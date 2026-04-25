@@ -6,6 +6,7 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use async_trait::async_trait;
+use tokio_util::sync::CancellationToken;
 
 use crate::provider::Message;
 use crate::skills::SkillRegistry;
@@ -34,7 +35,11 @@ impl HookHandler for SkillsHook {
         10
     }
 
-    async fn before_prompt(&self, _messages: &[Message]) -> Result<HookOutcome> {
+    async fn before_prompt(
+        &self,
+        _messages: &[Message],
+        _cancel: CancellationToken,
+    ) -> Result<HookOutcome> {
         if self.skills.is_empty() {
             return Ok(HookOutcome::Continue);
         }

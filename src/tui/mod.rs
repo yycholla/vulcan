@@ -16,6 +16,7 @@ use crate::agent::Agent;
 use crate::config::Config;
 use crate::hooks::HookRegistry;
 use crate::hooks::audit::AuditHook;
+use crate::pause::{self, AgentResume, PauseKind};
 use crate::provider::StreamEvent;
 
 pub mod markdown;
@@ -27,6 +28,17 @@ pub mod widgets;
 use state::{AppState, ChatMessage, ChatRole};
 use theme::{Palette, body};
 use views::{View, render_view};
+
+/// What session, if any, the TUI should load on startup.
+#[derive(Debug, Clone)]
+pub enum ResumeTarget {
+    /// Start fresh — new session, empty history.
+    None,
+    /// Resume the most recently active session.
+    Last,
+    /// Resume a specific session by ID.
+    Specific(String),
+}
 
 enum KeyEv {
     Press(Event),
@@ -46,7 +58,12 @@ const SLASH_COMMANDS: &[SlashCommand] = &[
     SlashCommand { name: "clear", description: "Clear message history" },
     SlashCommand { name: "view", description: "Cycle to next view (or 1-5)" },
     SlashCommand { name: "reasoning", description: "Toggle reasoning trace" },
+    SlashCommand { name: "search", description: "Search past sessions: /search <query>" },
 ];
+
+fn short_id(id: &str) -> String {
+    id.chars().take(8).collect()
+}
 
 fn filter_commands(prefix: &str) -> Vec<&'static SlashCommand> {
     if prefix.is_empty() {
@@ -83,7 +100,7 @@ fn complete_slash(prefix: &str) -> Option<String> {
     }
 }
 
-pub async fn run_tui(config: &Config) -> Result<()> {
+pub async fn run_tui(config: &Config, resume: ResumeTarget) -> Result<()> {
     let mut terminal = init_terminal()?;
 
     // keyboard
@@ -112,9 +129,36 @@ pub async fn run_tui(config: &Config) -> Result<()> {
     let (audit_hook, audit_buf) = AuditHook::new(200);
     hook_reg.register(audit_hook);
 
+    // ── AgentPause channel: when SafetyHook (or future hooks) needs user
+    // input mid-loop, it sends an AgentPause; the main TUI loop renders an
+    // overlay and routes the response back via the pause's oneshot reply.
+    let (pause_tx, mut pause_rx) = pause::channel(8);
+
     // ── Long-lived agent: one per TUI session, shared across prompts so
     // hook handlers' state (audit log, rate limits, etc.) survives turns.
-    let agent = Arc::new(Mutex::new(Agent::with_hooks(config, hook_reg)));
+    let agent = Arc::new(Mutex::new(Agent::with_hooks_and_pause(
+        config,
+        hook_reg,
+        Some(pause_tx),
+    )));
+
+    // ── Apply resume target if any. Errors here are non-fatal — we report
+    // and start fresh.
+    let resume_note = {
+        let mut a = agent.lock().await;
+        match resume {
+            ResumeTarget::None => None,
+            ResumeTarget::Last => match a.continue_last_session() {
+                Ok(()) => Some(format!("Resumed last session ({})", short_id(a.session_id()))),
+                Err(e) => Some(format!("Could not resume last session: {e}")),
+            },
+            ResumeTarget::Specific(id) => match a.resume_session(&id) {
+                Ok(()) => Some(format!("Resumed session {}", short_id(&id))),
+                Err(e) => Some(format!("Could not resume session: {e}")),
+            },
+        }
+    };
+
     {
         let a = agent.lock().await;
         a.start_session().await;
@@ -125,6 +169,13 @@ pub async fn run_tui(config: &Config) -> Result<()> {
         config.provider.max_context as u32,
     );
     app.audit_log = Some(audit_buf);
+
+    if let Some(note) = resume_note {
+        app.messages.push(ChatMessage {
+            role: ChatRole::System,
+            content: note,
+        });
+    }
 
     let mut exit = false;
     let mut pending_quit = false;
@@ -169,11 +220,60 @@ pub async fn run_tui(config: &Config) -> Result<()> {
         })?;
 
         tokio::select! {
+            pause = pause_rx.recv() => {
+                if let Some(p) = pause {
+                    let summary = match &p.kind {
+                        PauseKind::SafetyApproval { command, reason, .. } => {
+                            format!("Safety: {reason}\n  $ {command}\n  [a]llow once, [r]emember & allow, [d]eny")
+                        }
+                        PauseKind::ToolArgConfirm { tool, summary, .. } => {
+                            format!("Confirm tool '{tool}': {summary}\n  [a]llow once, [r]emember & allow, [d]eny")
+                        }
+                        PauseKind::SkillSave { suggested_name, .. } => {
+                            format!("Save this as a skill named '{suggested_name}'?\n  [a]llow once, [d]eny")
+                        }
+                    };
+                    app.messages.push(ChatMessage {
+                        role: ChatRole::System,
+                        content: format!("⏸  Agent paused — {summary}"),
+                    });
+                    app.pending_pause = Some(p);
+                }
+                continue;
+            }
             ev = key_rx.recv() => {
                 match ev {
                     Some(KeyEv::Press(event)) => {
                         if let Event::Key(key) = event {
                             if key.kind == KeyEventKind::Press {
+                                // ── If a pause is active, intercept the keys that
+                                // dispatch a response. Anything else falls through
+                                // to normal handling so the user can still scroll, etc.
+                                if app.pending_pause.is_some() {
+                                    let resume = match key.code {
+                                        KeyCode::Char('a') | KeyCode::Char('A') => Some(AgentResume::Allow),
+                                        KeyCode::Char('r') | KeyCode::Char('R') => Some(AgentResume::AllowAndRemember),
+                                        KeyCode::Char('d') | KeyCode::Char('D') | KeyCode::Esc => Some(AgentResume::Deny),
+                                        _ => None,
+                                    };
+                                    if let Some(r) = resume {
+                                        if let Some(p) = app.pending_pause.take() {
+                                            let label = match &r {
+                                                AgentResume::Allow => "allowed (once)",
+                                                AgentResume::AllowAndRemember => "allowed (remembered)",
+                                                AgentResume::Deny => "denied",
+                                                AgentResume::DenyWithReason(_) => "denied",
+                                            };
+                                            let _ = p.reply.send(r);
+                                            app.messages.push(ChatMessage {
+                                                role: ChatRole::System,
+                                                content: format!("▶  Resumed — {label}"),
+                                            });
+                                        }
+                                        continue;
+                                    }
+                                }
+
                                 // ── view switching: Ctrl+1..5
                                 if key.modifiers.contains(KeyModifiers::CONTROL) {
                                     match key.code {
@@ -190,6 +290,18 @@ pub async fn run_tui(config: &Config) -> Result<()> {
                                         KeyCode::Char('c') => {
                                             if pending_quit {
                                                 exit = true;
+                                            } else if app.thinking {
+                                                // Turn in flight: single Ctrl+C cancels it.
+                                                // Double Ctrl+C still exits (pending_quit path).
+                                                let a = agent.clone();
+                                                tokio::spawn(async move {
+                                                    a.lock().await.cancel_current_turn();
+                                                });
+                                                app.messages.push(ChatMessage {
+                                                    role: ChatRole::System,
+                                                    content: "Cancelling current turn… (Ctrl+C again to quit)".into(),
+                                                });
+                                                pending_quit = true;
                                             } else {
                                                 pending_quit = true;
                                                 app.messages.push(ChatMessage {
@@ -253,6 +365,42 @@ pub async fn run_tui(config: &Config) -> Result<()> {
                                                                 app.view = v;
                                                             }
                                                         }
+                                                        continue;
+                                                    }
+                                                    s if s.starts_with("search ") => {
+                                                        let query = s[7..].trim();
+                                                        if query.is_empty() {
+                                                            app.messages.push(ChatMessage {
+                                                                role: ChatRole::System,
+                                                                content: "Usage: /search <query>".into(),
+                                                            });
+                                                            continue;
+                                                        }
+                                                        let hits = {
+                                                            let a = agent.lock().await;
+                                                            a.memory().search_messages(query, 10)
+                                                        };
+                                                        let report = match hits {
+                                                            Ok(hs) if hs.is_empty() => format!("No matches for '{query}'"),
+                                                            Ok(hs) => {
+                                                                let mut out = format!("Search '{query}' — {} hit(s):", hs.len());
+                                                                for h in hs {
+                                                                    let preview: String = h.content.chars().take(100).collect();
+                                                                    out.push_str(&format!(
+                                                                        "\n  [{}] {} — {}",
+                                                                        short_id(&h.session_id),
+                                                                        h.role,
+                                                                        preview.replace('\n', " ")
+                                                                    ));
+                                                                }
+                                                                out
+                                                            }
+                                                            Err(e) => format!("Search failed: {e}"),
+                                                        };
+                                                        app.messages.push(ChatMessage {
+                                                            role: ChatRole::System,
+                                                            content: report,
+                                                        });
                                                         continue;
                                                     }
                                                     _ => {

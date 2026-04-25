@@ -1,8 +1,8 @@
 use clap::Parser;
+use tracing_subscriber::EnvFilter;
 use vulcan::cli::{Cli, Command};
 use vulcan::config::Config;
-use vulcan::tui::run_tui;
-use tracing_subscriber::EnvFilter;
+use vulcan::tui::{ResumeTarget, run_tui};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -11,21 +11,45 @@ async fn main() -> anyhow::Result<()> {
 
     match cli.command {
         None | Some(Command::Chat) => {
-            // TUI mode: log to a file so tracing output doesn't splat into the TUI
             init_tui_logging();
-            run_tui(&config).await?;
+            let resume = if cli.r#continue {
+                ResumeTarget::Last
+            } else {
+                ResumeTarget::None
+            };
+            run_tui(&config, resume).await?;
         }
         Some(Command::Prompt { text }) => {
-            // One-shot mode: log to stderr (visible while waiting)
             init_cli_logging();
             let mut agent = vulcan::agent::Agent::new(&config);
+            if cli.r#continue {
+                agent.continue_last_session()?;
+            }
             let response = agent.run_prompt(&text).await?;
             println!("{response}");
         }
         Some(Command::Session { id }) => {
+            init_tui_logging();
+            run_tui(&config, ResumeTarget::Specific(id)).await?;
+        }
+        Some(Command::Search { query, limit }) => {
             init_cli_logging();
-            let mut agent = vulcan::agent::Agent::new(&config);
-            agent.resume_session(&id).await?;
+            let store = vulcan::memory::SessionStore::new();
+            let hits = store.search_messages(&query, limit)?;
+            if hits.is_empty() {
+                println!("No matches.");
+            } else {
+                for h in hits {
+                    let preview: String = h.content.chars().take(120).collect();
+                    println!(
+                        "[{}…] {} (score {:.2})\n  {}\n",
+                        &h.session_id[..8],
+                        h.role,
+                        h.score,
+                        preview.replace('\n', " ")
+                    );
+                }
+            }
         }
     }
 
@@ -49,7 +73,6 @@ fn init_tui_logging() {
     let log_path = log_dir.join("vulcan.log");
 
     let file = std::fs::File::create(&log_path).unwrap_or_else(|_| {
-        // Fallback: /dev/null
         std::fs::File::open("/dev/null").unwrap()
     });
 
@@ -61,6 +84,5 @@ fn init_tui_logging() {
         .with_ansi(false)
         .init();
 
-    // Also print a note to stderr before the TUI takes over
     eprintln!("Vulcan TUI starting... logs → {log_path:?}");
 }

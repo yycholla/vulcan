@@ -2,6 +2,7 @@ use crate::tools::{Tool, ToolResult};
 use anyhow::Result;
 use async_trait::async_trait;
 use serde_json::{json, Value};
+use tokio_util::sync::CancellationToken;
 
 pub struct BashTool;
 
@@ -24,24 +25,32 @@ impl Tool for BashTool {
             "required": ["command"]
         })
     }
-    async fn call(&self, params: Value) -> Result<ToolResult> {
+    async fn call(&self, params: Value, cancel: CancellationToken) -> Result<ToolResult> {
         let command = params["command"].as_str().ok_or_else(|| anyhow::anyhow!("command required"))?;
         let timeout = params["timeout"].as_i64().unwrap_or(60);
         let workdir = params["workdir"].as_str();
 
         let mut cmd = tokio::process::Command::new("bash");
         cmd.arg("-c").arg(command);
+        // kill_on_drop: when the future is dropped (cancel races) the child
+        // process is killed instead of orphaned.
+        cmd.kill_on_drop(true);
 
         if let Some(dir) = workdir {
             cmd.current_dir(dir);
         }
 
-        let output = tokio::time::timeout(
-            std::time::Duration::from_secs(timeout as u64),
-            cmd.output(),
-        )
-        .await
-        .map_err(|_| anyhow::anyhow!("Command timed out after {timeout}s"))??;
+        let output = tokio::select! {
+            biased;
+            _ = cancel.cancelled() => {
+                return Ok(ToolResult::err("Cancelled"));
+            }
+            res = tokio::time::timeout(
+                std::time::Duration::from_secs(timeout as u64),
+                cmd.output(),
+            ) => res
+                .map_err(|_| anyhow::anyhow!("Command timed out after {timeout}s"))??,
+        };
 
         let stdout = String::from_utf8_lossy(&output.stdout);
         let stderr = String::from_utf8_lossy(&output.stderr);

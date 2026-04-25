@@ -3,6 +3,7 @@ use anyhow::Result;
 use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::Arc;
+use tokio_util::sync::CancellationToken;
 
 /// Canonical tool return type — the wire format between `Tool::call`, the
 /// agent loop, and `AfterToolCall` hooks.
@@ -55,7 +56,11 @@ pub trait Tool: Send + Sync {
     fn name(&self) -> &str;
     fn description(&self) -> &str;
     fn schema(&self) -> Value;
-    async fn call(&self, params: Value) -> Result<ToolResult>;
+    /// Execute the tool. The `cancel` token fires when the user requests
+    /// cancellation; impls should race their work against `cancel.cancelled()`
+    /// (or rely on `kill_on_drop` for child processes) and return
+    /// `ToolResult::err("Cancelled")` on cancel.
+    async fn call(&self, params: Value, cancel: CancellationToken) -> Result<ToolResult>;
 }
 
 pub mod file;
@@ -102,7 +107,12 @@ impl ToolRegistry {
     }
 
     /// Execute a tool by name with JSON arguments.
-    pub async fn execute(&self, name: &str, arguments: &str) -> Result<ToolResult> {
+    pub async fn execute(
+        &self,
+        name: &str,
+        arguments: &str,
+        cancel: CancellationToken,
+    ) -> Result<ToolResult> {
         let tool = self
             .tools
             .get(name)
@@ -111,6 +121,6 @@ impl ToolRegistry {
         let params: Value = serde_json::from_str(arguments)
             .map_err(|e| anyhow::anyhow!("Failed to parse arguments for {name}: {e}"))?;
 
-        tool.call(params).await
+        tool.call(params, cancel).await
     }
 }

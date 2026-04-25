@@ -9,6 +9,7 @@ use std::sync::{Arc, Mutex};
 use anyhow::Result;
 use chrono::{DateTime, Utc};
 use serde_json::Value;
+use tokio_util::sync::CancellationToken;
 
 use crate::tools::ToolResult;
 
@@ -70,7 +71,12 @@ impl HookHandler for AuditHook {
         1
     }
 
-    async fn before_tool_call(&self, tool: &str, args: &Value) -> Result<HookOutcome> {
+    async fn before_tool_call(
+        &self,
+        tool: &str,
+        args: &Value,
+        _cancel: CancellationToken,
+    ) -> Result<HookOutcome> {
         let detail = args.to_string();
         self.push(AuditEntry {
             time: Utc::now(),
@@ -81,7 +87,12 @@ impl HookHandler for AuditHook {
         Ok(HookOutcome::Continue)
     }
 
-    async fn after_tool_call(&self, tool: &str, result: &ToolResult) -> Result<HookOutcome> {
+    async fn after_tool_call(
+        &self,
+        tool: &str,
+        result: &ToolResult,
+        _cancel: CancellationToken,
+    ) -> Result<HookOutcome> {
         let kind = if result.is_error {
             AuditKind::Err
         } else {

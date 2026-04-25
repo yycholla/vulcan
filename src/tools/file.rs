@@ -3,6 +3,7 @@ use crate::tools::{Tool, ToolResult};
 use anyhow::Result;
 use async_trait::async_trait;
 use serde_json::{json, Value};
+use tokio_util::sync::CancellationToken;
 
 pub struct ReadFile;
 
@@ -25,7 +26,7 @@ impl Tool for ReadFile {
             "required": ["path"]
         })
     }
-    async fn call(&self, params: Value) -> Result<ToolResult> {
+    async fn call(&self, params: Value, _cancel: CancellationToken) -> Result<ToolResult> {
         let path = params["path"].as_str().ok_or_else(|| anyhow::anyhow!("path required"))?;
         let offset = params["offset"].as_i64().unwrap_or(1);
         let limit = params["limit"].as_i64().unwrap_or(500);
@@ -75,7 +76,7 @@ impl Tool for WriteFile {
             "required": ["path", "content"]
         })
     }
-    async fn call(&self, params: Value) -> Result<ToolResult> {
+    async fn call(&self, params: Value, _cancel: CancellationToken) -> Result<ToolResult> {
         let path = params["path"].as_str().ok_or_else(|| anyhow::anyhow!("path required"))?;
         let content = params["content"].as_str().unwrap_or("");
 
@@ -112,7 +113,7 @@ impl Tool for SearchFiles {
             "required": ["pattern"]
         })
     }
-    async fn call(&self, params: Value) -> Result<ToolResult> {
+    async fn call(&self, params: Value, _cancel: CancellationToken) -> Result<ToolResult> {
         let pattern = params["pattern"].as_str().ok_or_else(|| anyhow::anyhow!("pattern required"))?;
         let path = params["path"].as_str().unwrap_or(".");
         let limit = params["limit"].as_i64().unwrap_or(20);
@@ -166,7 +167,7 @@ impl Tool for PatchFile {
             "required": ["path", "old_string", "new_string"]
         })
     }
-    async fn call(&self, params: Value) -> Result<ToolResult> {
+    async fn call(&self, params: Value, _cancel: CancellationToken) -> Result<ToolResult> {
         let path = params["path"].as_str().ok_or_else(|| anyhow::anyhow!("path required"))?;
         let old = params["old_string"].as_str().ok_or_else(|| anyhow::anyhow!("old_string required"))?;
         let new = params["new_string"].as_str().unwrap_or("");

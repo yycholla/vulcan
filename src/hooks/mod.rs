@@ -12,11 +12,13 @@ use std::time::Duration;
 use anyhow::Result;
 use serde_json::Value;
 use tokio::time::timeout;
+use tokio_util::sync::CancellationToken;
 
 use crate::provider::Message;
 use crate::tools::ToolResult;
 
 pub mod audit;
+pub mod safety;
 pub mod skills;
 
 /// Where injected messages land in the outgoing prompt. Only honored by
@@ -77,19 +79,37 @@ pub trait HookHandler: Send + Sync {
         50
     }
 
-    async fn before_prompt(&self, _messages: &[Message]) -> Result<HookOutcome> {
+    async fn before_prompt(
+        &self,
+        _messages: &[Message],
+        _cancel: CancellationToken,
+    ) -> Result<HookOutcome> {
         Ok(HookOutcome::Continue)
     }
 
-    async fn before_tool_call(&self, _tool: &str, _args: &Value) -> Result<HookOutcome> {
+    async fn before_tool_call(
+        &self,
+        _tool: &str,
+        _args: &Value,
+        _cancel: CancellationToken,
+    ) -> Result<HookOutcome> {
         Ok(HookOutcome::Continue)
     }
 
-    async fn after_tool_call(&self, _tool: &str, _result: &ToolResult) -> Result<HookOutcome> {
+    async fn after_tool_call(
+        &self,
+        _tool: &str,
+        _result: &ToolResult,
+        _cancel: CancellationToken,
+    ) -> Result<HookOutcome> {
         Ok(HookOutcome::Continue)
     }
 
-    async fn before_agent_end(&self, _final_response: &str) -> Result<HookOutcome> {
+    async fn before_agent_end(
+        &self,
+        _final_response: &str,
+        _cancel: CancellationToken,
+    ) -> Result<HookOutcome> {
         Ok(HookOutcome::Continue)
     }
 
@@ -131,12 +151,16 @@ impl HookRegistry {
     /// all injections applied at their requested positions. The input slice is
     /// not mutated — injections are transient and never persist into
     /// conversation history.
-    pub async fn apply_before_prompt(&self, messages: &[Message]) -> Vec<Message> {
+    pub async fn apply_before_prompt(
+        &self,
+        messages: &[Message],
+        cancel: CancellationToken,
+    ) -> Vec<Message> {
         let mut after_system: Vec<Message> = Vec::new();
         let mut appended: Vec<Message> = Vec::new();
 
         for h in &self.handlers {
-            match self.run(h, h.before_prompt(messages)).await {
+            match self.run(h, h.before_prompt(messages, cancel.clone())).await {
                 Some(HookOutcome::InjectMessages {
                     messages: msgs,
                     position,
@@ -183,9 +207,14 @@ impl HookRegistry {
     }
 
     /// Emit BeforeToolCall. First non-Continue outcome wins.
-    pub async fn before_tool_call(&self, tool: &str, args: &Value) -> ToolCallDecision {
+    pub async fn before_tool_call(
+        &self,
+        tool: &str,
+        args: &Value,
+        cancel: CancellationToken,
+    ) -> ToolCallDecision {
         for h in &self.handlers {
-            match self.run(h, h.before_tool_call(tool, args)).await {
+            match self.run(h, h.before_tool_call(tool, args, cancel.clone())).await {
                 Some(HookOutcome::Block { reason }) => {
                     tracing::info!("hook {} blocked tool {tool}: {reason}", h.name());
                     return ToolCallDecision::Block(reason);
@@ -208,9 +237,14 @@ impl HookRegistry {
     }
 
     /// Emit AfterToolCall. First ReplaceResult wins; otherwise None.
-    pub async fn after_tool_call(&self, tool: &str, result: &ToolResult) -> Option<ToolResult> {
+    pub async fn after_tool_call(
+        &self,
+        tool: &str,
+        result: &ToolResult,
+        cancel: CancellationToken,
+    ) -> Option<ToolResult> {
         for h in &self.handlers {
-            match self.run(h, h.after_tool_call(tool, result)).await {
+            match self.run(h, h.after_tool_call(tool, result, cancel.clone())).await {
                 Some(HookOutcome::ReplaceResult(new)) => {
                     tracing::info!("hook {} replaced result for {tool}", h.name());
                     return Some(new);
@@ -230,9 +264,13 @@ impl HookRegistry {
 
     /// Emit BeforeAgentEnd. First ForceContinue wins; returned instruction is
     /// appended as a user turn and the loop continues.
-    pub async fn before_agent_end(&self, response: &str) -> Option<String> {
+    pub async fn before_agent_end(
+        &self,
+        response: &str,
+        cancel: CancellationToken,
+    ) -> Option<String> {
         for h in &self.handlers {
-            match self.run(h, h.before_agent_end(response)).await {
+            match self.run(h, h.before_agent_end(response, cancel.clone())).await {
                 Some(HookOutcome::ForceContinue { instruction }) => {
                     tracing::info!("hook {} forced continue", h.name());
                     return Some(instruction);
