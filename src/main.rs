@@ -1,7 +1,9 @@
 use clap::Parser;
+use std::io::Write;
 use tracing_subscriber::EnvFilter;
 use vulcan::cli::{Cli, Command};
 use vulcan::config::Config;
+use vulcan::provider::StreamEvent;
 use vulcan::tui::{ResumeTarget, run_tui};
 
 #[tokio::main]
@@ -25,8 +27,42 @@ async fn main() -> anyhow::Result<()> {
             if cli.r#continue {
                 agent.continue_last_session()?;
             }
-            let response = agent.run_prompt(&text).await?;
-            println!("{response}");
+            // YYC-38: stream tokens to stdout as they arrive instead of
+            // blocking on the buffered chat path. Long generations now
+            // start producing visible output immediately.
+            let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<StreamEvent>();
+            let stream_task = tokio::spawn(async move {
+                agent.run_prompt_stream(&text, tx).await
+            });
+
+            let mut stdout = std::io::stdout().lock();
+            let mut exit_code = 0;
+            while let Some(ev) = rx.recv().await {
+                match ev {
+                    StreamEvent::Text(chunk) => {
+                        let _ = stdout.write_all(chunk.as_bytes());
+                        let _ = stdout.flush();
+                    }
+                    StreamEvent::Error(msg) => {
+                        eprintln!("\nError: {msg}");
+                        exit_code = 1;
+                    }
+                    StreamEvent::Done(_) => break,
+                    // Reasoning, ToolCallStart/End not surfaced in CLI
+                    // output — they'd mix with the response stream and
+                    // need a richer renderer (the TUI handles them).
+                    _ => {}
+                }
+            }
+            // Trailing newline so the next shell prompt isn't glued to
+            // the model's last token.
+            let _ = writeln!(stdout);
+            let _ = stdout.flush();
+            // Surface any task-level error (provider init, etc).
+            stream_task.await??;
+            if exit_code != 0 {
+                std::process::exit(exit_code);
+            }
         }
         Some(Command::Session { id }) => {
             init_tui_logging();
