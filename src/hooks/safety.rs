@@ -17,7 +17,7 @@ use serde_json::Value;
 use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
 
-use crate::pause::{AgentPause, AgentResume, PauseKind, PauseSender};
+use crate::pause::{AgentPause, AgentResume, OptionKind, PauseKind, PauseOption, PauseSender};
 
 use super::{HookHandler, HookOutcome};
 
@@ -117,6 +117,30 @@ impl HookHandler for SafetyHook {
                     reason: reason.to_string(),
                 },
                 reply: reply_tx,
+                // YYC-59: surface inline pills so the TUI can render
+                // semantic action buttons. Falls back to the legacy
+                // a/r/d modal automatically if a future caller leaves
+                // this empty.
+                options: vec![
+                    PauseOption {
+                        key: 'y',
+                        label: "allow".into(),
+                        kind: OptionKind::Primary,
+                        resume: AgentResume::Allow,
+                    },
+                    PauseOption {
+                        key: 'r',
+                        label: "remember".into(),
+                        kind: OptionKind::Neutral,
+                        resume: AgentResume::AllowAndRemember,
+                    },
+                    PauseOption {
+                        key: 'n',
+                        label: "deny".into(),
+                        kind: OptionKind::Destructive,
+                        resume: AgentResume::Deny,
+                    },
+                ],
             };
 
             if tx.send(pause).await.is_err() {
@@ -263,6 +287,38 @@ mod tests {
 
         // And the command should now be in the approval cache.
         assert!(hook_arc.is_approved(dangerous));
+    }
+
+    #[tokio::test]
+    async fn safety_pause_carries_inline_pill_options() {
+        // YYC-59: safety hook should populate the y/r/n option set so the
+        // TUI can render inline pills + key-dispatch the choice.
+        let (tx, mut rx) = crate::pause::channel(4);
+        let hook = SafetyHook::with_pause_emitter(tx);
+        let dangerous = "rm -rf /";
+        let args = serde_json::json!({ "command": dangerous });
+        let cancel = CancellationToken::new();
+
+        let hook_arc = std::sync::Arc::new(hook);
+        let h = hook_arc.clone();
+        let c = cancel.clone();
+        let task = tokio::spawn(async move { h.before_tool_call("bash", &args, c).await });
+
+        let pause = rx.recv().await.expect("pause should arrive");
+        let keys: Vec<char> = pause.options.iter().map(|o| o.key).collect();
+        assert_eq!(keys, vec!['y', 'r', 'n']);
+        assert!(pause
+            .options
+            .iter()
+            .any(|o| o.key == 'y' && matches!(o.kind, OptionKind::Primary)));
+        assert!(pause
+            .options
+            .iter()
+            .any(|o| o.key == 'n' && matches!(o.kind, OptionKind::Destructive)));
+
+        // Drain the task with a deny so the spawned future doesn't leak.
+        pause.reply.send(AgentResume::Deny).ok();
+        let _ = task.await;
     }
 
     #[tokio::test]

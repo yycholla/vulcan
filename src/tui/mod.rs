@@ -362,14 +362,26 @@ pub async fn run_tui(config: &Config, resume: ResumeTarget) -> Result<()> {
         tokio::select! {
             pause = pause_rx.recv() => {
                 if let Some(p) = pause {
-                    let summary = match &p.kind {
-                        PauseKind::SafetyApproval { command, reason, .. } => {
+                    // YYC-59: pause now carries inline pill options, so the
+                    // bracket-list hint is redundant when options is present.
+                    let summary = match (&p.kind, p.options.is_empty()) {
+                        (PauseKind::SafetyApproval { command, reason, .. }, false) => {
+                            format!("Safety: {reason}\n  $ {command}")
+                        }
+                        (PauseKind::ToolArgConfirm { tool, summary, .. }, false) => {
+                            format!("Confirm tool '{tool}': {summary}")
+                        }
+                        (PauseKind::SkillSave { suggested_name, .. }, false) => {
+                            format!("Save this as a skill named '{suggested_name}'?")
+                        }
+                        // No options → legacy bracket-list hint stays in.
+                        (PauseKind::SafetyApproval { command, reason, .. }, true) => {
                             format!("Safety: {reason}\n  $ {command}\n  [a]llow once, [r]emember & allow, [d]eny")
                         }
-                        PauseKind::ToolArgConfirm { tool, summary, .. } => {
+                        (PauseKind::ToolArgConfirm { tool, summary, .. }, true) => {
                             format!("Confirm tool '{tool}': {summary}\n  [a]llow once, [r]emember & allow, [d]eny")
                         }
-                        PauseKind::SkillSave { suggested_name, .. } => {
+                        (PauseKind::SkillSave { suggested_name, .. }, true) => {
                             format!("Save this as a skill named '{suggested_name}'?\n  [a]llow once, [d]eny")
                         }
                     };
@@ -392,12 +404,31 @@ pub async fn run_tui(config: &Config, resume: ResumeTarget) -> Result<()> {
                                 // ── If a pause is active, intercept the keys that
                                 // dispatch a response. Anything else falls through
                                 // to normal handling so the user can still scroll, etc.
-                                if app.pending_pause.is_some() {
-                                    let resume = match key.code {
-                                        KeyCode::Char('a') | KeyCode::Char('A') => Some(AgentResume::Allow),
-                                        KeyCode::Char('r') | KeyCode::Char('R') => Some(AgentResume::AllowAndRemember),
-                                        KeyCode::Char('d') | KeyCode::Char('D') | KeyCode::Esc => Some(AgentResume::Deny),
-                                        _ => None,
+                                if let Some(p) = app.pending_pause.as_ref() {
+                                    // YYC-59: if the pause carries inline options, the
+                                    // user's keystroke is matched against options[i].key
+                                    // (case-insensitive) and the option's `resume` is
+                                    // sent back. Esc is always Deny. Falls back to the
+                                    // legacy a/r/d modal when options is empty.
+                                    let resume = if !p.options.is_empty() {
+                                        match key.code {
+                                            KeyCode::Esc => Some(AgentResume::Deny),
+                                            KeyCode::Char(c) => p
+                                                .options
+                                                .iter()
+                                                .find(|o| {
+                                                    o.key.eq_ignore_ascii_case(&c)
+                                                })
+                                                .map(|o| o.resume.clone()),
+                                            _ => None,
+                                        }
+                                    } else {
+                                        match key.code {
+                                            KeyCode::Char('a') | KeyCode::Char('A') => Some(AgentResume::Allow),
+                                            KeyCode::Char('r') | KeyCode::Char('R') => Some(AgentResume::AllowAndRemember),
+                                            KeyCode::Char('d') | KeyCode::Char('D') | KeyCode::Esc => Some(AgentResume::Deny),
+                                            _ => None,
+                                        }
                                     };
                                     if let Some(r) = resume {
                                         if let Some(p) = app.pending_pause.take() {
