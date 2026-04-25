@@ -886,19 +886,58 @@ fn trading_floor(f: &mut TuiFrame, area: Rect, app: &AppState) {
     f.render_widget(Paragraph::new(lines).style(body()), tl_inner);
     draw_v_divider(f, bot[0]);
 
-    // ── diff (bot-mid)
-    let diff_inner = section_header(f, bot[1], "diff · users/auth.rs", None);
+    // ── diff (bot-mid). YYC-66: prefer the live edit sink; fall back to
+    // demo data only if no real edit has happened yet AND the sink isn't
+    // wired up (sink wired but empty → render an honest empty state).
+    let live_diff = app.latest_diff();
+    let diff_title: String = match (&live_diff, app.diff_sink.is_some()) {
+        (Some(d), _) => format!("diff · {}", d.path),
+        (None, true) => "diff · no edits this session".into(),
+        (None, false) => "diff · users/auth.rs".into(),
+    };
+    let diff_inner = section_header(f, bot[1], &diff_title, None);
     let mut lines: Vec<Line<'static>> = Vec::new();
-    for ln in &app.diff_lines {
-        let style = match ln.kind {
-            DiffKind::Hunk => Style::default()
+    if let Some(d) = live_diff {
+        // Compact two-block render: prefix old lines with "-" in red,
+        // new lines with "+" in green. Header shows tool + timestamp.
+        lines.push(Line::from(Span::styled(
+            format!("@@ {} · {}", d.tool, d.at.format("%H:%M:%S")),
+            Style::default()
                 .fg(Palette::MUTED)
                 .add_modifier(Modifier::DIM),
-            DiffKind::Added => Style::default().fg(Palette::GREEN),
-            DiffKind::Removed => Style::default().fg(Palette::RED),
-            DiffKind::Ctx => Style::default().fg(Palette::INK),
-        };
-        lines.push(Line::from(Span::styled(ln.text.clone(), style)));
+        )));
+        for line in d.before.lines() {
+            lines.push(Line::from(Span::styled(
+                format!("- {line}"),
+                Style::default().fg(Palette::RED),
+            )));
+        }
+        for line in d.after.lines() {
+            lines.push(Line::from(Span::styled(
+                format!("+ {line}"),
+                Style::default().fg(Palette::GREEN),
+            )));
+        }
+    } else if app.diff_sink.is_some() {
+        // Sink wired but empty — be honest, no fake diff.
+        lines.push(Line::from(Span::styled(
+            "  No file edits captured yet. Run an edit_file or write_file tool.",
+            Style::default().fg(Palette::MUTED),
+        )));
+    } else {
+        // No sink at all — fall back to the demo data so the layout
+        // still looks alive (e.g. headless preview environments).
+        for ln in &app.diff_lines {
+            let style = match ln.kind {
+                DiffKind::Hunk => Style::default()
+                    .fg(Palette::MUTED)
+                    .add_modifier(Modifier::DIM),
+                DiffKind::Added => Style::default().fg(Palette::GREEN),
+                DiffKind::Removed => Style::default().fg(Palette::RED),
+                DiffKind::Ctx => Style::default().fg(Palette::INK),
+            };
+            lines.push(Line::from(Span::styled(ln.text.clone(), style)));
+        }
     }
     f.render_widget(
         Paragraph::new(lines)

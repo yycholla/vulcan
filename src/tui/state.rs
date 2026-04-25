@@ -344,6 +344,11 @@ pub struct AppState {
     pub sessions: Vec<SessionState>,
     pub active_session_id: Option<String>,
     pub diff_lines: Vec<DiffLine>,
+    /// Live edit-diff sink shared with the agent (YYC-66). Renderers
+    /// peek the inner Option each frame to surface the latest edit; we
+    /// fall back to `diff_lines` (demo) only until the first real edit
+    /// arrives, after which the live diff replaces it.
+    pub diff_sink: Option<crate::tools::EditDiffSink>,
     pub orchestration: OrchestrationState,
 
     /// Optional shared handle to the audit-log hook's ring buffer. When
@@ -390,6 +395,7 @@ impl AppState {
             sessions: Vec::new(),
             active_session_id: None,
             diff_lines: demo_diff(),
+            diff_sink: None,
             orchestration: OrchestrationState::default(),
 
             audit_log: None,
@@ -503,6 +509,14 @@ impl AppState {
             format_thousands(self.prompt_tokens_last),
             format_thousands(self.token_max),
         )
+    }
+
+    /// Snapshot the most recent file edit, if the diff sink is wired up
+    /// and an edit has been captured (YYC-66). Locks briefly to clone the
+    /// value so the renderer doesn't hold the mutex across draws.
+    pub fn latest_diff(&self) -> Option<crate::tools::EditDiff> {
+        let sink = self.diff_sink.as_ref()?;
+        sink.lock().ok()?.clone()
     }
 
     /// Cumulative token count (input + output across all turns). Used by

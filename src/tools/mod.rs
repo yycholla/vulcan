@@ -67,6 +67,42 @@ pub mod file;
 pub mod shell;
 pub mod web;
 
+/// Compact record of the most recent file-edit operation (YYC-66).
+/// Captured by `WriteFile`/`PatchFile` after a successful write so the
+/// TUI's diff pane can render real activity instead of demo data.
+#[derive(Debug, Clone)]
+pub struct EditDiff {
+    pub path: String,
+    /// Tool that produced the edit ("write_file" / "edit_file").
+    pub tool: String,
+    /// Snippet of the file contents *before* the edit. Empty for
+    /// freshly-created files.
+    pub before: String,
+    /// Snippet of the file contents *after* the edit.
+    pub after: String,
+    pub at: chrono::DateTime<chrono::Local>,
+}
+
+/// Shared latest-edit slot. `None` until the first successful edit;
+/// overwritten on every subsequent edit. The TUI clones the Arc and
+/// peeks the inner Option each render.
+pub type EditDiffSink = Arc<std::sync::Mutex<Option<EditDiff>>>;
+
+pub fn new_diff_sink() -> EditDiffSink {
+    Arc::new(std::sync::Mutex::new(None))
+}
+
+/// Trim a string to a max number of lines + chars so the TUI doesn't
+/// stash megabyte-sized files in memory just to render a 6-line preview.
+pub(crate) fn snippet(text: &str, max_lines: usize, max_chars: usize) -> String {
+    let limited: String = text.chars().take(max_chars).collect();
+    limited
+        .lines()
+        .take(max_lines)
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 /// Registry of available tools — tools are discovered at startup via the `inventory` pattern
 pub struct ToolRegistry {
     tools: HashMap<String, Arc<dyn Tool>>,
@@ -74,13 +110,21 @@ pub struct ToolRegistry {
 
 impl ToolRegistry {
     pub fn new() -> Self {
+        Self::new_with_diff_sink(None)
+    }
+
+    /// Build a tool registry that wires `WriteFile`/`PatchFile` to a
+    /// shared diff sink (YYC-66). Pass `Some(sink)` to capture edits;
+    /// `None` keeps the legacy behavior (tools don't observe their own
+    /// writes).
+    pub fn new_with_diff_sink(sink: Option<EditDiffSink>) -> Self {
         let mut registry = Self {
             tools: HashMap::new(),
         };
         registry.register(Arc::new(file::ReadFile));
-        registry.register(Arc::new(file::WriteFile));
+        registry.register(Arc::new(file::WriteFile::new(sink.clone())));
         registry.register(Arc::new(file::SearchFiles));
-        registry.register(Arc::new(file::PatchFile));
+        registry.register(Arc::new(file::PatchFile::new(sink)));
         registry.register(Arc::new(web::WebSearch));
         registry.register(Arc::new(web::WebFetch));
         for tool in shell::make_tools() {
