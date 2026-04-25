@@ -68,6 +68,17 @@ impl View {
 
 // ─── shared chat rendering ──────────────────────────────────────────────
 
+/// Compute and stash the max scroll offset for the chat viewport given the
+/// pre-wrap line count and viewport height. Used by the auto-follow logic in
+/// mod.rs to pin scroll to the bottom while `at_bottom` is true (YYC-69).
+/// Note: the count is pre-wrap, so very long wrapped lines under-count the
+/// real bottom by a few rows. Acceptable for follow-bottom UX; the user can
+/// always nudge with Down to land exactly at the tail.
+fn publish_chat_max_scroll(app: &AppState, line_count: usize, viewport_height: u16) {
+    let max = (line_count as u16).saturating_sub(viewport_height);
+    app.chat_max_scroll.set(max);
+}
+
 /// Build flat lines for the primary chat — user/agent messages with markdown.
 /// `show_reasoning` toggles a stylized reasoning block before the first agent
 /// message (used by views that show a reasoning trace).
@@ -206,6 +217,7 @@ fn single_stack(f: &mut TuiFrame, area: Rect, app: &AppState) {
         None,
     );
     let lines = build_chat_lines(app, app.show_reasoning, false);
+    publish_chat_max_scroll(app, lines.len(), inner.height);
     f.render_widget(
         Paragraph::new(lines)
             .style(body())
@@ -317,6 +329,7 @@ fn split_sessions(f: &mut TuiFrame, area: Rect, app: &AppState) {
         height: main.height.saturating_sub(1),
     };
     let lines = build_chat_lines(app, app.show_reasoning, false);
+    publish_chat_max_scroll(app, lines.len(), body_area.height.saturating_sub(1));
     f.render_widget(
         Paragraph::new(lines)
             .style(body())
@@ -690,6 +703,7 @@ fn trading_floor(f: &mut TuiFrame, area: Rect, app: &AppState) {
     // ── primary chat (top-left, red header)
     let primary_inner = section_header(f, top[0], "primary · auth-refactor", Some(Palette::RED));
     let lines = build_chat_lines(app, app.show_reasoning, true);
+    publish_chat_max_scroll(app, lines.len(), primary_inner.height);
     f.render_widget(
         Paragraph::new(lines)
             .style(body())
