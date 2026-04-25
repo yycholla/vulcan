@@ -155,10 +155,36 @@ impl Agent {
         let lsp_manager = Arc::new(crate::code::lsp::LspManager::new(
             std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")),
         ));
-        let tools = ToolRegistry::new_with_diff_and_lsp(
+        let mut tools = ToolRegistry::new_with_diff_and_lsp(
             Some(diff_sink.clone()),
             Some(lsp_manager.clone()),
         );
+
+        // YYC-48: register embedding tools when [embeddings] is
+        // enabled. The index opens its own SQLite store; failure is
+        // logged but non-fatal — the agent still has every other tool.
+        if config.embeddings.enabled {
+            let parser_cache = Arc::new(crate::code::ParserCache::new());
+            let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+            match crate::code::embed::EmbeddingIndex::open(
+                cwd,
+                parser_cache,
+                config.embeddings.clone(),
+                config.provider.base_url.clone(),
+                api_key.clone().into(),
+            ) {
+                Ok(index) => {
+                    let arc = Arc::new(index);
+                    tools.register(Arc::new(
+                        crate::tools::code_search::IndexEmbeddingsTool::new(arc.clone()),
+                    ));
+                    tools.register(Arc::new(
+                        crate::tools::code_search::CodeSearchSemanticTool::new(arc),
+                    ));
+                }
+                Err(e) => tracing::warn!("embedding index unavailable: {e}"),
+            }
+        }
         let skills = Arc::new(SkillRegistry::new(&config.skills_dir));
         let memory = SessionStore::new();
         let context = ContextManager::new(provider.max_context());

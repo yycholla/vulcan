@@ -25,6 +25,34 @@ pub struct Config {
 
     #[serde(default)]
     pub compaction: CompactionConfig,
+
+    #[serde(default)]
+    pub embeddings: EmbeddingsConfig,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct EmbeddingsConfig {
+    /// Off by default — set true once an embedding endpoint + model
+    /// are configured. Tools surface a "not configured" error when
+    /// disabled rather than reaching for a remote API the user
+    /// didn't ask for.
+    #[serde(default)]
+    pub enabled: bool,
+    /// OpenAI-compatible embeddings endpoint (e.g.
+    /// `https://api.openai.com/v1`). Defaults to the same provider
+    /// base URL when blank — convenient for OpenRouter / OpenAI users
+    /// whose chat and embedding endpoints share an origin.
+    #[serde(default)]
+    pub base_url: String,
+    /// Optional separate API key for the embeddings endpoint.
+    /// Falls back to the provider's `api_key` (or `VULCAN_API_KEY`).
+    pub api_key: Option<String>,
+    /// Embedding model name (e.g. "text-embedding-3-small").
+    #[serde(default = "default_embedding_model")]
+    pub model: String,
+    /// Embedding dimensionality. Used to validate responses.
+    #[serde(default = "default_embedding_dim")]
+    pub dim: usize,
 }
 
 #[derive(Debug, Deserialize, Clone, Copy, PartialEq, Eq, Default)]
@@ -143,8 +171,28 @@ impl Default for Config {
             tools: ToolsConfig::default(),
             skills_dir: default_skills_dir(),
             compaction: CompactionConfig::default(),
+            embeddings: EmbeddingsConfig::default(),
         }
     }
+}
+
+impl Default for EmbeddingsConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            base_url: String::new(),
+            api_key: None,
+            model: default_embedding_model(),
+            dim: default_embedding_dim(),
+        }
+    }
+}
+
+fn default_embedding_model() -> String {
+    "text-embedding-3-small".into()
+}
+fn default_embedding_dim() -> usize {
+    1536
 }
 
 fn default_provider_type() -> String {

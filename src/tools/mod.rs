@@ -66,6 +66,7 @@ pub trait Tool: Send + Sync {
 pub mod code;
 pub mod code_edit;
 pub mod code_graph;
+pub mod code_search;
 pub mod file;
 pub mod git;
 pub mod lsp;
