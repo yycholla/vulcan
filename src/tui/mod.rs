@@ -49,36 +49,53 @@ enum KeyEv {
 struct SlashCommand {
     name: &'static str,
     description: &'static str,
+    /// True when the command can run mid-turn without corrupting agent state
+    /// (YYC-62). Pure UI ops are safe; anything that mutates conversation
+    /// history or reaches into the agent is not. Default false (conservative).
+    mid_turn_safe: bool,
 }
 
 const SLASH_COMMANDS: &[SlashCommand] = &[
     SlashCommand {
         name: "exit",
         description: "Quit Vulcan",
+        // Always exits cleanly; no state to corrupt.
+        mid_turn_safe: true,
     },
     SlashCommand {
         name: "quit",
         description: "Quit Vulcan",
+        mid_turn_safe: true,
     },
     SlashCommand {
         name: "help",
         description: "Show available commands",
+        // Pure UI: pushes a system message.
+        mid_turn_safe: true,
     },
     SlashCommand {
         name: "clear",
         description: "Clear message history",
+        // Destructive: would nuke the in-flight User+Agent pair the agent
+        // loop is streaming into. Defer until idle.
+        mid_turn_safe: false,
     },
     SlashCommand {
         name: "view",
         description: "Cycle to next view (or 1-5)",
+        mid_turn_safe: true,
     },
     SlashCommand {
         name: "reasoning",
         description: "Toggle reasoning trace",
+        mid_turn_safe: true,
     },
     SlashCommand {
         name: "search",
         description: "Search past sessions: /search <query>",
+        // Holds agent.lock().await — would deadlock against the in-flight
+        // run_prompt_stream task. Defer until idle.
+        mid_turn_safe: false,
     },
 ];
 
@@ -537,14 +554,44 @@ pub async fn run_tui(config: &Config, resume: ResumeTarget) -> Result<()> {
                                                 app.input = format!("/{}", candidates[idx].name);
                                             }
                                         }
-                                        // YYC-61: while the agent is busy, plain text Enter
-                                        // submissions go onto the queue rather than dispatching
-                                        // immediately. Drained when the current turn ends.
-                                        // Slash commands are still gated to the idle path
-                                        // (YYC-62 will add per-command mid-turn-safe routing).
+                                        if app.input.is_empty() {
+                                            continue;
+                                        }
+                                        // YYC-62: classify slash commands as mid-turn-safe or
+                                        // must-defer. Mid-turn-safe slash dispatch falls through
+                                        // to the existing inline branch even while busy. Must-
+                                        // defer slash commands emit a wait notice rather than
+                                        // smuggling state-mutating ops past the agent loop.
+                                        let is_slash = app.input.starts_with('/');
+                                        let mid_turn_safe = if is_slash {
+                                            let body = &app.input[1..];
+                                            let head = body.split_whitespace().next().unwrap_or("");
+                                            SLASH_COMMANDS
+                                                .iter()
+                                                .find(|c| c.name == head)
+                                                .map(|c| c.mid_turn_safe)
+                                                .unwrap_or(false)
+                                        } else {
+                                            false
+                                        };
+                                        if app.thinking && is_slash && !mid_turn_safe {
+                                            let cmd_text = app.input.trim().to_string();
+                                            app.input.clear();
+                                            app.slash_menu_selection = 0;
+                                            pending_quit = false;
+                                            app.messages.push(ChatMessage {
+                                                role: ChatRole::System,
+                                                content: format!(
+                                                    "{cmd_text} can't run while the agent is busy. Wait for the current turn to end (or Ctrl+C to cancel)."
+                                                ),
+                                                ..Default::default()
+                                            });
+                                            continue;
+                                        }
+                                        // YYC-61: plain text during busy → queue.
                                         if !app.input.is_empty()
                                             && app.thinking
-                                            && !app.input.starts_with('/')
+                                            && !is_slash
                                         {
                                             let msg = app.input.trim().to_string();
                                             if !msg.is_empty() {
@@ -555,7 +602,9 @@ pub async fn run_tui(config: &Config, resume: ResumeTarget) -> Result<()> {
                                             pending_quit = false;
                                             continue;
                                         }
-                                        if !app.input.is_empty() && !app.thinking {
+                                        // Idle, or busy + mid-turn-safe slash command — fall
+                                        // through to dispatch.
+                                        if !app.input.is_empty() {
                                             let msg = app.input.trim().to_string();
                                             app.input.clear();
                                             app.slash_menu_selection = 0;
