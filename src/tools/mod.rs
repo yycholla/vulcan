@@ -118,8 +118,11 @@ impl ToolRegistry {
             .get(name)
             .ok_or_else(|| anyhow::anyhow!("Unknown tool: {name}"))?;
 
-        let params: Value = serde_json::from_str(arguments)
-            .map_err(|e| anyhow::anyhow!("Failed to parse arguments for {name}: {e}"))?;
+        let params: Value = serde_json::from_str(arguments).map_err(|e| {
+            // Include the raw args so the LLM can see what it generated and
+            // self-correct on the next turn rather than hallucinating fixes.
+            anyhow::anyhow!("Failed to parse arguments for {name}: {e}. Raw args: {arguments}")
+        })?;
 
         tool.call(params, cancel).await
     }

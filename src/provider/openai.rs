@@ -13,6 +13,7 @@ pub struct OpenAIProvider {
     api_key: String,
     model: String,
     max_context: usize,
+    max_retries: u32,
 }
 
 impl OpenAIProvider {
@@ -21,6 +22,7 @@ impl OpenAIProvider {
         api_key: &str,
         model: &str,
         max_context: usize,
+        max_retries: u32,
     ) -> Result<Self> {
         let client = Client::builder()
             .timeout(Duration::from_secs(300))
@@ -33,6 +35,7 @@ impl OpenAIProvider {
             api_key: api_key.to_string(),
             model: model.to_string(),
             max_context,
+            max_retries,
         })
     }
 
@@ -51,28 +54,85 @@ impl OpenAIProvider {
         body
     }
 
-    /// Make the HTTP request and return the response
-    async fn do_request(&self, messages: &[Message], tools: &[ToolDefinition]) -> Result<reqwest::Response> {
+    /// Make the HTTP request and return the response. Retries up to
+    /// `max_retries` times on transient failures (429, 408, 5xx, network
+    /// errors) with exponential backoff + jitter. Non-retryable errors
+    /// (400, 401, 403, 404, 422) and cancellation pass through immediately.
+    async fn do_request(
+        &self,
+        messages: &[Message],
+        tools: &[ToolDefinition],
+        cancel: &CancellationToken,
+    ) -> Result<reqwest::Response> {
         let url = format!("{}/chat/completions", self.base_url);
         let body = self.build_request(messages, tools);
 
-        let response = self
-            .client
-            .post(&url)
-            .header("Authorization", format!("Bearer {}", self.api_key))
-            .header("Content-Type", "application/json")
-            .json(&body)
-            .send()
-            .await
-            .context("LLM API request failed")?;
+        for attempt in 0..=self.max_retries {
+            if cancel.is_cancelled() {
+                anyhow::bail!("Cancelled");
+            }
 
-        if !response.status().is_success() {
-            let status = response.status();
-            let text = response.text().await.unwrap_or_default();
-            anyhow::bail!("LLM API returned {status}: {text}");
+            if attempt > 0 {
+                let delay = backoff_delay(attempt);
+                tracing::warn!(
+                    "Retrying API request (attempt {}/{}) after {:?}",
+                    attempt,
+                    self.max_retries,
+                    delay
+                );
+                tokio::select! {
+                    biased;
+                    _ = cancel.cancelled() => anyhow::bail!("Cancelled"),
+                    _ = tokio::time::sleep(delay) => {},
+                }
+            }
+
+            let send_result = self
+                .client
+                .post(&url)
+                .header("Authorization", format!("Bearer {}", self.api_key))
+                .header("Content-Type", "application/json")
+                .json(&body)
+                .send()
+                .await;
+
+            match send_result {
+                Ok(response) => {
+                    let status = response.status();
+                    if status.is_success() {
+                        return Ok(response);
+                    }
+                    let body_text = response.text().await.unwrap_or_default();
+                    if is_retryable_status(status) && attempt < self.max_retries {
+                        tracing::warn!(
+                            "API returned {} (retryable, attempt {}/{}): {}",
+                            status,
+                            attempt + 1,
+                            self.max_retries,
+                            truncate(&body_text, 200)
+                        );
+                        continue;
+                    }
+                    anyhow::bail!("LLM API returned {status}: {body_text}");
+                }
+                Err(e) => {
+                    // Network/timeout errors are always retryable within budget.
+                    if attempt < self.max_retries {
+                        tracing::warn!(
+                            "Network error (retryable, attempt {}/{}): {}",
+                            attempt + 1,
+                            self.max_retries,
+                            e
+                        );
+                        continue;
+                    }
+                    return Err(anyhow::Error::from(e).context("LLM API request failed"));
+                }
+            }
         }
 
-        Ok(response)
+        // Should be unreachable — the loop body always either returns/bails or continues.
+        anyhow::bail!("LLM API retry budget exhausted")
     }
 
     /// Parse a single SSE data line and accumulate state
@@ -178,7 +238,7 @@ impl LLMProvider for OpenAIProvider {
             biased;
             _ = cancel.cancelled() => anyhow::bail!("Cancelled"),
             res = async {
-                let response = self.do_request(messages, tools).await?;
+                let response = self.do_request(messages, tools, &cancel).await?;
                 response.bytes().await.context("Failed to read response body")
             } => res?,
         };
@@ -221,7 +281,7 @@ impl LLMProvider for OpenAIProvider {
         let response = tokio::select! {
             biased;
             _ = cancel.cancelled() => anyhow::bail!("Cancelled"),
-            res = self.do_request(messages, tools) => res?,
+            res = self.do_request(messages, tools, &cancel) => res?,
         };
 
         let mut content = String::new();
@@ -291,5 +351,84 @@ impl LLMProvider for OpenAIProvider {
 
     fn max_context(&self) -> usize {
         self.max_context
+    }
+}
+
+/// Status codes worth retrying. Excludes auth/permission/validation errors
+/// where retrying just spends more of the budget on a guaranteed failure.
+fn is_retryable_status(status: reqwest::StatusCode) -> bool {
+    matches!(
+        status.as_u16(),
+        408 | 425 | 429 | 500 | 502 | 503 | 504
+    )
+}
+
+/// Exponential backoff with jitter. attempt=1 → ~1s, 2 → ~2s, 3 → ~4s, 4 → ~8s, 5 → ~16s.
+/// Jitter is 0-25% of the base delay, derived from monotonic-ish system time
+/// to avoid synchronized retry storms across multiple in-flight requests.
+fn backoff_delay(attempt: u32) -> Duration {
+    let shift = attempt.saturating_sub(1).min(4);
+    let base_ms: u64 = 1_000_u64 << shift;
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.subsec_nanos() as u64)
+        .unwrap_or(0);
+    let jitter_window = (base_ms / 4).max(1);
+    let jitter_ms = nanos % jitter_window;
+    Duration::from_millis(base_ms + jitter_ms)
+}
+
+fn truncate(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        s.to_string()
+    } else {
+        let mut out: String = s.chars().take(max).collect();
+        out.push('…');
+        out
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use reqwest::StatusCode;
+
+    #[test]
+    fn retryable_includes_429_5xx_and_timeouts() {
+        assert!(is_retryable_status(StatusCode::REQUEST_TIMEOUT));
+        assert!(is_retryable_status(StatusCode::TOO_MANY_REQUESTS));
+        assert!(is_retryable_status(StatusCode::INTERNAL_SERVER_ERROR));
+        assert!(is_retryable_status(StatusCode::BAD_GATEWAY));
+        assert!(is_retryable_status(StatusCode::SERVICE_UNAVAILABLE));
+        assert!(is_retryable_status(StatusCode::GATEWAY_TIMEOUT));
+    }
+
+    #[test]
+    fn retryable_excludes_auth_and_validation_errors() {
+        // These mean "your request is wrong" — retrying just burns budget.
+        assert!(!is_retryable_status(StatusCode::BAD_REQUEST));
+        assert!(!is_retryable_status(StatusCode::UNAUTHORIZED));
+        assert!(!is_retryable_status(StatusCode::FORBIDDEN));
+        assert!(!is_retryable_status(StatusCode::NOT_FOUND));
+        assert!(!is_retryable_status(StatusCode::UNPROCESSABLE_ENTITY));
+    }
+
+    #[test]
+    fn backoff_grows_exponentially_within_cap() {
+        let d1 = backoff_delay(1).as_millis();
+        let d2 = backoff_delay(2).as_millis();
+        let d3 = backoff_delay(3).as_millis();
+        let d4 = backoff_delay(4).as_millis();
+        let d5 = backoff_delay(5).as_millis();
+        let d6 = backoff_delay(6).as_millis();
+
+        // Base values: 1000, 2000, 4000, 8000, 16000, 16000 (capped at shift=4).
+        // Jitter is up to 25% of base, so each delay is in [base, base + base/4).
+        assert!((1000..1250).contains(&d1), "got {d1}");
+        assert!((2000..2500).contains(&d2), "got {d2}");
+        assert!((4000..5000).contains(&d3), "got {d3}");
+        assert!((8000..10000).contains(&d4), "got {d4}");
+        assert!((16000..20000).contains(&d5), "got {d5}");
+        assert!((16000..20000).contains(&d6), "got {d6} (should be capped)");
     }
 }

@@ -43,6 +43,10 @@ pub struct ProviderConfig {
     /// Max context size in tokens
     #[serde(default = "default_max_context")]
     pub max_context: usize,
+    /// Max retries on transient API failures (429, 5xx, connection errors).
+    /// Backoff is exponential with jitter: 1s, 2s, 4s, 8s, 16s.
+    #[serde(default = "default_max_retries")]
+    pub max_retries: u32,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -73,6 +77,7 @@ impl Default for ProviderConfig {
             api_key: None,
             model: default_model(),
             max_context: default_max_context(),
+            max_retries: default_max_retries(),
         }
     }
 }
@@ -115,6 +120,9 @@ fn default_model() -> String {
 }
 fn default_max_context() -> usize {
     128_000
+}
+fn default_max_retries() -> u32 {
+    4
 }
 fn default_skills_dir() -> PathBuf {
     vulcan_home().join("skills")
