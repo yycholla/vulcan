@@ -214,6 +214,7 @@ pub async fn run_tui(config: &Config, resume: ResumeTarget) -> Result<()> {
             role: ChatRole::System,
             content: note,
             reasoning: String::new(),
+                            segments: Vec::new(),
         });
 
         // Hydrate prior turns into the chat panel so resumed sessions show their
@@ -243,6 +244,7 @@ pub async fn run_tui(config: &Config, resume: ResumeTarget) -> Result<()> {
                             role: ChatRole::Agent,
                             content: content.unwrap_or_default(),
                             reasoning: reasoning_content.unwrap_or_default(),
+                            segments: Vec::new(),
                         });
                     }
                     Message::Tool { .. } => {} // skip — audit log shows tool activity
@@ -318,6 +320,7 @@ pub async fn run_tui(config: &Config, resume: ResumeTarget) -> Result<()> {
                         role: ChatRole::System,
                         content: format!("⏸  Agent paused — {summary}"),
                         reasoning: String::new(),
+                            segments: Vec::new(),
                     });
                     app.note_pause(&summary);
                     app.pending_pause = Some(p);
@@ -352,6 +355,7 @@ pub async fn run_tui(config: &Config, resume: ResumeTarget) -> Result<()> {
                                                 role: ChatRole::System,
                                                 content: format!("▶  Resumed — {label}"),
                                                 reasoning: String::new(),
+                            segments: Vec::new(),
                                             });
                                             app.note_resume(label);
                                         }
@@ -386,6 +390,7 @@ pub async fn run_tui(config: &Config, resume: ResumeTarget) -> Result<()> {
                                                     role: ChatRole::System,
                                                     content: "Cancelling current turn… (Ctrl+C again to quit)".into(),
                                                     reasoning: String::new(),
+                            segments: Vec::new(),
                                                 });
                                                 pending_quit = true;
                                             } else {
@@ -394,6 +399,7 @@ pub async fn run_tui(config: &Config, resume: ResumeTarget) -> Result<()> {
                                                     role: ChatRole::System,
                                                     content: "Press Ctrl+C again to quit, or any key to cancel.".into(),
                                                     reasoning: String::new(),
+                            segments: Vec::new(),
                                                 });
                                             }
                                             continue;
@@ -433,6 +439,7 @@ pub async fn run_tui(config: &Config, resume: ResumeTarget) -> Result<()> {
                                                             role: ChatRole::System,
                                                             content: format!("Reasoning trace: {}", if app.show_reasoning { "on" } else { "off" }),
                                                             reasoning: String::new(),
+                            segments: Vec::new(),
                                                         });
                                                         continue;
                                                     }
@@ -462,6 +469,7 @@ pub async fn run_tui(config: &Config, resume: ResumeTarget) -> Result<()> {
                                                                 role: ChatRole::System,
                                                                 content: "Usage: /search <query>".into(),
                                                                 reasoning: String::new(),
+                            segments: Vec::new(),
                                                             });
                                                             continue;
                                                         }
@@ -490,6 +498,7 @@ pub async fn run_tui(config: &Config, resume: ResumeTarget) -> Result<()> {
                                                             role: ChatRole::System,
                                                             content: report,
                                                             reasoning: String::new(),
+                            segments: Vec::new(),
                                                         });
                                                         continue;
                                                     }
@@ -498,6 +507,7 @@ pub async fn run_tui(config: &Config, resume: ResumeTarget) -> Result<()> {
                                                             role: ChatRole::System,
                                                             content: format!("Unknown command: {msg}. Try /help"),
                                                             reasoning: String::new(),
+                            segments: Vec::new(),
                                                         });
                                                         continue;
                                                     }
@@ -556,16 +566,24 @@ pub async fn run_tui(config: &Config, resume: ResumeTarget) -> Result<()> {
                     Some(StreamEvent::Text(chunk)) => {
                         if let Some(last) = app.messages.last_mut() {
                             if matches!(last.role, ChatRole::Agent) {
+                                // Append to both the segment timeline (the
+                                // YYC-71 ordered renderer) and the legacy
+                                // `content` field (kept so other code that
+                                // peeks at .content keeps working).
+                                last.append_text(&chunk);
                                 last.content.push_str(&chunk);
                             }
                         }
                     }
                     Some(StreamEvent::Reasoning(chunk)) => {
                         // Per-token reasoning trace from thinking-mode models.
-                        // Append to the current agent message's reasoning buffer
-                        // so the renderer can show it as the model thinks.
+                        // Push to the segment timeline so it interleaves with
+                        // tool calls in render order; also append to the
+                        // legacy `reasoning` field so latest_reasoning() etc.
+                        // continue to work.
                         if let Some(last) = app.messages.last_mut() {
                             if matches!(last.role, ChatRole::Agent) {
+                                last.append_reasoning(&chunk);
                                 last.reasoning.push_str(&chunk);
                             }
                         }
@@ -589,14 +607,15 @@ pub async fn run_tui(config: &Config, resume: ResumeTarget) -> Result<()> {
                         app.note_error(&e);
                     }
                     Some(StreamEvent::ToolCallStart { name, .. }) => {
-                        // Append an in-progress marker to the agent message.
-                        // ToolCallEnd will later flip the trailing `…` to `✓` / `✗`.
-                        // Newline before the marker only if there's preamble content;
-                        // otherwise it'd be one orphan blank line in front of the marker.
+                        // Push a tool-call segment into the timeline. The
+                        // renderer interleaves it between Reasoning/Text
+                        // segments in arrival order (YYC-71). The legacy
+                        // `content` string is left alone — its embedded
+                        // `_[🔧 …]_` markers are gone since the renderer now
+                        // gets tool calls from `segments`.
                         if let Some(last) = app.messages.last_mut() {
                             if matches!(last.role, ChatRole::Agent) {
-                                let prefix = if last.content.is_empty() { "" } else { "\n\n" };
-                                last.content.push_str(&format!("{prefix}_[🔧 {name}…]_"));
+                                last.push_tool_start(name.clone());
                             }
                         }
                         app.note_tool_start(&name);
@@ -604,13 +623,7 @@ pub async fn run_tui(config: &Config, resume: ResumeTarget) -> Result<()> {
                     Some(StreamEvent::ToolCallEnd { name, ok, .. }) => {
                         if let Some(last) = app.messages.last_mut() {
                             if matches!(last.role, ChatRole::Agent) {
-                                let mark = if ok { "✓" } else { "✗" };
-                                let in_progress = format!("_[🔧 {name}…]_");
-                                let done = format!("_[🔧 {name} {mark}]_");
-                                if let Some(pos) = last.content.find(&in_progress) {
-                                    last.content
-                                        .replace_range(pos..pos + in_progress.len(), &done);
-                                }
+                                last.finish_tool(&name, ok);
                             }
                         }
                         app.note_tool_end(&name, ok);

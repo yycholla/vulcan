@@ -17,14 +17,40 @@ pub enum ChatRole {
     System,
 }
 
+/// In-flight or completed tool call rendered inside an agent message timeline.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ToolStatus {
+    InProgress,
+    /// `bool` is the success flag — true → ✓, false → ✗.
+    Done(bool),
+}
+
+/// One slice of an agent's response timeline, in arrival order. Segments
+/// preserve the natural interleaving of reasoning, tool calls, and text so
+/// the renderer can show the agent's actual flow (think → tool → think →
+/// answer) instead of bunching all reasoning above all tool calls (YYC-71).
+#[derive(Clone, Debug)]
+pub enum MessageSegment {
+    Reasoning(String),
+    Text(String),
+    ToolCall { name: String, status: ToolStatus },
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct ChatMessage {
     pub role: ChatRole,
+    /// Flattened text content (kept for hydration from `Message::Assistant`
+    /// where the wire format only has aggregate content + reasoning, no
+    /// per-event timeline). Used as a fallback by the renderer when
+    /// `segments` is empty.
     pub content: String,
-    /// Reasoning trace for thinking-mode models (`Message::Assistant.reasoning_content`).
-    /// Populated for agent messages from streaming `StreamEvent::Reasoning` deltas
-    /// and from session-resume hydration. Empty for everything else.
+    /// Aggregate reasoning trace for hydrated messages. Renderer falls back
+    /// to this only when `segments` is empty.
     pub reasoning: String,
+    /// Ordered timeline of reasoning fragments, tool calls, and text chunks
+    /// as they arrived. Populated for live streamed agent messages; empty
+    /// for user/system messages and hydrated history.
+    pub segments: Vec<MessageSegment>,
 }
 
 impl ChatMessage {
@@ -33,6 +59,77 @@ impl ChatMessage {
             role,
             content: content.into(),
             reasoning: String::new(),
+            segments: Vec::new(),
+        }
+    }
+
+    /// True if neither the live segment timeline nor the hydrated content
+    /// field has any text. Used by the renderer to decide whether to show
+    /// the streaming "Thinking…" / "Answering…" placeholder.
+    pub fn has_text(&self) -> bool {
+        if !self.content.is_empty() {
+            return true;
+        }
+        self.segments
+            .iter()
+            .any(|s| matches!(s, MessageSegment::Text(t) if !t.is_empty()))
+    }
+
+    /// True if any reasoning has been recorded — either streamed into
+    /// segments or hydrated into the legacy `reasoning` field.
+    pub fn has_reasoning(&self) -> bool {
+        if !self.reasoning.is_empty() {
+            return true;
+        }
+        self.segments
+            .iter()
+            .any(|s| matches!(s, MessageSegment::Reasoning(r) if !r.is_empty()))
+    }
+
+    /// Append a text chunk to the segment timeline, coalescing with the
+    /// trailing segment if it's also text.
+    pub fn append_text(&mut self, chunk: &str) {
+        match self.segments.last_mut() {
+            Some(MessageSegment::Text(t)) => t.push_str(chunk),
+            _ => self.segments.push(MessageSegment::Text(chunk.to_string())),
+        }
+    }
+
+    /// Append a reasoning chunk to the segment timeline, coalescing with the
+    /// trailing segment if it's also reasoning. New tool calls or text break
+    /// the run, so subsequent reasoning starts a fresh segment — that's the
+    /// whole point of YYC-71.
+    pub fn append_reasoning(&mut self, chunk: &str) {
+        match self.segments.last_mut() {
+            Some(MessageSegment::Reasoning(r)) => r.push_str(chunk),
+            _ => self
+                .segments
+                .push(MessageSegment::Reasoning(chunk.to_string())),
+        }
+    }
+
+    pub fn push_tool_start(&mut self, name: impl Into<String>) {
+        self.segments.push(MessageSegment::ToolCall {
+            name: name.into(),
+            status: ToolStatus::InProgress,
+        });
+    }
+
+    /// Mark the most recent in-progress ToolCall with this name as done.
+    /// Walks segments in reverse so concurrent dispatch (YYC-34) still
+    /// pairs each end with its own start as the matching tail.
+    pub fn finish_tool(&mut self, name: &str, ok: bool) {
+        for seg in self.segments.iter_mut().rev() {
+            if let MessageSegment::ToolCall {
+                name: n,
+                status: status @ ToolStatus::InProgress,
+            } = seg
+            {
+                if n == name {
+                    *status = ToolStatus::Done(ok);
+                    return;
+                }
+            }
         }
     }
 }
@@ -653,5 +750,77 @@ mod tests {
         assert_eq!(session.status, SessionStatus::Live);
         assert!(session.is_active);
         assert_eq!(session.message_count, 3);
+    }
+
+    #[test]
+    fn segments_interleave_reasoning_tool_text_in_arrival_order() {
+        // Simulates the exact YYC-71 sequence: think → tool → think → answer.
+        let mut m = ChatMessage::new(ChatRole::Agent, "");
+        m.append_reasoning("checking the file");
+        m.push_tool_start("read_file");
+        m.finish_tool("read_file", true);
+        m.append_reasoning("now writing");
+        m.push_tool_start("write_file");
+        m.finish_tool("write_file", true);
+        m.append_text("Done!");
+
+        let kinds: Vec<&str> = m
+            .segments
+            .iter()
+            .map(|s| match s {
+                MessageSegment::Reasoning(_) => "reasoning",
+                MessageSegment::Text(_) => "text",
+                MessageSegment::ToolCall { .. } => "tool",
+            })
+            .collect();
+        assert_eq!(
+            kinds,
+            vec!["reasoning", "tool", "reasoning", "tool", "text"]
+        );
+    }
+
+    #[test]
+    fn append_reasoning_coalesces_until_broken_by_other_segment() {
+        let mut m = ChatMessage::new(ChatRole::Agent, "");
+        m.append_reasoning("first ");
+        m.append_reasoning("chunk");
+        m.push_tool_start("bash");
+        m.append_reasoning("after tool");
+        // Three segments: reasoning, tool, reasoning — second reasoning is
+        // its own segment because the tool call broke the run.
+        assert_eq!(m.segments.len(), 3);
+        match &m.segments[0] {
+            MessageSegment::Reasoning(r) => assert_eq!(r, "first chunk"),
+            other => panic!("expected reasoning, got {other:?}"),
+        }
+        match &m.segments[2] {
+            MessageSegment::Reasoning(r) => assert_eq!(r, "after tool"),
+            other => panic!("expected reasoning, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn finish_tool_pairs_with_most_recent_in_progress_call_of_same_name() {
+        // Parallel dispatch (YYC-34): two write_file calls in flight; the
+        // first to finish should pair with the most recent matching start
+        // that's still in-progress.
+        let mut m = ChatMessage::new(ChatRole::Agent, "");
+        m.push_tool_start("write_file");
+        m.push_tool_start("write_file");
+        m.finish_tool("write_file", true);
+
+        let statuses: Vec<ToolStatus> = m
+            .segments
+            .iter()
+            .filter_map(|s| match s {
+                MessageSegment::ToolCall { status, .. } => Some(*status),
+                _ => None,
+            })
+            .collect();
+        // Most-recent in-progress finishes first; the older one stays open.
+        assert_eq!(
+            statuses,
+            vec![ToolStatus::InProgress, ToolStatus::Done(true)]
+        );
     }
 }
