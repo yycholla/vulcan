@@ -253,7 +253,8 @@ impl LLMProvider for OpenAIProvider {
                 let line = buf[..newline].to_string();
                 buf = buf[newline + 1..].to_string();
 
-                let prev_len = content.len();
+                let prev_content_len = content.len();
+                let prev_reasoning_len = reasoning.len();
                 Self::parse_line(
                     &line,
                     &mut content,
@@ -263,10 +264,14 @@ impl LLMProvider for OpenAIProvider {
                     &mut finish_reason,
                 );
 
-                // If content grew, send the delta through the channel
-                if content.len() > prev_len {
-                    let delta = &content[prev_len..];
+                // Send any new content/reasoning deltas through the channel.
+                if content.len() > prev_content_len {
+                    let delta = &content[prev_content_len..];
                     let _ = tx.send(StreamEvent::Text(delta.to_string()));
+                }
+                if reasoning.len() > prev_reasoning_len {
+                    let delta = &reasoning[prev_reasoning_len..];
+                    let _ = tx.send(StreamEvent::Reasoning(delta.to_string()));
                 }
             }
         }

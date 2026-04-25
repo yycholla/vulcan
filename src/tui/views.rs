@@ -96,9 +96,23 @@ fn build_chat_lines(app: &AppState, show_reasoning: bool, dense: bool) -> Vec<Li
             ChatRole::System => ("system", Palette::YELLOW),
         };
         out.push(message_header(role_label, accent, None));
+
+        // Reasoning trace from a thinking-mode model, when present and toggle is on.
+        // Rendered before the agent's content so the visual order matches the
+        // model's natural output (think → answer).
+        if show_reasoning && matches!(m.role, ChatRole::Agent) && !m.reasoning.is_empty() {
+            for l in super::widgets::reasoning_lines(&m.reasoning, false) {
+                out.push(l);
+            }
+        }
+
         if matches!(m.role, ChatRole::Agent) && m.content.is_empty() {
+            // Streaming and content hasn't started yet — show "thinking…" hint.
+            // If reasoning is already streaming above, this still tells the user
+            // they're waiting on the answer (not lost).
+            let label = if m.reasoning.is_empty() { "▎ Thinking…" } else { "▎ Answering…" };
             out.push(Line::from(Span::styled(
-                "▎ Thinking…",
+                label,
                 Style::default().fg(Palette::MUTED).add_modifier(Modifier::SLOW_BLINK),
             )));
         } else {
@@ -111,20 +125,6 @@ fn build_chat_lines(app: &AppState, show_reasoning: bool, dense: bool) -> Vec<Li
             }
         }
         if !dense || i + 1 == app.messages.len() {
-            out.push(Line::from(""));
-        }
-
-        // After the very first agent message, optionally inject a reasoning trace.
-        if show_reasoning
-            && matches!(m.role, ChatRole::Agent)
-            && i == app.messages.iter().position(|x| matches!(x.role, ChatRole::Agent)).unwrap_or(0)
-        {
-            for l in super::widgets::reasoning_lines(
-                "Three services share AuthMiddleware. Gateway is upstream — refactor it last.",
-                false,
-            ) {
-                out.push(l);
-            }
             out.push(Line::from(""));
         }
     }
