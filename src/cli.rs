@@ -6,6 +6,12 @@ use clap::{Parser, Subcommand};
 pub struct Cli {
     #[command(subcommand)]
     pub command: Option<Command>,
+
+    /// Resume the most recent session. Applies to `chat` (default) and
+    /// `prompt` subcommands. Ignored for `session` (which already targets a
+    /// specific ID) and `search`.
+    #[arg(long, global = true)]
+    pub r#continue: bool,
 }
 
 #[derive(Subcommand, Debug)]
@@ -17,9 +23,17 @@ pub enum Command {
         /// The prompt text to send to the agent
         text: String,
     },
-    /// Resume a previous session by ID
+    /// Resume a previous session by ID (interactive TUI)
     Session {
         /// Session ID to resume
         id: String,
+    },
+    /// Full-text search across all saved sessions
+    Search {
+        /// FTS5 query (matches against message content)
+        query: String,
+        /// Max results to return
+        #[arg(long, default_value_t = 10)]
+        limit: usize,
     },
 }

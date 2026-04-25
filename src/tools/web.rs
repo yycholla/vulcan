@@ -2,6 +2,7 @@ use crate::tools::{Tool, ToolResult};
 use anyhow::Result;
 use async_trait::async_trait;
 use serde_json::{json, Value};
+use tokio_util::sync::CancellationToken;
 
 pub struct WebSearch;
 
@@ -22,7 +23,7 @@ impl Tool for WebSearch {
             "required": ["query"]
         })
     }
-    async fn call(&self, params: Value) -> Result<ToolResult> {
+    async fn call(&self, params: Value, cancel: CancellationToken) -> Result<ToolResult> {
         let query = params["query"].as_str().ok_or_else(|| anyhow::anyhow!("query required"))?;
 
         // Use DuckDuckGo's lite version for simple scraping
@@ -31,8 +32,14 @@ impl Tool for WebSearch {
             .user_agent("vulcan/0.1 (AI agent; personal use)")
             .build()?;
 
-        let response = client.get(&url).send().await?;
-        let html = response.text().await?;
+        let html = tokio::select! {
+            biased;
+            _ = cancel.cancelled() => return Ok(ToolResult::err("Cancelled")),
+            res = async {
+                let response = client.get(&url).send().await?;
+                response.text().await
+            } => res?,
+        };
 
         // Simple extraction of result links from DuckDuckGo HTML
         let results = extract_ddg_results(&html);
@@ -134,7 +141,7 @@ impl Tool for WebFetch {
             "required": ["url"]
         })
     }
-    async fn call(&self, params: Value) -> Result<ToolResult> {
+    async fn call(&self, params: Value, cancel: CancellationToken) -> Result<ToolResult> {
         let url = params["url"].as_str().ok_or_else(|| anyhow::anyhow!("url required"))?;
 
         let client = reqwest::Client::builder()
@@ -142,21 +149,19 @@ impl Tool for WebFetch {
             .timeout(std::time::Duration::from_secs(30))
             .build()?;
 
-        let response = client.get(url).send().await?;
-        let status = response.status();
-
-        if !status.is_success() {
-            return Err(anyhow::anyhow!("HTTP {status} fetching {url}"));
-        }
-
-        // Check content type — if it's text/html we can extract
-        let _content_type = response
-            .headers()
-            .get("content-type")
-            .and_then(|v| v.to_str().ok())
-            .unwrap_or("");
-
-        let body = response.text().await?;
+        let (status, body) = tokio::select! {
+            biased;
+            _ = cancel.cancelled() => return Ok(ToolResult::err("Cancelled")),
+            res = async {
+                let response = client.get(url).send().await?;
+                let status = response.status();
+                if !status.is_success() {
+                    return Err(anyhow::anyhow!("HTTP {status} fetching {url}"));
+                }
+                let body = response.text().await?;
+                Ok::<_, anyhow::Error>((status, body))
+            } => res?,
+        };
 
         // Trim page content
         let text = html_to_text(&body);

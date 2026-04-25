@@ -1,124 +1,485 @@
-use crate::provider::Message;
+//! Persistent session storage backed by SQLite (with FTS5 for cross-session
+//! search).
+//!
+//! Schema:
+//! - `sessions(id PK, created_at, last_active)`
+//! - `messages(id PK AUTOINCREMENT, session_id FK, position, role, content,
+//!    tool_call_id, tool_calls_json, created_at)` indexed on `(session_id, position)`
+//! - `messages_fts` — external-content FTS5 over `messages.content`, kept in
+//!    sync via insert/update/delete triggers.
+//!
+//! The JSONL format used previously is gone; old data under
+//! `~/.vulcan/sessions/*.jsonl` is left in place but not read. Migration is a
+//! manual one-off if it ever matters (see Linear YYC-14).
+
+use std::sync::Mutex;
+
 use anyhow::{Context, Result};
 use chrono::Utc;
-use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
+use rusqlite::{Connection, OptionalExtension, params};
 
-/// Persistent session storage using JSONL files
+use crate::provider::{Message, ToolCall};
+
+const SCHEMA: &str = r#"
+PRAGMA foreign_keys = ON;
+PRAGMA journal_mode = WAL;
+
+CREATE TABLE IF NOT EXISTS sessions (
+    id          TEXT PRIMARY KEY,
+    created_at  INTEGER NOT NULL,
+    last_active INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS messages (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id      TEXT NOT NULL,
+    position        INTEGER NOT NULL,
+    role            TEXT NOT NULL,
+    content         TEXT,
+    tool_call_id    TEXT,
+    tool_calls_json TEXT,
+    created_at      INTEGER NOT NULL,
+    FOREIGN KEY(session_id) REFERENCES sessions(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id, position);
+
+CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(
+    content,
+    content='messages',
+    content_rowid='id'
+);
+
+CREATE TRIGGER IF NOT EXISTS messages_ai AFTER INSERT ON messages BEGIN
+    INSERT INTO messages_fts(rowid, content) VALUES (new.id, COALESCE(new.content, ''));
+END;
+
+CREATE TRIGGER IF NOT EXISTS messages_ad AFTER DELETE ON messages BEGIN
+    INSERT INTO messages_fts(messages_fts, rowid, content) VALUES('delete', old.id, COALESCE(old.content, ''));
+END;
+
+CREATE TRIGGER IF NOT EXISTS messages_au AFTER UPDATE ON messages BEGIN
+    INSERT INTO messages_fts(messages_fts, rowid, content) VALUES('delete', old.id, COALESCE(old.content, ''));
+    INSERT INTO messages_fts(rowid, content) VALUES (new.id, COALESCE(new.content, ''));
+END;
+"#;
+
 pub struct SessionStore {
-    sessions_dir: PathBuf,
+    conn: Mutex<Connection>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
-pub struct SessionMeta {
+/// One row from a full-text search. Score is the BM25 rank (lower = better
+/// per FTS5 conventions).
+#[derive(Debug, Clone)]
+pub struct SearchHit {
+    pub session_id: String,
+    pub position: i64,
+    pub role: String,
+    pub content: String,
+    pub created_at: i64,
+    pub score: f64,
+}
+
+#[derive(Debug, Clone)]
+pub struct SessionSummary {
     pub id: String,
-    pub created_at: String,
-    pub updated_at: String,
+    pub created_at: i64,
+    pub last_active: i64,
     pub message_count: usize,
-    pub title: Option<String>,
 }
 
 impl SessionStore {
+    /// Open (or create) the session store at `~/.vulcan/sessions.db`. Panics
+    /// on fatal DB initialization errors — matches the existing pattern in
+    /// `Agent::new` (api key, provider).
     pub fn new() -> Self {
-        let dir = crate::config::vulcan_home().join("sessions");
+        let dir = crate::config::vulcan_home();
         std::fs::create_dir_all(&dir).ok();
-        Self { sessions_dir: dir }
+        let path = dir.join("sessions.db");
+
+        let conn = Connection::open(&path)
+            .unwrap_or_else(|e| panic!("Failed to open session DB at {}: {e}", path.display()));
+
+        conn.execute_batch(SCHEMA)
+            .unwrap_or_else(|e| panic!("Failed to initialize session DB schema: {e}"));
+
+        Self {
+            conn: Mutex::new(conn),
+        }
     }
 
-    /// Get the most recent session ID, if any
+    /// Most recently active session, by `last_active`. `None` if there are no
+    /// sessions yet.
     pub fn last_session_id(&self) -> Option<String> {
-        let mut entries: Vec<_> = std::fs::read_dir(&self.sessions_dir)
-            .ok()?
-            .filter_map(|e| e.ok())
-            .filter(|e| e.path().extension().map_or(false, |ext| ext == "jsonl"))
-            .filter_map(|e| {
-                let meta = e.path().with_extension("json");
-                let created = std::fs::metadata(&meta)
-                    .and_then(|m| m.created())
-                    .ok()?;
-                Some((e.path(), created))
-            })
-            .collect();
-
-        entries.sort_by(|a, b| b.1.cmp(&a.1));
-        entries
-            .first()
-            .map(|(path, _)| {
-                path.file_stem()
-                    .and_then(|s| s.to_str())
-                    .unwrap_or("")
-                    .to_string()
-            })
+        let conn = self.conn.lock().ok()?;
+        conn.query_row(
+            "SELECT id FROM sessions ORDER BY last_active DESC LIMIT 1",
+            [],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .ok()
+        .flatten()
     }
 
-    /// Load message history for a session
+    /// Load all messages for `session_id` in the order they were saved.
+    /// Returns `Ok(None)` if the session doesn't exist.
     pub fn load_history(&self, session_id: &str) -> Result<Option<Vec<Message>>> {
-        let path = self.sessions_dir.join(format!("{session_id}.jsonl"));
-        if !path.exists() {
+        let conn = self.conn.lock().map_err(|_| anyhow::anyhow!("session DB poisoned"))?;
+
+        let exists: bool = conn
+            .query_row(
+                "SELECT 1 FROM sessions WHERE id = ?1",
+                params![session_id],
+                |_| Ok(true),
+            )
+            .optional()
+            .context("Failed to check session existence")?
+            .unwrap_or(false);
+        if !exists {
             return Ok(None);
         }
 
-        let content = std::fs::read_to_string(&path)
-            .with_context(|| format!("Failed to read session {session_id}"))?;
+        let mut stmt = conn.prepare(
+            "SELECT role, content, tool_call_id, tool_calls_json
+             FROM messages
+             WHERE session_id = ?1
+             ORDER BY position ASC",
+        )?;
 
-        let messages: Vec<Message> = content
-            .lines()
-            .filter_map(|line| serde_json::from_str(line).ok())
-            .collect();
+        let rows = stmt.query_map(params![session_id], |row| {
+            let role: String = row.get(0)?;
+            let content: Option<String> = row.get(1)?;
+            let tool_call_id: Option<String> = row.get(2)?;
+            let tool_calls_json: Option<String> = row.get(3)?;
+            Ok((role, content, tool_call_id, tool_calls_json))
+        })?;
+
+        let mut messages = Vec::new();
+        for row in rows {
+            let (role, content, tool_call_id, tool_calls_json) = row?;
+            let msg = decode_message(&role, content, tool_call_id, tool_calls_json)?;
+            messages.push(msg);
+        }
 
         Ok(Some(messages))
     }
 
-    /// Save messages to session history
-    pub fn save_messages(&self, messages: &[Message]) -> Result<String> {
-        let session_id = self.last_session_id().unwrap_or_else(|| {
-            uuid::Uuid::new_v4().to_string()
-        });
+    /// Save the full message history for `session_id`. The session row is
+    /// upserted (`last_active` bumped); existing messages for the session are
+    /// deleted and replaced with `messages` — full-snapshot semantics matching
+    /// the per-prompt save the agent emits.
+    pub fn save_messages(&self, session_id: &str, messages: &[Message]) -> Result<()> {
+        let now = Utc::now().timestamp();
 
-        let path = self.sessions_dir.join(format!("{session_id}.jsonl"));
+        let mut conn = self
+            .conn
+            .lock()
+            .map_err(|_| anyhow::anyhow!("session DB poisoned"))?;
+        let tx = conn.transaction()?;
 
-        let saved_count = if path.exists() {
-            let existing = std::fs::read_to_string(&path)?;
-            existing.lines().count()
-        } else {
-            0
-        };
+        // Upsert the session row.
+        tx.execute(
+            "INSERT INTO sessions (id, created_at, last_active)
+             VALUES (?1, ?2, ?2)
+             ON CONFLICT(id) DO UPDATE SET last_active = excluded.last_active",
+            params![session_id, now],
+        )?;
 
-        // Write out the full history
-        let mut file = std::fs::File::create(&path)?;
-        for msg in messages {
-            let line = serde_json::to_string(msg)?;
-            writeln!(file, "{line}")?;
+        // Replace all messages for this session — full snapshot semantics.
+        tx.execute(
+            "DELETE FROM messages WHERE session_id = ?1",
+            params![session_id],
+        )?;
+
+        for (idx, msg) in messages.iter().enumerate() {
+            let (role, content, tool_call_id, tool_calls_json) = encode_message(msg)?;
+            tx.execute(
+                "INSERT INTO messages
+                 (session_id, position, role, content, tool_call_id, tool_calls_json, created_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                params![
+                    session_id,
+                    idx as i64,
+                    role,
+                    content,
+                    tool_call_id,
+                    tool_calls_json,
+                    now,
+                ],
+            )?;
         }
 
-        // Write meta
-        let meta = SessionMeta {
-            id: session_id.clone(),
-            created_at: if saved_count == 0 {
-                Utc::now().to_rfc3339()
-            } else {
-                // Read existing meta
-                Self::read_meta(&self.sessions_dir, &session_id)
-                    .unwrap_or_else(|| Utc::now().to_rfc3339())
-            },
-            updated_at: Utc::now().to_rfc3339(),
-            message_count: messages.len(),
-            title: None,
-        };
-
-        let meta_path = self.sessions_dir.join(format!("{session_id}.json"));
-        std::fs::write(&meta_path, serde_json::to_string_pretty(&meta)?)?;
-
-        Ok(session_id)
+        tx.commit()?;
+        Ok(())
     }
 
-    fn read_meta(dir: &PathBuf, id: &str) -> Option<String> {
-        let path = dir.join(format!("{id}.json"));
-        let meta: SessionMeta =
-            serde_json::from_str(&std::fs::read_to_string(path).ok()?).ok()?;
-        Some(meta.created_at)
+    /// Most-recent-first list of saved sessions, capped at `limit`.
+    pub fn list_sessions(&self, limit: usize) -> Result<Vec<SessionSummary>> {
+        let conn = self.conn.lock().map_err(|_| anyhow::anyhow!("session DB poisoned"))?;
+
+        let mut stmt = conn.prepare(
+            "SELECT s.id, s.created_at, s.last_active,
+                    (SELECT COUNT(*) FROM messages m WHERE m.session_id = s.id) AS msg_count
+             FROM sessions s
+             ORDER BY s.last_active DESC
+             LIMIT ?1",
+        )?;
+
+        let rows = stmt.query_map(params![limit as i64], |row| {
+            Ok(SessionSummary {
+                id: row.get(0)?,
+                created_at: row.get(1)?,
+                last_active: row.get(2)?,
+                message_count: row.get::<_, i64>(3)? as usize,
+            })
+        })?;
+
+        let mut summaries = Vec::new();
+        for row in rows {
+            summaries.push(row?);
+        }
+        Ok(summaries)
+    }
+
+    /// Full-text search across every saved message. Returns the top `limit`
+    /// hits ranked by BM25.
+    pub fn search_messages(&self, query: &str, limit: usize) -> Result<Vec<SearchHit>> {
+        let conn = self.conn.lock().map_err(|_| anyhow::anyhow!("session DB poisoned"))?;
+
+        let mut stmt = conn.prepare(
+            "SELECT m.session_id, m.position, m.role, m.content, m.created_at, bm25(messages_fts) AS score
+             FROM messages_fts
+             JOIN messages m ON m.id = messages_fts.rowid
+             WHERE messages_fts MATCH ?1
+             ORDER BY score
+             LIMIT ?2",
+        )?;
+
+        let rows = stmt.query_map(params![query, limit as i64], |row| {
+            Ok(SearchHit {
+                session_id: row.get(0)?,
+                position: row.get(1)?,
+                role: row.get(2)?,
+                content: row.get::<_, Option<String>>(3)?.unwrap_or_default(),
+                created_at: row.get(4)?,
+                score: row.get(5)?,
+            })
+        })?;
+
+        let mut hits = Vec::new();
+        for row in rows {
+            hits.push(row?);
+        }
+        Ok(hits)
     }
 }
 
-// Helper for the write! macro in save_messages
-use std::io::Write;
+impl Default for SessionStore {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+fn encode_message(
+    msg: &Message,
+) -> Result<(&'static str, Option<String>, Option<String>, Option<String>)> {
+    Ok(match msg {
+        Message::System { content } => ("system", Some(content.clone()), None, None),
+        Message::User { content } => ("user", Some(content.clone()), None, None),
+        Message::Assistant {
+            content,
+            tool_calls,
+        } => {
+            let tool_calls_json = match tool_calls {
+                Some(tcs) => Some(serde_json::to_string(tcs).context("encode tool_calls")?),
+                None => None,
+            };
+            ("assistant", content.clone(), None, tool_calls_json)
+        }
+        Message::Tool {
+            tool_call_id,
+            content,
+        } => (
+            "tool",
+            Some(content.clone()),
+            Some(tool_call_id.clone()),
+            None,
+        ),
+    })
+}
+
+fn decode_message(
+    role: &str,
+    content: Option<String>,
+    tool_call_id: Option<String>,
+    tool_calls_json: Option<String>,
+) -> Result<Message> {
+    Ok(match role {
+        "system" => Message::System {
+            content: content.unwrap_or_default(),
+        },
+        "user" => Message::User {
+            content: content.unwrap_or_default(),
+        },
+        "assistant" => {
+            let tool_calls = match tool_calls_json {
+                Some(s) => Some(serde_json::from_str::<Vec<ToolCall>>(&s).context("decode tool_calls")?),
+                None => None,
+            };
+            Message::Assistant {
+                content,
+                tool_calls,
+            }
+        }
+        "tool" => Message::Tool {
+            tool_call_id: tool_call_id.unwrap_or_default(),
+            content: content.unwrap_or_default(),
+        },
+        other => anyhow::bail!("unknown role in DB: {other}"),
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    fn store_in(dir: &TempDir) -> SessionStore {
+        // Bypass `new()` so we don't write into ~/.vulcan during tests.
+        let path = dir.path().join("sessions.db");
+        let conn = Connection::open(&path).unwrap();
+        conn.execute_batch(SCHEMA).unwrap();
+        SessionStore {
+            conn: Mutex::new(conn),
+        }
+    }
+
+    #[test]
+    fn round_trip_messages() {
+        let dir = TempDir::new().unwrap();
+        let store = store_in(&dir);
+        let session_id = uuid::Uuid::new_v4().to_string();
+
+        let messages = vec![
+            Message::System {
+                content: "you are a helpful agent".into(),
+            },
+            Message::User {
+                content: "what is rust?".into(),
+            },
+            Message::Assistant {
+                content: Some("a systems language with strong types".into()),
+                tool_calls: None,
+            },
+        ];
+
+        store.save_messages(&session_id, &messages).unwrap();
+        let loaded = store.load_history(&session_id).unwrap().unwrap();
+        assert_eq!(loaded.len(), 3);
+        match &loaded[1] {
+            Message::User { content } => assert_eq!(content, "what is rust?"),
+            other => panic!("expected User, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn last_session_id_returns_most_recent() {
+        let dir = TempDir::new().unwrap();
+        let store = store_in(&dir);
+        let id = uuid::Uuid::new_v4().to_string();
+
+        store
+            .save_messages(
+                &id,
+                &[Message::User {
+                    content: "first".into(),
+                }],
+            )
+            .unwrap();
+        assert_eq!(store.last_session_id(), Some(id));
+    }
+
+    #[test]
+    fn list_sessions_returns_summaries_in_recency_order() {
+        let dir = TempDir::new().unwrap();
+        let store = store_in(&dir);
+        let s1 = uuid::Uuid::new_v4().to_string();
+        let s2 = uuid::Uuid::new_v4().to_string();
+
+        store
+            .save_messages(&s1, &[Message::User { content: "a".into() }])
+            .unwrap();
+        // Sleep 1s would make this deterministic, but the second save bumps
+        // last_active beyond the first's wall-clock-second granularity in
+        // practice. Make it explicit by saving twice with different content.
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+        store
+            .save_messages(&s2, &[Message::User { content: "b".into() }])
+            .unwrap();
+
+        let summaries = store.list_sessions(10).unwrap();
+        assert_eq!(summaries.len(), 2);
+        assert_eq!(summaries[0].id, s2, "most recent should come first");
+        assert_eq!(summaries[1].id, s1);
+        assert_eq!(summaries[0].message_count, 1);
+    }
+
+    #[test]
+    fn fts_search_finds_content() {
+        let dir = TempDir::new().unwrap();
+        let store = store_in(&dir);
+        let session_id = uuid::Uuid::new_v4().to_string();
+
+        store
+            .save_messages(
+                &session_id,
+                &[
+                    Message::User {
+                        content: "the quick brown fox jumps over the lazy dog".into(),
+                    },
+                    Message::User {
+                        content: "lorem ipsum dolor sit amet".into(),
+                    },
+                ],
+            )
+            .unwrap();
+
+        let hits = store.search_messages("brown fox", 10).unwrap();
+        assert!(
+            hits.iter().any(|h| h.content.contains("brown fox")),
+            "expected fox hit, got {hits:?}"
+        );
+    }
+
+    #[test]
+    fn assistant_with_tool_calls_round_trips() {
+        let dir = TempDir::new().unwrap();
+        let store = store_in(&dir);
+        let id = uuid::Uuid::new_v4().to_string();
+
+        let messages = vec![Message::Assistant {
+            content: None,
+            tool_calls: Some(vec![ToolCall {
+                id: "call_1".into(),
+                call_type: "function".into(),
+                function: crate::provider::ToolCallFunction {
+                    name: "bash".into(),
+                    arguments: r#"{"command":"ls"}"#.into(),
+                },
+            }]),
+        }];
+
+        store.save_messages(&id, &messages).unwrap();
+        let loaded = store.load_history(&id).unwrap().unwrap();
+
+        match &loaded[0] {
+            Message::Assistant { tool_calls, .. } => {
+                let tcs = tool_calls.as_ref().expect("tool calls present");
+                assert_eq!(tcs.len(), 1);
+                assert_eq!(tcs[0].function.name, "bash");
+            }
+            other => panic!("expected Assistant, got {other:?}"),
+        }
+    }
+}

@@ -144,19 +144,23 @@ pub enum StreamEvent {
 /// A provider capable of chatting with an LLM
 #[async_trait::async_trait]
 pub trait LLMProvider: Send + Sync {
-    /// Send a chat request and get a buffered response (for CLI mode)
+    /// Send a chat request and get a buffered response (for CLI mode).
+    /// Race against `cancel.cancelled()`; on cancel, drop the in-flight HTTP
+    /// request and return an `Err` (the agent loop translates this).
     async fn chat(
         &self,
         messages: &[Message],
         tools: &[ToolDefinition],
+        cancel: tokio_util::sync::CancellationToken,
     ) -> Result<ChatResponse>;
 
-    /// Send a chat request and stream response events through a channel (for TUI mode)
+    /// Send a chat request and stream response events through a channel (for TUI mode).
     async fn chat_stream(
         &self,
         messages: &[Message],
         tools: &[ToolDefinition],
         tx: mpsc::UnboundedSender<StreamEvent>,
+        cancel: tokio_util::sync::CancellationToken,
     ) -> Result<()>;
 
     /// Get the model's context window size

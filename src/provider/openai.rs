@@ -4,6 +4,7 @@ use reqwest::Client;
 use serde_json::{json, Value};
 use std::time::Duration;
 use tokio::sync::mpsc;
+use tokio_util::sync::CancellationToken;
 
 /// OpenAI-compatible provider (works with OpenRouter, Anthropic, Ollama, etc.)
 pub struct OpenAIProvider {
@@ -164,9 +165,16 @@ impl LLMProvider for OpenAIProvider {
         &self,
         messages: &[Message],
         tools: &[ToolDefinition],
+        cancel: CancellationToken,
     ) -> Result<ChatResponse> {
-        let response = self.do_request(messages, tools).await?;
-        let bytes = response.bytes().await.context("Failed to read response body")?;
+        let bytes = tokio::select! {
+            biased;
+            _ = cancel.cancelled() => anyhow::bail!("Cancelled"),
+            res = async {
+                let response = self.do_request(messages, tools).await?;
+                response.bytes().await.context("Failed to read response body")
+            } => res?,
+        };
         let text = String::from_utf8_lossy(&bytes);
 
         let mut content = String::new();
@@ -192,8 +200,13 @@ impl LLMProvider for OpenAIProvider {
         messages: &[Message],
         tools: &[ToolDefinition],
         tx: mpsc::UnboundedSender<StreamEvent>,
+        cancel: CancellationToken,
     ) -> Result<()> {
-        let response = self.do_request(messages, tools).await?;
+        let response = tokio::select! {
+            biased;
+            _ = cancel.cancelled() => anyhow::bail!("Cancelled"),
+            res = self.do_request(messages, tools) => res?,
+        };
 
         let mut content = String::new();
         let mut tool_calls: Vec<ToolCall> = Vec::new();
@@ -205,7 +218,15 @@ impl LLMProvider for OpenAIProvider {
         let mut buf = String::new();
 
         use futures_util::StreamExt;
-        while let Some(chunk_result) = stream.next().await {
+        loop {
+            let chunk_result = tokio::select! {
+                biased;
+                _ = cancel.cancelled() => anyhow::bail!("Cancelled"),
+                next = stream.next() => match next {
+                    Some(r) => r,
+                    None => break,
+                },
+            };
             let chunk = chunk_result.context("Failed to read stream chunk")?;
             let chunk_str = String::from_utf8_lossy(&chunk);
             buf.push_str(&chunk_str);

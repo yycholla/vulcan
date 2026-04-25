@@ -83,6 +83,11 @@ pub struct AppState {
     /// falls back to demo data so the design still looks alive on first launch.
     pub audit_log: Option<AuditBuffer>,
 
+    /// When the agent emits an `AgentPause`, the TUI parks it here. Render
+    /// shows an overlay; key handler intercepts Y/A/N keys and consumes the
+    /// pause via `take()` to send the reply.
+    pub pending_pause: Option<crate::pause::AgentPause>,
+
     cursor: Cell<(u16, u16)>,
     pub model_label: String,
     pub token_used: u32,
@@ -107,6 +112,7 @@ impl AppState {
             tree: demo_tree(),
 
             audit_log: None,
+            pending_pause: None,
 
             cursor: Cell::new((0, 0)),
             model_label,
