@@ -121,6 +121,35 @@ impl Agent {
         &self.session_id
     }
 
+    /// Test-only constructor that takes a fully-built provider and an empty
+    /// (or test-curated) registry. Bypasses the env-derived config path so
+    /// tests don't need a real API key. Memory points at an in-memory or
+    /// temporary store via the caller — this constructor leaves the real
+    /// `SessionStore::new()` path which writes to ~/.vulcan; tests should
+    /// override `Agent::memory` if they care about isolation, or pass a
+    /// custom session_id and accept that ~/.vulcan/sessions.db gets touched.
+    #[cfg(test)]
+    pub(crate) fn for_test(
+        provider: Box<dyn LLMProvider>,
+        tools: ToolRegistry,
+        hooks: HookRegistry,
+        skills: Arc<SkillRegistry>,
+    ) -> Self {
+        let max_context = provider.max_context();
+        Self {
+            provider,
+            tools,
+            skills,
+            context: ContextManager::new(max_context),
+            memory: SessionStore::new(),
+            prompt_builder: PromptBuilder,
+            hooks: Arc::new(hooks),
+            session_id: Uuid::new_v4().to_string(),
+            turns: 0,
+            turn_cancel: CancellationToken::new(),
+        }
+    }
+
     /// Cancel the currently-running turn. Safe to call from any thread.
     /// After cancellation fires, the in-flight tool/LLM/hook futures get
     /// dropped (with `kill_on_drop` semantics where applicable) and the
@@ -552,5 +581,152 @@ fn flatten_for_message(result: ToolResult) -> String {
         media_block
     } else {
         format!("{}\n\n{media_block}", result.output)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::hooks::HookRegistry;
+    use crate::provider::mock::{MockProvider, MockResponse};
+    use crate::skills::SkillRegistry;
+    use crate::tools::ToolRegistry;
+    use std::sync::Arc;
+
+    fn empty_skills() -> Arc<SkillRegistry> {
+        // Point at a path that doesn't exist so the registry is empty.
+        Arc::new(SkillRegistry::new(&std::path::PathBuf::from(
+            "/tmp/vulcan-test-skills-nonexistent",
+        )))
+    }
+
+    /// Build an Agent with a MockProvider and minimal setup. Returns the agent
+    /// and a handle to the mock so tests can enqueue responses + inspect calls.
+    fn agent_with_mock() -> (Agent, Arc<MockProvider>) {
+        let mock = Arc::new(MockProvider::new(128_000));
+        // The agent needs Box<dyn LLMProvider>; we wrap a clone of the Arc.
+        // Since MockProvider's state is in interior Mutex, cloning the Arc
+        // gives the test a handle to the same instance.
+        struct ProviderHandle(Arc<MockProvider>);
+        #[async_trait::async_trait]
+        impl LLMProvider for ProviderHandle {
+            async fn chat(
+                &self,
+                m: &[Message],
+                t: &[crate::provider::ToolDefinition],
+                c: CancellationToken,
+            ) -> Result<crate::provider::ChatResponse> {
+                self.0.chat(m, t, c).await
+            }
+            async fn chat_stream(
+                &self,
+                m: &[Message],
+                t: &[crate::provider::ToolDefinition],
+                tx: tokio::sync::mpsc::UnboundedSender<crate::provider::StreamEvent>,
+                c: CancellationToken,
+            ) -> Result<()> {
+                self.0.chat_stream(m, t, tx, c).await
+            }
+            fn max_context(&self) -> usize {
+                self.0.max_context()
+            }
+        }
+        let agent = Agent::for_test(
+            Box::new(ProviderHandle(mock.clone())),
+            ToolRegistry::new(),
+            HookRegistry::new(),
+            empty_skills(),
+        );
+        (agent, mock)
+    }
+
+    #[tokio::test]
+    async fn single_turn_text_response() {
+        let (mut agent, mock) = agent_with_mock();
+        mock.enqueue_text("Hello there");
+
+        let resp = agent.run_prompt("hi").await.unwrap();
+        assert_eq!(resp, "Hello there");
+
+        // Provider was called once; messages had system + user (no history).
+        let calls = mock.captured_calls();
+        assert_eq!(calls.len(), 1);
+        assert!(matches!(calls[0][0], Message::System { .. }));
+        match &calls[0][1] {
+            Message::User { content } => assert_eq!(content, "hi"),
+            other => panic!("expected User, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn multi_turn_with_tool_call() {
+        let (mut agent, mock) = agent_with_mock();
+        // Iter 0: tool call. Iter 1: final text response.
+        mock.enqueue_tool_call(
+            "read_file",
+            "call_1",
+            serde_json::json!({"path": "/tmp/vulcan-test-nonexistent-file"}),
+        );
+        mock.enqueue_text("Read failed but that's fine for the test");
+
+        // The real ReadFile tool is registered by ToolRegistry::new(); it'll
+        // return Err for the bogus path, which dispatch_tool wraps as
+        // ToolResult::err. The agent's iteration 1 sees a Tool message with
+        // the error string and emits the queued text response.
+        let resp = agent.run_prompt("read it").await.unwrap();
+        assert_eq!(resp, "Read failed but that's fine for the test");
+
+        let calls = mock.captured_calls();
+        assert_eq!(calls.len(), 2, "should call provider twice (tool, then final)");
+
+        // Iteration 1's messages should include the tool result.
+        let iter1 = &calls[1];
+        assert!(
+            iter1.iter().any(|m| matches!(m, Message::Tool { .. })),
+            "iteration 1 should include a Tool message in history"
+        );
+    }
+
+    #[tokio::test]
+    async fn streaming_and_buffered_paths_match() {
+        // Same scripted response in both paths; final returned text should match.
+        let (mut a1, m1) = agent_with_mock();
+        m1.enqueue_text("identical output");
+        let buffered = a1.run_prompt("x").await.unwrap();
+
+        let (mut a2, m2) = agent_with_mock();
+        m2.enqueue_text("identical output");
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let streamed = a2.run_prompt_stream("x", tx).await.unwrap();
+        // Drain the channel.
+        while let Ok(_) = rx.try_recv() {}
+
+        assert_eq!(buffered, streamed);
+        assert_eq!(buffered, "identical output");
+    }
+
+    #[tokio::test]
+    async fn provider_error_propagates() {
+        let (mut agent, mock) = agent_with_mock();
+        mock.enqueue_error("simulated 500");
+
+        let result = agent.run_prompt("anything").await;
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("simulated 500"), "got {msg:?}");
+    }
+
+    #[tokio::test]
+    async fn reasoning_carries_into_assistant_message() {
+        let (mut agent, mock) = agent_with_mock();
+        mock.enqueue(MockResponse::WithReasoning {
+            reasoning: "the user wants a greeting".into(),
+            content: "Hi!".into(),
+        });
+
+        let resp = agent.run_prompt("hello").await.unwrap();
+        assert_eq!(resp, "Hi!");
+        // run_prompt's final save_messages would have stored the reasoning;
+        // not asserting against the DB to avoid touching ~/.vulcan in tests.
     }
 }

@@ -1,5 +1,8 @@
 pub mod openai;
 
+#[cfg(test)]
+pub mod mock;
+
 use std::fmt;
 use std::time::Duration;
 

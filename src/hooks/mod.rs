@@ -329,3 +329,226 @@ impl Default for HookRegistry {
         Self::new()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// Test handler with configurable behavior. Records how many times each
+    /// event fired so tests can assert isolation.
+    struct Probe {
+        name: &'static str,
+        priority: i32,
+        before_tool_outcome: HookOutcome,
+        before_tool_calls: AtomicUsize,
+        sleep_ms: u64,
+    }
+
+    impl Probe {
+        fn new(name: &'static str, priority: i32, outcome: HookOutcome) -> Self {
+            Self {
+                name,
+                priority,
+                before_tool_outcome: outcome,
+                before_tool_calls: AtomicUsize::new(0),
+                sleep_ms: 0,
+            }
+        }
+        fn slow(mut self, ms: u64) -> Self {
+            self.sleep_ms = ms;
+            self
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl HookHandler for Probe {
+        fn name(&self) -> &str {
+            self.name
+        }
+        fn priority(&self) -> i32 {
+            self.priority
+        }
+        async fn before_tool_call(
+            &self,
+            _tool: &str,
+            _args: &Value,
+            _cancel: CancellationToken,
+        ) -> Result<HookOutcome> {
+            self.before_tool_calls.fetch_add(1, Ordering::SeqCst);
+            if self.sleep_ms > 0 {
+                tokio::time::sleep(std::time::Duration::from_millis(self.sleep_ms)).await;
+            }
+            Ok(self.before_tool_outcome.clone())
+        }
+    }
+
+    #[tokio::test]
+    async fn first_block_wins_and_short_circuits_subsequent_handlers() {
+        let mut reg = HookRegistry::new();
+        let blocker = Arc::new(Probe::new(
+            "blocker",
+            10,
+            HookOutcome::Block {
+                reason: "nope".into(),
+            },
+        ));
+        let after = Arc::new(Probe::new("after", 20, HookOutcome::Continue));
+        reg.register(blocker.clone());
+        reg.register(after.clone());
+
+        let decision = reg
+            .before_tool_call("bash", &Value::Null, CancellationToken::new())
+            .await;
+
+        match decision {
+            ToolCallDecision::Block(reason) => assert_eq!(reason, "nope"),
+            other => panic!("expected Block, got {other:?}"),
+        }
+
+        // Earlier handler fired, later one was short-circuited.
+        assert_eq!(blocker.before_tool_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(after.before_tool_calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn priority_ordering_lower_runs_first() {
+        let mut reg = HookRegistry::new();
+        let probe_a = Arc::new(Probe::new(
+            "a",
+            1,
+            HookOutcome::Block {
+                reason: "first".into(),
+            },
+        ));
+        let probe_b = Arc::new(Probe::new(
+            "b",
+            50,
+            HookOutcome::Block {
+                reason: "second".into(),
+            },
+        ));
+        // Register b BEFORE a; sort should still pick a.
+        reg.register(probe_b.clone());
+        reg.register(probe_a.clone());
+
+        let decision = reg
+            .before_tool_call("bash", &Value::Null, CancellationToken::new())
+            .await;
+        match decision {
+            ToolCallDecision::Block(r) => assert_eq!(r, "first"),
+            other => panic!("expected first probe to win, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn handler_timeout_does_not_break_loop() {
+        let mut reg =
+            HookRegistry::new().with_timeout(std::time::Duration::from_millis(50));
+        // First handler sleeps past the timeout window.
+        let slow = Arc::new(
+            Probe::new(
+                "slow",
+                10,
+                HookOutcome::Block {
+                    reason: "would block".into(),
+                },
+            )
+            .slow(500),
+        );
+        // Second handler is fast and would Continue.
+        let fast = Arc::new(Probe::new("fast", 20, HookOutcome::Continue));
+        reg.register(slow.clone());
+        reg.register(fast.clone());
+
+        let decision = reg
+            .before_tool_call("bash", &Value::Null, CancellationToken::new())
+            .await;
+
+        // Slow handler timed out → its Block outcome is dropped → fast handler
+        // runs → Continue.
+        assert!(matches!(decision, ToolCallDecision::Continue));
+        assert_eq!(fast.before_tool_calls.load(Ordering::SeqCst), 1);
+    }
+
+    /// Hook that injects a System message via BeforePrompt.
+    struct Injector {
+        name: &'static str,
+        msg: String,
+        position: InjectPosition,
+    }
+
+    #[async_trait::async_trait]
+    impl HookHandler for Injector {
+        fn name(&self) -> &str {
+            self.name
+        }
+        async fn before_prompt(
+            &self,
+            _messages: &[Message],
+            _cancel: CancellationToken,
+        ) -> Result<HookOutcome> {
+            Ok(HookOutcome::InjectMessages {
+                messages: vec![Message::System {
+                    content: self.msg.clone(),
+                }],
+                position: self.position,
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn before_prompt_injections_accumulate_and_position() {
+        let mut reg = HookRegistry::new();
+        reg.register(Arc::new(Injector {
+            name: "after-system-1",
+            msg: "AS1".into(),
+            position: InjectPosition::AfterSystem,
+        }));
+        reg.register(Arc::new(Injector {
+            name: "after-system-2",
+            msg: "AS2".into(),
+            position: InjectPosition::AfterSystem,
+        }));
+        reg.register(Arc::new(Injector {
+            name: "appended",
+            msg: "TAIL".into(),
+            position: InjectPosition::Append,
+        }));
+
+        let input = vec![
+            Message::System {
+                content: "you are agent".into(),
+            },
+            Message::User {
+                content: "hi".into(),
+            },
+        ];
+        let outgoing = reg
+            .apply_before_prompt(&input, CancellationToken::new())
+            .await;
+
+        // Expected order: System(original), System(AS1), System(AS2), User, System(TAIL).
+        assert_eq!(outgoing.len(), 5);
+        match &outgoing[0] {
+            Message::System { content } => assert_eq!(content, "you are agent"),
+            o => panic!("expected original system, got {o:?}"),
+        }
+        match &outgoing[1] {
+            Message::System { content } => assert_eq!(content, "AS1"),
+            o => panic!("expected AS1, got {o:?}"),
+        }
+        match &outgoing[2] {
+            Message::System { content } => assert_eq!(content, "AS2"),
+            o => panic!("expected AS2, got {o:?}"),
+        }
+        match &outgoing[3] {
+            Message::User { content } => assert_eq!(content, "hi"),
+            o => panic!("expected user, got {o:?}"),
+        }
+        match &outgoing[4] {
+            Message::System { content } => assert_eq!(content, "TAIL"),
+            o => panic!("expected appended TAIL, got {o:?}"),
+        }
+    }
+}
