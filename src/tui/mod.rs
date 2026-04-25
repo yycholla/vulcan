@@ -533,9 +533,27 @@ pub async fn run_tui(config: &Config, resume: ResumeTarget) -> Result<()> {
                         app.thinking = false;
                     }
                     Some(StreamEvent::ToolCallStart { name, .. }) => {
+                        // Append an in-progress marker to the agent message.
+                        // ToolCallEnd will later flip the trailing `…` to `✓` / `✗`.
+                        // Newline before the marker only if there's preamble content;
+                        // otherwise it'd be one orphan blank line in front of the marker.
                         if let Some(last) = app.messages.last_mut() {
                             if matches!(last.role, ChatRole::Agent) {
-                                last.content.push_str(&format!("\n\n_[🔧 {name}…]_\n"));
+                                let prefix = if last.content.is_empty() { "" } else { "\n\n" };
+                                last.content.push_str(&format!("{prefix}_[🔧 {name}…]_"));
+                            }
+                        }
+                    }
+                    Some(StreamEvent::ToolCallEnd { name, ok, .. }) => {
+                        if let Some(last) = app.messages.last_mut() {
+                            if matches!(last.role, ChatRole::Agent) {
+                                let mark = if ok { "✓" } else { "✗" };
+                                let in_progress = format!("_[🔧 {name}…]_");
+                                let done = format!("_[🔧 {name} {mark}]_");
+                                if let Some(pos) = last.content.find(&in_progress) {
+                                    last.content
+                                        .replace_range(pos..pos + in_progress.len(), &done);
+                                }
                             }
                         }
                     }
