@@ -271,9 +271,11 @@ pub async fn run_tui(config: &Config, resume: ResumeTarget) -> Result<()> {
     );
     app.audit_log = Some(audit_buf);
     // YYC-66: clone the agent's diff sink so the TUI can render real edits.
+    // YYC-67: pull catalog pricing for the cost estimate.
     {
         let a = agent.lock().await;
         app.diff_sink = Some(a.diff_sink().clone());
+        app.pricing = a.pricing().cloned();
     }
     refresh_sessions(&agent, &mut app).await;
 
@@ -853,6 +855,8 @@ pub async fn run_tui(config: &Config, resume: ResumeTarget) -> Result<()> {
                             }
                         }
                         app.thinking = false;
+                        // YYC-67: record provider-level error for telemetry.
+                        app.provider_errors_total = app.provider_errors_total.saturating_add(1);
                         app.note_error(&e);
                     }
                     Some(StreamEvent::ToolCallStart { name, .. }) => {
@@ -874,6 +878,11 @@ pub async fn run_tui(config: &Config, resume: ResumeTarget) -> Result<()> {
                             if matches!(last.role, ChatRole::Agent) {
                                 last.finish_tool(&name, ok);
                             }
+                        }
+                        // YYC-67: tool call telemetry.
+                        app.tool_calls_total = app.tool_calls_total.saturating_add(1);
+                        if !ok {
+                            app.tool_errors_total = app.tool_errors_total.saturating_add(1);
                         }
                         app.note_tool_end(&name, ok);
                     }

@@ -349,6 +349,18 @@ pub struct AppState {
     /// fall back to `diff_lines` (demo) only until the first real edit
     /// arrives, after which the live diff replaces it.
     pub diff_sink: Option<crate::tools::EditDiffSink>,
+    /// Per-token pricing pulled from the provider catalog at startup
+    /// (YYC-67). Used with `prompt_tokens_total + completion_tokens_total`
+    /// to compute estimated session cost.
+    pub pricing: Option<crate::provider::catalog::Pricing>,
+    /// Number of tool dispatches this session (counts every ToolCallEnd).
+    pub tool_calls_total: u32,
+    /// Tool dispatches that ended with `ok=false`.
+    pub tool_errors_total: u32,
+    /// Provider-level errors surfaced via StreamEvent::Error.
+    pub provider_errors_total: u32,
+    /// When the TUI session started — used for elapsed-time displays.
+    pub session_started: std::time::Instant,
     pub orchestration: OrchestrationState,
 
     /// Optional shared handle to the audit-log hook's ring buffer. When
@@ -396,6 +408,11 @@ impl AppState {
             active_session_id: None,
             diff_lines: demo_diff(),
             diff_sink: None,
+            pricing: None,
+            tool_calls_total: 0,
+            tool_errors_total: 0,
+            provider_errors_total: 0,
+            session_started: std::time::Instant::now(),
             orchestration: OrchestrationState::default(),
 
             audit_log: None,
@@ -508,6 +525,18 @@ impl AppState {
             self.model_label,
             format_thousands(self.prompt_tokens_last),
             format_thousands(self.token_max),
+        )
+    }
+
+    /// Estimated session cost in USD, computed from cumulative token
+    /// totals (YYC-60) and per-token pricing (YYC-67). `None` when
+    /// pricing isn't available — the renderer should show "—" rather
+    /// than a fake number.
+    pub fn estimated_cost(&self) -> Option<f64> {
+        let p = self.pricing.as_ref()?;
+        Some(
+            (self.prompt_tokens_total as f64) * p.input_per_token
+                + (self.completion_tokens_total as f64) * p.output_per_token,
         )
     }
 
@@ -1025,6 +1054,28 @@ mod tests {
         assert!((app.context_ratio() - 0.5).abs() < 1e-6);
         app.prompt_tokens_last = 95_000;
         assert!(app.context_ratio() > 0.9);
+    }
+
+    #[test]
+    fn estimated_cost_returns_none_without_pricing() {
+        let mut app = AppState::new("test".into(), 100_000);
+        app.prompt_tokens_total = 1_000;
+        app.completion_tokens_total = 500;
+        assert!(app.estimated_cost().is_none());
+    }
+
+    #[test]
+    fn estimated_cost_multiplies_tokens_by_per_token_pricing() {
+        let mut app = AppState::new("test".into(), 100_000);
+        app.prompt_tokens_total = 1_000;
+        app.completion_tokens_total = 500;
+        app.pricing = Some(crate::provider::catalog::Pricing {
+            input_per_token: 0.000_001,
+            output_per_token: 0.000_002,
+        });
+        let cost = app.estimated_cost().unwrap();
+        // 1000*0.000001 + 500*0.000002 = 0.001 + 0.001 = 0.002
+        assert!((cost - 0.002).abs() < 1e-9, "got {cost}");
     }
 
     #[test]
