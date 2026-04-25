@@ -42,14 +42,14 @@ pub struct Agent {
 impl Agent {
     /// Construct an Agent with no caller-supplied hooks. Built-in hooks (skills
     /// injection, etc.) are still registered.
-    pub fn new(config: &Config) -> Result<Self> {
-        Self::with_hooks_and_pause(config, HookRegistry::new(), None)
+    pub async fn new(config: &Config) -> Result<Self> {
+        Self::with_hooks_and_pause(config, HookRegistry::new(), None).await
     }
 
     /// Construct with caller-supplied hooks and no interactive pause channel.
     /// The TUI uses `with_hooks_and_pause` to wire one up.
-    pub fn with_hooks(config: &Config, hooks: HookRegistry) -> Result<Self> {
-        Self::with_hooks_and_pause(config, hooks, None)
+    pub async fn with_hooks(config: &Config, hooks: HookRegistry) -> Result<Self> {
+        Self::with_hooks_and_pause(config, hooks, None).await
     }
 
     /// Construct an Agent with a caller-supplied hook registry and an optional
@@ -57,10 +57,13 @@ impl Agent {
     /// registry; if a pause emitter is provided, `SafetyHook` is wired up to
     /// route blocks through it as `AgentPause::SafetyApproval`.
     ///
+    /// Async because it fetches the provider's model catalog at startup
+    /// (YYC-64). Catalog-fetch failures are non-fatal — logged and continued
+    /// with config defaults.
+    ///
     /// Returns `Err` for fatal init failures (missing API key, provider build
-    /// failure). These were previously panics; the caller now decides how to
-    /// surface the error.
-    pub fn with_hooks_and_pause(
+    /// failure, or model not found in catalog).
+    pub async fn with_hooks_and_pause(
         config: &Config,
         mut hooks: HookRegistry,
         pause_tx: Option<PauseSender>,
@@ -71,12 +74,62 @@ impl Agent {
             )
         })?;
 
+        // ── Catalog: validate the configured model and (optionally) override
+        // max_context with whatever the catalog says it actually is. Non-fatal:
+        // if the catalog endpoint fails, we log + continue with the configured
+        // values rather than blocking startup over a metadata fetch.
+        let mut effective_max_context = config.provider.max_context;
+        if !config.provider.disable_catalog {
+            match Self::fetch_catalog(config, &api_key).await {
+                Ok(models) => {
+                    let found = models.iter().find(|m| m.id == config.provider.model);
+                    match found {
+                        Some(model_info) => {
+                            if model_info.context_length > 0
+                                && config.provider.max_context == 128_000
+                            {
+                                effective_max_context = model_info.context_length;
+                                tracing::info!(
+                                    "catalog: using context_length={} for {}",
+                                    model_info.context_length,
+                                    model_info.id
+                                );
+                            }
+                        }
+                        None => {
+                            let suggestions = crate::provider::catalog::fuzzy_suggest(
+                                &models,
+                                &config.provider.model,
+                                3,
+                            );
+                            let hint = if suggestions.is_empty() {
+                                String::new()
+                            } else {
+                                format!(" Did you mean: {}?", suggestions.join(", "))
+                            };
+                            anyhow::bail!(
+                                "Model '{}' not found in provider catalog.{} \
+                                 (See `[provider].model` in config.)",
+                                config.provider.model,
+                                hint,
+                            );
+                        }
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        "catalog fetch failed (continuing with config defaults): {e}"
+                    );
+                }
+            }
+        }
+
         let provider: Box<dyn LLMProvider> = Box::new(
             OpenAIProvider::new(
                 &config.provider.base_url,
                 &api_key,
                 &config.provider.model,
-                config.provider.max_context,
+                effective_max_context,
                 config.provider.max_retries,
             )
             .context("Failed to initialize LLM provider")?,
@@ -119,6 +172,24 @@ impl Agent {
 
     pub fn session_id(&self) -> &str {
         &self.session_id
+    }
+
+    /// Fetch the provider's model catalog (cached if fresh, otherwise
+    /// HTTP-fetched). Used for startup validation and `max_context`
+    /// auto-population. Runs inside the caller's tokio runtime — the
+    /// constructor is `async` for exactly this reason.
+    async fn fetch_catalog(
+        config: &Config,
+        api_key: &str,
+    ) -> Result<Vec<crate::provider::catalog::ModelInfo>> {
+        use std::time::Duration;
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(15))
+            .build()?;
+        let ttl = Duration::from_secs(config.provider.catalog_cache_ttl_hours * 3600);
+        let catalog =
+            crate::provider::catalog::for_base_url(client, &config.provider.base_url, api_key, ttl);
+        catalog.list_models().await.map_err(Into::into)
     }
 
     /// Test-only constructor that takes a fully-built provider and an empty

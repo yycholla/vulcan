@@ -15,6 +15,12 @@ max_context = 128000
 # Max retries on transient API failures (429, 5xx, network errors).
 # Backoff is exponential with jitter: 1s, 2s, 4s, 8s, 16s.
 max_retries = 4
+# How long to cache the provider's model catalog before re-fetching (hours).
+# Vulcan validates `model` against this catalog at startup and uses its
+# `context_length` to size the LLM context window.
+catalog_cache_ttl_hours = 24
+# Skip the catalog fetch entirely. Useful for offline/testing setups.
+# disable_catalog = false
 
 [tools]
 # Enable dangerous tools (file overwrite, shell exec) without confirmation
