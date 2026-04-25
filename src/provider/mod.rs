@@ -1,10 +1,178 @@
 pub mod openai;
 
+use std::fmt;
+use std::time::Duration;
+
 use anyhow::Result;
 use serde::{de, Deserialize, Deserializer, Serialize, Serializer};
 use serde::ser::SerializeStruct;
 use serde_json::Value;
 use tokio::sync::mpsc;
+
+/// Categorized provider failure. Replaces opaque `anyhow::bail!` strings with
+/// a structured taxonomy so callers (retry logic, TUI banner) can branch on
+/// the kind of failure, and so the user sees an actionable next-step hint
+/// instead of raw provider JSON. See YYC-41.
+#[derive(Debug, thiserror::Error)]
+pub enum ProviderError {
+    /// 401 / 403 — API key is missing, invalid, revoked, or lacks permission.
+    Auth { message: String },
+    /// 429 — provider is throttling. `retry_after` is the server's hint if it
+    /// sent a `Retry-After` header.
+    RateLimited { retry_after: Option<Duration> },
+    /// 404 with a model-shaped error body — bad model slug.
+    ModelNotFound { model: String, message: String },
+    /// 400 / 422 — request shape is wrong (malformed messages, invalid params,
+    /// missing reasoning_content, etc.).
+    BadRequest { message: String },
+    /// 5xx — provider is having a bad day.
+    ServerError { status: u16, message: String },
+    /// Connection/DNS/TLS/timeout — never reached the provider.
+    Network(reqwest::Error),
+    /// Status codes we don't classify (3xx redirects we can't follow,
+    /// uncommon 4xx, etc.) and non-JSON 4xx bodies.
+    Other { status: u16, body: String },
+}
+
+impl fmt::Display for ProviderError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ProviderError::Auth { message } => write!(
+                f,
+                "Authentication failed: {message}. \
+                 Check your API key in ~/.vulcan/config.toml or set the VULCAN_API_KEY env var."
+            ),
+            ProviderError::RateLimited { retry_after: Some(d) } => write!(
+                f,
+                "Rate limited by provider. Suggested retry after {}s.",
+                d.as_secs().max(1)
+            ),
+            ProviderError::RateLimited { retry_after: None } => {
+                write!(f, "Rate limited by provider. Retrying with backoff.")
+            }
+            ProviderError::ModelNotFound { model, message } => write!(
+                f,
+                "Model '{model}' not found ({message}). \
+                 Check `[provider].model` in your config — model slugs are listed at the provider's catalog \
+                 (e.g. https://openrouter.ai/models)."
+            ),
+            ProviderError::BadRequest { message } => write!(
+                f,
+                "Provider rejected the request: {message}. \
+                 This usually means the message format is wrong (often a model-specific \
+                 requirement around tool calls or reasoning passthrough)."
+            ),
+            ProviderError::ServerError { status, message } => write!(
+                f,
+                "Provider returned {status}: {message}. This is a transient server-side issue; \
+                 retries should resolve it."
+            ),
+            ProviderError::Network(e) => write!(
+                f,
+                "Network error reaching provider: {e}. \
+                 Check connectivity, base_url in config, and any proxy settings."
+            ),
+            ProviderError::Other { status, body } => {
+                let trimmed = body.chars().take(300).collect::<String>();
+                write!(f, "Provider returned {status}: {trimmed}")
+            }
+        }
+    }
+}
+
+impl ProviderError {
+    /// Should the agent retry this error within its budget?
+    /// `Auth` / `BadRequest` / `ModelNotFound` / `Other` are non-retryable —
+    /// retrying just spends budget on a guaranteed failure.
+    pub fn is_retryable(&self) -> bool {
+        matches!(
+            self,
+            ProviderError::RateLimited { .. }
+                | ProviderError::ServerError { .. }
+                | ProviderError::Network(_)
+        )
+    }
+
+    /// Classify a non-2xx HTTP response into a `ProviderError`. Tolerates
+    /// non-JSON bodies and varying error shapes across OpenAI/OpenRouter/
+    /// Anthropic (`error.message` + either `error.code` or `error.type`).
+    pub fn from_response(status: reqwest::StatusCode, body: &str, model: &str) -> Self {
+        let code = status.as_u16();
+        let message = extract_error_message(body).unwrap_or_else(|| body.to_string());
+
+        match code {
+            401 | 403 => ProviderError::Auth { message },
+            429 => ProviderError::RateLimited {
+                retry_after: None, // header parsing is the caller's job
+            },
+            404 => {
+                // Heuristic: if the body mentions the model slug, treat as ModelNotFound.
+                if message.to_lowercase().contains("model")
+                    || body.to_lowercase().contains(&model.to_lowercase())
+                {
+                    ProviderError::ModelNotFound {
+                        model: model.to_string(),
+                        message,
+                    }
+                } else {
+                    ProviderError::Other {
+                        status: code,
+                        body: body.to_string(),
+                    }
+                }
+            }
+            400 | 422 => ProviderError::BadRequest { message },
+            500..=599 => ProviderError::ServerError {
+                status: code,
+                message,
+            },
+            _ => ProviderError::Other {
+                status: code,
+                body: body.to_string(),
+            },
+        }
+    }
+}
+
+impl From<reqwest::Error> for ProviderError {
+    fn from(e: reqwest::Error) -> Self {
+        ProviderError::Network(e)
+    }
+}
+
+/// Best-effort extraction of `error.message` from common provider body shapes.
+/// All of OpenAI / OpenRouter / Anthropic / DeepSeek wrap errors as
+/// `{"error": {"message": "...", ...}}`; OpenRouter's nested `metadata.raw`
+/// also follows that shape one level deeper.
+fn extract_error_message(body: &str) -> Option<String> {
+    let v: serde_json::Value = serde_json::from_str(body).ok()?;
+    // Top-level error.message
+    if let Some(m) = v.get("error").and_then(|e| e.get("message")).and_then(|m| m.as_str()) {
+        // OpenRouter-style: error.metadata.raw is a JSON string with an inner
+        // error.message that's the actual provider message. Surface that if present.
+        if let Some(raw) = v
+            .get("error")
+            .and_then(|e| e.get("metadata"))
+            .and_then(|md| md.get("raw"))
+            .and_then(|r| r.as_str())
+        {
+            if let Ok(inner) = serde_json::from_str::<serde_json::Value>(raw) {
+                if let Some(inner_m) = inner
+                    .get("error")
+                    .and_then(|e| e.get("message"))
+                    .and_then(|m| m.as_str())
+                {
+                    return Some(inner_m.to_string());
+                }
+            }
+        }
+        return Some(m.to_string());
+    }
+    // Some providers (Anthropic) put it at top level
+    v.get("message")
+        .and_then(|m| m.as_str())
+        .map(|s| s.to_string())
+}
 
 /// A message in the conversation history (OpenAI-compatible format)
 #[derive(Debug, Clone)]

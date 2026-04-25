@@ -313,12 +313,18 @@ impl Agent {
                 .await
             {
                 // Surface provider failures to the TUI rather than dropping
-                // the channel silently — otherwise the user sees the chat
-                // freeze with no error indication.
-                tracing::error!("agent iteration {iteration}: chat_stream failed: {e}");
-                let _ = ui_tx.send(StreamEvent::Error(format!("Provider error: {e}")));
+                // the channel silently. ProviderError carries actionable hints
+                // via its Display impl; if the error chain has one (most
+                // common case), use that — otherwise fall back to the raw
+                // anyhow chain.
+                let user_message = e
+                    .downcast_ref::<crate::provider::ProviderError>()
+                    .map(|pe| pe.to_string())
+                    .unwrap_or_else(|| format!("{e}"));
+                tracing::error!("agent iteration {iteration}: chat_stream failed: {user_message}");
+                let _ = ui_tx.send(StreamEvent::Error(user_message.clone()));
                 let _ = ui_tx.send(StreamEvent::Done(crate::provider::ChatResponse {
-                    content: Some(format!("⚠ Provider error: {e}")),
+                    content: Some(format!("⚠ {user_message}")),
                     tool_calls: None,
                     usage: None,
                     finish_reason: Some("error".into()),
