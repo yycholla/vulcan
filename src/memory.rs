@@ -31,14 +31,15 @@ CREATE TABLE IF NOT EXISTS sessions (
 );
 
 CREATE TABLE IF NOT EXISTS messages (
-    id              INTEGER PRIMARY KEY AUTOINCREMENT,
-    session_id      TEXT NOT NULL,
-    position        INTEGER NOT NULL,
-    role            TEXT NOT NULL,
-    content         TEXT,
-    tool_call_id    TEXT,
-    tool_calls_json TEXT,
-    created_at      INTEGER NOT NULL,
+    id                INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id        TEXT NOT NULL,
+    position          INTEGER NOT NULL,
+    role              TEXT NOT NULL,
+    content           TEXT,
+    tool_call_id      TEXT,
+    tool_calls_json   TEXT,
+    reasoning_content TEXT,
+    created_at        INTEGER NOT NULL,
     FOREIGN KEY(session_id) REFERENCES sessions(id) ON DELETE CASCADE
 );
 
@@ -103,6 +104,15 @@ impl SessionStore {
         conn.execute_batch(SCHEMA)
             .unwrap_or_else(|e| panic!("Failed to initialize session DB schema: {e}"));
 
+        // Idempotent migration for DBs that pre-date the reasoning_content
+        // column (YYC-43). SQLite errors on duplicate-column ADD; harmless to
+        // ignore — the column either exists from CREATE TABLE above or this
+        // adds it.
+        let _ = conn.execute(
+            "ALTER TABLE messages ADD COLUMN reasoning_content TEXT",
+            [],
+        );
+
         Self {
             conn: Mutex::new(conn),
         }
@@ -141,7 +151,7 @@ impl SessionStore {
         }
 
         let mut stmt = conn.prepare(
-            "SELECT role, content, tool_call_id, tool_calls_json
+            "SELECT role, content, tool_call_id, tool_calls_json, reasoning_content
              FROM messages
              WHERE session_id = ?1
              ORDER BY position ASC",
@@ -152,13 +162,14 @@ impl SessionStore {
             let content: Option<String> = row.get(1)?;
             let tool_call_id: Option<String> = row.get(2)?;
             let tool_calls_json: Option<String> = row.get(3)?;
-            Ok((role, content, tool_call_id, tool_calls_json))
+            let reasoning_content: Option<String> = row.get(4)?;
+            Ok((role, content, tool_call_id, tool_calls_json, reasoning_content))
         })?;
 
         let mut messages = Vec::new();
         for row in rows {
-            let (role, content, tool_call_id, tool_calls_json) = row?;
-            let msg = decode_message(&role, content, tool_call_id, tool_calls_json)?;
+            let (role, content, tool_call_id, tool_calls_json, reasoning_content) = row?;
+            let msg = decode_message(&role, content, tool_call_id, tool_calls_json, reasoning_content)?;
             messages.push(msg);
         }
 
@@ -193,11 +204,12 @@ impl SessionStore {
         )?;
 
         for (idx, msg) in messages.iter().enumerate() {
-            let (role, content, tool_call_id, tool_calls_json) = encode_message(msg)?;
+            let (role, content, tool_call_id, tool_calls_json, reasoning_content) =
+                encode_message(msg)?;
             tx.execute(
                 "INSERT INTO messages
-                 (session_id, position, role, content, tool_call_id, tool_calls_json, created_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                 (session_id, position, role, content, tool_call_id, tool_calls_json, reasoning_content, created_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
                 params![
                     session_id,
                     idx as i64,
@@ -205,6 +217,7 @@ impl SessionStore {
                     content,
                     tool_call_id,
                     tool_calls_json,
+                    reasoning_content,
                     now,
                 ],
             )?;
@@ -281,21 +294,34 @@ impl Default for SessionStore {
     }
 }
 
-fn encode_message(
-    msg: &Message,
-) -> Result<(&'static str, Option<String>, Option<String>, Option<String>)> {
+type Encoded = (
+    &'static str,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+);
+
+fn encode_message(msg: &Message) -> Result<Encoded> {
     Ok(match msg {
-        Message::System { content } => ("system", Some(content.clone()), None, None),
-        Message::User { content } => ("user", Some(content.clone()), None, None),
+        Message::System { content } => ("system", Some(content.clone()), None, None, None),
+        Message::User { content } => ("user", Some(content.clone()), None, None, None),
         Message::Assistant {
             content,
             tool_calls,
+            reasoning_content,
         } => {
             let tool_calls_json = match tool_calls {
                 Some(tcs) => Some(serde_json::to_string(tcs).context("encode tool_calls")?),
                 None => None,
             };
-            ("assistant", content.clone(), None, tool_calls_json)
+            (
+                "assistant",
+                content.clone(),
+                None,
+                tool_calls_json,
+                reasoning_content.clone(),
+            )
         }
         Message::Tool {
             tool_call_id,
@@ -304,6 +330,7 @@ fn encode_message(
             "tool",
             Some(content.clone()),
             Some(tool_call_id.clone()),
+            None,
             None,
         ),
     })
@@ -314,6 +341,7 @@ fn decode_message(
     content: Option<String>,
     tool_call_id: Option<String>,
     tool_calls_json: Option<String>,
+    reasoning_content: Option<String>,
 ) -> Result<Message> {
     Ok(match role {
         "system" => Message::System {
@@ -330,6 +358,7 @@ fn decode_message(
             Message::Assistant {
                 content,
                 tool_calls,
+                reasoning_content,
             }
         }
         "tool" => Message::Tool {
@@ -371,6 +400,7 @@ mod tests {
             Message::Assistant {
                 content: Some("a systems language with strong types".into()),
                 tool_calls: None,
+                reasoning_content: None,
             },
         ];
 
@@ -468,6 +498,7 @@ mod tests {
                     arguments: r#"{"command":"ls"}"#.into(),
                 },
             }]),
+            reasoning_content: None,
         }];
 
         store.save_messages(&id, &messages).unwrap();
@@ -479,6 +510,31 @@ mod tests {
                 assert_eq!(tcs.len(), 1);
                 assert_eq!(tcs[0].function.name, "bash");
             }
+            other => panic!("expected Assistant, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn reasoning_content_round_trips() {
+        let dir = TempDir::new().unwrap();
+        let store = store_in(&dir);
+        let id = uuid::Uuid::new_v4().to_string();
+
+        let messages = vec![Message::Assistant {
+            content: Some("the answer is 42".into()),
+            tool_calls: None,
+            reasoning_content: Some("First I considered…then I weighed…".into()),
+        }];
+
+        store.save_messages(&id, &messages).unwrap();
+        let loaded = store.load_history(&id).unwrap().unwrap();
+        match &loaded[0] {
+            Message::Assistant {
+                reasoning_content, ..
+            } => assert_eq!(
+                reasoning_content.as_deref(),
+                Some("First I considered…then I weighed…")
+            ),
             other => panic!("expected Assistant, got {other:?}"),
         }
     }

@@ -195,6 +195,7 @@ impl Agent {
                 messages.push(Message::Assistant {
                     content: response.content.clone(),
                     tool_calls: Some(tool_calls.clone()),
+                    reasoning_content: response.reasoning_content.clone(),
                 });
 
                 for tc in tool_calls {
@@ -209,12 +210,14 @@ impl Agent {
                 }
             } else {
                 let text = response.content.unwrap_or_default();
+                let reasoning = response.reasoning_content.clone();
 
                 // ── BeforeAgentEnd: a handler may force the loop to continue.
                 if let Some(instruction) = self.hooks.before_agent_end(&text, cancel.clone()).await {
                     messages.push(Message::Assistant {
                         content: Some(text.clone()),
                         tool_calls: None,
+                        reasoning_content: reasoning,
                     });
                     messages.push(Message::User { content: instruction });
                     continue;
@@ -266,6 +269,7 @@ impl Agent {
                     tool_calls: None,
                     usage: None,
                     finish_reason: Some("cancelled".into()),
+                    reasoning_content: None,
                 }));
                 return Ok("Cancelled".to_string());
             }
@@ -325,6 +329,7 @@ impl Agent {
                 messages.push(Message::Assistant {
                     content: response.content.clone(),
                     tool_calls: Some(tool_calls.clone()),
+                    reasoning_content: response.reasoning_content.clone(),
                 });
 
                 for tc in tool_calls {
@@ -338,15 +343,26 @@ impl Agent {
                     });
                 }
             } else {
+                let reasoning = response.reasoning_content.clone();
+
                 // ── BeforeAgentEnd
                 if let Some(instruction) = self.hooks.before_agent_end(&full_response, cancel.clone()).await {
                     messages.push(Message::Assistant {
                         content: Some(full_response.clone()),
                         tool_calls: None,
+                        reasoning_content: reasoning,
                     });
                     messages.push(Message::User { content: instruction });
                     continue;
                 }
+
+                // Final assistant turn after the loop ends — save with reasoning
+                // so the next turn can echo it back to thinking-mode models.
+                messages.push(Message::Assistant {
+                    content: Some(full_response.clone()),
+                    tool_calls: None,
+                    reasoning_content: reasoning.clone(),
+                });
 
                 self.memory.save_messages(&self.session_id, &messages)?;
                 self.turns = self.turns.saturating_add(1);
@@ -358,6 +374,7 @@ impl Agent {
                     tool_calls: None,
                     usage: response.usage,
                     finish_reason: response.finish_reason,
+                    reasoning_content: reasoning,
                 }));
                 return Ok(full_response);
             }

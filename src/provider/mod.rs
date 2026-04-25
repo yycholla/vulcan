@@ -18,6 +18,11 @@ pub enum Message {
     Assistant {
         content: Option<String>,
         tool_calls: Option<Vec<ToolCall>>,
+        /// Reasoning trace from thinking-mode models (DeepSeek V4 emits this
+        /// as `reasoning_content`). When the conversation continues, the
+        /// provider may require the prior assistant turn's reasoning to be
+        /// echoed back — without it, the API rejects with 400. See YYC-43.
+        reasoning_content: Option<String>,
     },
     Tool {
         tool_call_id: String,
@@ -41,8 +46,12 @@ impl Serialize for Message {
                 s.serialize_field("content", content)?;
                 s.end()
             }
-            Message::Assistant { content, tool_calls } => {
-                let mut s = serializer.serialize_struct("Message", 3)?;
+            Message::Assistant {
+                content,
+                tool_calls,
+                reasoning_content,
+            } => {
+                let mut s = serializer.serialize_struct("Message", 4)?;
                 s.serialize_field("role", "assistant")?;
                 if let Some(c) = content {
                     s.serialize_field("content", c)?;
@@ -51,6 +60,9 @@ impl Serialize for Message {
                 }
                 if let Some(tc) = tool_calls {
                     s.serialize_field("tool_calls", tc)?;
+                }
+                if let Some(rc) = reasoning_content {
+                    s.serialize_field("reasoning_content", rc)?;
                 }
                 s.end()
             }
@@ -76,6 +88,8 @@ impl<'de> Deserialize<'de> for Message {
             tool_call_id: Option<String>,
             #[serde(default)]
             tool_calls: Option<Vec<ToolCall>>,
+            #[serde(default)]
+            reasoning_content: Option<String>,
         }
 
         let data = MessageData::deserialize(deserializer)?;
@@ -89,6 +103,7 @@ impl<'de> Deserialize<'de> for Message {
             "assistant" => Ok(Message::Assistant {
                 content: data.content,
                 tool_calls: data.tool_calls,
+                reasoning_content: data.reasoning_content,
             }),
             "tool" => Ok(Message::Tool {
                 tool_call_id: data.tool_call_id.unwrap_or_default(),
@@ -174,6 +189,9 @@ pub struct ChatResponse {
     pub tool_calls: Option<Vec<ToolCall>>,
     pub usage: Option<Usage>,
     pub finish_reason: Option<String>,
+    /// Reasoning trace from thinking-mode models. Carried through so the
+    /// agent can attach it to the assistant message it appends to history.
+    pub reasoning_content: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
