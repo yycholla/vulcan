@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use crate::config::Config;
 use crate::context::ContextManager;
+use crate::hooks::diagnostics::DiagnosticsHook;
 use crate::hooks::safety::SafetyHook;
 use crate::hooks::skills::SkillsHook;
 use crate::hooks::{HookRegistry, ToolCallDecision};
@@ -165,6 +166,14 @@ impl Agent {
 
         // Built-in hook: surface available skills to the LLM via BeforePrompt.
         hooks.register(Arc::new(SkillsHook::new(skills.clone())));
+
+        // Built-in hook (YYC-51): auto-run LSP diagnostics after every
+        // successful edit_file/write_file. No-op when LSP isn't
+        // installed for the language; the user pays nothing extra.
+        hooks.register(Arc::new(DiagnosticsHook::new(
+            lsp_manager.clone(),
+            diff_sink.clone(),
+        )));
 
         // Built-in hook: block dangerous shell invocations unless yolo_mode is on.
         // Skipped entirely (not even registered as observe-only) when yolo_mode
