@@ -63,6 +63,7 @@ pub trait Tool: Send + Sync {
     async fn call(&self, params: Value, cancel: CancellationToken) -> Result<ToolResult>;
 }
 
+pub mod code;
 pub mod file;
 pub mod git;
 pub mod shell;
@@ -128,6 +129,13 @@ impl ToolRegistry {
         registry.register(Arc::new(file::PatchFile::new(sink)));
         registry.register(Arc::new(web::WebSearch));
         registry.register(Arc::new(web::WebFetch));
+        // YYC-45: tree-sitter structural code tools. One parser cache
+        // shared across all three so we only initialize each grammar
+        // once per session.
+        let parser_cache = Arc::new(crate::code::ParserCache::new());
+        registry.register(Arc::new(code::CodeOutlineTool::new(parser_cache.clone())));
+        registry.register(Arc::new(code::CodeExtractTool::new(parser_cache.clone())));
+        registry.register(Arc::new(code::CodeQueryTool::new(parser_cache)));
         // YYC-36: native git tools — agent stops composing brittle
         // `git ...` shell strings through bash.
         registry.register(Arc::new(git::GitStatusTool));
