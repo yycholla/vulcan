@@ -215,7 +215,7 @@ impl Agent {
             tools,
             skills,
             context: ContextManager::new(max_context),
-            memory: SessionStore::new(),
+            memory: SessionStore::in_memory(),
             prompt_builder: PromptBuilder,
             hooks: Arc::new(hooks),
             session_id: Uuid::new_v4().to_string(),
@@ -237,6 +237,12 @@ impl Agent {
     /// (Agent::new doesn't call it itself because hooks aren't always async-
     /// available at construction time).
     pub async fn start_session(&self) {
+        if let Err(e) = self
+            .memory
+            .save_session_metadata(&self.session_id, None, None)
+        {
+            tracing::warn!("failed to initialize session metadata: {e}");
+        }
         self.hooks.session_start(&self.session_id).await;
     }
 
@@ -601,6 +607,25 @@ impl Agent {
         }
     }
 
+    /// Create a new child session rooted at the current one, persist its
+    /// lineage, and switch the agent to that child session immediately.
+    pub fn fork_session(&mut self, lineage_label: Option<&str>) -> Result<String> {
+        let parent_session_id = self.session_id.clone();
+        let child_session_id = Uuid::new_v4().to_string();
+        self.memory.save_session_metadata(
+            &child_session_id,
+            Some(&parent_session_id),
+            lineage_label,
+        )?;
+        self.session_id = child_session_id.clone();
+        tracing::info!(
+            "forked session {} -> {}",
+            parent_session_id,
+            child_session_id
+        );
+        Ok(child_session_id)
+    }
+
     /// Borrow the underlying `SessionStore`. Used by the TUI's `/search`
     /// command and the `vulcan search` CLI subcommand to run FTS queries.
     pub fn memory(&self) -> &crate::memory::SessionStore {
@@ -841,4 +866,20 @@ mod tests {
         // not asserting against the DB to avoid touching ~/.vulcan in tests.
     }
 
+    #[tokio::test]
+    async fn fork_session_records_lineage_and_switches_active_session() {
+        let (mut agent, _mock) = agent_with_mock();
+        let parent_id = agent.session_id().to_string();
+
+        let child_id = agent.fork_session(Some("branched for UI work")).unwrap();
+
+        assert_eq!(agent.session_id(), child_id);
+        let summaries = agent.memory().list_sessions(10).unwrap();
+        let child = summaries
+            .iter()
+            .find(|s| s.id == child_id)
+            .expect("child summary should exist");
+        assert_eq!(child.parent_session_id.as_deref(), Some(parent_id.as_str()));
+        assert_eq!(child.lineage_label.as_deref(), Some("branched for UI work"));
+    }
 }

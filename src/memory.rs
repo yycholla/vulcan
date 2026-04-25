@@ -2,7 +2,7 @@
 //! search).
 //!
 //! Schema:
-//! - `sessions(id PK, created_at, last_active)`
+//! - `sessions(id PK, created_at, last_active, parent_session_id, lineage_label)`
 //! - `messages(id PK AUTOINCREMENT, session_id FK, position, role, content,
 //!    tool_call_id, tool_calls_json, created_at)` indexed on `(session_id, position)`
 //! - `messages_fts` — external-content FTS5 over `messages.content`, kept in
@@ -25,9 +25,11 @@ PRAGMA foreign_keys = ON;
 PRAGMA journal_mode = WAL;
 
 CREATE TABLE IF NOT EXISTS sessions (
-    id          TEXT PRIMARY KEY,
-    created_at  INTEGER NOT NULL,
-    last_active INTEGER NOT NULL
+    id                TEXT PRIMARY KEY,
+    created_at        INTEGER NOT NULL,
+    last_active       INTEGER NOT NULL,
+    parent_session_id TEXT,
+    lineage_label     TEXT
 );
 
 CREATE TABLE IF NOT EXISTS messages (
@@ -87,6 +89,8 @@ pub struct SessionSummary {
     pub created_at: i64,
     pub last_active: i64,
     pub message_count: usize,
+    pub parent_session_id: Option<String>,
+    pub lineage_label: Option<String>,
 }
 
 impl SessionStore {
@@ -101,17 +105,8 @@ impl SessionStore {
         let conn = Connection::open(&path)
             .unwrap_or_else(|e| panic!("Failed to open session DB at {}: {e}", path.display()));
 
-        conn.execute_batch(SCHEMA)
+        initialize_conn(&conn)
             .unwrap_or_else(|e| panic!("Failed to initialize session DB schema: {e}"));
-
-        // Idempotent migration for DBs that pre-date the reasoning_content
-        // column (YYC-43). SQLite errors on duplicate-column ADD; harmless to
-        // ignore — the column either exists from CREATE TABLE above or this
-        // adds it.
-        let _ = conn.execute(
-            "ALTER TABLE messages ADD COLUMN reasoning_content TEXT",
-            [],
-        );
 
         Self {
             conn: Mutex::new(conn),
@@ -135,7 +130,10 @@ impl SessionStore {
     /// Load all messages for `session_id` in the order they were saved.
     /// Returns `Ok(None)` if the session doesn't exist.
     pub fn load_history(&self, session_id: &str) -> Result<Option<Vec<Message>>> {
-        let conn = self.conn.lock().map_err(|_| anyhow::anyhow!("session DB poisoned"))?;
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| anyhow::anyhow!("session DB poisoned"))?;
 
         let exists: bool = conn
             .query_row(
@@ -163,13 +161,25 @@ impl SessionStore {
             let tool_call_id: Option<String> = row.get(2)?;
             let tool_calls_json: Option<String> = row.get(3)?;
             let reasoning_content: Option<String> = row.get(4)?;
-            Ok((role, content, tool_call_id, tool_calls_json, reasoning_content))
+            Ok((
+                role,
+                content,
+                tool_call_id,
+                tool_calls_json,
+                reasoning_content,
+            ))
         })?;
 
         let mut messages = Vec::new();
         for row in rows {
             let (role, content, tool_call_id, tool_calls_json, reasoning_content) = row?;
-            let msg = decode_message(&role, content, tool_call_id, tool_calls_json, reasoning_content)?;
+            let msg = decode_message(
+                &role,
+                content,
+                tool_call_id,
+                tool_calls_json,
+                reasoning_content,
+            )?;
             messages.push(msg);
         }
 
@@ -189,13 +199,9 @@ impl SessionStore {
             .map_err(|_| anyhow::anyhow!("session DB poisoned"))?;
         let tx = conn.transaction()?;
 
-        // Upsert the session row.
-        tx.execute(
-            "INSERT INTO sessions (id, created_at, last_active)
-             VALUES (?1, ?2, ?2)
-             ON CONFLICT(id) DO UPDATE SET last_active = excluded.last_active",
-            params![session_id, now],
-        )?;
+        // Upsert the session row while preserving any previously-recorded
+        // lineage metadata.
+        upsert_session_metadata(&tx, session_id, now, None, None)?;
 
         // Replace all messages for this session — full snapshot semantics.
         tx.execute(
@@ -227,12 +233,32 @@ impl SessionStore {
         Ok(())
     }
 
+    /// Persist session metadata even before any messages exist. Used to create
+    /// truthful child sessions with lineage before the first turn lands.
+    pub fn save_session_metadata(
+        &self,
+        session_id: &str,
+        parent_session_id: Option<&str>,
+        lineage_label: Option<&str>,
+    ) -> Result<()> {
+        let now = Utc::now().timestamp();
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| anyhow::anyhow!("session DB poisoned"))?;
+
+        upsert_session_metadata(&conn, session_id, now, parent_session_id, lineage_label)
+    }
+
     /// Most-recent-first list of saved sessions, capped at `limit`.
     pub fn list_sessions(&self, limit: usize) -> Result<Vec<SessionSummary>> {
-        let conn = self.conn.lock().map_err(|_| anyhow::anyhow!("session DB poisoned"))?;
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| anyhow::anyhow!("session DB poisoned"))?;
 
         let mut stmt = conn.prepare(
-            "SELECT s.id, s.created_at, s.last_active,
+            "SELECT s.id, s.created_at, s.last_active, s.parent_session_id, s.lineage_label,
                     (SELECT COUNT(*) FROM messages m WHERE m.session_id = s.id) AS msg_count
              FROM sessions s
              ORDER BY s.last_active DESC
@@ -244,7 +270,9 @@ impl SessionStore {
                 id: row.get(0)?,
                 created_at: row.get(1)?,
                 last_active: row.get(2)?,
-                message_count: row.get::<_, i64>(3)? as usize,
+                parent_session_id: row.get(3)?,
+                lineage_label: row.get(4)?,
+                message_count: row.get::<_, i64>(5)? as usize,
             })
         })?;
 
@@ -258,7 +286,10 @@ impl SessionStore {
     /// Full-text search across every saved message. Returns the top `limit`
     /// hits ranked by BM25.
     pub fn search_messages(&self, query: &str, limit: usize) -> Result<Vec<SearchHit>> {
-        let conn = self.conn.lock().map_err(|_| anyhow::anyhow!("session DB poisoned"))?;
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| anyhow::anyhow!("session DB poisoned"))?;
 
         let mut stmt = conn.prepare(
             "SELECT m.session_id, m.position, m.role, m.content, m.created_at, bm25(messages_fts) AS score
@@ -286,12 +317,50 @@ impl SessionStore {
         }
         Ok(hits)
     }
+
+    #[cfg(test)]
+    pub(crate) fn in_memory() -> Self {
+        let conn = Connection::open_in_memory().expect("open in-memory session DB");
+        initialize_conn(&conn).expect("initialize in-memory session DB");
+        Self {
+            conn: Mutex::new(conn),
+        }
+    }
 }
 
 impl Default for SessionStore {
     fn default() -> Self {
         Self::new()
     }
+}
+
+fn initialize_conn(conn: &Connection) -> Result<()> {
+    conn.execute_batch(SCHEMA)?;
+
+    // Idempotent migrations for DBs created before additive columns landed.
+    let _ = conn.execute("ALTER TABLE messages ADD COLUMN reasoning_content TEXT", []);
+    let _ = conn.execute("ALTER TABLE sessions ADD COLUMN parent_session_id TEXT", []);
+    let _ = conn.execute("ALTER TABLE sessions ADD COLUMN lineage_label TEXT", []);
+    Ok(())
+}
+
+fn upsert_session_metadata(
+    conn: &Connection,
+    session_id: &str,
+    now: i64,
+    parent_session_id: Option<&str>,
+    lineage_label: Option<&str>,
+) -> Result<()> {
+    conn.execute(
+        "INSERT INTO sessions (id, created_at, last_active, parent_session_id, lineage_label)
+         VALUES (?1, ?2, ?2, ?3, ?4)
+         ON CONFLICT(id) DO UPDATE SET
+             last_active = excluded.last_active,
+             parent_session_id = COALESCE(excluded.parent_session_id, sessions.parent_session_id),
+             lineage_label = COALESCE(excluded.lineage_label, sessions.lineage_label)",
+        params![session_id, now, parent_session_id, lineage_label],
+    )?;
+    Ok(())
 }
 
 type Encoded = (
@@ -352,7 +421,9 @@ fn decode_message(
         },
         "assistant" => {
             let tool_calls = match tool_calls_json {
-                Some(s) => Some(serde_json::from_str::<Vec<ToolCall>>(&s).context("decode tool_calls")?),
+                Some(s) => {
+                    Some(serde_json::from_str::<Vec<ToolCall>>(&s).context("decode tool_calls")?)
+                }
                 None => None,
             };
             Message::Assistant {
@@ -378,7 +449,7 @@ mod tests {
         // Bypass `new()` so we don't write into ~/.vulcan during tests.
         let path = dir.path().join("sessions.db");
         let conn = Connection::open(&path).unwrap();
-        conn.execute_batch(SCHEMA).unwrap();
+        initialize_conn(&conn).unwrap();
         SessionStore {
             conn: Mutex::new(conn),
         }
@@ -438,14 +509,24 @@ mod tests {
         let s2 = uuid::Uuid::new_v4().to_string();
 
         store
-            .save_messages(&s1, &[Message::User { content: "a".into() }])
+            .save_messages(
+                &s1,
+                &[Message::User {
+                    content: "a".into(),
+                }],
+            )
             .unwrap();
         // Sleep 1s would make this deterministic, but the second save bumps
         // last_active beyond the first's wall-clock-second granularity in
         // practice. Make it explicit by saving twice with different content.
         std::thread::sleep(std::time::Duration::from_millis(1100));
         store
-            .save_messages(&s2, &[Message::User { content: "b".into() }])
+            .save_messages(
+                &s2,
+                &[Message::User {
+                    content: "b".into(),
+                }],
+            )
             .unwrap();
 
         let summaries = store.list_sessions(10).unwrap();
@@ -480,6 +561,87 @@ mod tests {
             hits.iter().any(|h| h.content.contains("brown fox")),
             "expected fox hit, got {hits:?}"
         );
+    }
+
+    #[test]
+    fn session_lineage_survives_metadata_and_message_saves() {
+        let dir = TempDir::new().unwrap();
+        let store = store_in(&dir);
+        let parent_id = uuid::Uuid::new_v4().to_string();
+        let child_id = uuid::Uuid::new_v4().to_string();
+
+        store
+            .save_messages(
+                &parent_id,
+                &[Message::User {
+                    content: "root".into(),
+                }],
+            )
+            .unwrap();
+        store
+            .save_session_metadata(
+                &child_id,
+                Some(&parent_id),
+                Some("branched from root session"),
+            )
+            .unwrap();
+        store
+            .save_messages(
+                &child_id,
+                &[Message::User {
+                    content: "child".into(),
+                }],
+            )
+            .unwrap();
+
+        let summaries = store.list_sessions(10).unwrap();
+        let child = summaries
+            .iter()
+            .find(|s| s.id == child_id)
+            .expect("child summary should exist");
+        assert_eq!(child.parent_session_id.as_deref(), Some(parent_id.as_str()));
+        assert_eq!(
+            child.lineage_label.as_deref(),
+            Some("branched from root session")
+        );
+        assert_eq!(child.message_count, 1);
+    }
+
+    #[test]
+    fn save_messages_preserves_existing_lineage_metadata() {
+        let dir = TempDir::new().unwrap();
+        let store = store_in(&dir);
+        let parent_id = uuid::Uuid::new_v4().to_string();
+        let child_id = uuid::Uuid::new_v4().to_string();
+
+        store
+            .save_session_metadata(&child_id, Some(&parent_id), Some("forked"))
+            .unwrap();
+        store
+            .save_messages(
+                &child_id,
+                &[Message::User {
+                    content: "first".into(),
+                }],
+            )
+            .unwrap();
+        store
+            .save_messages(
+                &child_id,
+                &[Message::User {
+                    content: "second".into(),
+                }],
+            )
+            .unwrap();
+
+        let summaries = store.list_sessions(10).unwrap();
+        let child = summaries
+            .iter()
+            .find(|s| s.id == child_id)
+            .expect("child summary should exist");
+        assert_eq!(child.parent_session_id.as_deref(), Some(parent_id.as_str()));
+        assert_eq!(child.lineage_label.as_deref(), Some("forked"));
+        assert_eq!(child.message_count, 1);
     }
 
     #[test]
