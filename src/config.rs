@@ -47,6 +47,15 @@ pub struct ProviderConfig {
     /// Backoff is exponential with jitter: 1s, 2s, 4s, 8s, 16s.
     #[serde(default = "default_max_retries")]
     pub max_retries: u32,
+    /// How long to cache the provider's `/models` catalog before re-fetching.
+    /// Defaults to 24 hours. Set to 0 to disable caching (always fetch fresh).
+    #[serde(default = "default_catalog_cache_ttl_hours")]
+    pub catalog_cache_ttl_hours: u64,
+    /// Skip catalog fetching at startup. Useful when testing or working
+    /// offline. Errors from missing or unreachable catalogs are non-fatal
+    /// regardless; this just avoids the extra HTTP roundtrip on launch.
+    #[serde(default)]
+    pub disable_catalog: bool,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -78,6 +87,8 @@ impl Default for ProviderConfig {
             model: default_model(),
             max_context: default_max_context(),
             max_retries: default_max_retries(),
+            catalog_cache_ttl_hours: default_catalog_cache_ttl_hours(),
+            disable_catalog: false,
         }
     }
 }
@@ -123,6 +134,9 @@ fn default_max_context() -> usize {
 }
 fn default_max_retries() -> u32 {
     4
+}
+fn default_catalog_cache_ttl_hours() -> u64 {
+    24
 }
 fn default_skills_dir() -> PathBuf {
     vulcan_home().join("skills")

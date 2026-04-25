@@ -137,7 +137,7 @@ pub async fn run_tui(config: &Config, resume: ResumeTarget) -> Result<()> {
     // ── Long-lived agent: one per TUI session, shared across prompts so
     // hook handlers' state (audit log, rate limits, etc.) survives turns.
     let agent = Arc::new(Mutex::new(
-        Agent::with_hooks_and_pause(config, hook_reg, Some(pause_tx))?,
+        Agent::with_hooks_and_pause(config, hook_reg, Some(pause_tx)).await?,
     ));
 
     // ── Apply resume target if any. Errors here are non-fatal — we report
