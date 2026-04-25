@@ -1,6 +1,21 @@
 use std::cell::Cell;
 use std::collections::VecDeque;
 
+/// Format a u32 with comma thousands separators (YYC-60).
+/// `18402 → "18,402"`. Pure utility, no allocation beyond the result.
+pub fn format_thousands(n: u32) -> String {
+    let s = n.to_string();
+    let bytes = s.as_bytes();
+    let mut out = String::with_capacity(s.len() + s.len() / 3);
+    for (i, b) in bytes.iter().enumerate() {
+        if i > 0 && (bytes.len() - i) % 3 == 0 {
+            out.push(',');
+        }
+        out.push(*b as char);
+    }
+    out
+}
+
 use chrono::Local;
 use ratatui::style::Color;
 
@@ -343,7 +358,16 @@ pub struct AppState {
 
     cursor: Cell<(u16, u16)>,
     pub model_label: String,
-    pub token_used: u32,
+    /// Cumulative input tokens across the whole session (every turn's
+    /// `usage.prompt_tokens` summed). Used by the cost telemetry pane
+    /// (YYC-67).
+    pub prompt_tokens_total: u32,
+    /// Cumulative output tokens across the whole session.
+    pub completion_tokens_total: u32,
+    /// Latest turn's `usage.prompt_tokens` — represents the current
+    /// context window size and is what the prompt-status ratio bar
+    /// (YYC-60) uses for capacity coloring.
+    pub prompt_tokens_last: u32,
     pub token_max: u32,
 }
 
@@ -373,7 +397,9 @@ impl AppState {
 
             cursor: Cell::new((0, 0)),
             model_label,
-            token_used: 0,
+            prompt_tokens_total: 0,
+            completion_tokens_total: 0,
+            prompt_tokens_last: 0,
             token_max,
         }
     }
@@ -467,9 +493,32 @@ impl AppState {
     }
 
     pub fn model_status(&self) -> String {
-        let used_k = self.token_used / 1000;
-        let max_k = self.token_max / 1000;
-        format!("{} · {}k / {}k", self.model_label, used_k, max_k)
+        // YYC-60: design spec is `{model} · {used:n} / {max:n}` with comma
+        // grouping. `used` is the latest turn's prompt_tokens (current
+        // context window size); the bar represents context capacity, not
+        // lifetime cost.
+        format!(
+            "{} · {} / {}",
+            self.model_label,
+            format_thousands(self.prompt_tokens_last),
+            format_thousands(self.token_max),
+        )
+    }
+
+    /// Cumulative token count (input + output across all turns). Used by
+    /// the cost/runtime telemetry pane (YYC-67).
+    pub fn lifetime_tokens(&self) -> u32 {
+        self.prompt_tokens_total
+            .saturating_add(self.completion_tokens_total)
+    }
+
+    /// Ratio of latest context to max — drives the capacity coloring on
+    /// the prompt-status row (YYC-60).
+    pub fn context_ratio(&self) -> f32 {
+        if self.token_max == 0 {
+            return 0.0;
+        }
+        (self.prompt_tokens_last as f32) / (self.token_max as f32)
     }
 
     pub fn cursor_set(&self, x: u16, y: u16) {
@@ -942,6 +991,34 @@ mod tests {
         app.input = "/queue".into();
         app.refresh_prompt_mode();
         assert_eq!(app.prompt_mode, PromptMode::Busy);
+    }
+
+    #[test]
+    fn format_thousands_groups_at_three_digit_boundaries() {
+        assert_eq!(format_thousands(0), "0");
+        assert_eq!(format_thousands(42), "42");
+        assert_eq!(format_thousands(999), "999");
+        assert_eq!(format_thousands(1_000), "1,000");
+        assert_eq!(format_thousands(18_402), "18,402");
+        assert_eq!(format_thousands(1_234_567), "1,234,567");
+    }
+
+    #[test]
+    fn context_ratio_reflects_latest_prompt_size() {
+        let mut app = AppState::new("test".into(), 100_000);
+        assert_eq!(app.context_ratio(), 0.0);
+        app.prompt_tokens_last = 50_000;
+        assert!((app.context_ratio() - 0.5).abs() < 1e-6);
+        app.prompt_tokens_last = 95_000;
+        assert!(app.context_ratio() > 0.9);
+    }
+
+    #[test]
+    fn lifetime_tokens_sums_prompt_and_completion_totals() {
+        let mut app = AppState::new("test".into(), 100_000);
+        app.prompt_tokens_total = 1_000;
+        app.completion_tokens_total = 500;
+        assert_eq!(app.lifetime_tokens(), 1_500);
     }
 
     #[test]

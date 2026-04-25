@@ -822,7 +822,16 @@ pub async fn run_tui(config: &Config, resume: ResumeTarget) -> Result<()> {
                     Some(StreamEvent::Done(resp)) => {
                         app.thinking = false;
                         if let Some(usage) = resp.usage {
-                            app.token_used = app.token_used.saturating_add(usage.completion_tokens as u32);
+                            // YYC-60: track lifetime totals for cost (YYC-67)
+                            // and the latest prompt size for the in-status
+                            // capacity bar.
+                            app.prompt_tokens_total = app
+                                .prompt_tokens_total
+                                .saturating_add(usage.prompt_tokens as u32);
+                            app.completion_tokens_total = app
+                                .completion_tokens_total
+                                .saturating_add(usage.completion_tokens as u32);
+                            app.prompt_tokens_last = usage.prompt_tokens as u32;
                         }
                         app.note_done();
                         refresh_sessions(&agent, &mut app).await;

@@ -286,6 +286,9 @@ pub fn prompt_row(
     input: &str,
     hints: &[(&str, &str)],
     model_status: &str,
+    // capacity_ratio (YYC-60): current context / max. Drives the
+    // model_status fg color: ≤70% ink, 70-90% yellow, >90% red.
+    capacity_ratio: f32,
     thinking: bool,
 ) -> (u16, u16) {
     if area.height < 2 {
@@ -378,10 +381,18 @@ pub fn prompt_row(
             pad,
             Style::default().fg(Palette::MUTED).bg(Palette::PAPER),
         ));
+        // YYC-60: color the model_status span by context capacity ratio.
+        let status_fg = if capacity_ratio > 0.90 {
+            Palette::RED
+        } else if capacity_ratio > 0.70 {
+            Palette::YELLOW
+        } else {
+            Palette::INK
+        };
         hint_spans.push(Span::styled(
             format!(" {model_status}"),
             Style::default()
-                .fg(Palette::INK)
+                .fg(status_fg)
                 .bg(Palette::PAPER)
                 .add_modifier(Modifier::BOLD),
         ));

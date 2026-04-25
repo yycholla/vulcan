@@ -296,6 +296,7 @@ fn single_stack(f: &mut TuiFrame, area: Rect, app: &AppState) {
         &app.input,
         app.prompt_hints(),
         &app.model_status(),
+        app.context_ratio(),
         app.thinking,
     );
     app.cursor_set(cx, cy);
@@ -403,6 +404,7 @@ fn split_sessions(f: &mut TuiFrame, area: Rect, app: &AppState) {
         &app.input,
         app.prompt_hints(),
         &app.model_status(),
+        app.context_ratio(),
         app.thinking,
     );
     app.cursor_set(cx, cy);
@@ -579,6 +581,7 @@ fn tiled_mesh(f: &mut TuiFrame, area: Rect, app: &AppState) {
         &app.input,
         app.prompt_hints(),
         &app.model_status(),
+        app.context_ratio(),
         app.thinking,
     );
     app.cursor_set(cx, cy);
@@ -696,6 +699,7 @@ fn tree_of_thought(f: &mut TuiFrame, area: Rect, app: &AppState) {
         &app.input,
         app.prompt_hints(),
         &app.model_status(),
+        app.context_ratio(),
         app.thinking,
     );
     app.cursor_set(cx, cy);
@@ -991,6 +995,7 @@ fn trading_floor(f: &mut TuiFrame, area: Rect, app: &AppState) {
         &app.input,
         app.prompt_hints(),
         &app.model_status(),
+        app.context_ratio(),
         app.thinking,
     );
     app.cursor_set(cx, cy);
