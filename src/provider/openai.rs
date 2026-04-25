@@ -79,6 +79,7 @@ impl OpenAIProvider {
     fn parse_line(
         line: &str,
         content: &mut String,
+        reasoning: &mut String,
         tool_calls: &mut Vec<ToolCall>,
         usage: &mut Option<Usage>,
         finish_reason: &mut Option<String>,
@@ -99,6 +100,12 @@ impl OpenAIProvider {
                     if let Some(delta) = choice["delta"].as_object() {
                         if let Some(text) = delta.get("content").and_then(|c| c.as_str()) {
                             content.push_str(text);
+                        }
+                        // DeepSeek-shape reasoning trace. OpenRouter passes
+                        // it through for thinking-mode models; we accumulate
+                        // and echo it back on the next turn (YYC-43).
+                        if let Some(rc) = delta.get("reasoning_content").and_then(|c| c.as_str()) {
+                            reasoning.push_str(rc);
                         }
                         if let Some(tcs) = delta.get("tool_calls").and_then(|c| c.as_array()) {
                             for tc in tcs {
@@ -178,12 +185,20 @@ impl LLMProvider for OpenAIProvider {
         let text = String::from_utf8_lossy(&bytes);
 
         let mut content = String::new();
+        let mut reasoning = String::new();
         let mut tool_calls: Vec<ToolCall> = Vec::new();
         let mut usage: Option<Usage> = None;
         let mut finish_reason: Option<String> = None;
 
         for line in text.lines() {
-            Self::parse_line(line, &mut content, &mut tool_calls, &mut usage, &mut finish_reason);
+            Self::parse_line(
+                line,
+                &mut content,
+                &mut reasoning,
+                &mut tool_calls,
+                &mut usage,
+                &mut finish_reason,
+            );
         }
 
         Ok(ChatResponse {
@@ -191,6 +206,7 @@ impl LLMProvider for OpenAIProvider {
             tool_calls: Some(tool_calls).filter(|c| !c.is_empty()),
             usage,
             finish_reason,
+            reasoning_content: Some(reasoning).filter(|r| !r.is_empty()),
         })
     }
 
@@ -209,6 +225,7 @@ impl LLMProvider for OpenAIProvider {
         };
 
         let mut content = String::new();
+        let mut reasoning = String::new();
         let mut tool_calls: Vec<ToolCall> = Vec::new();
         let mut usage: Option<Usage> = None;
         let mut finish_reason: Option<String> = None;
@@ -237,7 +254,14 @@ impl LLMProvider for OpenAIProvider {
                 buf = buf[newline + 1..].to_string();
 
                 let prev_len = content.len();
-                Self::parse_line(&line, &mut content, &mut tool_calls, &mut usage, &mut finish_reason);
+                Self::parse_line(
+                    &line,
+                    &mut content,
+                    &mut reasoning,
+                    &mut tool_calls,
+                    &mut usage,
+                    &mut finish_reason,
+                );
 
                 // If content grew, send the delta through the channel
                 if content.len() > prev_len {
@@ -253,6 +277,7 @@ impl LLMProvider for OpenAIProvider {
             tool_calls: Some(tool_calls).filter(|c| !c.is_empty()),
             usage,
             finish_reason,
+            reasoning_content: Some(reasoning).filter(|r| !r.is_empty()),
         };
 
         let _ = tx.send(StreamEvent::Done(response));
