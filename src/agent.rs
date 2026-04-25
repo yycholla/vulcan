@@ -12,7 +12,7 @@ use crate::provider::openai::OpenAIProvider;
 use crate::provider::{LLMProvider, Message, StreamEvent};
 use crate::skills::SkillRegistry;
 use crate::tools::{ToolRegistry, ToolResult};
-use anyhow::Result;
+use anyhow::{Context, Result};
 use serde_json::Value;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
@@ -42,13 +42,13 @@ pub struct Agent {
 impl Agent {
     /// Construct an Agent with no caller-supplied hooks. Built-in hooks (skills
     /// injection, etc.) are still registered.
-    pub fn new(config: &Config) -> Self {
+    pub fn new(config: &Config) -> Result<Self> {
         Self::with_hooks_and_pause(config, HookRegistry::new(), None)
     }
 
     /// Construct with caller-supplied hooks and no interactive pause channel.
     /// The TUI uses `with_hooks_and_pause` to wire one up.
-    pub fn with_hooks(config: &Config, hooks: HookRegistry) -> Self {
+    pub fn with_hooks(config: &Config, hooks: HookRegistry) -> Result<Self> {
         Self::with_hooks_and_pause(config, hooks, None)
     }
 
@@ -56,14 +56,20 @@ impl Agent {
     /// pause emitter. Built-ins (skills, safety) are registered into the
     /// registry; if a pause emitter is provided, `SafetyHook` is wired up to
     /// route blocks through it as `AgentPause::SafetyApproval`.
+    ///
+    /// Returns `Err` for fatal init failures (missing API key, provider build
+    /// failure). These were previously panics; the caller now decides how to
+    /// surface the error.
     pub fn with_hooks_and_pause(
         config: &Config,
         mut hooks: HookRegistry,
         pause_tx: Option<PauseSender>,
-    ) -> Self {
-        let api_key = config
-            .api_key()
-            .expect("No API key configured. Set VULCAN_API_KEY or add api_key to config.toml");
+    ) -> Result<Self> {
+        let api_key = config.api_key().ok_or_else(|| {
+            anyhow::anyhow!(
+                "No API key configured. Set VULCAN_API_KEY or add api_key to ~/.vulcan/config.toml"
+            )
+        })?;
 
         let provider: Box<dyn LLMProvider> = Box::new(
             OpenAIProvider::new(
@@ -71,8 +77,9 @@ impl Agent {
                 &api_key,
                 &config.provider.model,
                 config.provider.max_context,
+                config.provider.max_retries,
             )
-            .expect("Failed to initialize LLM provider"),
+            .context("Failed to initialize LLM provider")?,
         );
 
         let tools = ToolRegistry::new();
@@ -96,7 +103,7 @@ impl Agent {
             hooks.register(Arc::new(safety));
         }
 
-        Self {
+        Ok(Self {
             provider,
             tools,
             skills,
@@ -107,7 +114,7 @@ impl Agent {
             session_id,
             turns: 0,
             turn_cancel: CancellationToken::new(),
-        }
+        })
     }
 
     pub fn session_id(&self) -> &str {
@@ -424,7 +431,18 @@ impl Agent {
         raw_args: &str,
         cancel: CancellationToken,
     ) -> String {
-        let parsed_args: Value = serde_json::from_str(raw_args).unwrap_or(Value::Null);
+        let parsed_args: Value = match serde_json::from_str(raw_args) {
+            Ok(v) => v,
+            Err(e) => {
+                // Hooks see Null when args are unparseable, but we surface the
+                // structured error to the LLM via `tools.execute` (which also
+                // re-parses) so the agent can self-correct on the next turn.
+                tracing::warn!(
+                    "Tool '{name}' received unparseable JSON args ({e}). Raw: {raw_args}"
+                );
+                Value::Null
+            }
+        };
 
         let (effective_args_str, blocked) =
             match self.hooks.before_tool_call(name, &parsed_args, cancel.clone()).await {

@@ -6,12 +6,15 @@
 type = "openai-compat"
 # Base URL for the API
 base_url = "https://openrouter.ai/api/v1"
-# API key — can also be set via FERRIS_API_KEY env var
+# API key — can also be set via VULCAN_API_KEY env var
 # api_key = "sk-..."
 # Model to use
 model = "deepseek/deepseek-v4-flash"
 # Max context size in tokens
 max_context = 128000
+# Max retries on transient API failures (429, 5xx, network errors).
+# Backoff is exponential with jitter: 1s, 2s, 4s, 8s, 16s.
+max_retries = 4
 
 [tools]
 # Enable dangerous tools (file overwrite, shell exec) without confirmation
