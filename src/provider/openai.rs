@@ -161,10 +161,15 @@ impl OpenAIProvider {
                         if let Some(text) = delta.get("content").and_then(|c| c.as_str()) {
                             content.push_str(text);
                         }
-                        // DeepSeek-shape reasoning trace. OpenRouter passes
-                        // it through for thinking-mode models; we accumulate
-                        // and echo it back on the next turn (YYC-43).
+                        // Reasoning trace from thinking-mode models. The
+                        // field name varies by proxy — DeepSeek's native API
+                        // uses `reasoning_content`, OpenRouter normalizes to
+                        // `reasoning`. Accept either and merge into one
+                        // accumulator (YYC-63).
                         if let Some(rc) = delta.get("reasoning_content").and_then(|c| c.as_str()) {
+                            reasoning.push_str(rc);
+                        }
+                        if let Some(rc) = delta.get("reasoning").and_then(|c| c.as_str()) {
                             reasoning.push_str(rc);
                         }
                         if let Some(tcs) = delta.get("tool_calls").and_then(|c| c.as_array()) {

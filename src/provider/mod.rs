@@ -51,7 +51,7 @@ impl Serialize for Message {
                 tool_calls,
                 reasoning_content,
             } => {
-                let mut s = serializer.serialize_struct("Message", 4)?;
+                let mut s = serializer.serialize_struct("Message", 5)?;
                 s.serialize_field("role", "assistant")?;
                 if let Some(c) = content {
                     s.serialize_field("content", c)?;
@@ -61,8 +61,13 @@ impl Serialize for Message {
                 if let Some(tc) = tool_calls {
                     s.serialize_field("tool_calls", tc)?;
                 }
+                // Emit both field names. DeepSeek's native API uses
+                // `reasoning_content`; OpenRouter's standardized name is
+                // `reasoning`. Sending both means a tool-using turn against
+                // either path won't fail with "must be passed back" (YYC-63).
                 if let Some(rc) = reasoning_content {
                     s.serialize_field("reasoning_content", rc)?;
+                    s.serialize_field("reasoning", rc)?;
                 }
                 s.end()
             }
