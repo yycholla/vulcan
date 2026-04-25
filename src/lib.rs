@@ -2,6 +2,7 @@ pub mod agent;
 pub mod cli;
 pub mod config;
 pub mod context;
+pub mod hooks;
 pub mod memory;
 pub mod platform;
 pub mod prompt_builder;

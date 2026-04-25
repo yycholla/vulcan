@@ -577,28 +577,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "ferris"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "async-trait",
- "chrono",
- "clap",
- "crossterm",
- "futures-util",
- "ratatui",
- "reqwest",
- "serde",
- "serde_json",
- "thiserror 2.0.18",
- "tokio",
- "toml",
- "tracing",
- "tracing-subscriber",
- "uuid",
-]
-
-[[package]]
 name = "filedescriptor"
 version = "0.8.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2814,6 +2792,28 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6d9b2acfb050df409c972a37d3b8e08cdea3bddb0c09db9d53137e504cfabed0"
 dependencies = [
  "utf8parse",
+]
+
+[[package]]
+name = "vulcan"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "chrono",
+ "clap",
+ "crossterm",
+ "futures-util",
+ "ratatui",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "toml",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
 ]
 
 [[package]]

@@ -1,8 +1,8 @@
 use clap::{Parser, Subcommand};
 
-/// ferris — a pure-Rust personal AI agent
+/// vulcan — a Rust AI agent. Forged at the forge, tested by fire.
 #[derive(Parser, Debug)]
-#[command(name = "ferris", version, about, long_about = None)]
+#[command(name = "vulcan", version, about, long_about = None)]
 pub struct Cli {
     #[command(subcommand)]
     pub command: Option<Command>,

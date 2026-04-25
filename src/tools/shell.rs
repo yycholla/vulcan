@@ -1,4 +1,4 @@
-use crate::tools::Tool;
+use crate::tools::{Tool, ToolResult};
 use anyhow::Result;
 use async_trait::async_trait;
 use serde_json::{json, Value};
@@ -24,7 +24,7 @@ impl Tool for BashTool {
             "required": ["command"]
         })
     }
-    async fn call(&self, params: Value) -> Result<String> {
+    async fn call(&self, params: Value) -> Result<ToolResult> {
         let command = params["command"].as_str().ok_or_else(|| anyhow::anyhow!("command required"))?;
         let timeout = params["timeout"].as_i64().unwrap_or(60);
         let workdir = params["workdir"].as_str();
@@ -45,10 +45,11 @@ impl Tool for BashTool {
 
         let stdout = String::from_utf8_lossy(&output.stdout);
         let stderr = String::from_utf8_lossy(&output.stderr);
+        let success = output.status.success();
 
         let mut result = String::new();
 
-        if output.status.success() {
+        if success {
             result.push_str(stdout.trim());
         } else {
             result.push_str(&format!("Exit code: {}\n", output.status.code().unwrap_or(-1)));
@@ -65,6 +66,10 @@ impl Tool for BashTool {
             result.push_str("\n... (truncated at 50K chars)");
         }
 
-        Ok(result)
+        Ok(ToolResult {
+            output: result,
+            media: Vec::new(),
+            is_error: !success,
+        })
     }
 }

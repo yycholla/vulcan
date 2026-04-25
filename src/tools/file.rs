@@ -1,5 +1,5 @@
 
-use crate::tools::Tool;
+use crate::tools::{Tool, ToolResult};
 use anyhow::Result;
 use async_trait::async_trait;
 use serde_json::{json, Value};
@@ -25,7 +25,7 @@ impl Tool for ReadFile {
             "required": ["path"]
         })
     }
-    async fn call(&self, params: Value) -> Result<String> {
+    async fn call(&self, params: Value) -> Result<ToolResult> {
         let path = params["path"].as_str().ok_or_else(|| anyhow::anyhow!("path required"))?;
         let offset = params["offset"].as_i64().unwrap_or(1);
         let limit = params["limit"].as_i64().unwrap_or(500);
@@ -36,7 +36,7 @@ impl Tool for ReadFile {
         let end = (start + limit as usize).min(lines.len());
 
         if start >= lines.len() {
-            return Ok("File offset exceeds file length.".into());
+            return Ok(ToolResult::ok("File offset exceeds file length."));
         }
 
         let result: String = lines[start..end]
@@ -46,11 +46,12 @@ impl Tool for ReadFile {
             .collect::<Vec<_>>()
             .join("\n");
 
-        Ok(if result.is_empty() {
-            "File is empty.".into()
+        let output = if result.is_empty() {
+            "File is empty.".to_string()
         } else {
             format!("{result}\n---\n{}/{} lines shown", end - start, lines.len())
-        })
+        };
+        Ok(ToolResult::ok(output))
     }
 }
 
@@ -74,7 +75,7 @@ impl Tool for WriteFile {
             "required": ["path", "content"]
         })
     }
-    async fn call(&self, params: Value) -> Result<String> {
+    async fn call(&self, params: Value) -> Result<ToolResult> {
         let path = params["path"].as_str().ok_or_else(|| anyhow::anyhow!("path required"))?;
         let content = params["content"].as_str().unwrap_or("");
 
@@ -85,7 +86,7 @@ impl Tool for WriteFile {
 
         tokio::fs::write(path, content).await?;
         let bytes = content.len();
-        Ok(format!("Wrote {bytes} bytes to {path}"))
+        Ok(ToolResult::ok(format!("Wrote {bytes} bytes to {path}")))
     }
 }
 
@@ -111,7 +112,7 @@ impl Tool for SearchFiles {
             "required": ["pattern"]
         })
     }
-    async fn call(&self, params: Value) -> Result<String> {
+    async fn call(&self, params: Value) -> Result<ToolResult> {
         let pattern = params["pattern"].as_str().ok_or_else(|| anyhow::anyhow!("pattern required"))?;
         let path = params["path"].as_str().unwrap_or(".");
         let limit = params["limit"].as_i64().unwrap_or(20);
@@ -135,11 +136,12 @@ impl Tool for SearchFiles {
         }
 
         let result = stdout.trim().to_string();
-        Ok(if result.is_empty() {
-            "No matches found.".into()
+        let output = if result.is_empty() {
+            "No matches found.".to_string()
         } else {
             result
-        })
+        };
+        Ok(ToolResult::ok(output))
     }
 }
 
@@ -164,7 +166,7 @@ impl Tool for PatchFile {
             "required": ["path", "old_string", "new_string"]
         })
     }
-    async fn call(&self, params: Value) -> Result<String> {
+    async fn call(&self, params: Value) -> Result<ToolResult> {
         let path = params["path"].as_str().ok_or_else(|| anyhow::anyhow!("path required"))?;
         let old = params["old_string"].as_str().ok_or_else(|| anyhow::anyhow!("old_string required"))?;
         let new = params["new_string"].as_str().unwrap_or("");
@@ -181,7 +183,7 @@ impl Tool for PatchFile {
                 .collect::<Vec<_>>();
 
             let hint = if similar.is_empty() {
-                "No similar text found nearby.".into()
+                "No similar text found nearby.".to_string()
             } else {
                 format!("Did you mean one of:\n{}", similar.join("\n"))
             };
@@ -193,6 +195,6 @@ impl Tool for PatchFile {
         tokio::fs::write(path, &new_content).await?;
 
         let replaces = content.matches(old).count();
-        Ok(format!("Replaced {replaces} occurrence(s) in {path}"))
+        Ok(ToolResult::ok(format!("Replaced {replaces} occurrence(s) in {path}")))
     }
 }

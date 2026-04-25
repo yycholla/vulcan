@@ -2,14 +2,14 @@ use anyhow::{Context, Result};
 use serde::Deserialize;
 use std::path::PathBuf;
 
-/// Path to the ferris config directory (~/.ferris/)
-pub fn ferris_home() -> PathBuf {
+/// Path to the Vulcan config directory (~/.vulcan/)
+pub fn vulcan_home() -> PathBuf {
     dirs_or_default()
 }
 
 fn dirs_or_default() -> PathBuf {
     let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
-    PathBuf::from(home).join(".ferris")
+    PathBuf::from(home).join(".vulcan")
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -35,7 +35,7 @@ pub struct ProviderConfig {
     /// Base URL for API (e.g. https://openrouter.ai/api/v1)
     #[serde(default = "default_base_url")]
     pub base_url: String,
-    /// API key — can also be set via FERRIS_API_KEY env var
+    /// API key — can also be set via VULCAN_API_KEY env var
     pub api_key: Option<String>,
     /// Model name (e.g. "anthropic/claude-sonnet-4", "gpt-4o")
     #[serde(default = "default_model")]
@@ -117,7 +117,7 @@ fn default_max_context() -> usize {
     128_000
 }
 fn default_skills_dir() -> PathBuf {
-    ferris_home().join("skills")
+    vulcan_home().join("skills")
 }
 fn default_compaction_enabled() -> bool {
     true
@@ -130,13 +130,13 @@ fn default_reserved_tokens() -> usize {
 }
 
 impl Config {
-    /// Load config from ~/.ferris/config.toml, then checks project dir as fallback.
+    /// Load config from ~/.vulcan/config.toml, then checks project dir as fallback.
     pub fn load() -> Result<Self> {
-        let primary = ferris_home().join("config.toml");
+        let primary = vulcan_home().join("config.toml");
 
         // Check multiple locations in order of precedence
         let candidates = [
-            ("~/.ferris/config.toml", primary.clone()),
+            ("~/.vulcan/config.toml", primary.clone()),
             ("./config.toml", PathBuf::from("config.toml")),
         ];
 
@@ -152,15 +152,15 @@ impl Config {
         }
 
         tracing::info!(
-            "No config found at ~/.ferris/config.toml or ./config.toml, using defaults. \
-             Copy config.example.toml to ~/.ferris/config.toml and set your API key."
+            "No config found at ~/.vulcan/config.toml or ./config.toml, using defaults. \
+             Copy config.example.toml to ~/.vulcan/config.toml and set your API key."
         );
         Ok(Config::default())
     }
 
     /// Resolve the API key: env var > config > compile-time warning
     pub fn api_key(&self) -> Option<String> {
-        std::env::var("FERRIS_API_KEY")
+        std::env::var("VULCAN_API_KEY")
             .ok()
             .or_else(|| self.provider.api_key.clone())
     }

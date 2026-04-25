@@ -1,0 +1,26 @@
+# Vulcan Configuration
+# Located at ~/.vulcan/config.toml
+
+[provider]
+# Provider type: "openai-compat" (works with OpenRouter, Anthropic, OpenAI, Ollama, etc.)
+type = "openai-compat"
+# Base URL for the API
+base_url = "https://openrouter.ai/api/v1"
+# API key — can also be set via FERRIS_API_KEY env var
+# api_key = "sk-..."
+# Model to use
+model = "deepseek/deepseek-v4-flash"
+# Max context size in tokens
+max_context = 128000
+
+[tools]
+# Enable dangerous tools (file overwrite, shell exec) without confirmation
+yolo_mode = false
+
+[compaction]
+# Auto-compress context when token usage is high
+enabled = true
+# Trigger compaction when context is 85% full
+trigger_ratio = 0.85
+# Reserved tokens for LLM response generation
+reserved_tokens = 50000

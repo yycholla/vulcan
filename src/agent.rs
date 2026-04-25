@@ -1,29 +1,51 @@
+use std::sync::Arc;
+
 use crate::config::Config;
 use crate::context::ContextManager;
+use crate::hooks::skills::SkillsHook;
+use crate::hooks::{HookRegistry, ToolCallDecision};
 use crate::memory::SessionStore;
 use crate::prompt_builder::PromptBuilder;
 use crate::provider::openai::OpenAIProvider;
 use crate::provider::{LLMProvider, Message, StreamEvent};
 use crate::skills::SkillRegistry;
-use crate::tools::ToolRegistry;
+use crate::tools::{ToolRegistry, ToolResult};
 use anyhow::Result;
+use serde_json::Value;
 use tokio::sync::mpsc;
+use uuid::Uuid;
 
-/// The core agent — orchestrates the LLM, tools, and state
+/// The core agent — orchestrates the LLM, tools, hooks, and state.
+///
+/// One Agent per session. Hold it across turns: the hook registry's stateful
+/// handlers (audit log, rate limits, approval caches) only work if the Agent
+/// outlives a single prompt.
 pub struct Agent {
     provider: Box<dyn LLMProvider>,
     tools: ToolRegistry,
-    skills: SkillRegistry,
+    skills: Arc<SkillRegistry>,
     context: ContextManager,
     memory: SessionStore,
     prompt_builder: PromptBuilder,
+    hooks: Arc<HookRegistry>,
+    session_id: String,
+    turns: u32,
 }
 
 impl Agent {
+    /// Construct an Agent with no caller-supplied hooks. Built-in hooks (skills
+    /// injection, etc.) are still registered.
     pub fn new(config: &Config) -> Self {
+        Self::with_hooks(config, HookRegistry::new())
+    }
+
+    /// Construct an Agent with a caller-supplied hook registry. Built-in hooks
+    /// (currently: skills) are registered into it before it's wrapped in Arc.
+    /// Fires `session_start` is up to the caller — see `start_session`.
+    pub fn with_hooks(config: &Config, mut hooks: HookRegistry) -> Self {
         let api_key = config
             .api_key()
-            .expect("No API key configured. Set FERRIS_API_KEY or add api_key to config.toml");
+            .expect("No API key configured. Set VULCAN_API_KEY or add api_key to config.toml");
 
         let provider: Box<dyn LLMProvider> = Box::new(
             OpenAIProvider::new(
@@ -36,9 +58,13 @@ impl Agent {
         );
 
         let tools = ToolRegistry::new();
-        let skills = SkillRegistry::new(&config.skills_dir);
+        let skills = Arc::new(SkillRegistry::new(&config.skills_dir));
         let memory = SessionStore::new();
         let context = ContextManager::new(provider.max_context());
+        let session_id = Uuid::new_v4().to_string();
+
+        // Built-in hook: surface available skills to the LLM via BeforePrompt.
+        hooks.register(Arc::new(SkillsHook::new(skills.clone())));
 
         Self {
             provider,
@@ -47,18 +73,35 @@ impl Agent {
             context,
             memory,
             prompt_builder: PromptBuilder,
+            hooks: Arc::new(hooks),
+            session_id,
+            turns: 0,
         }
     }
 
-    /// Run a one-shot prompt (no TUI). Gathers context, calls LLM, dispatches tools, returns result.
+    pub fn session_id(&self) -> &str {
+        &self.session_id
+    }
+
+    /// Fires `session_start` on all hook handlers. Call once after construction
+    /// (Agent::new doesn't call it itself because hooks aren't always async-
+    /// available at construction time).
+    pub async fn start_session(&self) {
+        self.hooks.session_start(&self.session_id).await;
+    }
+
+    /// Fires `session_end` and records the total turn count.
+    pub async fn end_session(&self) {
+        self.hooks.session_end(&self.session_id, self.turns).await;
+    }
+
+    /// Run a one-shot prompt (no TUI). Gathers context, calls LLM, dispatches
+    /// tools, returns result. Honors all hook events.
     pub async fn run_prompt(&mut self, input: &str) -> Result<String> {
-        let system = self
-            .prompt_builder
-            .build_system_prompt(&self.skills, &self.tools);
+        let system = self.prompt_builder.build_system_prompt(&self.tools);
         let tool_defs = self.tools.definitions();
         let mut messages = vec![Message::System { content: system }];
 
-        // Load recent session context for continuity
         if let Some(session_id) = self.memory.last_session_id() {
             if let Some(history) = self.memory.load_history(&session_id)? {
                 for msg in history {
@@ -71,11 +114,9 @@ impl Agent {
             content: input.to_string(),
         });
 
-        // Main agent loop — up to 10 iterations to prevent runaway tool chains
         for iteration in 0..10 {
             tracing::debug!("Agent iteration {iteration}");
 
-            // Check if we need to compact context
             if self.context.should_compact(&messages) {
                 let summary = self.context.compact(&messages)?;
                 messages = vec![
@@ -88,24 +129,18 @@ impl Agent {
                 ];
             }
 
-            let response = self.provider.chat(&messages, &tool_defs).await?;
+            // ── BeforePrompt: handlers may inject extra messages. Injections
+            // are transient — they go on the wire but don't persist into the
+            // conversation history we save to memory.
+            let outgoing = self.hooks.apply_before_prompt(&messages).await;
 
-            let has_content = response.content.as_deref().unwrap_or("").len();
-            let has_tools = response.tool_calls.as_ref().map_or(0, |t| t.len());
-            tracing::debug!(
-                "LLM response: content={} chars, tool_calls={}, finish={:?}",
-                has_content,
-                has_tools,
-                response.finish_reason,
-            );
+            let response = self.provider.chat(&outgoing, &tool_defs).await?;
 
-            // Track token usage
             if let Some(usage) = &response.usage {
                 self.context
                     .record_usage(usage.prompt_tokens, usage.completion_tokens);
             }
 
-            // If there are tool calls, execute them
             if let Some(tool_calls) = &response.tool_calls {
                 messages.push(Message::Assistant {
                     content: response.content.clone(),
@@ -114,34 +149,31 @@ impl Agent {
 
                 for tc in tool_calls {
                     tracing::info!("Executing tool: {} (call {})", tc.function.name, tc.id);
-
-                    let result = self
-                        .tools
-                        .execute(&tc.function.name, &tc.function.arguments)
-                        .await;
-
-                    let output = match &result {
-                        Ok(o) => o.clone(),
-                        Err(e) => format!("Error: {e}"),
-                    };
-
+                    let final_result =
+                        self.dispatch_tool(&tc.function.name, &tc.function.arguments).await;
                     messages.push(Message::Tool {
                         tool_call_id: tc.id.clone(),
-                        content: output,
+                        content: final_result,
                     });
                 }
             } else {
-                // No tool calls — this is the final answer
                 let text = response.content.unwrap_or_default();
 
-                // Save to session history
-                self.memory.save_messages(&messages)?;
+                // ── BeforeAgentEnd: a handler may force the loop to continue.
+                if let Some(instruction) = self.hooks.before_agent_end(&text).await {
+                    messages.push(Message::Assistant {
+                        content: Some(text.clone()),
+                        tool_calls: None,
+                    });
+                    messages.push(Message::User { content: instruction });
+                    continue;
+                }
 
-                // Try to auto-create a skill if this was a complex task
+                self.memory.save_messages(&messages)?;
+                self.turns = self.turns.saturating_add(1);
                 if iteration >= 5 {
                     self.skills.try_auto_create(input, &text)?;
                 }
-
                 return Ok(text);
             }
         }
@@ -149,16 +181,14 @@ impl Agent {
         Ok("Agent reached maximum iteration limit.".to_string())
     }
 
-    /// Run a prompt with streaming — sends text tokens through `ui_tx` as they arrive.
-    /// After the LLM finishes, tool calls are executed and results returned inline.
+    /// Run a prompt with streaming — sends text tokens through `ui_tx` as they
+    /// arrive. Honors all hook events.
     pub async fn run_prompt_stream(
         &mut self,
         input: &str,
         ui_tx: mpsc::UnboundedSender<StreamEvent>,
     ) -> Result<String> {
-        let system = self
-            .prompt_builder
-            .build_system_prompt(&self.skills, &self.tools);
+        let system = self.prompt_builder.build_system_prompt(&self.tools);
         let tool_defs = self.tools.definitions();
         let mut messages = vec![Message::System { content: system }];
 
@@ -177,12 +207,12 @@ impl Agent {
         let mut full_response = String::new();
 
         for iteration in 0..10 {
-            // Channel 1: provider writes stream events here
+            // ── BeforePrompt (transient — see run_prompt for rationale).
+            let outgoing = self.hooks.apply_before_prompt(&messages).await;
+
             let (inner_tx, mut inner_rx) = mpsc::unbounded_channel::<StreamEvent>();
-            // Channel 2: agent reads Done/Error from here
             let (priv_tx, mut priv_rx) = mpsc::unbounded_channel::<StreamEvent>();
 
-            // Fork task: forward Text to UI, forward Done/Error to agent's private channel
             let ui_tx_clone = ui_tx.clone();
             tokio::spawn(async move {
                 while let Some(ev) = inner_rx.recv().await {
@@ -201,12 +231,10 @@ impl Agent {
                 }
             });
 
-            // Start the provider stream (writes to inner_tx)
             self.provider
-                .chat_stream(&messages, &tool_defs, inner_tx)
+                .chat_stream(&outgoing, &tool_defs, inner_tx)
                 .await?;
 
-            // Wait for Done from the private channel
             let mut final_response: Option<crate::provider::ChatResponse> = None;
             while let Some(event) = priv_rx.recv().await {
                 match event {
@@ -226,17 +254,10 @@ impl Agent {
                 None => return Err(anyhow::anyhow!("Stream ended without Done event")),
             };
 
-            tracing::debug!(
-                "LLM response: content={} chars, tool_calls={}",
-                response.content.as_deref().unwrap_or("").len(),
-                response.tool_calls.as_ref().map_or(0, |t| t.len()),
-            );
-
             if let Some(text) = &response.content {
                 full_response.push_str(text);
             }
 
-            // Handle tool calls
             if let Some(tool_calls) = &response.tool_calls {
                 messages.push(Message::Assistant {
                     content: response.content.clone(),
@@ -245,23 +266,26 @@ impl Agent {
 
                 for tc in tool_calls {
                     tracing::info!("Executing tool: {} (call {})", tc.function.name, tc.id);
-                    let result = self
-                        .tools
-                        .execute(&tc.function.name, &tc.function.arguments)
-                        .await;
-                    let output = match &result {
-                        Ok(o) => o.clone(),
-                        Err(e) => format!("Error: {e}"),
-                    };
+                    let final_result =
+                        self.dispatch_tool(&tc.function.name, &tc.function.arguments).await;
                     messages.push(Message::Tool {
                         tool_call_id: tc.id.clone(),
-                        content: output,
+                        content: final_result,
                     });
                 }
-                // Loop back for next LLM call with tool results
             } else {
-                // Final answer
+                // ── BeforeAgentEnd
+                if let Some(instruction) = self.hooks.before_agent_end(&full_response).await {
+                    messages.push(Message::Assistant {
+                        content: Some(full_response.clone()),
+                        tool_calls: None,
+                    });
+                    messages.push(Message::User { content: instruction });
+                    continue;
+                }
+
                 self.memory.save_messages(&messages)?;
+                self.turns = self.turns.saturating_add(1);
                 if iteration >= 5 {
                     self.skills.try_auto_create(input, &full_response)?;
                 }
@@ -280,10 +304,7 @@ impl Agent {
 
     /// Resume a previous session by ID
     pub async fn resume_session(&mut self, session_id: &str) -> Result<()> {
-        let history = self
-            .memory
-            .load_history(session_id)?
-            .unwrap_or_default();
+        let history = self.memory.load_history(session_id)?.unwrap_or_default();
 
         if history.is_empty() {
             eprintln!("No session found with ID: {session_id}");
@@ -294,7 +315,61 @@ impl Agent {
             "Resumed session {session_id} ({} messages)",
             history.len()
         );
-        // In TUI mode this would rehydrate the conversation
         Ok(())
+    }
+
+    /// Dispatch a single tool call, running BeforeToolCall + AfterToolCall
+    /// hooks around it. Returns the result flattened to the `String` payload
+    /// expected by `Message::Tool` (media references inlined as `[media: ...]`
+    /// markers). Hooks see the full `ToolResult`.
+    async fn dispatch_tool(&self, name: &str, raw_args: &str) -> String {
+        let parsed_args: Value = serde_json::from_str(raw_args).unwrap_or(Value::Null);
+
+        let (effective_args_str, blocked) =
+            match self.hooks.before_tool_call(name, &parsed_args).await {
+                ToolCallDecision::Continue => (raw_args.to_string(), None),
+                ToolCallDecision::Block(reason) => (raw_args.to_string(), Some(reason)),
+                ToolCallDecision::ReplaceArgs(new_args) => (
+                    serde_json::to_string(&new_args).unwrap_or_else(|_| raw_args.to_string()),
+                    None,
+                ),
+            };
+
+        let raw_result: ToolResult = if let Some(reason) = blocked {
+            ToolResult::err(format!("Blocked: {reason}"))
+        } else {
+            match self.tools.execute(name, &effective_args_str).await {
+                Ok(r) => r,
+                Err(e) => ToolResult::err(format!("Error: {e}")),
+            }
+        };
+
+        let final_result = match self.hooks.after_tool_call(name, &raw_result).await {
+            Some(replaced) => replaced,
+            None => raw_result,
+        };
+
+        flatten_for_message(final_result)
+    }
+}
+
+/// Render a `ToolResult` to the `String` payload that goes into
+/// `Message::Tool { content }`. Media references are inlined as `[media: ...]`
+/// markers since the OpenAI tool message format only carries a single text
+/// field.
+fn flatten_for_message(result: ToolResult) -> String {
+    if result.media.is_empty() {
+        return result.output;
+    }
+    let media_block = result
+        .media
+        .iter()
+        .map(|m| format!("[media: {m}]"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    if result.output.is_empty() {
+        media_block
+    } else {
+        format!("{}\n\n{media_block}", result.output)
     }
 }

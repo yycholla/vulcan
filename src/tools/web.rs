@@ -1,4 +1,4 @@
-use crate::tools::Tool;
+use crate::tools::{Tool, ToolResult};
 use anyhow::Result;
 use async_trait::async_trait;
 use serde_json::{json, Value};
@@ -22,13 +22,13 @@ impl Tool for WebSearch {
             "required": ["query"]
         })
     }
-    async fn call(&self, params: Value) -> Result<String> {
+    async fn call(&self, params: Value) -> Result<ToolResult> {
         let query = params["query"].as_str().ok_or_else(|| anyhow::anyhow!("query required"))?;
 
         // Use DuckDuckGo's lite version for simple scraping
         let url = format!("https://html.duckduckgo.com/html/?q={}", urlencoding(query));
         let client = reqwest::Client::builder()
-            .user_agent("ferris/0.1 (AI agent; personal use)")
+            .user_agent("vulcan/0.1 (AI agent; personal use)")
             .build()?;
 
         let response = client.get(&url).send().await?;
@@ -37,8 +37,8 @@ impl Tool for WebSearch {
         // Simple extraction of result links from DuckDuckGo HTML
         let results = extract_ddg_results(&html);
 
-        Ok(if results.is_empty() {
-            "No results found.".into()
+        let output = if results.is_empty() {
+            "No results found.".to_string()
         } else {
             results
                 .iter()
@@ -46,7 +46,8 @@ impl Tool for WebSearch {
                 .map(|(i, r)| format!("{}. [{}]({})\n   {}", i + 1, r.title, r.url, r.snippet))
                 .collect::<Vec<_>>()
                 .join("\n\n")
-        })
+        };
+        Ok(ToolResult::ok(output))
     }
 }
 
@@ -133,11 +134,11 @@ impl Tool for WebFetch {
             "required": ["url"]
         })
     }
-    async fn call(&self, params: Value) -> Result<String> {
+    async fn call(&self, params: Value) -> Result<ToolResult> {
         let url = params["url"].as_str().ok_or_else(|| anyhow::anyhow!("url required"))?;
 
         let client = reqwest::Client::builder()
-            .user_agent("ferris/0.1 (AI agent; personal use)")
+            .user_agent("vulcan/0.1 (AI agent; personal use)")
             .timeout(std::time::Duration::from_secs(30))
             .build()?;
 
@@ -168,7 +169,7 @@ impl Tool for WebFetch {
             result.push_str(&text);
         }
 
-        Ok(result)
+        Ok(ToolResult::ok(result))
     }
 }
 

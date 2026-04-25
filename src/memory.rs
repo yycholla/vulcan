@@ -20,7 +20,7 @@ pub struct SessionMeta {
 
 impl SessionStore {
     pub fn new() -> Self {
-        let dir = crate::config::ferris_home().join("sessions");
+        let dir = crate::config::vulcan_home().join("sessions");
         std::fs::create_dir_all(&dir).ok();
         Self { sessions_dir: dir }
     }

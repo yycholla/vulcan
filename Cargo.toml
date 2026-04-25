@@ -1,11 +1,11 @@
 [package]
-name = "ferris"
+name = "vulcan"
 version = "0.1.0"
 edition = "2024"
-description = "A pure-Rust personal AI agent — Hermes meets Ironcode"
+description = "A Rust AI agent — forged at the forge, tested by fire"
 authors = ["Colin Hanway"]
 license = "MIT"
-repository = "https://github.com/yycholla/ferris"
+repository = "https://github.com/yycholla/vulcan"
 readme = "README.md"
 
 [dependencies]

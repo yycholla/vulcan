@@ -4,12 +4,58 @@ use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::Arc;
 
+/// Canonical tool return type — the wire format between `Tool::call`, the
+/// agent loop, and `AfterToolCall` hooks.
+///
+/// `output` goes to the LLM (via `Message::Tool` content). `media` carries
+/// file paths for attachments (images, audio, etc.) — the agent serializes
+/// them inline as `[media: ...]` markers when flattening for the message
+/// payload, but hooks and the TUI see them as a separate field. `is_error`
+/// is the structured signal that something went wrong (preferred over
+/// string-prefix sniffing like `output.starts_with("Error:")`).
+#[derive(Debug, Clone, Default)]
+pub struct ToolResult {
+    pub output: String,
+    pub media: Vec<String>,
+    pub is_error: bool,
+}
+
+impl ToolResult {
+    pub fn ok(output: impl Into<String>) -> Self {
+        Self {
+            output: output.into(),
+            media: Vec::new(),
+            is_error: false,
+        }
+    }
+
+    pub fn err(output: impl Into<String>) -> Self {
+        Self {
+            output: output.into(),
+            media: Vec::new(),
+            is_error: true,
+        }
+    }
+}
+
+impl From<String> for ToolResult {
+    fn from(output: String) -> Self {
+        Self::ok(output)
+    }
+}
+
+impl From<&str> for ToolResult {
+    fn from(output: &str) -> Self {
+        Self::ok(output)
+    }
+}
+
 #[async_trait::async_trait]
 pub trait Tool: Send + Sync {
     fn name(&self) -> &str;
     fn description(&self) -> &str;
     fn schema(&self) -> Value;
-    async fn call(&self, params: Value) -> Result<String>;
+    async fn call(&self, params: Value) -> Result<ToolResult>;
 }
 
 pub mod file;
@@ -55,8 +101,8 @@ impl ToolRegistry {
             .collect()
     }
 
-    /// Execute a tool by name with JSON arguments
-    pub async fn execute(&self, name: &str, arguments: &str) -> Result<String> {
+    /// Execute a tool by name with JSON arguments.
+    pub async fn execute(&self, name: &str, arguments: &str) -> Result<ToolResult> {
         let tool = self
             .tools
             .get(name)

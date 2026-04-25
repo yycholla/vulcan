@@ -1,0 +1,399 @@
+use ratatui::{
+    Frame as TuiFrame,
+    layout::{Constraint, Direction, Layout, Rect},
+    style::{Color, Modifier, Style},
+    text::{Line, Span},
+    widgets::{Block, BorderType, Borders, Paragraph, Wrap},
+};
+
+use super::theme::{Palette, body, inverse};
+
+/// Bauhaus framed window: thick double-line border, title bar with `▓▓` mark
+/// + uppercase title on left, status pill on right. Matches the design's
+/// `Frame` component (boxShadow handled with paper bg fill).
+///
+/// `accent` overrides the title-bar background; default is ink black.
+pub fn frame(
+    f: &mut TuiFrame,
+    area: Rect,
+    title: &str,
+    status: Option<&str>,
+    accent: Option<Color>,
+) -> Rect {
+    if area.width < 4 || area.height < 3 {
+        return area;
+    }
+
+    // Outer block — paint paper background and a heavy border.
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Thick)
+        .border_style(Style::default().fg(Palette::INK).bg(Palette::PAPER))
+        .style(body());
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+
+    // Title bar = first line inside the border.
+    if inner.height == 0 {
+        return inner;
+    }
+    let bar = Rect { x: inner.x, y: inner.y, width: inner.width, height: 1 };
+    let bar_bg = accent.unwrap_or(Palette::INK);
+    let bar_fg = if accent.is_some() { Palette::INK } else { Palette::PAPER };
+    let bar_style = Style::default().fg(bar_fg).bg(bar_bg).add_modifier(Modifier::BOLD);
+
+    let mut spans = vec![
+        Span::styled(" ▓▓ ", bar_style),
+        Span::styled(title.to_uppercase(), bar_style),
+    ];
+    if let Some(s) = status {
+        let status_text = format!(" {s} ");
+        let used: u16 = (4 + title.chars().count() + status_text.chars().count()) as u16;
+        if used < bar.width {
+            let pad = " ".repeat((bar.width - used) as usize);
+            spans.push(Span::styled(pad, bar_style));
+        }
+        spans.push(Span::styled(status_text, bar_style));
+    } else {
+        let used: u16 = (4 + title.chars().count()) as u16;
+        if used < bar.width {
+            let pad = " ".repeat((bar.width - used) as usize);
+            spans.push(Span::styled(pad, bar_style));
+        }
+    }
+    f.render_widget(Paragraph::new(Line::from(spans)).style(bar_style), bar);
+
+    // Body region = everything below the title bar.
+    Rect {
+        x: inner.x,
+        y: inner.y + 1,
+        width: inner.width,
+        height: inner.height.saturating_sub(1),
+    }
+}
+
+/// Render a child "section" header inside a pane (one ink line, paper text).
+pub fn section_header(f: &mut TuiFrame, area: Rect, label: &str, accent: Option<Color>) -> Rect {
+    if area.height == 0 {
+        return area;
+    }
+    let bg = accent.unwrap_or(Palette::INK);
+    let fg = if accent.is_some() { Palette::INK } else { Palette::PAPER };
+    let style = Style::default().fg(fg).bg(bg).add_modifier(Modifier::BOLD);
+    let bar = Rect { x: area.x, y: area.y, width: area.width, height: 1 };
+    let text = format!(" ▣ {} ", label.to_uppercase());
+    let pad_total = area.width as usize;
+    let mut display = text.clone();
+    if display.chars().count() < pad_total {
+        display.push_str(&" ".repeat(pad_total - display.chars().count()));
+    }
+    f.render_widget(Paragraph::new(display).style(style), bar);
+    Rect {
+        x: area.x,
+        y: area.y + 1,
+        width: area.width,
+        height: area.height - 1,
+    }
+}
+
+/// A status pill rendered inline as a Span (uppercase, padded).
+pub fn pill(text: &str, color: Color, filled: bool) -> Span<'static> {
+    let body = format!(" {} ", text.to_uppercase());
+    let style = if filled {
+        Style::default().fg(Palette::PAPER).bg(color).add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(color).add_modifier(Modifier::BOLD)
+    };
+    Span::styled(body, style)
+}
+
+/// Sparkline characters — 1 char per value.
+pub fn sparkline(values: &[u16]) -> String {
+    let chars: Vec<char> = "▁▂▃▄▅▆▇█".chars().collect();
+    let max = (*values.iter().max().unwrap_or(&1)).max(1);
+    values
+        .iter()
+        .map(|v| {
+            let idx = ((*v as f32 / max as f32) * 7.0).round() as usize;
+            chars[idx.min(7)]
+        })
+        .collect()
+}
+
+/// Tool call card — three lines: header (name + status), args, optional result.
+/// Returns the lines so the caller composes them into a Paragraph.
+pub fn tool_call_lines(
+    name: &str,
+    args: &str,
+    status: ToolStatus,
+    result: Option<&str>,
+) -> Vec<Line<'static>> {
+    let (color, label) = match status {
+        ToolStatus::Ok => (Palette::GREEN, "✓ ok"),
+        ToolStatus::Run => (Palette::YELLOW, "● running"),
+        ToolStatus::Err => (Palette::RED, "✗ failed"),
+    };
+    let mut lines = Vec::new();
+    let header = format!(" ┏ {name:<28}{label:>14} ");
+    lines.push(Line::from(Span::styled(
+        header,
+        Style::default().fg(color).bg(Palette::FAINT).add_modifier(Modifier::BOLD),
+    )));
+    lines.push(Line::from(Span::styled(
+        format!(" ┃ {}", args),
+        Style::default().fg(Palette::MUTED).bg(Palette::PAPER),
+    )));
+    if let Some(r) = result {
+        lines.push(Line::from(Span::styled(
+            format!(" ┗ {}", r),
+            Style::default().fg(Palette::INK).bg(Palette::PAPER),
+        )));
+    } else {
+        lines.push(Line::from(Span::styled(
+            " ┗".to_string(),
+            Style::default().fg(Palette::INK).bg(Palette::PAPER),
+        )));
+    }
+    lines
+}
+
+#[derive(Copy, Clone)]
+pub enum ToolStatus {
+    Ok,
+    Run,
+    Err,
+}
+
+/// Reasoning trace block — italicized, hatched bg.
+pub fn reasoning_lines(text: &str, hidden: bool) -> Vec<Line<'static>> {
+    if hidden {
+        return vec![Line::from(Span::styled(
+            "░░░ reasoning trace hidden · Ctrl-R to show ░░░",
+            Style::default().fg(Palette::MUTED).add_modifier(Modifier::DIM),
+        ))];
+    }
+    let mut lines = vec![Line::from(Span::styled(
+        " ▒ THINKING",
+        Style::default()
+            .fg(Palette::INK)
+            .bg(Palette::FAINT)
+            .add_modifier(Modifier::BOLD),
+    ))];
+    for raw in text.lines() {
+        lines.push(Line::from(Span::styled(
+            format!(" ▒ {}", raw),
+            Style::default()
+                .fg(Palette::INK)
+                .bg(Palette::FAINT)
+                .add_modifier(Modifier::ITALIC),
+        )));
+    }
+    lines
+}
+
+/// Message header: ▆ ROLE · tag
+pub fn message_header(role: &str, accent: Color, tag: Option<&str>) -> Line<'static> {
+    let mut spans = vec![
+        Span::styled("▆ ", Style::default().fg(accent).add_modifier(Modifier::BOLD)),
+        Span::styled(
+            role.to_uppercase(),
+            Style::default().fg(Palette::INK).add_modifier(Modifier::BOLD),
+        ),
+    ];
+    if let Some(t) = tag {
+        spans.push(Span::raw(" "));
+        spans.push(pill(t, accent, false));
+    }
+    Line::from(spans)
+}
+
+/// Render a paragraph with a left accent bar — used for chat message bodies.
+pub fn render_message_body(
+    f: &mut TuiFrame,
+    area: Rect,
+    accent: Color,
+    lines: Vec<Line<'static>>,
+) {
+    if area.width < 3 || area.height == 0 {
+        return;
+    }
+    let bar = Rect { x: area.x, y: area.y, width: 1, height: area.height };
+    f.render_widget(
+        Paragraph::new(
+            std::iter::repeat_with(|| Line::from(Span::styled("▎", Style::default().fg(accent))))
+                .take(area.height as usize)
+                .collect::<Vec<_>>(),
+        )
+        .style(body()),
+        bar,
+    );
+    let body_area = Rect {
+        x: area.x + 2,
+        y: area.y,
+        width: area.width.saturating_sub(2),
+        height: area.height,
+    };
+    f.render_widget(
+        Paragraph::new(lines).style(body()).wrap(Wrap { trim: false }),
+        body_area,
+    );
+}
+
+/// Bottom prompt row with mode pill, red caret, the input text + cursor,
+/// dashed key-hint line, and right-aligned model + token gauge.
+///
+/// Returns the (x, y) where the OS cursor should be placed.
+pub fn prompt_row(
+    f: &mut TuiFrame,
+    area: Rect,
+    mode: &str,
+    input: &str,
+    hints: &[(&str, &str)],
+    model_status: &str,
+    thinking: bool,
+) -> (u16, u16) {
+    if area.height < 2 {
+        return (area.x, area.y);
+    }
+    // Top divider
+    let layout = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(1), Constraint::Length(1), Constraint::Length(1)])
+        .split(area);
+
+    // Divider row
+    let div = "─".repeat(area.width as usize);
+    f.render_widget(
+        Paragraph::new(div).style(Style::default().fg(Palette::INK).bg(Palette::PAPER)),
+        layout[0],
+    );
+
+    // Mode pill + caret + input
+    let mode_pill = Span::styled(
+        format!(" {} ", mode),
+        Style::default().fg(Palette::PAPER).bg(Palette::INK).add_modifier(Modifier::BOLD),
+    );
+    let caret = Span::styled(
+        " ❯ ",
+        Style::default().fg(Palette::RED).bg(Palette::PAPER).add_modifier(Modifier::BOLD),
+    );
+    let input_span = Span::styled(
+        input.to_string(),
+        Style::default().fg(Palette::INK).bg(Palette::PAPER),
+    );
+    let cursor_block = Span::styled(
+        if thinking { "▒" } else { "█" },
+        Style::default()
+            .fg(Palette::INK)
+            .bg(Palette::PAPER)
+            .add_modifier(if thinking { Modifier::SLOW_BLINK } else { Modifier::empty() }),
+    );
+    let line = Line::from(vec![mode_pill, caret, input_span, cursor_block]);
+    f.render_widget(Paragraph::new(line).style(body()), layout[1]);
+
+    // Cursor position: after mode pill (mode width + 2 spaces) + caret (3) + input chars
+    let mode_width = mode.chars().count() as u16 + 2;
+    let cursor_x = layout[1].x + mode_width + 3 + input.chars().count() as u16;
+    let cursor_y = layout[1].y;
+
+    // Hints row
+    let mut hint_spans: Vec<Span<'static>> = Vec::new();
+    for (i, (key, label)) in hints.iter().enumerate() {
+        if i > 0 {
+            hint_spans.push(Span::styled(
+                "  ",
+                Style::default().fg(Palette::MUTED).bg(Palette::PAPER),
+            ));
+        }
+        hint_spans.push(Span::styled(
+            format!(" {key} "),
+            Style::default()
+                .fg(Palette::PAPER)
+                .bg(Palette::INK)
+                .add_modifier(Modifier::BOLD),
+        ));
+        hint_spans.push(Span::styled(
+            format!(" {label}"),
+            Style::default().fg(Palette::MUTED).bg(Palette::PAPER),
+        ));
+    }
+    let hint_text_len: u16 = hint_spans.iter().map(|s| s.content.chars().count() as u16).sum();
+    let model_len = model_status.chars().count() as u16;
+    if hint_text_len + model_len + 2 < area.width {
+        let pad = " ".repeat((area.width - hint_text_len - model_len - 1) as usize);
+        hint_spans.push(Span::styled(
+            pad,
+            Style::default().fg(Palette::MUTED).bg(Palette::PAPER),
+        ));
+        hint_spans.push(Span::styled(
+            format!(" {model_status}"),
+            Style::default().fg(Palette::INK).bg(Palette::PAPER).add_modifier(Modifier::BOLD),
+        ));
+    }
+    f.render_widget(
+        Paragraph::new(Line::from(hint_spans)).style(body()),
+        layout[2],
+    );
+
+    (cursor_x, cursor_y)
+}
+
+/// Bottom ticker strip — used in trading floor view. Scrolling text of recent
+/// sub-agent activity.
+pub fn ticker(f: &mut TuiFrame, area: Rect, cells: &[(String, String, Color)]) {
+    if area.height == 0 {
+        return;
+    }
+    let mut spans = vec![Span::styled(
+        " TICKER ",
+        Style::default().fg(Palette::PAPER).bg(Palette::RED).add_modifier(Modifier::BOLD),
+    )];
+    for (sub, msg, color) in cells {
+        spans.push(Span::styled(
+            " ".to_string(),
+            Style::default().fg(Palette::PAPER).bg(Palette::INK),
+        ));
+        spans.push(Span::styled(
+            "█".to_string(),
+            Style::default().fg(*color).bg(Palette::INK),
+        ));
+        spans.push(Span::styled(
+            format!(" #{sub} "),
+            Style::default()
+                .fg(Palette::PAPER)
+                .bg(Palette::INK)
+                .add_modifier(Modifier::BOLD),
+        ));
+        spans.push(Span::styled(
+            format!("{msg} "),
+            Style::default().fg(Palette::PAPER).bg(Palette::INK),
+        ));
+        spans.push(Span::styled(
+            "│",
+            Style::default().fg(Palette::MUTED).bg(Palette::INK),
+        ));
+    }
+    // Pad to full width with ink bg
+    let used: u16 = spans.iter().map(|s| s.content.chars().count() as u16).sum();
+    if used < area.width {
+        spans.push(Span::styled(
+            " ".repeat((area.width - used) as usize),
+            Style::default().bg(Palette::INK),
+        ));
+    }
+    f.render_widget(
+        Paragraph::new(Line::from(spans)).style(inverse()),
+        area,
+    );
+}
+
+/// Fill a rect with a solid background color (paper by default).
+pub fn fill(f: &mut TuiFrame, area: Rect, style: Style) {
+    if area.height == 0 || area.width == 0 {
+        return;
+    }
+    let blank: Vec<Line<'static>> = (0..area.height)
+        .map(|_| Line::from(Span::styled(" ".repeat(area.width as usize), style)))
+        .collect();
+    f.render_widget(Paragraph::new(blank).style(style), area);
+}
