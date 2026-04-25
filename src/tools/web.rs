@@ -1,7 +1,7 @@
 use crate::tools::{Tool, ToolResult};
 use anyhow::Result;
 use async_trait::async_trait;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use tokio_util::sync::CancellationToken;
 
 pub struct WebSearch;
@@ -24,7 +24,9 @@ impl Tool for WebSearch {
         })
     }
     async fn call(&self, params: Value, cancel: CancellationToken) -> Result<ToolResult> {
-        let query = params["query"].as_str().ok_or_else(|| anyhow::anyhow!("query required"))?;
+        let query = params["query"]
+            .as_str()
+            .ok_or_else(|| anyhow::anyhow!("query required"))?;
 
         // Use DuckDuckGo's lite version for simple scraping
         let url = format!("https://html.duckduckgo.com/html/?q={}", urlencoding(query));
@@ -99,7 +101,11 @@ fn extract_ddg_results(html: &str) -> Vec<DdgResult> {
             .to_string();
 
         if !title.is_empty() {
-            results.push(DdgResult { title, url, snippet });
+            results.push(DdgResult {
+                title,
+                url,
+                snippet,
+            });
             if results.len() >= 5 {
                 break;
             }
@@ -142,7 +148,9 @@ impl Tool for WebFetch {
         })
     }
     async fn call(&self, params: Value, cancel: CancellationToken) -> Result<ToolResult> {
-        let url = params["url"].as_str().ok_or_else(|| anyhow::anyhow!("url required"))?;
+        let url = params["url"]
+            .as_str()
+            .ok_or_else(|| anyhow::anyhow!("url required"))?;
 
         let client = reqwest::Client::builder()
             .user_agent("vulcan/0.1 (AI agent; personal use)")
@@ -189,7 +197,10 @@ fn html_to_text(html: &str) -> String {
         if in_script {
             if ch == '<' {
                 // Check for closing script tag
-                if html[html.len().saturating_sub(8)..].to_lowercase().contains("/script") {
+                if html[html.len().saturating_sub(8)..]
+                    .to_lowercase()
+                    .contains("/script")
+                {
                     in_script = false;
                 }
             }
@@ -206,8 +217,16 @@ fn html_to_text(html: &str) -> String {
                 in_tag = true;
                 // Detect script/style blocks to skip
                 let lower = html[..].to_lowercase();
-                if lower.contains("<script") { in_script = true; in_tag = false; continue; }
-                if lower.contains("<style") { in_style = true; in_tag = false; continue; }
+                if lower.contains("<script") {
+                    in_script = true;
+                    in_tag = false;
+                    continue;
+                }
+                if lower.contains("<style") {
+                    in_style = true;
+                    in_tag = false;
+                    continue;
+                }
             }
             '>' if in_tag => {
                 in_tag = false;

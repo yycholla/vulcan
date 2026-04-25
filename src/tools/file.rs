@@ -1,8 +1,7 @@
-
 use crate::tools::{Tool, ToolResult};
 use anyhow::Result;
 use async_trait::async_trait;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use tokio_util::sync::CancellationToken;
 
 pub struct ReadFile;
@@ -27,7 +26,9 @@ impl Tool for ReadFile {
         })
     }
     async fn call(&self, params: Value, _cancel: CancellationToken) -> Result<ToolResult> {
-        let path = params["path"].as_str().ok_or_else(|| anyhow::anyhow!("path required"))?;
+        let path = params["path"]
+            .as_str()
+            .ok_or_else(|| anyhow::anyhow!("path required"))?;
         let offset = params["offset"].as_i64().unwrap_or(1);
         let limit = params["limit"].as_i64().unwrap_or(500);
 
@@ -77,7 +78,9 @@ impl Tool for WriteFile {
         })
     }
     async fn call(&self, params: Value, _cancel: CancellationToken) -> Result<ToolResult> {
-        let path = params["path"].as_str().ok_or_else(|| anyhow::anyhow!("path required"))?;
+        let path = params["path"]
+            .as_str()
+            .ok_or_else(|| anyhow::anyhow!("path required"))?;
         let content = params["content"].as_str().unwrap_or("");
 
         // Create parent directories
@@ -114,7 +117,9 @@ impl Tool for SearchFiles {
         })
     }
     async fn call(&self, params: Value, _cancel: CancellationToken) -> Result<ToolResult> {
-        let pattern = params["pattern"].as_str().ok_or_else(|| anyhow::anyhow!("pattern required"))?;
+        let pattern = params["pattern"]
+            .as_str()
+            .ok_or_else(|| anyhow::anyhow!("pattern required"))?;
         let path = params["path"].as_str().unwrap_or(".");
         let limit = params["limit"].as_i64().unwrap_or(20);
 
@@ -168,8 +173,12 @@ impl Tool for PatchFile {
         })
     }
     async fn call(&self, params: Value, _cancel: CancellationToken) -> Result<ToolResult> {
-        let path = params["path"].as_str().ok_or_else(|| anyhow::anyhow!("path required"))?;
-        let old = params["old_string"].as_str().ok_or_else(|| anyhow::anyhow!("old_string required"))?;
+        let path = params["path"]
+            .as_str()
+            .ok_or_else(|| anyhow::anyhow!("path required"))?;
+        let old = params["old_string"]
+            .as_str()
+            .ok_or_else(|| anyhow::anyhow!("old_string required"))?;
         let new = params["new_string"].as_str().unwrap_or("");
 
         let content = tokio::fs::read_to_string(path).await?;
@@ -196,6 +205,8 @@ impl Tool for PatchFile {
         tokio::fs::write(path, &new_content).await?;
 
         let replaces = content.matches(old).count();
-        Ok(ToolResult::ok(format!("Replaced {replaces} occurrence(s) in {path}")))
+        Ok(ToolResult::ok(format!(
+            "Replaced {replaces} occurrence(s) in {path}"
+        )))
     }
 }

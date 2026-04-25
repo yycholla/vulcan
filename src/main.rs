@@ -58,8 +58,7 @@ async fn main() -> anyhow::Result<()> {
 
 /// Log to stderr for CLI/one-shot mode — fine because there's no TUI
 fn init_cli_logging() {
-    let filter = EnvFilter::try_from_env("VULCAN_LOG")
-        .unwrap_or_else(|_| EnvFilter::new("info"));
+    let filter = EnvFilter::try_from_env("VULCAN_LOG").unwrap_or_else(|_| EnvFilter::new("info"));
     tracing_subscriber::fmt()
         .with_env_filter(filter)
         .with_writer(std::io::stderr)
@@ -72,12 +71,10 @@ fn init_tui_logging() {
     std::fs::create_dir_all(&log_dir).ok();
     let log_path = log_dir.join("vulcan.log");
 
-    let file = std::fs::File::create(&log_path).unwrap_or_else(|_| {
-        std::fs::File::open("/dev/null").unwrap()
-    });
+    let file = std::fs::File::create(&log_path)
+        .unwrap_or_else(|_| std::fs::File::open("/dev/null").unwrap());
 
-    let filter = EnvFilter::try_from_env("VULCAN_LOG")
-        .unwrap_or_else(|_| EnvFilter::new("info"));
+    let filter = EnvFilter::try_from_env("VULCAN_LOG").unwrap_or_else(|_| EnvFilter::new("info"));
     tracing_subscriber::fmt()
         .with_env_filter(filter)
         .with_writer(file)

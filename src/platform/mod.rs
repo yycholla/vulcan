@@ -3,7 +3,6 @@
 /// This module defines the abstraction for sending and receiving messages
 /// across different platforms. Phase 1 uses the CLI platform (stdin/stdout/TUI).
 /// Phase 2 adds Telegram (teloxide) and Discord (serenity).
-
 use anyhow::Result;
 
 /// A message from a user on any platform

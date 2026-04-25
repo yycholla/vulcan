@@ -8,8 +8,8 @@ use std::fmt;
 use std::time::Duration;
 
 use anyhow::Result;
-use serde::{de, Deserialize, Deserializer, Serialize, Serializer};
 use serde::ser::SerializeStruct;
+use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
 use serde_json::Value;
 use tokio::sync::mpsc;
 
@@ -46,7 +46,9 @@ impl fmt::Display for ProviderError {
                 "Authentication failed: {message}. \
                  Check your API key in ~/.vulcan/config.toml or set the VULCAN_API_KEY env var."
             ),
-            ProviderError::RateLimited { retry_after: Some(d) } => write!(
+            ProviderError::RateLimited {
+                retry_after: Some(d),
+            } => write!(
                 f,
                 "Rate limited by provider. Suggested retry after {}s.",
                 d.as_secs().max(1)
@@ -151,7 +153,11 @@ impl From<reqwest::Error> for ProviderError {
 fn extract_error_message(body: &str) -> Option<String> {
     let v: serde_json::Value = serde_json::from_str(body).ok()?;
     // Top-level error.message
-    if let Some(m) = v.get("error").and_then(|e| e.get("message")).and_then(|m| m.as_str()) {
+    if let Some(m) = v
+        .get("error")
+        .and_then(|e| e.get("message"))
+        .and_then(|m| m.as_str())
+    {
         // OpenRouter-style: error.metadata.raw is a JSON string with an inner
         // error.message that's the actual provider message. Surface that if present.
         if let Some(raw) = v
@@ -243,7 +249,10 @@ impl Serialize for Message {
                 }
                 s.end()
             }
-            Message::Tool { tool_call_id, content } => {
+            Message::Tool {
+                tool_call_id,
+                content,
+            } => {
                 let mut s = serializer.serialize_struct("Message", 3)?;
                 s.serialize_field("role", "tool")?;
                 s.serialize_field("tool_call_id", tool_call_id)?;

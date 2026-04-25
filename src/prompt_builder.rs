@@ -8,7 +8,7 @@ impl PromptBuilder {
         let tool_section = format!(
             "## Available Tools\n\
              You have access to the following tools. When you need to perform an action, \
-             respond with a `tool_calls` array:\n\n{}\n",
+             call the appropriate tool directly through the tool-calling interface:\n\n{}\n",
             tools
                 .definitions()
                 .iter()
@@ -29,7 +29,31 @@ impl PromptBuilder {
              {tool_section}\n\
              ## Response Format\n\
              Respond naturally. If the user's request doesn't need tools, just answer directly. \
-             When tools are needed, include a `tool_calls` block with the appropriate function calls."
+             When tools are needed, call the tool directly instead of printing a JSON blob or a literal \
+             `tool_calls` block in assistant text. Tool call arguments must be valid JSON matching the tool schema."
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn system_prompt_mentions_json_for_tool_call_mode() {
+        let prompt = PromptBuilder.build_system_prompt(&ToolRegistry::new());
+        assert!(
+            prompt.to_lowercase().contains("json"),
+            "prompt must mention json for providers that require it when json_object mode is enabled: {prompt:?}"
+        );
+    }
+
+    #[test]
+    fn system_prompt_does_not_tell_models_to_print_literal_tool_calls_blocks() {
+        let prompt = PromptBuilder.build_system_prompt(&ToolRegistry::new());
+        assert!(
+            !prompt.contains("include a `tool_calls` block"),
+            "prompt should instruct native tool calling, not literal tool_calls text output: {prompt:?}"
+        );
     }
 }

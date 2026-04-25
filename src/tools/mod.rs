@@ -124,6 +124,138 @@ impl ToolRegistry {
             anyhow::anyhow!("Failed to parse arguments for {name}: {e}. Raw args: {arguments}")
         })?;
 
+        // Lightweight schema validation: check required fields are present
+        // before dispatch. Catches the common "model forgot a required arg"
+        // failure mode early with a clear error containing the schema, so
+        // the agent can self-correct on the next turn (YYC-39).
+        let schema = tool.schema();
+        validate_tool_params(name, &schema, &params, arguments)?;
+
         tool.call(params, cancel).await
+    }
+}
+
+/// Returns a comma-separated list of `required` schema fields that are
+/// missing from `params`, or `None` if all required fields are present (or
+/// the schema doesn't declare any).
+fn missing_required_fields(schema: &Value, params: &Value) -> Option<String> {
+    let required = schema.get("required")?.as_array()?;
+    let provided = params.as_object()?;
+    let missing: Vec<&str> = required
+        .iter()
+        .filter_map(|v| v.as_str())
+        .filter(|key| !provided.contains_key(*key))
+        .collect();
+    if missing.is_empty() {
+        None
+    } else {
+        Some(missing.join(", "))
+    }
+}
+
+fn validate_tool_params(
+    name: &str,
+    schema: &Value,
+    params: &Value,
+    raw_arguments: &str,
+) -> Result<()> {
+    let schema_text =
+        serde_json::to_string(schema).unwrap_or_else(|_| "<unserializable schema>".into());
+
+    if params.as_object().is_none() {
+        anyhow::bail!(
+            "Tool '{name}' arguments must be a JSON object. Schema: {schema_text}. \
+             You provided: {raw_arguments}"
+        );
+    }
+
+    if let Some(missing) = missing_required_fields(schema, params) {
+        let required = schema
+            .get("required")
+            .and_then(|v| v.as_array())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|s| s.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            })
+            .unwrap_or_default();
+        anyhow::bail!(
+            "Tool '{name}' is missing required field(s): {missing}. \
+             Required fields are: [{required}]. Schema: {schema_text}. \
+             You provided: {raw_arguments}"
+        );
+    }
+
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+    use tokio_util::sync::CancellationToken;
+
+    #[tokio::test]
+    async fn missing_required_field_yields_clear_error() {
+        let registry = ToolRegistry::new();
+        // edit_file requires path, old_string, new_string. Omit new_string.
+        let bogus_args = json!({
+            "path": "/tmp/x",
+            "old_string": "foo"
+            // new_string missing
+        })
+        .to_string();
+
+        let err = registry
+            .execute("edit_file", &bogus_args, CancellationToken::new())
+            .await
+            .unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("missing required"), "got {msg:?}");
+        assert!(msg.contains("new_string"), "got {msg:?}");
+        assert!(msg.contains("Required fields"), "got {msg:?}");
+        assert!(msg.contains("Schema"), "got {msg:?}");
+    }
+
+    #[tokio::test]
+    async fn malformed_json_yields_clear_error() {
+        let registry = ToolRegistry::new();
+        let err = registry
+            .execute("read_file", "{not valid json", CancellationToken::new())
+            .await
+            .unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("Failed to parse arguments"), "got {msg:?}");
+        assert!(msg.contains("Raw args"), "got {msg:?}");
+    }
+
+    #[test]
+    fn missing_required_handles_empty_or_absent_required() {
+        // Schema with no `required` key — should pass.
+        let schema = json!({"type": "object", "properties": {}});
+        assert!(missing_required_fields(&schema, &json!({})).is_none());
+        // Schema with empty required array — should pass.
+        let schema = json!({"type": "object", "required": []});
+        assert!(missing_required_fields(&schema, &json!({})).is_none());
+        // Required, all present.
+        let schema = json!({"required": ["a", "b"]});
+        assert!(missing_required_fields(&schema, &json!({"a": 1, "b": 2})).is_none());
+        // Required, one missing.
+        let schema = json!({"required": ["a", "b"]});
+        let missing = missing_required_fields(&schema, &json!({"a": 1})).unwrap();
+        assert_eq!(missing, "b");
+    }
+
+    #[tokio::test]
+    async fn non_object_arguments_fail_before_tool_dispatch() {
+        let registry = ToolRegistry::new();
+        let err = registry
+            .execute("read_file", "[]", CancellationToken::new())
+            .await
+            .unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("JSON object"), "got {msg:?}");
+        assert!(msg.contains("Schema"), "got {msg:?}");
     }
 }

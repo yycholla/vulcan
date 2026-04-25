@@ -51,10 +51,7 @@ pub struct ModelFeatures {
 pub trait ProviderCatalog: Send + Sync {
     async fn list_models(&self) -> std::result::Result<Vec<ModelInfo>, ProviderError>;
 
-    async fn get_model(
-        &self,
-        id: &str,
-    ) -> std::result::Result<Option<ModelInfo>, ProviderError> {
+    async fn get_model(&self, id: &str) -> std::result::Result<Option<ModelInfo>, ProviderError> {
         let models = self.list_models().await?;
         Ok(models.into_iter().find(|m| m.id == id))
     }
@@ -132,7 +129,10 @@ fn parse_openrouter(body: &Value) -> Vec<ModelInfo> {
                 .map(String::from);
             // OpenRouter pricing is given as strings like "0.00000028" per token.
             let pricing = m.get("pricing").and_then(|p| {
-                let inp = p.get("prompt").and_then(|v| v.as_str()).and_then(|s| s.parse::<f64>().ok())?;
+                let inp = p
+                    .get("prompt")
+                    .and_then(|v| v.as_str())
+                    .and_then(|s| s.parse::<f64>().ok())?;
                 let out = p
                     .get("completion")
                     .and_then(|v| v.as_str())
@@ -165,8 +165,10 @@ fn parse_openrouter(body: &Value) -> Vec<ModelInfo> {
                     .get("supported_parameters")
                     .and_then(|v| v.as_array())
                     .map(|a| {
-                        a.iter()
-                            .any(|s| s.as_str() == Some("reasoning") || s.as_str() == Some("include_reasoning"))
+                        a.iter().any(|s| {
+                            s.as_str() == Some("reasoning")
+                                || s.as_str() == Some("include_reasoning")
+                        })
                     })
                     .unwrap_or(false),
             };

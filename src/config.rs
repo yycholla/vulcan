@@ -27,6 +27,25 @@ pub struct Config {
     pub compaction: CompactionConfig,
 }
 
+#[derive(Debug, Deserialize, Clone, Copy, PartialEq, Eq, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum ProviderDebugMode {
+    #[default]
+    Off,
+    ToolFallback,
+    Wire,
+}
+
+impl ProviderDebugMode {
+    pub fn logs_wire(self) -> bool {
+        matches!(self, Self::Wire)
+    }
+
+    pub fn logs_tool_fallback(self) -> bool {
+        matches!(self, Self::ToolFallback | Self::Wire)
+    }
+}
+
 #[derive(Debug, Deserialize, Clone)]
 pub struct ProviderConfig {
     /// Provider type: "openai-compat" (covers OpenRouter, Anthropic, Ollama, etc.)
@@ -56,6 +75,13 @@ pub struct ProviderConfig {
     /// regardless; this just avoids the extra HTTP roundtrip on launch.
     #[serde(default)]
     pub disable_catalog: bool,
+    /// Provider protocol debugging:
+    /// - "off": no extra provider logging
+    /// - "tool-fallback": log raw assistant content when content-shaped tool
+    ///   fallback parsing is used
+    /// - "wire": also log request and raw response bodies
+    #[serde(default)]
+    pub debug: ProviderDebugMode,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -89,6 +115,7 @@ impl Default for ProviderConfig {
             max_retries: default_max_retries(),
             catalog_cache_ttl_hours: default_catalog_cache_ttl_hours(),
             disable_catalog: false,
+            debug: ProviderDebugMode::Off,
         }
     }
 }
@@ -164,8 +191,9 @@ impl Config {
 
         for (label, path) in &candidates {
             if path.exists() {
-                let content = std::fs::read_to_string(path)
-                    .with_context(|| format!("Failed to read config at {label} ({})", path.display()))?;
+                let content = std::fs::read_to_string(path).with_context(|| {
+                    format!("Failed to read config at {label} ({})", path.display())
+                })?;
                 let config: Config =
                     toml::from_str(&content).context("Failed to parse config.toml")?;
                 tracing::info!("Loaded config from {}", path.display());
@@ -185,5 +213,35 @@ impl Config {
         std::env::var("VULCAN_API_KEY")
             .ok()
             .or_else(|| self.provider.api_key.clone())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn provider_debug_mode_parses_from_toml() {
+        let config: Config = toml::from_str(
+            r#"
+[provider]
+debug = "wire"
+"#,
+        )
+        .expect("config should parse");
+
+        assert!(matches!(config.provider.debug, ProviderDebugMode::Wire));
+    }
+
+    #[test]
+    fn provider_debug_mode_helpers_match_expected_scopes() {
+        assert!(!ProviderDebugMode::Off.logs_wire());
+        assert!(!ProviderDebugMode::Off.logs_tool_fallback());
+
+        assert!(!ProviderDebugMode::ToolFallback.logs_wire());
+        assert!(ProviderDebugMode::ToolFallback.logs_tool_fallback());
+
+        assert!(ProviderDebugMode::Wire.logs_wire());
+        assert!(ProviderDebugMode::Wire.logs_tool_fallback());
     }
 }

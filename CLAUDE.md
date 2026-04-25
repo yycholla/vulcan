@@ -4,9 +4,13 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Vulcan is a pure-Rust personal AI agent (CLI + TUI). The binary is `vulcan`; chat is the default subcommand.
 
+## Github PR flow
+
+- This project uses Graphite for pr stacks and review. Branches should follow linear best practice for best sync between github state and linear
+
 ## Where work is tracked and planned
 
-- **Linear** is the source of truth for tasks. Workspace team **Yycholla**, project **Vulcan — Rust AI Agent** — issues use the `YYC-` prefix. Check existing issues before creating new ones; ask before bulk-creating tickets.
+- **Linear** is the source of truth for tasks. Workspace team **Yycholla**, project **Vulcan — Rust AI Agent** — issues use the `YYC-` prefix. Check existing issues before creating new ones; ask before bulk-creating tickets. Group under an epic issue where possible.
 - **`~/wiki/queries/rust-hermes-plan.md`** is the master vision (Phase 1 → 2 → 3, locked Phase 1 scope, tool trait + provider trait shapes). Anything that contradicts the plan is either an open question or a documentation lag — don't silently diverge.
 - **`~/wiki/queries/`** also holds design docs (e.g. `hooks-design.md` once written) — prefer adding cross-cutting design docs there, not in the repo.
 
@@ -27,6 +31,8 @@ Logging: TUI mode logs to a file (so `tracing` output doesn't splat the screen);
 Config: `~/.vulcan/config.toml` (see `config.example.toml`). API key via `VULCAN_API_KEY` env var or the config file.
 
 ## Architecture worth reading multiple files to understand
+
+Currently features and architecture should be focused on creating an excellent foundation for further features and maintenance.
 
 **The hook system is the foundation surface.** It's the in-tree precursor to the OpenClaw-style plugin architecture in the master plan. Reading order: `src/hooks/mod.rs` → `src/hooks/audit.rs` (reference handler) → `src/hooks/skills.rs` (built-in BeforePrompt) → how `src/agent.rs` wires the five events.
 

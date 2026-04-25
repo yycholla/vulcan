@@ -62,7 +62,9 @@ pub fn render_markdown(text: &str) -> Vec<Line<'static>> {
                     5 => "##### ",
                     _ => "###### ",
                 },
-                Style::default().fg(MdTheme::HEADING).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(MdTheme::HEADING)
+                    .add_modifier(Modifier::BOLD),
             )];
             styled.extend(spans);
             lines.push(Line::from(styled));
@@ -76,12 +78,18 @@ pub fn render_markdown(text: &str) -> Vec<Line<'static>> {
             continue;
         }
         if line == ">" {
-            lines.push(Line::from(Span::styled("▎", Style::default().fg(MdTheme::QUOTE))));
+            lines.push(Line::from(Span::styled(
+                "▎",
+                Style::default().fg(MdTheme::QUOTE),
+            )));
             continue;
         }
 
         if let Some(content) = line.strip_prefix("- ").or_else(|| line.strip_prefix("* ")) {
-            let mut spans = vec![Span::styled("• ", Style::default().fg(MdTheme::LIST_BULLET))];
+            let mut spans = vec![Span::styled(
+                "• ",
+                Style::default().fg(MdTheme::LIST_BULLET),
+            )];
             spans.extend(parse_inline(content));
             lines.push(Line::from(spans));
             continue;
@@ -132,7 +140,11 @@ fn heading_level(line: &str) -> Option<usize> {
             return None;
         }
     }
-    if (1..=6).contains(&count) { Some(count) } else { None }
+    if (1..=6).contains(&count) {
+        Some(count)
+    } else {
+        None
+    }
 }
 
 fn strip_ordered_list_prefix(line: &str) -> Option<(&str, &str)> {
@@ -155,7 +167,9 @@ fn render_code_block(lines: &[String]) -> Vec<Line<'static>> {
     if lines.is_empty() {
         result.push(Line::from(Span::styled(
             " ```",
-            Style::default().fg(MdTheme::CODE).add_modifier(Modifier::DIM),
+            Style::default()
+                .fg(MdTheme::CODE)
+                .add_modifier(Modifier::DIM),
         )));
         return result;
     }
@@ -189,7 +203,9 @@ fn parse_inline(text: &str) -> Vec<Span<'static>> {
                 let code: String = chars[start..start + end].iter().collect();
                 spans.push(Span::styled(
                     code,
-                    Style::default().fg(MdTheme::CODE).bg(MdTheme::CODE_BLOCK_BG),
+                    Style::default()
+                        .fg(MdTheme::CODE)
+                        .bg(MdTheme::CODE_BLOCK_BG),
                 ));
                 i = start + end + 1;
                 continue;
@@ -220,7 +236,9 @@ fn parse_inline(text: &str) -> Vec<Span<'static>> {
                 let inner: String = chars[start..start + end].iter().collect();
                 spans.push(Span::styled(
                     inner,
-                    Style::default().fg(MdTheme::ITALIC).add_modifier(Modifier::ITALIC),
+                    Style::default()
+                        .fg(MdTheme::ITALIC)
+                        .add_modifier(Modifier::ITALIC),
                 ));
                 i = start + end + 1;
                 continue;

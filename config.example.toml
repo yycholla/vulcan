@@ -21,6 +21,11 @@ max_retries = 4
 catalog_cache_ttl_hours = 24
 # Skip the catalog fetch entirely. Useful for offline/testing setups.
 # disable_catalog = false
+# Provider protocol debug logging:
+# - "off": no extra provider logs
+# - "tool-fallback": log raw assistant content when fallback tool-call parsing is used
+# - "wire": also log request and raw response bodies
+# debug = "off"
 
 [tools]
 # Enable dangerous tools (file overwrite, shell exec) without confirmation

@@ -79,20 +79,23 @@ impl Agent {
         // if the catalog endpoint fails, we log + continue with the configured
         // values rather than blocking startup over a metadata fetch.
         let mut effective_max_context = config.provider.max_context;
+        let mut supports_json_mode = false;
         if !config.provider.disable_catalog {
             match Self::fetch_catalog(config, &api_key).await {
                 Ok(models) => {
                     let found = models.iter().find(|m| m.id == config.provider.model);
                     match found {
                         Some(model_info) => {
+                            supports_json_mode = model_info.features.json_mode;
                             if model_info.context_length > 0
                                 && config.provider.max_context == 128_000
                             {
                                 effective_max_context = model_info.context_length;
                                 tracing::info!(
-                                    "catalog: using context_length={} for {}",
+                                    "catalog: using context_length={} for {} (json_mode={})",
                                     model_info.context_length,
-                                    model_info.id
+                                    model_info.id,
+                                    supports_json_mode,
                                 );
                             }
                         }
@@ -117,9 +120,7 @@ impl Agent {
                     }
                 }
                 Err(e) => {
-                    tracing::warn!(
-                        "catalog fetch failed (continuing with config defaults): {e}"
-                    );
+                    tracing::warn!("catalog fetch failed (continuing with config defaults): {e}");
                 }
             }
         }
@@ -131,6 +132,8 @@ impl Agent {
                 &config.provider.model,
                 effective_max_context,
                 config.provider.max_retries,
+                supports_json_mode,
+                config.provider.debug,
             )
             .context("Failed to initialize LLM provider")?,
         );
@@ -289,9 +292,15 @@ impl Agent {
             // ── BeforePrompt: handlers may inject extra messages. Injections
             // are transient — they go on the wire but don't persist into the
             // conversation history we save to memory.
-            let outgoing = self.hooks.apply_before_prompt(&messages, cancel.clone()).await;
+            let outgoing = self
+                .hooks
+                .apply_before_prompt(&messages, cancel.clone())
+                .await;
 
-            let response = self.provider.chat(&outgoing, &tool_defs, cancel.clone()).await?;
+            let response = self
+                .provider
+                .chat(&outgoing, &tool_defs, cancel.clone())
+                .await?;
 
             if let Some(usage) = &response.usage {
                 self.context
@@ -320,13 +329,16 @@ impl Agent {
                 let reasoning = response.reasoning_content.clone();
 
                 // ── BeforeAgentEnd: a handler may force the loop to continue.
-                if let Some(instruction) = self.hooks.before_agent_end(&text, cancel.clone()).await {
+                if let Some(instruction) = self.hooks.before_agent_end(&text, cancel.clone()).await
+                {
                     messages.push(Message::Assistant {
                         content: Some(text.clone()),
                         tool_calls: None,
                         reasoning_content: reasoning,
                     });
-                    messages.push(Message::User { content: instruction });
+                    messages.push(Message::User {
+                        content: instruction,
+                    });
                     continue;
                 }
 
@@ -381,10 +393,16 @@ impl Agent {
                 return Ok("Cancelled".to_string());
             }
 
-            tracing::info!("agent iteration {iteration} starting (messages={})", messages.len());
+            tracing::info!(
+                "agent iteration {iteration} starting (messages={})",
+                messages.len()
+            );
 
             // ── BeforePrompt (transient — see run_prompt for rationale).
-            let outgoing = self.hooks.apply_before_prompt(&messages, cancel.clone()).await;
+            let outgoing = self
+                .hooks
+                .apply_before_prompt(&messages, cancel.clone())
+                .await;
 
             let (inner_tx, mut inner_rx) = mpsc::unbounded_channel::<StreamEvent>();
             let (priv_tx, mut priv_rx) = mpsc::unbounded_channel::<StreamEvent>();
@@ -461,7 +479,11 @@ impl Agent {
                 "agent iteration {iteration}: response content_len={}, tool_calls={}, reasoning_len={}",
                 response.content.as_deref().map(|s| s.len()).unwrap_or(0),
                 response.tool_calls.as_ref().map(|t| t.len()).unwrap_or(0),
-                response.reasoning_content.as_deref().map(|s| s.len()).unwrap_or(0),
+                response
+                    .reasoning_content
+                    .as_deref()
+                    .map(|s| s.len())
+                    .unwrap_or(0),
             );
 
             if let Some(text) = &response.content {
@@ -501,13 +523,19 @@ impl Agent {
                 let reasoning = response.reasoning_content.clone();
 
                 // ── BeforeAgentEnd
-                if let Some(instruction) = self.hooks.before_agent_end(&full_response, cancel.clone()).await {
+                if let Some(instruction) = self
+                    .hooks
+                    .before_agent_end(&full_response, cancel.clone())
+                    .await
+                {
                     messages.push(Message::Assistant {
                         content: Some(full_response.clone()),
                         tool_calls: None,
                         reasoning_content: reasoning,
                     });
-                    messages.push(Message::User { content: instruction });
+                    messages.push(Message::User {
+                        content: instruction,
+                    });
                     continue;
                 }
 
@@ -560,10 +588,7 @@ impl Agent {
             .load_history(session_id)?
             .ok_or_else(|| anyhow::anyhow!("Session not found: {session_id}"))?;
         self.session_id = session_id.to_string();
-        tracing::info!(
-            "resumed session {session_id} ({} messages)",
-            history.len()
-        );
+        tracing::info!("resumed session {session_id} ({} messages)", history.len());
         Ok(())
     }
 
@@ -608,26 +633,37 @@ impl Agent {
             }
         };
 
-        let (effective_args_str, blocked) =
-            match self.hooks.before_tool_call(name, &parsed_args, cancel.clone()).await {
-                ToolCallDecision::Continue => (raw_args.to_string(), None),
-                ToolCallDecision::Block(reason) => (raw_args.to_string(), Some(reason)),
-                ToolCallDecision::ReplaceArgs(new_args) => (
-                    serde_json::to_string(&new_args).unwrap_or_else(|_| raw_args.to_string()),
-                    None,
-                ),
-            };
+        let (effective_args_str, blocked) = match self
+            .hooks
+            .before_tool_call(name, &parsed_args, cancel.clone())
+            .await
+        {
+            ToolCallDecision::Continue => (raw_args.to_string(), None),
+            ToolCallDecision::Block(reason) => (raw_args.to_string(), Some(reason)),
+            ToolCallDecision::ReplaceArgs(new_args) => (
+                serde_json::to_string(&new_args).unwrap_or_else(|_| raw_args.to_string()),
+                None,
+            ),
+        };
 
         let raw_result: ToolResult = if let Some(reason) = blocked {
             ToolResult::err(format!("Blocked: {reason}"))
         } else {
-            match self.tools.execute(name, &effective_args_str, cancel.clone()).await {
+            match self
+                .tools
+                .execute(name, &effective_args_str, cancel.clone())
+                .await
+            {
                 Ok(r) => r,
                 Err(e) => ToolResult::err(format!("Error: {e}")),
             }
         };
 
-        match self.hooks.after_tool_call(name, &raw_result, cancel.clone()).await {
+        match self
+            .hooks
+            .after_tool_call(name, &raw_result, cancel.clone())
+            .await
+        {
             Some(replaced) => replaced,
             None => raw_result,
         }
@@ -748,7 +784,11 @@ mod tests {
         assert_eq!(resp, "Read failed but that's fine for the test");
 
         let calls = mock.captured_calls();
-        assert_eq!(calls.len(), 2, "should call provider twice (tool, then final)");
+        assert_eq!(
+            calls.len(),
+            2,
+            "should call provider twice (tool, then final)"
+        );
 
         // Iteration 1's messages should include the tool result.
         let iter1 = &calls[1];
@@ -800,4 +840,5 @@ mod tests {
         // run_prompt's final save_messages would have stored the reasoning;
         // not asserting against the DB to avoid touching ~/.vulcan in tests.
     }
+
 }
