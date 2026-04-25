@@ -152,8 +152,15 @@ pub enum StreamEvent {
     /// `reasoning_content`). Sent as it arrives so the UI can render the
     /// model "thinking" rather than blocking on the wait. See YYC-47.
     Reasoning(String),
-    /// A tool call was received (name + arguments-so-far)
+    /// A tool call is starting to dispatch. Emitted by the agent loop just
+    /// before `dispatch_tool` runs, so the TUI can render `🔧 name…` while
+    /// the tool executes (otherwise the chat would stay stuck on "Thinking…"
+    /// for the duration of the tool run). See YYC-57.
     ToolCallStart { id: String, name: String },
+    /// A tool call has finished. `ok` reflects `ToolResult::is_error`
+    /// (false on error/block/cancel). The TUI flips the corresponding
+    /// in-flight marker from `🔧 name…` to `🔧 name ✓` / `✗`.
+    ToolCallEnd { id: String, name: String, ok: bool },
     /// The stream is complete (with optional final ChatResponse)
     Done(ChatResponse),
     /// The stream hit an error

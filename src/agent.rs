@@ -207,12 +207,12 @@ impl Agent {
 
                 for tc in tool_calls {
                     tracing::info!("Executing tool: {} (call {})", tc.function.name, tc.id);
-                    let final_result = self
+                    let result = self
                         .dispatch_tool(&tc.function.name, &tc.function.arguments, cancel.clone())
                         .await;
                     messages.push(Message::Tool {
                         tool_call_id: tc.id.clone(),
-                        content: final_result,
+                        content: flatten_for_message(result),
                     });
                 }
             } else {
@@ -281,6 +281,8 @@ impl Agent {
                 return Ok("Cancelled".to_string());
             }
 
+            tracing::info!("agent iteration {iteration} starting (messages={})", messages.len());
+
             // ── BeforePrompt (transient — see run_prompt for rationale).
             let outgoing = self.hooks.apply_before_prompt(&messages, cancel.clone()).await;
 
@@ -305,9 +307,25 @@ impl Agent {
                 }
             });
 
-            self.provider
+            if let Err(e) = self
+                .provider
                 .chat_stream(&outgoing, &tool_defs, inner_tx, cancel.clone())
-                .await?;
+                .await
+            {
+                // Surface provider failures to the TUI rather than dropping
+                // the channel silently — otherwise the user sees the chat
+                // freeze with no error indication.
+                tracing::error!("agent iteration {iteration}: chat_stream failed: {e}");
+                let _ = ui_tx.send(StreamEvent::Error(format!("Provider error: {e}")));
+                let _ = ui_tx.send(StreamEvent::Done(crate::provider::ChatResponse {
+                    content: Some(format!("⚠ Provider error: {e}")),
+                    tool_calls: None,
+                    usage: None,
+                    finish_reason: Some("error".into()),
+                    reasoning_content: None,
+                }));
+                return Err(e);
+            }
 
             let mut final_response: Option<crate::provider::ChatResponse> = None;
             while let Some(event) = priv_rx.recv().await {
@@ -325,8 +343,20 @@ impl Agent {
 
             let response = match final_response {
                 Some(r) => r,
-                None => return Err(anyhow::anyhow!("Stream ended without Done event")),
+                None => {
+                    let msg = "Stream ended without Done event";
+                    tracing::error!("agent iteration {iteration}: {msg}");
+                    let _ = ui_tx.send(StreamEvent::Error(msg.into()));
+                    return Err(anyhow::anyhow!(msg));
+                }
             };
+
+            tracing::info!(
+                "agent iteration {iteration}: response content_len={}, tool_calls={}, reasoning_len={}",
+                response.content.as_deref().map(|s| s.len()).unwrap_or(0),
+                response.tool_calls.as_ref().map(|t| t.len()).unwrap_or(0),
+                response.reasoning_content.as_deref().map(|s| s.len()).unwrap_or(0),
+            );
 
             if let Some(text) = &response.content {
                 full_response.push_str(text);
@@ -341,12 +371,24 @@ impl Agent {
 
                 for tc in tool_calls {
                     tracing::info!("Executing tool: {} (call {})", tc.function.name, tc.id);
-                    let final_result = self
+                    // Surface tool activity to the TUI so the chat doesn't sit
+                    // on "Thinking…" while the tool runs (YYC-57).
+                    let _ = ui_tx.send(StreamEvent::ToolCallStart {
+                        id: tc.id.clone(),
+                        name: tc.function.name.clone(),
+                    });
+                    let result = self
                         .dispatch_tool(&tc.function.name, &tc.function.arguments, cancel.clone())
                         .await;
+                    let ok = !result.is_error;
+                    let _ = ui_tx.send(StreamEvent::ToolCallEnd {
+                        id: tc.id.clone(),
+                        name: tc.function.name.clone(),
+                        ok,
+                    });
                     messages.push(Message::Tool {
                         tool_call_id: tc.id.clone(),
-                        content: final_result,
+                        content: flatten_for_message(result),
                     });
                 }
             } else {
@@ -376,6 +418,19 @@ impl Agent {
                 if iteration >= 5 {
                     self.skills.try_auto_create(input, &full_response)?;
                 }
+
+                // If the model returned an empty response, surface it via a
+                // synthetic Text event so the user sees *something* rather
+                // than the chat appearing frozen on the previous marker.
+                if full_response.is_empty() {
+                    tracing::warn!(
+                        "agent iteration {iteration}: model returned empty content with no tool calls"
+                    );
+                    let _ = ui_tx.send(StreamEvent::Text(
+                        "_(model returned empty response)_".into(),
+                    ));
+                }
+
                 let _ = ui_tx.send(StreamEvent::Done(crate::provider::ChatResponse {
                     content: Some(full_response.clone()),
                     tool_calls: None,
@@ -425,12 +480,15 @@ impl Agent {
     /// hooks around it. Returns the result flattened to the `String` payload
     /// expected by `Message::Tool` (media references inlined as `[media: ...]`
     /// markers). Hooks see the full `ToolResult`.
+    /// Run BeforeToolCall + tool dispatch + AfterToolCall hooks. Returns the
+    /// final `ToolResult` so callers can both flatten it for `Message::Tool`
+    /// and inspect `is_error` (e.g. to emit `StreamEvent::ToolCallEnd { ok }`).
     async fn dispatch_tool(
         &self,
         name: &str,
         raw_args: &str,
         cancel: CancellationToken,
-    ) -> String {
+    ) -> ToolResult {
         let parsed_args: Value = match serde_json::from_str(raw_args) {
             Ok(v) => v,
             Err(e) => {
@@ -463,12 +521,10 @@ impl Agent {
             }
         };
 
-        let final_result = match self.hooks.after_tool_call(name, &raw_result, cancel.clone()).await {
+        match self.hooks.after_tool_call(name, &raw_result, cancel.clone()).await {
             Some(replaced) => replaced,
             None => raw_result,
-        };
-
-        flatten_for_message(final_result)
+        }
     }
 }
 
