@@ -282,6 +282,9 @@ pub struct AppState {
     /// the renderer on each frame. The main loop reads this to keep
     /// `scroll` pinned to the bottom while `at_bottom` is true.
     pub chat_max_scroll: Cell<u16>,
+    /// Highlighted row in the slash command palette (YYC-70). Reset to 0
+    /// whenever the filter changes; navigated via arrow keys or Ctrl+J/K.
+    pub slash_menu_selection: usize,
     pub show_reasoning: bool,
     pub session_label: String,
 
@@ -316,6 +319,7 @@ impl AppState {
             scroll: 0,
             at_bottom: true,
             chat_max_scroll: Cell::new(0),
+            slash_menu_selection: 0,
             show_reasoning: true,
             session_label: "new session".into(),
 

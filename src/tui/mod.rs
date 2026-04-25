@@ -97,6 +97,19 @@ fn filter_commands(prefix: &str) -> Vec<&'static SlashCommand> {
         .collect()
 }
 
+/// Same matching logic as the palette renderer in the main loop — exposed
+/// as a helper so the key handler can decide what to highlight or commit
+/// without duplicating prefix logic (YYC-70).
+fn current_palette(input: &str) -> Vec<&'static SlashCommand> {
+    if input == "/" {
+        SLASH_COMMANDS.iter().collect()
+    } else if input.starts_with('/') && input.len() > 1 {
+        filter_commands(&input[1..])
+    } else {
+        Vec::new()
+    }
+}
+
 fn complete_slash(prefix: &str) -> Option<String> {
     let matches = filter_commands(prefix);
     if matches.is_empty() {
@@ -306,7 +319,7 @@ pub async fn run_tui(config: &Config, resume: ResumeTarget) -> Result<()> {
             }
 
             if let (Some(pal), Some(area)) = (palette.as_ref(), palette_area) {
-                draw_palette(f, area, pal);
+                draw_palette(f, area, pal, app.slash_menu_selection);
             }
         })?;
 
@@ -380,6 +393,24 @@ pub async fn run_tui(config: &Config, resume: ResumeTarget) -> Result<()> {
                                             }
                                             continue;
                                         }
+                                        // YYC-70: Ctrl+J / Ctrl+K navigate the
+                                        // slash menu when it's open.
+                                        KeyCode::Char('j') | KeyCode::Char('k') => {
+                                            if app.input.starts_with('/') {
+                                                let candidates = current_palette(&app.input);
+                                                if !candidates.is_empty() {
+                                                    let len = candidates.len();
+                                                    if matches!(key.code, KeyCode::Char('j')) {
+                                                        app.slash_menu_selection =
+                                                            (app.slash_menu_selection + 1).min(len - 1);
+                                                    } else {
+                                                        app.slash_menu_selection =
+                                                            app.slash_menu_selection.saturating_sub(1);
+                                                    }
+                                                    continue;
+                                                }
+                                            }
+                                        }
                                         KeyCode::Char('r') => {
                                             app.show_reasoning = !app.show_reasoning;
                                             continue;
@@ -418,9 +449,19 @@ pub async fn run_tui(config: &Config, resume: ResumeTarget) -> Result<()> {
 
                                 match key.code {
                                     KeyCode::Enter => {
+                                        // YYC-70: when the slash menu is open with at least one
+                                        // match, Enter commits the highlighted command.
+                                        if app.input.starts_with('/') {
+                                            let candidates = current_palette(&app.input);
+                                            if !candidates.is_empty() {
+                                                let idx = app.slash_menu_selection.min(candidates.len() - 1);
+                                                app.input = format!("/{}", candidates[idx].name);
+                                            }
+                                        }
                                         if !app.input.is_empty() && !app.thinking {
                                             let msg = app.input.trim().to_string();
                                             app.input.clear();
+                                            app.slash_menu_selection = 0;
                                             pending_quit = false;
 
                                             // slash commands
@@ -542,10 +583,14 @@ pub async fn run_tui(config: &Config, resume: ResumeTarget) -> Result<()> {
                                     KeyCode::Char(c) => {
                                         pending_quit = false;
                                         app.input.push(c);
+                                        // Re-filtering may shrink the menu; keep the highlight
+                                        // anchored at the top so the visible top row is selected.
+                                        app.slash_menu_selection = 0;
                                     }
                                     KeyCode::Backspace => {
                                         pending_quit = false;
                                         app.input.pop();
+                                        app.slash_menu_selection = 0;
                                     }
                                     KeyCode::Tab => {
                                         pending_quit = false;
@@ -556,10 +601,28 @@ pub async fn run_tui(config: &Config, resume: ResumeTarget) -> Result<()> {
                                         }
                                     }
                                     KeyCode::Up => {
+                                        // YYC-70: arrows navigate the slash menu when open.
+                                        if app.input.starts_with('/') {
+                                            let candidates = current_palette(&app.input);
+                                            if !candidates.is_empty() {
+                                                app.slash_menu_selection =
+                                                    app.slash_menu_selection.saturating_sub(1);
+                                                continue;
+                                            }
+                                        }
                                         app.scroll = app.scroll.saturating_sub(1);
                                         app.at_bottom = false;
                                     }
                                     KeyCode::Down => {
+                                        if app.input.starts_with('/') {
+                                            let candidates = current_palette(&app.input);
+                                            if !candidates.is_empty() {
+                                                let len = candidates.len();
+                                                app.slash_menu_selection =
+                                                    (app.slash_menu_selection + 1).min(len - 1);
+                                                continue;
+                                            }
+                                        }
                                         let max = app.chat_max_scroll.get();
                                         app.scroll = app.scroll.saturating_add(1).min(max);
                                         app.at_bottom = app.scroll >= max;
@@ -670,7 +733,12 @@ pub async fn run_tui(config: &Config, resume: ResumeTarget) -> Result<()> {
     Ok(())
 }
 
-fn draw_palette(f: &mut ratatui::Frame, area: Rect, cmds: &[&SlashCommand]) {
+fn draw_palette(
+    f: &mut ratatui::Frame,
+    area: Rect,
+    cmds: &[&SlashCommand],
+    selected: usize,
+) {
     if area.height == 0 {
         return;
     }
@@ -707,15 +775,31 @@ fn draw_palette(f: &mut ratatui::Frame, area: Rect, cmds: &[&SlashCommand]) {
             Style::default().fg(Palette::MUTED),
         )));
     } else {
-        for cmd in cmds {
-            lines.push(Line::from(vec![
-                Span::styled(
-                    format!("  /{:<12}", cmd.name),
+        let active = selected.min(cmds.len().saturating_sub(1));
+        for (i, cmd) in cmds.iter().enumerate() {
+            let is_active = i == active;
+            // YYC-70: highlight the active row with inverted accent.
+            let (prefix, name_style, desc_style) = if is_active {
+                (
+                    "▸ ",
+                    Style::default()
+                        .fg(Palette::PAPER)
+                        .bg(Palette::RED)
+                        .add_modifier(Modifier::BOLD),
+                    Style::default().fg(Palette::PAPER).bg(Palette::RED),
+                )
+            } else {
+                (
+                    "  ",
                     Style::default()
                         .fg(Palette::RED)
                         .add_modifier(Modifier::BOLD),
-                ),
-                Span::styled(cmd.description, Style::default().fg(Palette::INK)),
+                    Style::default().fg(Palette::INK),
+                )
+            };
+            lines.push(Line::from(vec![
+                Span::styled(format!("{prefix}/{:<12}", cmd.name), name_style),
+                Span::styled(cmd.description, desc_style),
             ]));
         }
     }
