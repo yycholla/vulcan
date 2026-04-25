@@ -1,1 +1,10 @@
 /target
+
+# Local config — may contain API keys; keep out of git
+config.toml
+
+# Backup files (e.g. *.rs.bak from editor backups)
+*.bak
+
+# Local planning artifacts
+.hermes/
