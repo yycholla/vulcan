@@ -320,13 +320,27 @@ impl Agent {
                     reasoning_content: response.reasoning_content.clone(),
                 });
 
-                for tc in tool_calls {
-                    tracing::info!("Executing tool: {} (call {})", tc.function.name, tc.id);
-                    let result = self
-                        .dispatch_tool(&tc.function.name, &tc.function.arguments, cancel.clone())
-                        .await;
+                // YYC-34: dispatch all calls concurrently. Each dispatch still
+                // runs through BeforeToolCall + AfterToolCall hooks via
+                // `dispatch_tool`. Errors are isolated — a failing tool yields
+                // a `ToolResult::err`, never aborts the others. `join_all`
+                // preserves order so messages line up with their tool_call_id.
+                let this: &Self = self;
+                let dispatches = tool_calls.iter().map(|tc| {
+                    let id = tc.id.clone();
+                    let name = tc.function.name.clone();
+                    let args = tc.function.arguments.clone();
+                    let cancel = cancel.clone();
+                    async move {
+                        tracing::info!("Executing tool: {name} (call {id})");
+                        let result = this.dispatch_tool(&name, &args, cancel).await;
+                        (id, result)
+                    }
+                });
+                let results = futures_util::future::join_all(dispatches).await;
+                for (id, result) in results {
                     messages.push(Message::Tool {
-                        tool_call_id: tc.id.clone(),
+                        tool_call_id: id,
                         content: flatten_for_message(result),
                     });
                 }
@@ -503,25 +517,41 @@ impl Agent {
                     reasoning_content: response.reasoning_content.clone(),
                 });
 
+                // YYC-34: dispatch all calls concurrently. ToolCallStart events
+                // fire synchronously up front so the TUI shows every in-flight
+                // tool immediately; ToolCallEnd fires from inside each future
+                // as it completes (so they may arrive out of order — that's the
+                // point). `join_all` preserves order for the message vector
+                // so tool_call_id alignment stays deterministic.
                 for tc in tool_calls {
-                    tracing::info!("Executing tool: {} (call {})", tc.function.name, tc.id);
-                    // Surface tool activity to the TUI so the chat doesn't sit
-                    // on "Thinking…" while the tool runs (YYC-57).
                     let _ = ui_tx.send(StreamEvent::ToolCallStart {
                         id: tc.id.clone(),
                         name: tc.function.name.clone(),
                     });
-                    let result = self
-                        .dispatch_tool(&tc.function.name, &tc.function.arguments, cancel.clone())
-                        .await;
-                    let ok = !result.is_error;
-                    let _ = ui_tx.send(StreamEvent::ToolCallEnd {
-                        id: tc.id.clone(),
-                        name: tc.function.name.clone(),
-                        ok,
-                    });
+                }
+                let this: &Self = self;
+                let dispatches = tool_calls.iter().map(|tc| {
+                    let id = tc.id.clone();
+                    let name = tc.function.name.clone();
+                    let args = tc.function.arguments.clone();
+                    let cancel = cancel.clone();
+                    let ui_tx = ui_tx.clone();
+                    async move {
+                        tracing::info!("Executing tool: {name} (call {id})");
+                        let result = this.dispatch_tool(&name, &args, cancel).await;
+                        let ok = !result.is_error;
+                        let _ = ui_tx.send(StreamEvent::ToolCallEnd {
+                            id: id.clone(),
+                            name: name.clone(),
+                            ok,
+                        });
+                        (id, result)
+                    }
+                });
+                let results = futures_util::future::join_all(dispatches).await;
+                for (id, result) in results {
                     messages.push(Message::Tool {
-                        tool_call_id: tc.id.clone(),
+                        tool_call_id: id,
                         content: flatten_for_message(result),
                     });
                 }
@@ -881,5 +911,121 @@ mod tests {
             .expect("child summary should exist");
         assert_eq!(child.parent_session_id.as_deref(), Some(parent_id.as_str()));
         assert_eq!(child.lineage_label.as_deref(), Some("branched for UI work"));
+    }
+
+    /// Tool that increments an in-flight counter, sleeps, then decrements.
+    /// Records the maximum observed concurrency so the test can assert that
+    /// parallel dispatch actually overlaps tool execution (YYC-34).
+    struct ConcurrencyProbeTool {
+        in_flight: Arc<std::sync::atomic::AtomicUsize>,
+        max_observed: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::tools::Tool for ConcurrencyProbeTool {
+        fn name(&self) -> &str {
+            "concurrency_probe"
+        }
+        fn description(&self) -> &str {
+            "test tool that sleeps and tracks in-flight concurrency"
+        }
+        fn schema(&self) -> Value {
+            serde_json::json!({"type": "object", "properties": {}})
+        }
+        async fn call(
+            &self,
+            _params: Value,
+            _cancel: CancellationToken,
+        ) -> Result<crate::tools::ToolResult> {
+            use std::sync::atomic::Ordering;
+            let now = self.in_flight.fetch_add(1, Ordering::SeqCst) + 1;
+            self.max_observed.fetch_max(now, Ordering::SeqCst);
+            tokio::time::sleep(std::time::Duration::from_millis(40)).await;
+            self.in_flight.fetch_sub(1, Ordering::SeqCst);
+            Ok(crate::tools::ToolResult::ok("done"))
+        }
+    }
+
+    #[tokio::test]
+    async fn parallel_tool_calls_dispatch_concurrently() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let in_flight = Arc::new(AtomicUsize::new(0));
+        let max_observed = Arc::new(AtomicUsize::new(0));
+
+        let mut tools = ToolRegistry::new();
+        tools.register(Arc::new(ConcurrencyProbeTool {
+            in_flight: in_flight.clone(),
+            max_observed: max_observed.clone(),
+        }));
+
+        let mock = Arc::new(MockProvider::new(128_000));
+        struct ProviderHandle(Arc<MockProvider>);
+        #[async_trait::async_trait]
+        impl LLMProvider for ProviderHandle {
+            async fn chat(
+                &self,
+                m: &[Message],
+                t: &[crate::provider::ToolDefinition],
+                c: CancellationToken,
+            ) -> Result<crate::provider::ChatResponse> {
+                self.0.chat(m, t, c).await
+            }
+            async fn chat_stream(
+                &self,
+                m: &[Message],
+                t: &[crate::provider::ToolDefinition],
+                tx: tokio::sync::mpsc::UnboundedSender<crate::provider::StreamEvent>,
+                c: CancellationToken,
+            ) -> Result<()> {
+                self.0.chat_stream(m, t, tx, c).await
+            }
+            fn max_context(&self) -> usize {
+                self.0.max_context()
+            }
+        }
+        let mut agent = Agent::for_test(
+            Box::new(ProviderHandle(mock.clone())),
+            tools,
+            HookRegistry::new(),
+            empty_skills(),
+        );
+
+        // Iter 0: three parallel calls. Iter 1: final text.
+        mock.enqueue_tool_calls(vec![
+            ("concurrency_probe", "call_a", serde_json::json!({})),
+            ("concurrency_probe", "call_b", serde_json::json!({})),
+            ("concurrency_probe", "call_c", serde_json::json!({})),
+        ]);
+        mock.enqueue_text("done");
+
+        let started = std::time::Instant::now();
+        let resp = agent.run_prompt("go").await.unwrap();
+        let elapsed = started.elapsed();
+
+        assert_eq!(resp, "done");
+        // Three sequential 40ms sleeps would be ~120ms; parallel ≈ 40ms.
+        // Allow generous slack for runtime jitter.
+        assert!(
+            elapsed < std::time::Duration::from_millis(110),
+            "dispatch took {elapsed:?} — looks sequential"
+        );
+        assert!(
+            max_observed.load(Ordering::SeqCst) >= 2,
+            "expected ≥2 concurrent dispatches, observed {}",
+            max_observed.load(Ordering::SeqCst)
+        );
+
+        // Order preservation: tool messages line up with original call ids.
+        let calls = mock.captured_calls();
+        let iter1 = &calls[1];
+        let tool_ids: Vec<&str> = iter1
+            .iter()
+            .filter_map(|m| match m {
+                Message::Tool { tool_call_id, .. } => Some(tool_call_id.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(tool_ids, vec!["call_a", "call_b", "call_c"]);
     }
 }
