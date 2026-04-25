@@ -1,4 +1,5 @@
 use std::cell::Cell;
+use std::collections::VecDeque;
 
 use chrono::Local;
 use ratatui::style::Color;
@@ -318,6 +319,10 @@ pub struct AppState {
     /// Prompt-row mode (YYC-58). Drives the mode badge, the per-mode
     /// hint set, and which key bindings the dispatcher honors.
     pub prompt_mode: PromptMode,
+    /// Pending prompts submitted while the agent was busy (YYC-61).
+    /// Drained one-at-a-time from the front when each turn completes.
+    /// In-memory only — never persisted to sessions.db.
+    pub queue: VecDeque<String>,
     pub show_reasoning: bool,
     pub session_label: String,
 
@@ -354,6 +359,7 @@ impl AppState {
             chat_max_scroll: Cell::new(0),
             slash_menu_selection: 0,
             prompt_mode: PromptMode::Insert,
+            queue: VecDeque::new(),
             show_reasoning: true,
             session_label: "new session".into(),
 
@@ -936,6 +942,28 @@ mod tests {
         app.input = "/queue".into();
         app.refresh_prompt_mode();
         assert_eq!(app.prompt_mode, PromptMode::Busy);
+    }
+
+    #[test]
+    fn queue_starts_empty_and_pushes_in_fifo_order() {
+        let mut app = AppState::new("test".into(), 100);
+        assert!(app.queue.is_empty());
+        app.queue.push_back("first".into());
+        app.queue.push_back("second".into());
+        assert_eq!(app.queue.pop_front().as_deref(), Some("first"));
+        assert_eq!(app.queue.pop_front().as_deref(), Some("second"));
+        assert!(app.queue.is_empty());
+    }
+
+    #[test]
+    fn queue_pop_back_removes_most_recent_only() {
+        let mut app = AppState::new("test".into(), 100);
+        app.queue.push_back("a".into());
+        app.queue.push_back("b".into());
+        app.queue.push_back("c".into());
+        app.queue.pop_back();
+        let remaining: Vec<&str> = app.queue.iter().map(String::as_str).collect();
+        assert_eq!(remaining, vec!["a", "b"]);
     }
 
     #[test]

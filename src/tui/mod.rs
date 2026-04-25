@@ -137,6 +137,39 @@ fn complete_slash(prefix: &str) -> Option<String> {
     }
 }
 
+/// Spawn a fresh agent turn for `msg`. Updates chat state (User + empty
+/// Agent message), flips thinking on, re-engages auto-follow, then spawns
+/// `run_prompt_stream` against the agent. Used by the Enter handler for
+/// new submissions and by the Done handler when draining the queue
+/// (YYC-61).
+fn submit_prompt(
+    app: &mut AppState,
+    agent: &Arc<Mutex<Agent>>,
+    stream_tx: &mpsc::UnboundedSender<StreamEvent>,
+    msg: String,
+) {
+    app.messages.push(ChatMessage {
+        role: ChatRole::User,
+        content: msg.clone(),
+        ..Default::default()
+    });
+    app.messages.push(ChatMessage {
+        role: ChatRole::Agent,
+        content: String::new(),
+        ..Default::default()
+    });
+    app.thinking = true;
+    app.at_bottom = true;
+    app.note_prompt_submitted(&msg);
+
+    let tx = stream_tx.clone();
+    let a = agent.clone();
+    tokio::spawn(async move {
+        let mut a = a.lock().await;
+        let _ = a.run_prompt_stream(&msg, tx).await;
+    });
+}
+
 async fn refresh_sessions(agent: &Arc<Mutex<Agent>>, app: &mut AppState) {
     let (summaries, active_session_id) = {
         let a = agent.lock().await;
@@ -396,6 +429,18 @@ pub async fn run_tui(config: &Config, resume: ResumeTarget) -> Result<()> {
                                             }
                                             continue;
                                         }
+                                        // YYC-61: queue management hotkeys.
+                                        // Ctrl+Backspace pops the most recent queued
+                                        // submission; Ctrl+Shift+Backspace drops the
+                                        // entire queue.
+                                        KeyCode::Backspace => {
+                                            if key.modifiers.contains(KeyModifiers::SHIFT) {
+                                                app.queue.clear();
+                                            } else {
+                                                app.queue.pop_back();
+                                            }
+                                            continue;
+                                        }
                                         // YYC-70: Ctrl+J / Ctrl+K navigate the
                                         // slash menu when it's open.
                                         KeyCode::Char('j') | KeyCode::Char('k') => {
@@ -460,6 +505,24 @@ pub async fn run_tui(config: &Config, resume: ResumeTarget) -> Result<()> {
                                                 let idx = app.slash_menu_selection.min(candidates.len() - 1);
                                                 app.input = format!("/{}", candidates[idx].name);
                                             }
+                                        }
+                                        // YYC-61: while the agent is busy, plain text Enter
+                                        // submissions go onto the queue rather than dispatching
+                                        // immediately. Drained when the current turn ends.
+                                        // Slash commands are still gated to the idle path
+                                        // (YYC-62 will add per-command mid-turn-safe routing).
+                                        if !app.input.is_empty()
+                                            && app.thinking
+                                            && !app.input.starts_with('/')
+                                        {
+                                            let msg = app.input.trim().to_string();
+                                            if !msg.is_empty() {
+                                                app.queue.push_back(msg);
+                                            }
+                                            app.input.clear();
+                                            app.slash_menu_selection = 0;
+                                            pending_quit = false;
+                                            continue;
                                         }
                                         if !app.input.is_empty() && !app.thinking {
                                             let msg = app.input.trim().to_string();
@@ -566,21 +629,7 @@ pub async fn run_tui(config: &Config, resume: ResumeTarget) -> Result<()> {
                                                 }
                                             }
 
-                                            app.messages.push(ChatMessage { role: ChatRole::User, content: msg.clone(), ..Default::default() });
-                                            app.messages.push(ChatMessage { role: ChatRole::Agent, content: String::new(), ..Default::default() });
-                                            app.thinking = true;
-                                            // New prompt: re-engage auto-follow. The next render
-                                            // will publish the updated max scroll and the loop
-                                            // will pin scroll to it.
-                                            app.at_bottom = true;
-                                            app.note_prompt_submitted(&msg);
-
-                                            let tx = stream_tx.clone();
-                                            let agent = agent.clone();
-                                            tokio::spawn(async move {
-                                                let mut a = agent.lock().await;
-                                                let _ = a.run_prompt_stream(&msg, tx).await;
-                                            });
+                                            submit_prompt(&mut app, &agent, &stream_tx, msg);
                                         }
                                     }
                                     KeyCode::Char(c) => {
@@ -697,6 +746,11 @@ pub async fn run_tui(config: &Config, resume: ResumeTarget) -> Result<()> {
                         }
                         app.note_done();
                         refresh_sessions(&agent, &mut app).await;
+                        // YYC-61: drain one queued prompt per turn end. Subsequent
+                        // queued prompts ride the next Done event in the same way.
+                        if let Some(next) = app.queue.pop_front() {
+                            submit_prompt(&mut app, &agent, &stream_tx, next);
+                        }
                     }
                     Some(StreamEvent::Error(e)) => {
                         if let Some(last) = app.messages.last_mut() {
