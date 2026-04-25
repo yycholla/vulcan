@@ -9,7 +9,7 @@ use ratatui::{
 use super::markdown::render_markdown;
 use super::state::{AppState, ChatRole, MessageSegment, SessionStatus, ToolStatus};
 use super::theme::{Palette, body, faint_bg};
-use super::widgets::{fill, frame, message_header, section_header, sparkline, ticker};
+use super::widgets::{fill, frame, message_header, section_header, ticker};
 
 /// Public dispatch: render the active view inside `area`. The view writes
 /// its desired cursor position into `app` via `cursor_set`.
@@ -952,54 +952,82 @@ fn trading_floor(f: &mut TuiFrame, area: Rect, app: &AppState) {
     );
     draw_v_divider(f, bot[1]);
 
-    // ── metrics (bot-right)
+    // ── metrics (bot-right). YYC-67: replaced demo sparklines with real
+    // session counters. Cost shows "—" when pricing isn't available
+    // rather than inventing a number.
     let m_inner = section_header(f, bot[2], "metrics", None);
-    let metrics: Vec<(&str, Vec<u16>, ratatui::style::Color)> = vec![
-        ("tok/m", vec![2, 4, 3, 5, 7, 8, 6, 9, 7, 8], Palette::RED),
-        ("tools", vec![1, 1, 2, 3, 2, 4, 5, 3, 4, 6], Palette::BLUE),
-        ("cost ", vec![1, 2, 2, 3, 4, 4, 5, 6, 7, 8], Palette::YELLOW),
-        ("err  ", vec![0, 0, 0, 1, 0, 0, 0, 0, 1, 0], Palette::MUTED),
-    ];
-    let mut lines: Vec<Line<'static>> = Vec::new();
-    for (label, vals, color) in metrics {
-        lines.push(Line::from(vec![
-            Span::styled(
-                format!(" {label}  "),
-                Style::default()
-                    .fg(Palette::MUTED)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(
-                sparkline(&vals),
-                Style::default().fg(color).add_modifier(Modifier::BOLD),
-            ),
-        ]));
-    }
-    lines.push(Line::from(Span::styled(
-        format!(" {}", "─".repeat(m_inner.width.saturating_sub(2) as usize)),
-        Style::default().fg(Palette::INK),
-    )));
     let pad = m_inner.width.saturating_sub(2) as usize;
-    for (k, v) in [("session", "$0.84"), ("today", "$12.40"), ("cap", "$50.00")] {
-        let used = k.len() + v.len() + 2;
+
+    let cost_str = match app.estimated_cost() {
+        Some(c) => format!("${:.4}", c),
+        None => "—".to_string(),
+    };
+    let elapsed_secs = app.session_started.elapsed().as_secs();
+    let elapsed_str = if elapsed_secs >= 3600 {
+        format!("{}h{:02}m", elapsed_secs / 3600, (elapsed_secs % 3600) / 60)
+    } else if elapsed_secs >= 60 {
+        format!("{}m{:02}s", elapsed_secs / 60, elapsed_secs % 60)
+    } else {
+        format!("{}s", elapsed_secs)
+    };
+
+    let entries: Vec<(&str, String, ratatui::style::Color)> = vec![
+        (
+            "input",
+            super::state::format_thousands(app.prompt_tokens_total),
+            Palette::INK,
+        ),
+        (
+            "output",
+            super::state::format_thousands(app.completion_tokens_total),
+            Palette::INK,
+        ),
+        (
+            "tools",
+            app.tool_calls_total.to_string(),
+            if app.tool_calls_total == 0 {
+                Palette::MUTED
+            } else {
+                Palette::BLUE
+            },
+        ),
+        (
+            "errors",
+            format!(
+                "{} prov · {} tool",
+                app.provider_errors_total, app.tool_errors_total
+            ),
+            if app.provider_errors_total + app.tool_errors_total == 0 {
+                Palette::MUTED
+            } else {
+                Palette::RED
+            },
+        ),
+        ("cost", cost_str, Palette::YELLOW),
+        ("uptime", elapsed_str, Palette::MUTED),
+    ];
+
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    for (k, v, color) in entries {
+        let used = k.len() + v.chars().count() + 2;
         let middle = if pad > used {
             " ".repeat(pad - used)
         } else {
             String::new()
         };
-        let color = if k == "cap" {
-            Palette::RED
-        } else {
-            Palette::INK
-        };
         lines.push(Line::from(vec![
             Span::styled(format!(" {k}"), Style::default().fg(Palette::MUTED)),
             Span::styled(middle, Style::default().fg(Palette::PAPER)),
-            Span::styled(
-                v.to_string(),
-                Style::default().fg(color).add_modifier(Modifier::BOLD),
-            ),
+            Span::styled(v, Style::default().fg(color).add_modifier(Modifier::BOLD)),
         ]));
+    }
+    if app.pricing.is_none() {
+        lines.push(Line::from(Span::styled(
+            " (catalog has no pricing for this model — cost shown as —)",
+            Style::default()
+                .fg(Palette::MUTED)
+                .add_modifier(Modifier::DIM),
+        )));
     }
     f.render_widget(Paragraph::new(lines).style(body()), m_inner);
 

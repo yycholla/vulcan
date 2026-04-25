@@ -40,6 +40,10 @@ pub struct Agent {
     /// Latest file edit, captured by `WriteFile`/`PatchFile` (YYC-66).
     /// TUI clones this Arc and renders the inner Option each frame.
     diff_sink: crate::tools::EditDiffSink,
+    /// Per-token pricing for the active model, sourced from the provider
+    /// catalog at startup (YYC-67). `None` when the catalog is disabled
+    /// or the provider doesn't publish pricing.
+    pricing: Option<crate::provider::catalog::Pricing>,
 }
 
 impl Agent {
@@ -83,6 +87,7 @@ impl Agent {
         // values rather than blocking startup over a metadata fetch.
         let mut effective_max_context = config.provider.max_context;
         let mut supports_json_mode = false;
+        let mut pricing: Option<crate::provider::catalog::Pricing> = None;
         if !config.provider.disable_catalog {
             match Self::fetch_catalog(config, &api_key).await {
                 Ok(models) => {
@@ -90,6 +95,7 @@ impl Agent {
                     match found {
                         Some(model_info) => {
                             supports_json_mode = model_info.features.json_mode;
+                            pricing = model_info.pricing.clone();
                             if model_info.context_length > 0
                                 && config.provider.max_context == 128_000
                             {
@@ -175,6 +181,7 @@ impl Agent {
             turns: 0,
             turn_cancel: CancellationToken::new(),
             diff_sink,
+            pricing,
         })
     }
 
@@ -182,6 +189,13 @@ impl Agent {
     /// and peeks the inner Option each frame to render the latest edit.
     pub fn diff_sink(&self) -> &crate::tools::EditDiffSink {
         &self.diff_sink
+    }
+
+    /// Per-token pricing for the configured model, when known (YYC-67).
+    /// The TUI uses this with the cumulative token totals (YYC-60) to
+    /// compute estimated session cost.
+    pub fn pricing(&self) -> Option<&crate::provider::catalog::Pricing> {
+        self.pricing.as_ref()
     }
 
     pub fn session_id(&self) -> &str {
@@ -233,6 +247,7 @@ impl Agent {
             turns: 0,
             turn_cancel: CancellationToken::new(),
             diff_sink: crate::tools::new_diff_sink(),
+            pricing: None,
         }
     }
 
