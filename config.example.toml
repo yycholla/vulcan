@@ -38,3 +38,17 @@ enabled = true
 trigger_ratio = 0.85
 # Reserved tokens for LLM response generation
 reserved_tokens = 50000
+
+[embeddings]
+# Off by default — flip to true after configuring an OpenAI-compatible
+# embeddings endpoint. The agent then registers `index_code_embeddings`
+# and `code_search_semantic` (YYC-48).
+enabled = false
+# Base URL. Leave blank to fall back to [provider].base_url — convenient
+# for OpenRouter / OpenAI users whose chat + embedding origins match.
+# base_url = "https://api.openai.com/v1"
+# Optional override for the API key. Falls back to [provider].api_key
+# (or VULCAN_API_KEY) when omitted.
+# api_key = "sk-..."
+model = "text-embedding-3-small"
+dim = 1536
