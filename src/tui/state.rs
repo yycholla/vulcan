@@ -9,6 +9,36 @@ use crate::memory::SessionSummary;
 use super::theme::Palette;
 use super::views::{DiffKind, DiffLine, View};
 
+/// Prompt-row state machine (YYC-58). Drives the mode badge and the
+/// per-mode key dispatch + hint set. `Busy` is a transient state pinned
+/// while the agent is mid-turn (YYC-61); it lives on this enum so the
+/// queue path can use one classification rather than a parallel flag.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum PromptMode {
+    /// Default text entry.
+    #[default]
+    Insert,
+    /// User is typing a slash command.
+    Command,
+    /// Agent has paused for a user response (AgentPause).
+    Ask,
+    /// Agent is mid-turn; characters still type but Enter enqueues
+    /// instead of sending (YYC-61).
+    Busy,
+}
+
+impl PromptMode {
+    /// Short uppercase badge shown in the prompt row's mode pill.
+    pub fn badge(self) -> &'static str {
+        match self {
+            PromptMode::Insert => "INSERT",
+            PromptMode::Command => "CMD",
+            PromptMode::Ask => "ASK",
+            PromptMode::Busy => "BUSY",
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default)]
 pub enum ChatRole {
     User,
@@ -285,6 +315,9 @@ pub struct AppState {
     /// Highlighted row in the slash command palette (YYC-70). Reset to 0
     /// whenever the filter changes; navigated via arrow keys or Ctrl+J/K.
     pub slash_menu_selection: usize,
+    /// Prompt-row mode (YYC-58). Drives the mode badge, the per-mode
+    /// hint set, and which key bindings the dispatcher honors.
+    pub prompt_mode: PromptMode,
     pub show_reasoning: bool,
     pub session_label: String,
 
@@ -320,6 +353,7 @@ impl AppState {
             at_bottom: true,
             chat_max_scroll: Cell::new(0),
             slash_menu_selection: 0,
+            prompt_mode: PromptMode::Insert,
             show_reasoning: true,
             session_label: "new session".into(),
 
@@ -372,7 +406,58 @@ impl AppState {
     }
 
     pub fn mode_label(&self) -> &'static str {
-        if self.thinking { "RUN" } else { "INSERT" }
+        // YYC-58: badge follows the prompt mode rather than thinking flag.
+        // Busy is set externally when a turn starts (YYC-61).
+        self.prompt_mode.badge()
+    }
+
+    /// Per-mode hint pairs for the prompt-row footer (YYC-58). Centralized
+    /// so call sites in views don't drift apart on the bindings each mode
+    /// advertises.
+    pub fn prompt_hints(&self) -> &'static [(&'static str, &'static str)] {
+        match self.prompt_mode {
+            PromptMode::Insert => &[
+                ("↵", "send"),
+                ("⌃T", "tools"),
+                ("⌃K", "sessions"),
+                ("/", "cmds"),
+            ],
+            PromptMode::Command => &[
+                ("↵", "run"),
+                ("↑↓", "select"),
+                ("Tab", "complete"),
+                ("Esc", "cancel"),
+            ],
+            PromptMode::Ask => &[("y", "proceed"), ("n", "deny"), ("Esc", "cancel")],
+            PromptMode::Busy => &[
+                ("↵", "queue"),
+                ("⌃C", "cancel"),
+                ("⌃⌫", "drop last"),
+            ],
+        }
+    }
+
+    /// True while an agent turn is in flight. Backed by `thinking` for now;
+    /// kept as a method so callers (queue, dispatcher) don't reach into the
+    /// flag directly (YYC-61, YYC-62).
+    pub fn is_busy(&self) -> bool {
+        self.thinking
+    }
+
+    /// Recompute `prompt_mode` from observable state (pending pause,
+    /// thinking flag, input prefix). Called once per loop tick before
+    /// draw so the badge tracks reality without each call site updating
+    /// it manually.
+    pub fn refresh_prompt_mode(&mut self) {
+        self.prompt_mode = if self.pending_pause.is_some() {
+            PromptMode::Ask
+        } else if self.thinking {
+            PromptMode::Busy
+        } else if self.input.starts_with('/') {
+            PromptMode::Command
+        } else {
+            PromptMode::Insert
+        };
     }
 
     pub fn model_status(&self) -> String {
@@ -812,6 +897,45 @@ mod tests {
             MessageSegment::Reasoning(r) => assert_eq!(r, "after tool"),
             other => panic!("expected reasoning, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn refresh_prompt_mode_picks_command_when_input_starts_with_slash() {
+        let mut app = AppState::new("test".into(), 100);
+        app.input = "/help".into();
+        app.refresh_prompt_mode();
+        assert_eq!(app.prompt_mode, PromptMode::Command);
+    }
+
+    #[test]
+    fn refresh_prompt_mode_returns_to_insert_when_slash_cleared() {
+        let mut app = AppState::new("test".into(), 100);
+        app.input = "/help".into();
+        app.refresh_prompt_mode();
+        app.input.clear();
+        app.refresh_prompt_mode();
+        assert_eq!(app.prompt_mode, PromptMode::Insert);
+    }
+
+    #[test]
+    fn refresh_prompt_mode_uses_busy_when_thinking() {
+        let mut app = AppState::new("test".into(), 100);
+        app.thinking = true;
+        app.refresh_prompt_mode();
+        assert_eq!(app.prompt_mode, PromptMode::Busy);
+        assert_eq!(app.mode_label(), "BUSY");
+    }
+
+    #[test]
+    fn refresh_prompt_mode_busy_overrides_command_prefix() {
+        // While the agent is mid-turn the badge should still read BUSY
+        // even if the user typed `/` in the prompt — the slash menu can
+        // be shown but the mode pill reflects the agent state.
+        let mut app = AppState::new("test".into(), 100);
+        app.thinking = true;
+        app.input = "/queue".into();
+        app.refresh_prompt_mode();
+        assert_eq!(app.prompt_mode, PromptMode::Busy);
     }
 
     #[test]
