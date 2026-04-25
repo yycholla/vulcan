@@ -273,6 +273,15 @@ pub struct AppState {
     pub input: String,
     pub thinking: bool,
     pub scroll: u16,
+    /// True when the chat viewport is following the bottom — new agent
+    /// content auto-scrolls into view. Set false the moment the user scrolls
+    /// up; flipped back true when they scroll all the way back down or
+    /// submit a new prompt (YYC-69).
+    pub at_bottom: bool,
+    /// Last computed max scroll position for the chat viewport, written by
+    /// the renderer on each frame. The main loop reads this to keep
+    /// `scroll` pinned to the bottom while `at_bottom` is true.
+    pub chat_max_scroll: Cell<u16>,
     pub show_reasoning: bool,
     pub session_label: String,
 
@@ -305,6 +314,8 @@ impl AppState {
             input: String::new(),
             thinking: false,
             scroll: 0,
+            at_bottom: true,
+            chat_max_scroll: Cell::new(0),
             show_reasoning: true,
             session_label: "new session".into(),
 

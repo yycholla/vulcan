@@ -265,6 +265,14 @@ pub async fn run_tui(config: &Config, resume: ResumeTarget) -> Result<()> {
             None
         };
 
+        // YYC-69: keep the chat viewport pinned to the latest content while
+        // the user hasn't scrolled away. `chat_max_scroll` is published by
+        // the renderer on the previous frame, so this lags one tick after a
+        // new event — invisible in practice.
+        if app.at_bottom {
+            app.scroll = app.chat_max_scroll.get();
+        }
+
         terminal.draw(|f| {
             let area = f.area();
             let (main_area, palette_area) = if let Some(ref pal) = palette {
@@ -517,7 +525,10 @@ pub async fn run_tui(config: &Config, resume: ResumeTarget) -> Result<()> {
                                             app.messages.push(ChatMessage { role: ChatRole::User, content: msg.clone(), ..Default::default() });
                                             app.messages.push(ChatMessage { role: ChatRole::Agent, content: String::new(), ..Default::default() });
                                             app.thinking = true;
-                                            app.scroll = 0;
+                                            // New prompt: re-engage auto-follow. The next render
+                                            // will publish the updated max scroll and the loop
+                                            // will pin scroll to it.
+                                            app.at_bottom = true;
                                             app.note_prompt_submitted(&msg);
 
                                             let tx = stream_tx.clone();
@@ -544,10 +555,24 @@ pub async fn run_tui(config: &Config, resume: ResumeTarget) -> Result<()> {
                                             }
                                         }
                                     }
-                                    KeyCode::Up => app.scroll = app.scroll.saturating_sub(1),
-                                    KeyCode::Down => app.scroll = app.scroll.saturating_add(1),
-                                    KeyCode::PageUp => app.scroll = app.scroll.saturating_sub(10),
-                                    KeyCode::PageDown => app.scroll = app.scroll.saturating_add(10),
+                                    KeyCode::Up => {
+                                        app.scroll = app.scroll.saturating_sub(1);
+                                        app.at_bottom = false;
+                                    }
+                                    KeyCode::Down => {
+                                        let max = app.chat_max_scroll.get();
+                                        app.scroll = app.scroll.saturating_add(1).min(max);
+                                        app.at_bottom = app.scroll >= max;
+                                    }
+                                    KeyCode::PageUp => {
+                                        app.scroll = app.scroll.saturating_sub(10);
+                                        app.at_bottom = false;
+                                    }
+                                    KeyCode::PageDown => {
+                                        let max = app.chat_max_scroll.get();
+                                        app.scroll = app.scroll.saturating_add(10).min(max);
+                                        app.at_bottom = app.scroll >= max;
+                                    }
                                     KeyCode::Esc => exit = true,
                                     _ => { pending_quit = false; }
                                 }
