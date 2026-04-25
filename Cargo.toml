@@ -54,6 +54,17 @@ portable-pty = "0.9.0"
 # semantics predictable. Plan: migrate one tool at a time.
 gix = "0.82"
 
+# Code intelligence (YYC-45). Tree-sitter parses without per-language
+# servers; grammars are statically linked (binary cost is the price for
+# zero runtime deps). Versions verified against crates.io latest stable.
+tree-sitter = "0.26.8"
+tree-sitter-rust = "0.24.2"
+tree-sitter-python = "0.25.0"
+tree-sitter-typescript = "0.23.2"
+tree-sitter-javascript = "0.25.0"
+tree-sitter-go = "0.25.0"
+tree-sitter-json = "0.24.8"
+
 [profile.release]
 opt-level = "z"    # optimize for size
 lto = true
