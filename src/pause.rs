@@ -16,11 +16,40 @@
 use serde_json::Value;
 use tokio::sync::oneshot;
 
+/// Visual classification for a pause option's pill (YYC-59). Drives color
+/// — primary actions render filled, destructive in red, neutral in ink.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OptionKind {
+    Primary,
+    Neutral,
+    Destructive,
+}
+
+/// One inline action pill on a pause prompt (YYC-59). The hook emitting
+/// the pause declares the keys/labels/colors; the TUI renders the pills
+/// and routes a matching keystroke back as an `AgentResume`.
+#[derive(Debug, Clone)]
+pub struct PauseOption {
+    /// Single-char keyboard shortcut (e.g. 'y', 'n', 'e').
+    pub key: char,
+    /// Human-readable label rendered inside the pill ("proceed", "deny").
+    pub label: String,
+    /// Color/styling class for the pill.
+    pub kind: OptionKind,
+    /// Resume variant to send back on press. Carrying it on the option
+    /// lets each pause define its own key→action mapping without the TUI
+    /// hardcoding semantics.
+    pub resume: AgentResume,
+}
+
 /// One pause emission: what's being asked, plus a reply channel.
 #[derive(Debug)]
 pub struct AgentPause {
     pub kind: PauseKind,
     pub reply: oneshot::Sender<AgentResume>,
+    /// Inline action pills the TUI should render with the prompt
+    /// (YYC-59). Empty → TUI falls back to the legacy a/r/d modal.
+    pub options: Vec<PauseOption>,
 }
 
 /// What the agent is asking the user.

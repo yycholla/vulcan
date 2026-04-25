@@ -199,6 +199,34 @@ fn build_chat_lines(app: &AppState, show_reasoning: bool, dense: bool) -> Vec<Li
         }
     }
 
+    // YYC-59: inline action pills for an active AgentPause. Rendered
+    // beneath the latest assistant message so the user sees what
+    // they're being asked to choose.
+    if let Some(p) = app.pending_pause.as_ref() {
+        if !p.options.is_empty() {
+            let mut pill_spans: Vec<Span<'static>> = Vec::new();
+            pill_spans.push(Span::styled(
+                "▎ ",
+                Style::default().fg(Palette::INK),
+            ));
+            for (i, opt) in p.options.iter().enumerate() {
+                if i > 0 {
+                    pill_spans.push(Span::raw("  "));
+                }
+                let color = match opt.kind {
+                    crate::pause::OptionKind::Primary => Palette::BLUE,
+                    crate::pause::OptionKind::Neutral => Palette::INK,
+                    crate::pause::OptionKind::Destructive => Palette::RED,
+                };
+                let filled = matches!(opt.kind, crate::pause::OptionKind::Primary);
+                let label = format!("[{}] {}", opt.key, opt.label);
+                pill_spans.push(super::widgets::pill(&label, color, filled));
+            }
+            out.push(Line::from(pill_spans));
+            out.push(Line::from(""));
+        }
+    }
+
     // YYC-61: ghosted preview of pending queued submissions, rendered
     // beneath the latest agent message so the user sees what's been
     // staged behind the in-flight turn.
