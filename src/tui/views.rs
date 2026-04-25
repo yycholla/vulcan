@@ -198,6 +198,36 @@ fn build_chat_lines(app: &AppState, show_reasoning: bool, dense: bool) -> Vec<Li
             out.push(Line::from(""));
         }
     }
+
+    // YYC-61: ghosted preview of pending queued submissions, rendered
+    // beneath the latest agent message so the user sees what's been
+    // staged behind the in-flight turn.
+    if !app.queue.is_empty() {
+        out.push(Line::from(Span::styled(
+            format!("── queue · {} pending ──", app.queue.len()),
+            Style::default()
+                .fg(Palette::MUTED)
+                .add_modifier(Modifier::DIM),
+        )));
+        for (idx, qmsg) in app.queue.iter().enumerate() {
+            let preview: String = qmsg.chars().take(120).collect();
+            out.push(Line::from(vec![
+                Span::styled(
+                    format!("▸ #{:<2} ", idx + 1),
+                    Style::default()
+                        .fg(Palette::MUTED)
+                        .add_modifier(Modifier::DIM),
+                ),
+                Span::styled(
+                    preview,
+                    Style::default()
+                        .fg(Palette::MUTED)
+                        .add_modifier(Modifier::DIM),
+                ),
+            ]));
+        }
+        out.push(Line::from(""));
+    }
     out
 }
 
