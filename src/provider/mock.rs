@@ -85,6 +85,26 @@ impl MockProvider {
         self.enqueue(MockResponse::ToolCalls(vec![tc]))
     }
 
+    /// Enqueue a response containing multiple tool calls in a single turn —
+    /// the parallel-dispatch path's primary input.
+    pub fn enqueue_tool_calls(
+        &self,
+        calls: Vec<(&str, &str, serde_json::Value)>,
+    ) -> &Self {
+        let tcs: Vec<ToolCall> = calls
+            .into_iter()
+            .map(|(name, id, args)| ToolCall {
+                id: id.to_string(),
+                call_type: "function".into(),
+                function: ToolCallFunction {
+                    name: name.to_string(),
+                    arguments: args.to_string(),
+                },
+            })
+            .collect();
+        self.enqueue(MockResponse::ToolCalls(tcs))
+    }
+
     pub fn enqueue_error(&self, message: impl Into<String>) -> &Self {
         self.enqueue(MockResponse::Error(message.into()))
     }
