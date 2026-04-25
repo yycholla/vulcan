@@ -7,7 +7,7 @@ use ratatui::{
 };
 
 use super::markdown::render_markdown;
-use super::state::{AppState, ChatRole, SessionStatus};
+use super::state::{AppState, ChatRole, MessageSegment, SessionStatus, ToolStatus};
 use super::theme::{Palette, body, faint_bg};
 use super::widgets::{fill, frame, message_header, section_header, sparkline, ticker};
 
@@ -97,37 +97,90 @@ fn build_chat_lines(app: &AppState, show_reasoning: bool, dense: bool) -> Vec<Li
         };
         out.push(message_header(role_label, accent, None));
 
-        // Reasoning trace from a thinking-mode model, when present and toggle is on.
-        // Rendered before the agent's content so the visual order matches the
-        // model's natural output (think → answer).
-        if show_reasoning && matches!(m.role, ChatRole::Agent) && !m.reasoning.is_empty() {
-            for l in super::widgets::reasoning_lines(&m.reasoning, false) {
-                out.push(l);
-            }
-        }
+        let is_agent = matches!(m.role, ChatRole::Agent);
 
-        if matches!(m.role, ChatRole::Agent) && m.content.is_empty() {
-            // Streaming and content hasn't started yet — show "thinking…" hint.
-            // If reasoning is already streaming above, this still tells the user
-            // they're waiting on the answer (not lost).
-            let label = if m.reasoning.is_empty() {
-                "▎ Thinking…"
-            } else {
-                "▎ Answering…"
-            };
-            out.push(Line::from(Span::styled(
-                label,
-                Style::default()
-                    .fg(Palette::MUTED)
-                    .add_modifier(Modifier::SLOW_BLINK),
-            )));
+        if is_agent && !m.segments.is_empty() {
+            // Live timeline (YYC-71): render reasoning, tool calls, and text
+            // in arrival order. Reasoning fragments only emit when the
+            // toggle is on; tool calls always emit.
+            let mut text_emitted = false;
+            for seg in &m.segments {
+                match seg {
+                    MessageSegment::Reasoning(r) if show_reasoning && !r.is_empty() => {
+                        for l in super::widgets::reasoning_lines(r, false) {
+                            out.push(l);
+                        }
+                    }
+                    MessageSegment::Reasoning(_) => {}
+                    MessageSegment::ToolCall { name, status } => {
+                        let body = match status {
+                            ToolStatus::InProgress => format!("_[🔧 {name}…]_"),
+                            ToolStatus::Done(true) => format!("_[🔧 {name} ✓]_"),
+                            ToolStatus::Done(false) => format!("_[🔧 {name} ✗]_"),
+                        };
+                        let rendered = render_markdown(&body);
+                        for line in rendered {
+                            let mut spans =
+                                vec![Span::styled("▎ ", Style::default().fg(accent))];
+                            spans.extend(line.spans.into_iter());
+                            out.push(Line::from(spans));
+                        }
+                    }
+                    MessageSegment::Text(t) if !t.is_empty() => {
+                        text_emitted = true;
+                        let rendered = render_markdown(t);
+                        for line in rendered {
+                            let mut spans =
+                                vec![Span::styled("▎ ", Style::default().fg(accent))];
+                            spans.extend(line.spans.into_iter());
+                            out.push(Line::from(spans));
+                        }
+                    }
+                    MessageSegment::Text(_) => {}
+                }
+            }
+            // Show waiting placeholder when only reasoning has streamed and
+            // no body text has appeared yet.
+            if !text_emitted {
+                let label = if m.has_reasoning() {
+                    "▎ Answering…"
+                } else {
+                    "▎ Thinking…"
+                };
+                out.push(Line::from(Span::styled(
+                    label,
+                    Style::default()
+                        .fg(Palette::MUTED)
+                        .add_modifier(Modifier::SLOW_BLINK),
+                )));
+            }
         } else {
-            // Render body with a left accent bar, inline.
-            let rendered = render_markdown(&m.content);
-            for line in rendered {
-                let mut spans = vec![Span::styled("▎ ", Style::default().fg(accent))];
-                spans.extend(line.spans.into_iter());
-                out.push(Line::from(spans));
+            // Hydrated history (no segment timeline) — fall back to the
+            // legacy reasoning-then-content layout.
+            if show_reasoning && is_agent && !m.reasoning.is_empty() {
+                for l in super::widgets::reasoning_lines(&m.reasoning, false) {
+                    out.push(l);
+                }
+            }
+            if is_agent && m.content.is_empty() {
+                let label = if m.reasoning.is_empty() {
+                    "▎ Thinking…"
+                } else {
+                    "▎ Answering…"
+                };
+                out.push(Line::from(Span::styled(
+                    label,
+                    Style::default()
+                        .fg(Palette::MUTED)
+                        .add_modifier(Modifier::SLOW_BLINK),
+                )));
+            } else {
+                let rendered = render_markdown(&m.content);
+                for line in rendered {
+                    let mut spans = vec![Span::styled("▎ ", Style::default().fg(accent))];
+                    spans.extend(line.spans.into_iter());
+                    out.push(Line::from(spans));
+                }
             }
         }
         if !dense || i + 1 == app.messages.len() {
