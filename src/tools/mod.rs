@@ -64,6 +64,7 @@ pub trait Tool: Send + Sync {
 }
 
 pub mod code;
+pub mod code_edit;
 pub mod file;
 pub mod git;
 pub mod lsp;
@@ -159,7 +160,10 @@ impl ToolRegistry {
         registry.register(Arc::new(lsp::GotoDefinitionTool::new(lsp_mgr.clone())));
         registry.register(Arc::new(lsp::FindReferencesTool::new(lsp_mgr.clone())));
         registry.register(Arc::new(lsp::HoverTool::new(lsp_mgr.clone())));
-        registry.register(Arc::new(lsp::DiagnosticsTool::new(lsp_mgr)));
+        registry.register(Arc::new(lsp::DiagnosticsTool::new(lsp_mgr.clone())));
+        // YYC-49: AST-aware structural edits.
+        registry.register(Arc::new(code_edit::ReplaceFunctionBodyTool));
+        registry.register(Arc::new(code_edit::RenameSymbolTool::new(lsp_mgr)));
         // YYC-36: native git tools — agent stops composing brittle
         // `git ...` shell strings through bash.
         registry.register(Arc::new(git::GitStatusTool));
