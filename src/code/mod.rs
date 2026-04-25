@@ -4,6 +4,8 @@
 //! alongside. Both share `Language` here so language detection has one
 //! source of truth.
 
+pub mod lsp;
+
 use std::path::Path;
 use std::sync::Mutex;
 use tree_sitter::{Language as TsLanguage, Parser as TsParser};

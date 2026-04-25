@@ -44,6 +44,9 @@ pub struct Agent {
     /// catalog at startup (YYC-67). `None` when the catalog is disabled
     /// or the provider doesn't publish pricing.
     pricing: Option<crate::provider::catalog::Pricing>,
+    /// LSP server pool (YYC-46). Lazy: servers spawn on first tool
+    /// invocation that needs one. Reaped in `end_session`.
+    lsp_manager: Arc<crate::code::lsp::LspManager>,
 }
 
 impl Agent {
@@ -148,7 +151,13 @@ impl Agent {
         );
 
         let diff_sink = crate::tools::new_diff_sink();
-        let tools = ToolRegistry::new_with_diff_sink(Some(diff_sink.clone()));
+        let lsp_manager = Arc::new(crate::code::lsp::LspManager::new(
+            std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")),
+        ));
+        let tools = ToolRegistry::new_with_diff_and_lsp(
+            Some(diff_sink.clone()),
+            Some(lsp_manager.clone()),
+        );
         let skills = Arc::new(SkillRegistry::new(&config.skills_dir));
         let memory = SessionStore::new();
         let context = ContextManager::new(provider.max_context());
@@ -182,6 +191,7 @@ impl Agent {
             turn_cancel: CancellationToken::new(),
             diff_sink,
             pricing,
+            lsp_manager,
         })
     }
 
@@ -248,6 +258,9 @@ impl Agent {
             turn_cancel: CancellationToken::new(),
             diff_sink: crate::tools::new_diff_sink(),
             pricing: None,
+            lsp_manager: Arc::new(crate::code::lsp::LspManager::new(
+                std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")),
+            )),
         }
     }
 
@@ -273,9 +286,18 @@ impl Agent {
         self.hooks.session_start(&self.session_id).await;
     }
 
-    /// Fires `session_end` and records the total turn count.
+    /// Fires `session_end` and records the total turn count. Also
+    /// reaps any LSP servers spawned during the session (YYC-46).
     pub async fn end_session(&self) {
         self.hooks.session_end(&self.session_id, self.turns).await;
+        self.lsp_manager.shutdown_all().await;
+    }
+
+    /// Borrow the shared LSP manager (YYC-46). Used by the
+    /// auto-diagnostics hook (YYC-51) to query post-edit diagnostics
+    /// without re-spawning servers.
+    pub fn lsp_manager(&self) -> &Arc<crate::code::lsp::LspManager> {
+        &self.lsp_manager
     }
 
     /// Run a one-shot prompt (no TUI). Gathers context, calls LLM, dispatches
