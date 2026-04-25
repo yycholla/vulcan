@@ -1,0 +1,52 @@
+[package]
+name = "ferris"
+version = "0.1.0"
+edition = "2024"
+description = "A pure-Rust personal AI agent — Hermes meets Ironcode"
+authors = ["Colin Hanway"]
+license = "MIT"
+repository = "https://github.com/yycholla/ferris"
+readme = "README.md"
+
+[dependencies]
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+
+# HTTP / LLM API
+reqwest = { version = "0.13", features = ["json", "stream"] }
+
+# Async trait support (needed for dyn-compatible tool/provider traits)
+async-trait = "0.1"
+
+# Stream processing for SSE responses
+futures-util = "0.3"
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "1"
+
+# CLI + TUI
+clap = { version = "4", features = ["derive"] }
+ratatui = "0.30"
+crossterm = "0.29"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Error handling
+anyhow = "1"
+thiserror = "2"
+
+# Date/time
+chrono = { version = "0.4", features = ["serde"] }
+
+# UUID for session IDs
+uuid = { version = "1", features = ["v4"] }
+
+[profile.release]
+opt-level = "z"    # optimize for size
+lto = true
+codegen-units = 1
+strip = true
