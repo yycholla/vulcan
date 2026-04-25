@@ -1,4 +1,6 @@
-use crate::provider::{ChatResponse, LLMProvider, Message, StreamEvent, ToolCall, ToolDefinition, Usage};
+use crate::provider::{
+    ChatResponse, LLMProvider, Message, ProviderError, StreamEvent, ToolCall, ToolDefinition, Usage,
+};
 use anyhow::{Context, Result};
 use reqwest::Client;
 use serde_json::{json, Value};
@@ -55,21 +57,30 @@ impl OpenAIProvider {
     }
 
     /// Make the HTTP request and return the response. Retries up to
-    /// `max_retries` times on transient failures (429, 408, 5xx, network
-    /// errors) with exponential backoff + jitter. Non-retryable errors
-    /// (400, 401, 403, 404, 422) and cancellation pass through immediately.
+    /// `max_retries` times on transient failures (429, 5xx, network errors)
+    /// with exponential backoff + jitter. Non-retryable errors
+    /// (Auth/BadRequest/ModelNotFound/Other) and cancellation pass through
+    /// immediately. Returns a structured `ProviderError` on failure so
+    /// callers can render actionable messages and retry policies key off
+    /// the variant rather than raw status codes.
     async fn do_request(
         &self,
         messages: &[Message],
         tools: &[ToolDefinition],
         cancel: &CancellationToken,
-    ) -> Result<reqwest::Response> {
+    ) -> std::result::Result<reqwest::Response, ProviderError> {
         let url = format!("{}/chat/completions", self.base_url);
         let body = self.build_request(messages, tools);
 
+        let mut last_err: Option<ProviderError> = None;
         for attempt in 0..=self.max_retries {
             if cancel.is_cancelled() {
-                anyhow::bail!("Cancelled");
+                // Surface as Other; cancellation in the API layer doesn't
+                // map to a real provider failure.
+                return Err(ProviderError::Other {
+                    status: 0,
+                    body: "Cancelled".into(),
+                });
             }
 
             if attempt > 0 {
@@ -82,7 +93,12 @@ impl OpenAIProvider {
                 );
                 tokio::select! {
                     biased;
-                    _ = cancel.cancelled() => anyhow::bail!("Cancelled"),
+                    _ = cancel.cancelled() => {
+                        return Err(ProviderError::Other {
+                            status: 0,
+                            body: "Cancelled".into(),
+                        });
+                    }
                     _ = tokio::time::sleep(delay) => {},
                 }
             }
@@ -96,43 +112,36 @@ impl OpenAIProvider {
                 .send()
                 .await;
 
-            match send_result {
+            let err = match send_result {
                 Ok(response) => {
                     let status = response.status();
                     if status.is_success() {
                         return Ok(response);
                     }
                     let body_text = response.text().await.unwrap_or_default();
-                    if is_retryable_status(status) && attempt < self.max_retries {
-                        tracing::warn!(
-                            "API returned {} (retryable, attempt {}/{}): {}",
-                            status,
-                            attempt + 1,
-                            self.max_retries,
-                            truncate(&body_text, 200)
-                        );
-                        continue;
-                    }
-                    anyhow::bail!("LLM API returned {status}: {body_text}");
+                    ProviderError::from_response(status, &body_text, &self.model)
                 }
-                Err(e) => {
-                    // Network/timeout errors are always retryable within budget.
-                    if attempt < self.max_retries {
-                        tracing::warn!(
-                            "Network error (retryable, attempt {}/{}): {}",
-                            attempt + 1,
-                            self.max_retries,
-                            e
-                        );
-                        continue;
-                    }
-                    return Err(anyhow::Error::from(e).context("LLM API request failed"));
-                }
+                Err(e) => ProviderError::Network(e),
+            };
+
+            if err.is_retryable() && attempt < self.max_retries {
+                tracing::warn!(
+                    "Provider error (retryable, attempt {}/{}): {}",
+                    attempt + 1,
+                    self.max_retries,
+                    truncate(&err.to_string(), 200)
+                );
+                last_err = Some(err);
+                continue;
             }
+            // Non-retryable, or budget exhausted — surface the error.
+            return Err(err);
         }
 
-        // Should be unreachable — the loop body always either returns/bails or continues.
-        anyhow::bail!("LLM API retry budget exhausted")
+        Err(last_err.unwrap_or(ProviderError::Other {
+            status: 0,
+            body: "retry budget exhausted".into(),
+        }))
     }
 
     /// Parse a single SSE data line and accumulate state
@@ -359,15 +368,6 @@ impl LLMProvider for OpenAIProvider {
     }
 }
 
-/// Status codes worth retrying. Excludes auth/permission/validation errors
-/// where retrying just spends more of the budget on a guaranteed failure.
-fn is_retryable_status(status: reqwest::StatusCode) -> bool {
-    matches!(
-        status.as_u16(),
-        408 | 425 | 429 | 500 | 502 | 503 | 504
-    )
-}
-
 /// Exponential backoff with jitter. attempt=1 → ~1s, 2 → ~2s, 3 → ~4s, 4 → ~8s, 5 → ~16s.
 /// Jitter is 0-25% of the base delay, derived from monotonic-ish system time
 /// to avoid synchronized retry storms across multiple in-flight requests.
@@ -397,25 +397,102 @@ fn truncate(s: &str, max: usize) -> String {
 mod tests {
     use super::*;
     use reqwest::StatusCode;
+    use crate::provider::ProviderError;
 
-    #[test]
-    fn retryable_includes_429_5xx_and_timeouts() {
-        assert!(is_retryable_status(StatusCode::REQUEST_TIMEOUT));
-        assert!(is_retryable_status(StatusCode::TOO_MANY_REQUESTS));
-        assert!(is_retryable_status(StatusCode::INTERNAL_SERVER_ERROR));
-        assert!(is_retryable_status(StatusCode::BAD_GATEWAY));
-        assert!(is_retryable_status(StatusCode::SERVICE_UNAVAILABLE));
-        assert!(is_retryable_status(StatusCode::GATEWAY_TIMEOUT));
+    fn classify(code: u16, body: &str) -> ProviderError {
+        ProviderError::from_response(StatusCode::from_u16(code).unwrap(), body, "deepseek/deepseek-v4-flash")
     }
 
     #[test]
-    fn retryable_excludes_auth_and_validation_errors() {
-        // These mean "your request is wrong" — retrying just burns budget.
-        assert!(!is_retryable_status(StatusCode::BAD_REQUEST));
-        assert!(!is_retryable_status(StatusCode::UNAUTHORIZED));
-        assert!(!is_retryable_status(StatusCode::FORBIDDEN));
-        assert!(!is_retryable_status(StatusCode::NOT_FOUND));
-        assert!(!is_retryable_status(StatusCode::UNPROCESSABLE_ENTITY));
+    fn classifier_handles_common_provider_errors() {
+        // 401 / 403 → Auth
+        assert!(matches!(
+            classify(401, r#"{"error":{"message":"User not found.","code":401}}"#),
+            ProviderError::Auth { .. }
+        ));
+        assert!(matches!(
+            classify(403, r#"{"error":{"message":"Forbidden"}}"#),
+            ProviderError::Auth { .. }
+        ));
+        // 429 → RateLimited
+        assert!(matches!(
+            classify(429, r#"{"error":{"message":"slow down"}}"#),
+            ProviderError::RateLimited { .. }
+        ));
+        // 400 / 422 → BadRequest
+        assert!(matches!(
+            classify(400, r#"{"error":{"message":"bad shape"}}"#),
+            ProviderError::BadRequest { .. }
+        ));
+        assert!(matches!(
+            classify(422, r#"{"error":{"message":"invalid arg"}}"#),
+            ProviderError::BadRequest { .. }
+        ));
+        // 5xx → ServerError
+        assert!(matches!(
+            classify(500, r#"{"error":{"message":"oops"}}"#),
+            ProviderError::ServerError { .. }
+        ));
+        assert!(matches!(
+            classify(503, r#"{"error":{"message":"down"}}"#),
+            ProviderError::ServerError { .. }
+        ));
+        // 404 with model in body → ModelNotFound
+        assert!(matches!(
+            classify(404, r#"{"error":{"message":"Model deepseek/deepseek-v4-flash not found"}}"#),
+            ProviderError::ModelNotFound { .. }
+        ));
+        // 404 without model hint → Other
+        assert!(matches!(
+            classify(404, r#"{"error":{"message":"Resource gone"}}"#),
+            ProviderError::Other { .. }
+        ));
+        // Non-JSON body → Other (or BadRequest depending on status)
+        let html = "<html>500 internal server error</html>";
+        assert!(matches!(classify(500, html), ProviderError::ServerError { .. }));
+    }
+
+    #[test]
+    fn classifier_unwraps_openrouter_nested_error() {
+        // OpenRouter wraps the upstream provider's body inside metadata.raw.
+        let body = r#"{"error":{"message":"Provider returned error","code":400,"metadata":{"raw":"{\"error\":{\"message\":\"The reasoning_content in the thinking mode must be passed back to the API.\"}}"}}}"#;
+        let err = classify(400, body);
+        match err {
+            ProviderError::BadRequest { message } => {
+                assert!(
+                    message.contains("reasoning_content"),
+                    "expected unwrapped DeepSeek message, got {message:?}"
+                );
+            }
+            other => panic!("expected BadRequest, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn provider_error_retry_classification() {
+        assert!(classify(429, "{}").is_retryable());
+        assert!(classify(500, "{}").is_retryable());
+        assert!(classify(502, "{}").is_retryable());
+        assert!(classify(503, "{}").is_retryable());
+        // Auth/BadRequest/ModelNotFound/Other are not.
+        assert!(!classify(401, r#"{"error":{"message":"x"}}"#).is_retryable());
+        assert!(!classify(400, r#"{"error":{"message":"x"}}"#).is_retryable());
+        assert!(!classify(
+            404,
+            r#"{"error":{"message":"Model deepseek/deepseek-v4-flash not found"}}"#
+        ).is_retryable());
+    }
+
+    #[test]
+    fn provider_error_display_includes_actionable_hint() {
+        let auth = classify(401, r#"{"error":{"message":"User not found."}}"#).to_string();
+        assert!(auth.contains("API key"), "got {auth:?}");
+        let model = classify(
+            404,
+            r#"{"error":{"message":"Model deepseek/deepseek-v4-flash not found"}}"#,
+        )
+        .to_string();
+        assert!(model.contains("provider's catalog"), "got {model:?}");
     }
 
     #[test]
