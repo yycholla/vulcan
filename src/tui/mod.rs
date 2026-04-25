@@ -270,6 +270,11 @@ pub async fn run_tui(config: &Config, resume: ResumeTarget) -> Result<()> {
         config.provider.max_context as u32,
     );
     app.audit_log = Some(audit_buf);
+    // YYC-66: clone the agent's diff sink so the TUI can render real edits.
+    {
+        let a = agent.lock().await;
+        app.diff_sink = Some(a.diff_sink().clone());
+    }
     refresh_sessions(&agent, &mut app).await;
 
     if let Some(note) = resume_note {

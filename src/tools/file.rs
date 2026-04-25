@@ -57,7 +57,15 @@ impl Tool for ReadFile {
     }
 }
 
-pub struct WriteFile;
+pub struct WriteFile {
+    diff_sink: Option<crate::tools::EditDiffSink>,
+}
+
+impl WriteFile {
+    pub fn new(diff_sink: Option<crate::tools::EditDiffSink>) -> Self {
+        Self { diff_sink }
+    }
+}
 
 #[async_trait]
 impl Tool for WriteFile {
@@ -83,6 +91,15 @@ impl Tool for WriteFile {
             .ok_or_else(|| anyhow::anyhow!("path required"))?;
         let content = params["content"].as_str().unwrap_or("");
 
+        // YYC-66: snapshot the existing content before overwriting so the
+        // diff sink has a meaningful "before" — empty string for a fresh
+        // file is correct (it didn't exist).
+        let before = if self.diff_sink.is_some() {
+            tokio::fs::read_to_string(path).await.unwrap_or_default()
+        } else {
+            String::new()
+        };
+
         // Create parent directories
         if let Some(parent) = std::path::Path::new(path).parent() {
             tokio::fs::create_dir_all(parent).await?;
@@ -90,6 +107,18 @@ impl Tool for WriteFile {
 
         tokio::fs::write(path, content).await?;
         let bytes = content.len();
+
+        if let Some(sink) = &self.diff_sink {
+            let diff = crate::tools::EditDiff {
+                path: path.to_string(),
+                tool: "write_file".into(),
+                before: crate::tools::snippet(&before, 6, 800),
+                after: crate::tools::snippet(content, 6, 800),
+                at: chrono::Local::now(),
+            };
+            *sink.lock().unwrap() = Some(diff);
+        }
+
         Ok(ToolResult::ok(format!("Wrote {bytes} bytes to {path}")))
     }
 }
@@ -151,7 +180,15 @@ impl Tool for SearchFiles {
     }
 }
 
-pub struct PatchFile;
+pub struct PatchFile {
+    diff_sink: Option<crate::tools::EditDiffSink>,
+}
+
+impl PatchFile {
+    pub fn new(diff_sink: Option<crate::tools::EditDiffSink>) -> Self {
+        Self { diff_sink }
+    }
+}
 
 #[async_trait]
 impl Tool for PatchFile {
@@ -205,8 +242,80 @@ impl Tool for PatchFile {
         tokio::fs::write(path, &new_content).await?;
 
         let replaces = content.matches(old).count();
+
+        // YYC-66: capture the before/after snippets so the TUI diff pane
+        // shows actual edited text rather than demo data.
+        if let Some(sink) = &self.diff_sink {
+            let diff = crate::tools::EditDiff {
+                path: path.to_string(),
+                tool: "edit_file".into(),
+                before: crate::tools::snippet(old, 6, 800),
+                after: crate::tools::snippet(new, 6, 800),
+                at: chrono::Local::now(),
+            };
+            *sink.lock().unwrap() = Some(diff);
+        }
+
         Ok(ToolResult::ok(format!(
             "Replaced {replaces} occurrence(s) in {path}"
         )))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+    use tempfile::tempdir;
+    use tokio_util::sync::CancellationToken;
+
+    #[tokio::test]
+    async fn write_file_captures_before_after_into_diff_sink() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("hello.txt");
+        let path_str = path.to_string_lossy().to_string();
+        // Pre-existing content so "before" is non-empty.
+        std::fs::write(&path, "old contents\n").unwrap();
+
+        let sink = crate::tools::new_diff_sink();
+        let tool = WriteFile::new(Some(sink.clone()));
+        tool.call(
+            json!({"path": path_str, "content": "new contents\n"}),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+
+        let diff = sink.lock().unwrap().clone().expect("diff captured");
+        assert_eq!(diff.tool, "write_file");
+        assert_eq!(diff.path, path_str);
+        assert_eq!(diff.before, "old contents");
+        assert_eq!(diff.after, "new contents");
+    }
+
+    #[tokio::test]
+    async fn patch_file_captures_old_and_new_strings_into_diff_sink() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("a.rs");
+        let path_str = path.to_string_lossy().to_string();
+        std::fs::write(&path, "fn foo() { 1 }\n").unwrap();
+
+        let sink = crate::tools::new_diff_sink();
+        let tool = PatchFile::new(Some(sink.clone()));
+        tool.call(
+            json!({
+                "path": path_str,
+                "old_string": "1",
+                "new_string": "42",
+            }),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+
+        let diff = sink.lock().unwrap().clone().expect("diff captured");
+        assert_eq!(diff.tool, "edit_file");
+        assert_eq!(diff.before, "1");
+        assert_eq!(diff.after, "42");
     }
 }

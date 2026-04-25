@@ -37,6 +37,9 @@ pub struct Agent {
     /// next call to `run_prompt` / `run_prompt_stream` swaps in a fresh token
     /// so cancel applies to the in-flight turn only, not future ones.
     turn_cancel: CancellationToken,
+    /// Latest file edit, captured by `WriteFile`/`PatchFile` (YYC-66).
+    /// TUI clones this Arc and renders the inner Option each frame.
+    diff_sink: crate::tools::EditDiffSink,
 }
 
 impl Agent {
@@ -138,7 +141,8 @@ impl Agent {
             .context("Failed to initialize LLM provider")?,
         );
 
-        let tools = ToolRegistry::new();
+        let diff_sink = crate::tools::new_diff_sink();
+        let tools = ToolRegistry::new_with_diff_sink(Some(diff_sink.clone()));
         let skills = Arc::new(SkillRegistry::new(&config.skills_dir));
         let memory = SessionStore::new();
         let context = ContextManager::new(provider.max_context());
@@ -170,7 +174,14 @@ impl Agent {
             session_id,
             turns: 0,
             turn_cancel: CancellationToken::new(),
+            diff_sink,
         })
+    }
+
+    /// Borrow the shared edit-diff sink (YYC-66). The TUI clones this Arc
+    /// and peeks the inner Option each frame to render the latest edit.
+    pub fn diff_sink(&self) -> &crate::tools::EditDiffSink {
+        &self.diff_sink
     }
 
     pub fn session_id(&self) -> &str {
@@ -221,6 +232,7 @@ impl Agent {
             session_id: Uuid::new_v4().to_string(),
             turns: 0,
             turn_cancel: CancellationToken::new(),
+            diff_sink: crate::tools::new_diff_sink(),
         }
     }
 
