@@ -8,17 +8,32 @@ use crate::hooks::audit::{AuditBuffer, AuditKind};
 use super::theme::Palette;
 use super::views::{DiffKind, DiffLine, View};
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, Default)]
 pub enum ChatRole {
     User,
+    #[default]
     Agent,
     System,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct ChatMessage {
     pub role: ChatRole,
     pub content: String,
+    /// Reasoning trace for thinking-mode models (`Message::Assistant.reasoning_content`).
+    /// Populated for agent messages from streaming `StreamEvent::Reasoning` deltas
+    /// and from session-resume hydration. Empty for everything else.
+    pub reasoning: String,
+}
+
+impl ChatMessage {
+    pub fn new(role: ChatRole, content: impl Into<String>) -> Self {
+        Self {
+            role,
+            content: content.into(),
+            reasoning: String::new(),
+        }
+    }
 }
 
 #[derive(Clone, Debug)]

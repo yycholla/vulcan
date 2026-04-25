@@ -174,7 +174,41 @@ pub async fn run_tui(config: &Config, resume: ResumeTarget) -> Result<()> {
         app.messages.push(ChatMessage {
             role: ChatRole::System,
             content: note,
+            reasoning: String::new(),
         });
+
+        // Hydrate prior turns into the chat panel so resumed sessions show their
+        // history, not a blank screen. Tool turns are skipped (audit log surfaces
+        // tool activity separately).
+        let history = {
+            let a = agent.lock().await;
+            a.memory().load_history(a.session_id()).ok().flatten()
+        };
+        if let Some(msgs) = history {
+            for msg in msgs {
+                use crate::provider::Message;
+                match msg {
+                    Message::User { content } => {
+                        app.messages.push(ChatMessage::new(ChatRole::User, content));
+                    }
+                    Message::System { content } => {
+                        app.messages.push(ChatMessage::new(ChatRole::System, content));
+                    }
+                    Message::Assistant {
+                        content,
+                        reasoning_content,
+                        ..
+                    } => {
+                        app.messages.push(ChatMessage {
+                            role: ChatRole::Agent,
+                            content: content.unwrap_or_default(),
+                            reasoning: reasoning_content.unwrap_or_default(),
+                        });
+                    }
+                    Message::Tool { .. } => {} // skip — audit log shows tool activity
+                }
+            }
+        }
     }
 
     let mut exit = false;
@@ -236,6 +270,7 @@ pub async fn run_tui(config: &Config, resume: ResumeTarget) -> Result<()> {
                     app.messages.push(ChatMessage {
                         role: ChatRole::System,
                         content: format!("⏸  Agent paused — {summary}"),
+                        reasoning: String::new(),
                     });
                     app.pending_pause = Some(p);
                 }
@@ -268,6 +303,7 @@ pub async fn run_tui(config: &Config, resume: ResumeTarget) -> Result<()> {
                                             app.messages.push(ChatMessage {
                                                 role: ChatRole::System,
                                                 content: format!("▶  Resumed — {label}"),
+                                                reasoning: String::new(),
                                             });
                                         }
                                         continue;
@@ -300,6 +336,7 @@ pub async fn run_tui(config: &Config, resume: ResumeTarget) -> Result<()> {
                                                 app.messages.push(ChatMessage {
                                                     role: ChatRole::System,
                                                     content: "Cancelling current turn… (Ctrl+C again to quit)".into(),
+                                                    reasoning: String::new(),
                                                 });
                                                 pending_quit = true;
                                             } else {
@@ -307,6 +344,7 @@ pub async fn run_tui(config: &Config, resume: ResumeTarget) -> Result<()> {
                                                 app.messages.push(ChatMessage {
                                                     role: ChatRole::System,
                                                     content: "Press Ctrl+C again to quit, or any key to cancel.".into(),
+                                                    reasoning: String::new(),
                                                 });
                                             }
                                             continue;
@@ -333,7 +371,7 @@ pub async fn run_tui(config: &Config, resume: ResumeTarget) -> Result<()> {
                                                             help.push_str(&format!("\n  /{:<10}  {}", cmd.name, cmd.description));
                                                         }
                                                         help.push_str("\n\nKeys:\n  Ctrl+1..5  switch view (1=stack 2=split 3=tiled 4=tree 5=floor)\n  Ctrl+R     toggle reasoning trace\n  Tab        complete slash command");
-                                                        app.messages.push(ChatMessage { role: ChatRole::System, content: help });
+                                                        app.messages.push(ChatMessage { role: ChatRole::System, content: help, ..Default::default() });
                                                         continue;
                                                     }
                                                     "clear" => {
@@ -345,6 +383,7 @@ pub async fn run_tui(config: &Config, resume: ResumeTarget) -> Result<()> {
                                                         app.messages.push(ChatMessage {
                                                             role: ChatRole::System,
                                                             content: format!("Reasoning trace: {}", if app.show_reasoning { "on" } else { "off" }),
+                                                            reasoning: String::new(),
                                                         });
                                                         continue;
                                                     }
@@ -373,6 +412,7 @@ pub async fn run_tui(config: &Config, resume: ResumeTarget) -> Result<()> {
                                                             app.messages.push(ChatMessage {
                                                                 role: ChatRole::System,
                                                                 content: "Usage: /search <query>".into(),
+                                                                reasoning: String::new(),
                                                             });
                                                             continue;
                                                         }
@@ -400,6 +440,7 @@ pub async fn run_tui(config: &Config, resume: ResumeTarget) -> Result<()> {
                                                         app.messages.push(ChatMessage {
                                                             role: ChatRole::System,
                                                             content: report,
+                                                            reasoning: String::new(),
                                                         });
                                                         continue;
                                                     }
@@ -407,14 +448,15 @@ pub async fn run_tui(config: &Config, resume: ResumeTarget) -> Result<()> {
                                                         app.messages.push(ChatMessage {
                                                             role: ChatRole::System,
                                                             content: format!("Unknown command: {msg}. Try /help"),
+                                                            reasoning: String::new(),
                                                         });
                                                         continue;
                                                     }
                                                 }
                                             }
 
-                                            app.messages.push(ChatMessage { role: ChatRole::User, content: msg.clone() });
-                                            app.messages.push(ChatMessage { role: ChatRole::Agent, content: String::new() });
+                                            app.messages.push(ChatMessage { role: ChatRole::User, content: msg.clone(), ..Default::default() });
+                                            app.messages.push(ChatMessage { role: ChatRole::Agent, content: String::new(), ..Default::default() });
                                             app.thinking = true;
                                             app.scroll = 0;
 
@@ -465,6 +507,16 @@ pub async fn run_tui(config: &Config, resume: ResumeTarget) -> Result<()> {
                         if let Some(last) = app.messages.last_mut() {
                             if matches!(last.role, ChatRole::Agent) {
                                 last.content.push_str(&chunk);
+                            }
+                        }
+                    }
+                    Some(StreamEvent::Reasoning(chunk)) => {
+                        // Per-token reasoning trace from thinking-mode models.
+                        // Append to the current agent message's reasoning buffer
+                        // so the renderer can show it as the model thinks.
+                        if let Some(last) = app.messages.last_mut() {
+                            if matches!(last.role, ChatRole::Agent) {
+                                last.reasoning.push_str(&chunk);
                             }
                         }
                     }

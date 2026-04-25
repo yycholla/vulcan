@@ -148,6 +148,10 @@ pub struct ToolFunction {
 pub enum StreamEvent {
     /// A chunk of text content
     Text(String),
+    /// A chunk of reasoning trace from a thinking-mode model (DeepSeek
+    /// `reasoning_content`). Sent as it arrives so the UI can render the
+    /// model "thinking" rather than blocking on the wait. See YYC-47.
+    Reasoning(String),
     /// A tool call was received (name + arguments-so-far)
     ToolCallStart { id: String, name: String },
     /// The stream is complete (with optional final ChatResponse)
