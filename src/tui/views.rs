@@ -236,12 +236,7 @@ fn single_stack(f: &mut TuiFrame, area: Rect, app: &AppState) {
         layout[1],
         app.mode_label(),
         &app.input,
-        &[
-            ("↵", "send"),
-            ("⌃T", "tools"),
-            ("⌃K", "sessions"),
-            ("/", "cmds"),
-        ],
+        app.prompt_hints(),
         &app.model_status(),
         app.thinking,
     );
@@ -348,12 +343,7 @@ fn split_sessions(f: &mut TuiFrame, area: Rect, app: &AppState) {
         v[1],
         app.mode_label(),
         &app.input,
-        &[
-            ("↵", "send"),
-            ("⌃K", "sessions"),
-            ("⌃N", "new"),
-            ("/", "cmds"),
-        ],
+        app.prompt_hints(),
         &app.model_status(),
         app.thinking,
     );
@@ -527,9 +517,9 @@ fn tiled_mesh(f: &mut TuiFrame, area: Rect, app: &AppState) {
     let (cx, cy) = super::widgets::prompt_row(
         f,
         v[1],
-        "CMD",
+        app.mode_label(),
         &app.input,
-        &[("↵", "route to main"), ("⌃J", "switch tile"), ("/", "cmds")],
+        app.prompt_hints(),
         &app.model_status(),
         app.thinking,
     );
@@ -644,14 +634,9 @@ fn tree_of_thought(f: &mut TuiFrame, area: Rect, app: &AppState) {
     let (cx, cy) = super::widgets::prompt_row(
         f,
         v[1],
-        "ASK",
+        app.mode_label(),
         &app.input,
-        &[
-            ("↵", "send"),
-            ("M", "merge"),
-            ("X", "kill"),
-            ("B", "branch"),
-        ],
+        app.prompt_hints(),
         &app.model_status(),
         app.thinking,
     );
@@ -946,7 +931,7 @@ fn trading_floor(f: &mut TuiFrame, area: Rect, app: &AppState) {
         v[2],
         app.mode_label(),
         &app.input,
-        &[("↵", "send"), ("⌃1-5", "view"), ("/", "cmds")],
+        app.prompt_hints(),
         &app.model_status(),
         app.thinking,
     );

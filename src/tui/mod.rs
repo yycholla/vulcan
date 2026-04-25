@@ -278,6 +278,9 @@ pub async fn run_tui(config: &Config, resume: ResumeTarget) -> Result<()> {
             None
         };
 
+        // YYC-58: derive prompt mode from current state once per tick.
+        app.refresh_prompt_mode();
+
         // YYC-69: keep the chat viewport pinned to the latest content while
         // the user hasn't scrolled away. `chat_max_scroll` is published by
         // the renderer on the previous frame, so this lags one tick after a
@@ -636,7 +639,17 @@ pub async fn run_tui(config: &Config, resume: ResumeTarget) -> Result<()> {
                                         app.scroll = app.scroll.saturating_add(10).min(max);
                                         app.at_bottom = app.scroll >= max;
                                     }
-                                    KeyCode::Esc => exit = true,
+                                    KeyCode::Esc => {
+                                        // YYC-58: in Command mode (slash buffer pending), Esc
+                                        // clears the buffer and drops back to Insert; only Esc
+                                        // with an empty buffer exits.
+                                        if app.input.starts_with('/') {
+                                            app.input.clear();
+                                            app.slash_menu_selection = 0;
+                                        } else {
+                                            exit = true;
+                                        }
+                                    }
                                     _ => { pending_quit = false; }
                                 }
                             }
