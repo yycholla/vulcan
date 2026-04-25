@@ -83,7 +83,9 @@ impl ToolRegistry {
         registry.register(Arc::new(file::PatchFile));
         registry.register(Arc::new(web::WebSearch));
         registry.register(Arc::new(web::WebFetch));
-        registry.register(Arc::new(shell::BashTool));
+        for tool in shell::make_tools() {
+            registry.register(tool);
+        }
         registry
     }
 
