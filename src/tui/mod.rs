@@ -52,13 +52,34 @@ struct SlashCommand {
 }
 
 const SLASH_COMMANDS: &[SlashCommand] = &[
-    SlashCommand { name: "exit", description: "Quit Vulcan" },
-    SlashCommand { name: "quit", description: "Quit Vulcan" },
-    SlashCommand { name: "help", description: "Show available commands" },
-    SlashCommand { name: "clear", description: "Clear message history" },
-    SlashCommand { name: "view", description: "Cycle to next view (or 1-5)" },
-    SlashCommand { name: "reasoning", description: "Toggle reasoning trace" },
-    SlashCommand { name: "search", description: "Search past sessions: /search <query>" },
+    SlashCommand {
+        name: "exit",
+        description: "Quit Vulcan",
+    },
+    SlashCommand {
+        name: "quit",
+        description: "Quit Vulcan",
+    },
+    SlashCommand {
+        name: "help",
+        description: "Show available commands",
+    },
+    SlashCommand {
+        name: "clear",
+        description: "Clear message history",
+    },
+    SlashCommand {
+        name: "view",
+        description: "Cycle to next view (or 1-5)",
+    },
+    SlashCommand {
+        name: "reasoning",
+        description: "Toggle reasoning trace",
+    },
+    SlashCommand {
+        name: "search",
+        description: "Search past sessions: /search <query>",
+    },
 ];
 
 fn short_id(id: &str) -> String {
@@ -70,7 +91,10 @@ fn filter_commands(prefix: &str) -> Vec<&'static SlashCommand> {
         return SLASH_COMMANDS.iter().collect();
     }
     let lower = prefix.to_lowercase();
-    SLASH_COMMANDS.iter().filter(|c| c.name.starts_with(&lower)).collect()
+    SLASH_COMMANDS
+        .iter()
+        .filter(|c| c.name.starts_with(&lower))
+        .collect()
 }
 
 fn complete_slash(prefix: &str) -> Option<String> {
@@ -100,22 +124,35 @@ fn complete_slash(prefix: &str) -> Option<String> {
     }
 }
 
+async fn refresh_sessions(agent: &Arc<Mutex<Agent>>, app: &mut AppState) {
+    let (summaries, active_session_id) = {
+        let a = agent.lock().await;
+        (
+            a.memory().list_sessions(12).unwrap_or_default(),
+            a.session_id().to_string(),
+        )
+    };
+    app.hydrate_sessions(&summaries, &active_session_id);
+}
+
 pub async fn run_tui(config: &Config, resume: ResumeTarget) -> Result<()> {
     let mut terminal = init_terminal()?;
 
     // keyboard
     let (key_tx, mut key_rx) = mpsc::unbounded_channel::<KeyEv>();
     let tx_keys = key_tx.clone();
-    std::thread::spawn(move || loop {
-        match event::read() {
-            Ok(ev) => {
-                if tx_keys.send(KeyEv::Press(ev)).is_err() {
+    std::thread::spawn(move || {
+        loop {
+            match event::read() {
+                Ok(ev) => {
+                    if tx_keys.send(KeyEv::Press(ev)).is_err() {
+                        break;
+                    }
+                }
+                Err(e) => {
+                    let _ = tx_keys.send(KeyEv::Error(e.to_string()));
                     break;
                 }
-            }
-            Err(e) => {
-                let _ = tx_keys.send(KeyEv::Error(e.to_string()));
-                break;
             }
         }
     });
@@ -147,7 +184,10 @@ pub async fn run_tui(config: &Config, resume: ResumeTarget) -> Result<()> {
         match resume {
             ResumeTarget::None => None,
             ResumeTarget::Last => match a.continue_last_session() {
-                Ok(()) => Some(format!("Resumed last session ({})", short_id(a.session_id()))),
+                Ok(()) => Some(format!(
+                    "Resumed last session ({})",
+                    short_id(a.session_id())
+                )),
                 Err(e) => Some(format!("Could not resume last session: {e}")),
             },
             ResumeTarget::Specific(id) => match a.resume_session(&id) {
@@ -167,6 +207,7 @@ pub async fn run_tui(config: &Config, resume: ResumeTarget) -> Result<()> {
         config.provider.max_context as u32,
     );
     app.audit_log = Some(audit_buf);
+    refresh_sessions(&agent, &mut app).await;
 
     if let Some(note) = resume_note {
         app.messages.push(ChatMessage {
@@ -190,7 +231,8 @@ pub async fn run_tui(config: &Config, resume: ResumeTarget) -> Result<()> {
                         app.messages.push(ChatMessage::new(ChatRole::User, content));
                     }
                     Message::System { content } => {
-                        app.messages.push(ChatMessage::new(ChatRole::System, content));
+                        app.messages
+                            .push(ChatMessage::new(ChatRole::System, content));
                     }
                     Message::Assistant {
                         content,
@@ -226,7 +268,12 @@ pub async fn run_tui(config: &Config, resume: ResumeTarget) -> Result<()> {
             let (main_area, palette_area) = if let Some(ref pal) = palette {
                 let h = (pal.len() as u16 + 2).min(area.height / 2);
                 (
-                    Rect { x: area.x, y: area.y, width: area.width, height: area.height - h },
+                    Rect {
+                        x: area.x,
+                        y: area.y,
+                        width: area.width,
+                        height: area.height - h,
+                    },
                     Some(Rect {
                         x: area.x,
                         y: area.y + area.height - h,
@@ -240,8 +287,10 @@ pub async fn run_tui(config: &Config, resume: ResumeTarget) -> Result<()> {
 
             render_view(f, main_area, &app);
             let (cx, cy) = app.cursor();
-            if cx >= main_area.x && cx < main_area.x + main_area.width
-                && cy >= main_area.y && cy < main_area.y + main_area.height
+            if cx >= main_area.x
+                && cx < main_area.x + main_area.width
+                && cy >= main_area.y
+                && cy < main_area.y + main_area.height
             {
                 f.set_cursor_position(Position::new(cx, cy));
             }
@@ -270,6 +319,7 @@ pub async fn run_tui(config: &Config, resume: ResumeTarget) -> Result<()> {
                         content: format!("⏸  Agent paused — {summary}"),
                         reasoning: String::new(),
                     });
+                    app.note_pause(&summary);
                     app.pending_pause = Some(p);
                 }
                 continue;
@@ -303,6 +353,7 @@ pub async fn run_tui(config: &Config, resume: ResumeTarget) -> Result<()> {
                                                 content: format!("▶  Resumed — {label}"),
                                                 reasoning: String::new(),
                                             });
+                                            app.note_resume(label);
                                         }
                                         continue;
                                     }
@@ -457,6 +508,7 @@ pub async fn run_tui(config: &Config, resume: ResumeTarget) -> Result<()> {
                                             app.messages.push(ChatMessage { role: ChatRole::Agent, content: String::new(), ..Default::default() });
                                             app.thinking = true;
                                             app.scroll = 0;
+                                            app.note_prompt_submitted(&msg);
 
                                             let tx = stream_tx.clone();
                                             let agent = agent.clone();
@@ -517,12 +569,15 @@ pub async fn run_tui(config: &Config, resume: ResumeTarget) -> Result<()> {
                                 last.reasoning.push_str(&chunk);
                             }
                         }
+                        app.note_reasoning();
                     }
                     Some(StreamEvent::Done(resp)) => {
                         app.thinking = false;
                         if let Some(usage) = resp.usage {
                             app.token_used = app.token_used.saturating_add(usage.completion_tokens as u32);
                         }
+                        app.note_done();
+                        refresh_sessions(&agent, &mut app).await;
                     }
                     Some(StreamEvent::Error(e)) => {
                         if let Some(last) = app.messages.last_mut() {
@@ -531,6 +586,7 @@ pub async fn run_tui(config: &Config, resume: ResumeTarget) -> Result<()> {
                             }
                         }
                         app.thinking = false;
+                        app.note_error(&e);
                     }
                     Some(StreamEvent::ToolCallStart { name, .. }) => {
                         // Append an in-progress marker to the agent message.
@@ -543,6 +599,7 @@ pub async fn run_tui(config: &Config, resume: ResumeTarget) -> Result<()> {
                                 last.content.push_str(&format!("{prefix}_[🔧 {name}…]_"));
                             }
                         }
+                        app.note_tool_start(&name);
                     }
                     Some(StreamEvent::ToolCallEnd { name, ok, .. }) => {
                         if let Some(last) = app.messages.last_mut() {
@@ -556,6 +613,7 @@ pub async fn run_tui(config: &Config, resume: ResumeTarget) -> Result<()> {
                                 }
                             }
                         }
+                        app.note_tool_end(&name, ok);
                     }
                     None => app.thinking = false,
                 }
@@ -574,16 +632,17 @@ pub async fn run_tui(config: &Config, resume: ResumeTarget) -> Result<()> {
     Ok(())
 }
 
-fn draw_palette(
-    f: &mut ratatui::Frame,
-    area: Rect,
-    cmds: &[&SlashCommand],
-) {
+fn draw_palette(f: &mut ratatui::Frame, area: Rect, cmds: &[&SlashCommand]) {
     if area.height == 0 {
         return;
     }
     // Title bar
-    let bar = Rect { x: area.x, y: area.y, width: area.width, height: 1 };
+    let bar = Rect {
+        x: area.x,
+        y: area.y,
+        width: area.width,
+        height: 1,
+    };
     let mut header_text = " ▓▓ COMMANDS".to_string();
     if (header_text.chars().count() as u16) < bar.width {
         header_text.push_str(&" ".repeat(bar.width as usize - header_text.chars().count()));
