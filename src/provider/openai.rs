@@ -1,9 +1,10 @@
+use crate::config::ProviderDebugMode;
 use crate::provider::{
     ChatResponse, LLMProvider, Message, ProviderError, StreamEvent, ToolCall, ToolDefinition, Usage,
 };
 use anyhow::{Context, Result};
 use reqwest::Client;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
@@ -16,6 +17,12 @@ pub struct OpenAIProvider {
     model: String,
     max_context: usize,
     max_retries: u32,
+    /// Capability metadata from the provider catalog. This tells us the model
+    /// can support structured outputs if some future caller explicitly asks
+    /// for them, but normal chat/tool turns do not auto-enable
+    /// `response_format`.
+    _supports_json_mode: bool,
+    debug_mode: ProviderDebugMode,
 }
 
 impl OpenAIProvider {
@@ -25,6 +32,8 @@ impl OpenAIProvider {
         model: &str,
         max_context: usize,
         max_retries: u32,
+        supports_json_mode: bool,
+        debug_mode: ProviderDebugMode,
     ) -> Result<Self> {
         let client = Client::builder()
             .timeout(Duration::from_secs(300))
@@ -38,6 +47,8 @@ impl OpenAIProvider {
             model: model.to_string(),
             max_context,
             max_retries,
+            _supports_json_mode: supports_json_mode,
+            debug_mode,
         })
     }
 
@@ -71,6 +82,15 @@ impl OpenAIProvider {
     ) -> std::result::Result<reqwest::Response, ProviderError> {
         let url = format!("{}/chat/completions", self.base_url);
         let body = self.build_request(messages, tools);
+        if self.debug_mode.logs_wire() {
+            tracing::info!(
+                provider = "openai-compat",
+                model = %self.model,
+                url = %url,
+                request_body = %body,
+                "provider wire request"
+            );
+        }
 
         let mut last_err: Option<ProviderError> = None;
         for attempt in 0..=self.max_retries {
@@ -239,6 +259,241 @@ impl OpenAIProvider {
     }
 }
 
+fn log_tool_fallback_if_enabled(
+    debug_mode: ProviderDebugMode,
+    model: &str,
+    content: &str,
+    finish_reason: Option<&str>,
+    inferred_tool_calls: &[ToolCall],
+) {
+    if !debug_mode.logs_tool_fallback() || inferred_tool_calls.is_empty() {
+        return;
+    }
+
+    let tool_names = inferred_tool_calls
+        .iter()
+        .map(|tc| tc.function.name.as_str())
+        .collect::<Vec<_>>()
+        .join(", ");
+    tracing::info!(
+        provider = "openai-compat",
+        model = %model,
+        finish_reason = finish_reason.unwrap_or(""),
+        inferred_tools = %tool_names,
+        assistant_content = %content,
+        "provider response used content-shaped tool-call fallback"
+    );
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct WireResponseSummary {
+    raw_body: Option<String>,
+    sse_data_lines: usize,
+    has_done_marker: bool,
+    non_sse_preview: Option<String>,
+}
+
+fn summarize_wire_response(raw: &str) -> WireResponseSummary {
+    let mut sse_data_lines = 0;
+    let mut has_done_marker = false;
+    let mut non_sse_lines = Vec::new();
+
+    for line in raw.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if trimmed.starts_with("data: ") {
+            sse_data_lines += 1;
+            if trimmed == "data: [DONE]" {
+                has_done_marker = true;
+            }
+        } else {
+            non_sse_lines.push(trimmed.to_string());
+        }
+    }
+
+    if sse_data_lines > 0 {
+        let preview =
+            (!non_sse_lines.is_empty()).then(|| truncate(&non_sse_lines.join("\n"), 2_000));
+        WireResponseSummary {
+            raw_body: None,
+            sse_data_lines,
+            has_done_marker,
+            non_sse_preview: preview,
+        }
+    } else {
+        WireResponseSummary {
+            raw_body: Some(raw.to_string()),
+            sse_data_lines: 0,
+            has_done_marker: false,
+            non_sse_preview: None,
+        }
+    }
+}
+
+fn log_wire_response(model: &str, raw: &str) {
+    let summary = summarize_wire_response(raw);
+    if let Some(body) = summary.raw_body {
+        tracing::info!(
+            provider = "openai-compat",
+            model = %model,
+            response_body = %body,
+            "provider wire response"
+        );
+    } else {
+        tracing::info!(
+            provider = "openai-compat",
+            model = %model,
+            sse_data_lines = summary.sse_data_lines,
+            has_done_marker = summary.has_done_marker,
+            non_sse_preview = summary.non_sse_preview.as_deref().unwrap_or(""),
+            "provider wire response (stream summary; completion chunks suppressed)"
+        );
+    }
+}
+
+fn maybe_strip_json_fence(content: &str) -> &str {
+    let trimmed = content.trim();
+    if let Some(rest) = trimmed.strip_prefix("```json") {
+        return rest.strip_suffix("```").unwrap_or(rest).trim();
+    }
+    if let Some(rest) = trimmed.strip_prefix("```") {
+        return rest.strip_suffix("```").unwrap_or(rest).trim();
+    }
+    trimmed
+}
+
+fn missing_required_keys(schema: &Value, params: &Value) -> Option<Vec<String>> {
+    let required = schema.get("required")?.as_array()?;
+    let provided = params.as_object()?;
+    let missing = required
+        .iter()
+        .filter_map(|v| v.as_str())
+        .filter(|key| !provided.contains_key(*key))
+        .map(ToOwned::to_owned)
+        .collect::<Vec<_>>();
+    Some(missing)
+}
+
+fn score_tool_match(params: &Value, tool: &ToolDefinition) -> Option<(usize, usize)> {
+    let obj = params.as_object()?;
+    let schema = &tool.function.parameters;
+    let missing = missing_required_keys(schema, params)?;
+    if !missing.is_empty() {
+        return None;
+    }
+
+    let properties = schema
+        .get("properties")
+        .and_then(|v| v.as_object())
+        .cloned()
+        .unwrap_or_default();
+    let recognized = obj.keys().filter(|k| properties.contains_key(*k)).count();
+    let extras = obj.len().saturating_sub(recognized);
+    Some((recognized, extras))
+}
+
+fn infer_bare_object_tool_call(params: &Value, tools: &[ToolDefinition]) -> Option<ToolCall> {
+    let mut best: Option<(&ToolDefinition, usize, usize)> = None;
+
+    for tool in tools {
+        let Some((recognized, extras)) = score_tool_match(params, tool) else {
+            continue;
+        };
+
+        match best {
+            None => best = Some((tool, recognized, extras)),
+            Some((_, best_recognized, best_extras)) => {
+                if recognized > best_recognized
+                    || (recognized == best_recognized && extras < best_extras)
+                {
+                    best = Some((tool, recognized, extras));
+                } else if recognized == best_recognized && extras == best_extras {
+                    // Ambiguous match: don't guess.
+                    best = None;
+                }
+            }
+        }
+    }
+
+    let (tool, _, _) = best?;
+    Some(ToolCall {
+        id: "fallback_tool_call_0".into(),
+        call_type: "function".into(),
+        function: crate::provider::ToolCallFunction {
+            name: tool.function.name.clone(),
+            arguments: serde_json::to_string(params).ok()?,
+        },
+    })
+}
+
+fn infer_content_tool_calls(content: &str, tools: &[ToolDefinition]) -> Option<Vec<ToolCall>> {
+    if tools.is_empty() {
+        return None;
+    }
+
+    let trimmed = maybe_strip_json_fence(content);
+    let value: Value = serde_json::from_str(trimmed).ok()?;
+
+    if let Some(obj) = value.as_object() {
+        if let Some(tool_calls) = obj.get("tool_calls").and_then(|v| v.as_array()) {
+            let parsed = tool_calls
+                .iter()
+                .enumerate()
+                .filter_map(|(idx, call)| {
+                    let call_obj = call.as_object()?;
+                    let function = call_obj.get("function")?.as_object()?;
+                    let name = function.get("name")?.as_str()?.to_string();
+                    let arguments = function.get("arguments")?;
+                    let arguments = if let Some(s) = arguments.as_str() {
+                        s.to_string()
+                    } else {
+                        serde_json::to_string(arguments).ok()?
+                    };
+                    Some(ToolCall {
+                        id: call_obj
+                            .get("id")
+                            .and_then(|v| v.as_str())
+                            .map(str::to_string)
+                            .unwrap_or_else(|| format!("fallback_tool_call_{idx}")),
+                        call_type: "function".into(),
+                        function: crate::provider::ToolCallFunction { name, arguments },
+                    })
+                })
+                .collect::<Vec<_>>();
+            if !parsed.is_empty() {
+                return Some(parsed);
+            }
+        }
+
+        if let Some(arguments) = obj.get("arguments").or_else(|| obj.get("params")) {
+            if let Some(name) = obj
+                .get("name")
+                .or_else(|| obj.get("tool"))
+                .or_else(|| obj.get("tool_name"))
+                .and_then(|v| v.as_str())
+            {
+                let arguments = if let Some(s) = arguments.as_str() {
+                    s.to_string()
+                } else {
+                    serde_json::to_string(arguments).ok()?
+                };
+                return Some(vec![ToolCall {
+                    id: "fallback_tool_call_0".into(),
+                    call_type: "function".into(),
+                    function: crate::provider::ToolCallFunction {
+                        name: name.to_string(),
+                        arguments,
+                    },
+                }]);
+            }
+        }
+    }
+
+    infer_bare_object_tool_call(&value, tools).map(|tc| vec![tc])
+}
+
 #[async_trait::async_trait]
 impl LLMProvider for OpenAIProvider {
     /// Buffered chat — collects full response, returns it all at once
@@ -257,6 +512,9 @@ impl LLMProvider for OpenAIProvider {
             } => res?,
         };
         let text = String::from_utf8_lossy(&bytes);
+        if self.debug_mode.logs_wire() {
+            log_wire_response(&self.model, &text);
+        }
 
         let mut content = String::new();
         let mut reasoning = String::new();
@@ -275,9 +533,29 @@ impl LLMProvider for OpenAIProvider {
             );
         }
 
+        let inferred_tool_calls = if tool_calls.is_empty() {
+            infer_content_tool_calls(&content, tools)
+        } else {
+            None
+        };
+        if let Some(inferred) = inferred_tool_calls.as_ref() {
+            log_tool_fallback_if_enabled(
+                self.debug_mode,
+                &self.model,
+                &content,
+                finish_reason.as_deref(),
+                inferred,
+            );
+        }
+        let content = if inferred_tool_calls.is_some() {
+            String::new()
+        } else {
+            content
+        };
+
         Ok(ChatResponse {
             content: Some(content).filter(|c| !c.is_empty()),
-            tool_calls: Some(tool_calls).filter(|c| !c.is_empty()),
+            tool_calls: inferred_tool_calls.or_else(|| Some(tool_calls).filter(|c| !c.is_empty())),
             usage,
             finish_reason,
             reasoning_content: Some(reasoning).filter(|r| !r.is_empty()),
@@ -303,6 +581,7 @@ impl LLMProvider for OpenAIProvider {
         let mut tool_calls: Vec<ToolCall> = Vec::new();
         let mut usage: Option<Usage> = None;
         let mut finish_reason: Option<String> = None;
+        let mut raw_stream = self.debug_mode.logs_wire().then(String::new);
 
         // Read the HTTP response as a byte stream — chunks arrive as the LLM generates
         let mut stream = response.bytes_stream();
@@ -320,6 +599,9 @@ impl LLMProvider for OpenAIProvider {
             };
             let chunk = chunk_result.context("Failed to read stream chunk")?;
             let chunk_str = String::from_utf8_lossy(&chunk);
+            if let Some(raw) = raw_stream.as_mut() {
+                raw.push_str(&chunk_str);
+            }
             buf.push_str(&chunk_str);
 
             // Process complete lines from the buffer
@@ -350,10 +632,34 @@ impl LLMProvider for OpenAIProvider {
             }
         }
 
+        if let Some(raw) = raw_stream.as_ref() {
+            log_wire_response(&self.model, raw);
+        }
+
+        let inferred_tool_calls = if tool_calls.is_empty() {
+            infer_content_tool_calls(&content, tools)
+        } else {
+            None
+        };
+        if let Some(inferred) = inferred_tool_calls.as_ref() {
+            log_tool_fallback_if_enabled(
+                self.debug_mode,
+                &self.model,
+                &content,
+                finish_reason.as_deref(),
+                inferred,
+            );
+        }
+        let content = if inferred_tool_calls.is_some() {
+            String::new()
+        } else {
+            content
+        };
+
         // Build final ChatResponse and signal done
         let response = ChatResponse {
             content: Some(content).filter(|c| !c.is_empty()),
-            tool_calls: Some(tool_calls).filter(|c| !c.is_empty()),
+            tool_calls: inferred_tool_calls.or_else(|| Some(tool_calls).filter(|c| !c.is_empty())),
             usage,
             finish_reason,
             reasoning_content: Some(reasoning).filter(|r| !r.is_empty()),
@@ -396,11 +702,17 @@ fn truncate(s: &str, max: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use reqwest::StatusCode;
+    use crate::config::ProviderDebugMode;
     use crate::provider::ProviderError;
+    use reqwest::StatusCode;
+    use serde_json::json;
 
     fn classify(code: u16, body: &str) -> ProviderError {
-        ProviderError::from_response(StatusCode::from_u16(code).unwrap(), body, "deepseek/deepseek-v4-flash")
+        ProviderError::from_response(
+            StatusCode::from_u16(code).unwrap(),
+            body,
+            "deepseek/deepseek-v4-flash",
+        )
     }
 
     #[test]
@@ -439,7 +751,10 @@ mod tests {
         ));
         // 404 with model in body → ModelNotFound
         assert!(matches!(
-            classify(404, r#"{"error":{"message":"Model deepseek/deepseek-v4-flash not found"}}"#),
+            classify(
+                404,
+                r#"{"error":{"message":"Model deepseek/deepseek-v4-flash not found"}}"#
+            ),
             ProviderError::ModelNotFound { .. }
         ));
         // 404 without model hint → Other
@@ -449,7 +764,10 @@ mod tests {
         ));
         // Non-JSON body → Other (or BadRequest depending on status)
         let html = "<html>500 internal server error</html>";
-        assert!(matches!(classify(500, html), ProviderError::ServerError { .. }));
+        assert!(matches!(
+            classify(500, html),
+            ProviderError::ServerError { .. }
+        ));
     }
 
     #[test]
@@ -477,10 +795,13 @@ mod tests {
         // Auth/BadRequest/ModelNotFound/Other are not.
         assert!(!classify(401, r#"{"error":{"message":"x"}}"#).is_retryable());
         assert!(!classify(400, r#"{"error":{"message":"x"}}"#).is_retryable());
-        assert!(!classify(
-            404,
-            r#"{"error":{"message":"Model deepseek/deepseek-v4-flash not found"}}"#
-        ).is_retryable());
+        assert!(
+            !classify(
+                404,
+                r#"{"error":{"message":"Model deepseek/deepseek-v4-flash not found"}}"#
+            )
+            .is_retryable()
+        );
     }
 
     #[test]
@@ -493,6 +814,150 @@ mod tests {
         )
         .to_string();
         assert!(model.contains("provider's catalog"), "got {model:?}");
+    }
+
+    fn test_provider(supports_json_mode: bool) -> OpenAIProvider {
+        OpenAIProvider::new(
+            "https://example.com/v1",
+            "test-key",
+            "test-model",
+            128_000,
+            0,
+            supports_json_mode,
+            ProviderDebugMode::Off,
+        )
+        .expect("provider")
+    }
+
+    #[test]
+    fn build_request_omits_response_format_for_normal_tool_requests_even_with_json_mode() {
+        let provider = test_provider(true);
+        let body = provider.build_request(
+            &[Message::User {
+                content: "hi".to_string(),
+            }],
+            &[ToolDefinition {
+                tool_type: "function".into(),
+                function: crate::provider::ToolFunction {
+                    name: "read_file".into(),
+                    description: "Read a file".into(),
+                    parameters: json!({
+                        "type": "object",
+                        "properties": { "path": { "type": "string" } },
+                        "required": ["path"]
+                    }),
+                },
+            }],
+        );
+
+        assert!(body.get("tools").is_some(), "expected tools in request");
+        assert!(
+            body.get("response_format").is_none(),
+            "normal tool turns should not force structured-output mode: {body:?}"
+        );
+    }
+
+    #[test]
+    fn build_request_omits_response_format_without_tools_or_support() {
+        let with_support = test_provider(true);
+        let no_tools = with_support.build_request(
+            &[Message::User {
+                content: "hi".to_string(),
+            }],
+            &[],
+        );
+        assert!(
+            no_tools.get("response_format").is_none(),
+            "got {no_tools:?}"
+        );
+
+        let without_support = test_provider(false);
+        let no_support = without_support.build_request(
+            &[Message::User {
+                content: "hi".to_string(),
+            }],
+            &[ToolDefinition {
+                tool_type: "function".into(),
+                function: crate::provider::ToolFunction {
+                    name: "read_file".into(),
+                    description: "Read a file".into(),
+                    parameters: json!({
+                        "type": "object",
+                        "properties": { "path": { "type": "string" } },
+                        "required": ["path"]
+                    }),
+                },
+            }],
+        );
+        assert!(
+            no_support.get("response_format").is_none(),
+            "got {no_support:?}"
+        );
+    }
+
+    #[test]
+    fn content_fallback_infers_bash_tool_call_from_bare_json_args() {
+        let tools = vec![
+            ToolDefinition {
+                tool_type: "function".into(),
+                function: crate::provider::ToolFunction {
+                    name: "bash".into(),
+                    description: "Run a shell command".into(),
+                    parameters: json!({
+                        "type": "object",
+                        "properties": {
+                            "command": { "type": "string" },
+                            "timeout": { "type": "integer" },
+                            "workdir": { "type": "string" }
+                        },
+                        "required": ["command"]
+                    }),
+                },
+            },
+            ToolDefinition {
+                tool_type: "function".into(),
+                function: crate::provider::ToolFunction {
+                    name: "read_file".into(),
+                    description: "Read a file".into(),
+                    parameters: json!({
+                        "type": "object",
+                        "properties": { "path": { "type": "string" } },
+                        "required": ["path"]
+                    }),
+                },
+            },
+        ];
+
+        let inferred =
+            infer_content_tool_calls(r#"{"command":"ls -la","dependencies":[]}"#, &tools)
+                .expect("expected fallback tool call");
+        assert_eq!(inferred.len(), 1);
+        assert_eq!(inferred[0].function.name, "bash");
+        assert_eq!(
+            serde_json::from_str::<Value>(&inferred[0].function.arguments).unwrap(),
+            json!({"command":"ls -la","dependencies":[]})
+        );
+    }
+
+    #[test]
+    fn wire_response_summary_suppresses_sse_completion_chunks() {
+        let raw = r#"data: {"id":"gen-1","choices":[{"delta":{"content":"   ","role":"assistant"}}]}
+
+data: {"id":"gen-1","choices":[{"delta":{"content":"{\"","role":"assistant"}}]}
+
+data: [DONE]
+"#;
+
+        let summary = summarize_wire_response(raw);
+        assert_eq!(
+            summary,
+            WireResponseSummary {
+                raw_body: None,
+                sse_data_lines: 3,
+                has_done_marker: true,
+                non_sse_preview: None,
+            }
+        );
     }
 
     #[test]

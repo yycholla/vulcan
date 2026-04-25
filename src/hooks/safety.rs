@@ -244,9 +244,7 @@ mod tests {
         let hook_arc = std::sync::Arc::new(hook);
         let h = hook_arc.clone();
         let c = cancel.clone();
-        let task = tokio::spawn(async move {
-            h.before_tool_call("bash", &args, c).await
-        });
+        let task = tokio::spawn(async move { h.before_tool_call("bash", &args, c).await });
 
         // Simulate the TUI consuming the pause and sending AllowAndRemember.
         let pause = rx.recv().await.expect("pause should arrive");
@@ -254,7 +252,10 @@ mod tests {
             PauseKind::SafetyApproval { command, .. } => assert_eq!(command, dangerous),
             other => panic!("expected SafetyApproval, got {other:?}"),
         }
-        pause.reply.send(AgentResume::AllowAndRemember).expect("reply ok");
+        pause
+            .reply
+            .send(AgentResume::AllowAndRemember)
+            .expect("reply ok");
 
         // Hook should now resolve to Continue.
         let outcome = task.await.expect("task ok").expect("hook ok");

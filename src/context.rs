@@ -98,9 +98,7 @@ impl ContextManager {
             .iter()
             .map(|m| match m {
                 Message::User { content } => content.clone(),
-                Message::Assistant { content, .. } => {
-                    content.clone().unwrap_or_default()
-                }
+                Message::Assistant { content, .. } => content.clone().unwrap_or_default(),
                 Message::Tool { content, .. } => content.clone(),
                 Message::System { content } => content.clone(),
             })

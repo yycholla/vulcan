@@ -214,7 +214,10 @@ impl HookRegistry {
         cancel: CancellationToken,
     ) -> ToolCallDecision {
         for h in &self.handlers {
-            match self.run(h, h.before_tool_call(tool, args, cancel.clone())).await {
+            match self
+                .run(h, h.before_tool_call(tool, args, cancel.clone()))
+                .await
+            {
                 Some(HookOutcome::Block { reason }) => {
                     tracing::info!("hook {} blocked tool {tool}: {reason}", h.name());
                     return ToolCallDecision::Block(reason);
@@ -244,7 +247,10 @@ impl HookRegistry {
         cancel: CancellationToken,
     ) -> Option<ToolResult> {
         for h in &self.handlers {
-            match self.run(h, h.after_tool_call(tool, result, cancel.clone())).await {
+            match self
+                .run(h, h.after_tool_call(tool, result, cancel.clone()))
+                .await
+            {
                 Some(HookOutcome::ReplaceResult(new)) => {
                     tracing::info!("hook {} replaced result for {tool}", h.name());
                     return Some(new);
@@ -270,7 +276,10 @@ impl HookRegistry {
         cancel: CancellationToken,
     ) -> Option<String> {
         for h in &self.handlers {
-            match self.run(h, h.before_agent_end(response, cancel.clone())).await {
+            match self
+                .run(h, h.before_agent_end(response, cancel.clone()))
+                .await
+            {
                 Some(HookOutcome::ForceContinue { instruction }) => {
                     tracing::info!("hook {} forced continue", h.name());
                     return Some(instruction);
@@ -298,11 +307,7 @@ impl HookRegistry {
 
     pub async fn session_end(&self, session_id: &str, total_turns: u32) {
         for h in &self.handlers {
-            let _ = timeout(
-                self.handler_timeout,
-                h.session_end(session_id, total_turns),
-            )
-            .await;
+            let _ = timeout(self.handler_timeout, h.session_end(session_id, total_turns)).await;
         }
     }
 
@@ -443,8 +448,7 @@ mod tests {
 
     #[tokio::test]
     async fn handler_timeout_does_not_break_loop() {
-        let mut reg =
-            HookRegistry::new().with_timeout(std::time::Duration::from_millis(50));
+        let mut reg = HookRegistry::new().with_timeout(std::time::Duration::from_millis(50));
         // First handler sleeps past the timeout window.
         let slow = Arc::new(
             Probe::new(

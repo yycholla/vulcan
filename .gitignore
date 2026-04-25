@@ -9,3 +9,5 @@ config.toml
 # Local planning artifacts
 .hermes/
 /Private
+/.codex
+/docs/plans

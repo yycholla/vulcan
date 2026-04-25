@@ -148,10 +148,7 @@ impl LLMProvider for MockProvider {
         _tools: &[ToolDefinition],
         _cancel: CancellationToken,
     ) -> Result<ChatResponse> {
-        self.captured_calls
-            .lock()
-            .unwrap()
-            .push(messages.to_vec());
+        self.captured_calls.lock().unwrap().push(messages.to_vec());
         let r = self.next_response()?;
         Self::build_chat_response(r)
     }
@@ -163,10 +160,7 @@ impl LLMProvider for MockProvider {
         tx: mpsc::UnboundedSender<StreamEvent>,
         _cancel: CancellationToken,
     ) -> Result<()> {
-        self.captured_calls
-            .lock()
-            .unwrap()
-            .push(messages.to_vec());
+        self.captured_calls.lock().unwrap().push(messages.to_vec());
         let r = self.next_response()?;
 
         match &r {
