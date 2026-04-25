@@ -66,6 +66,7 @@ pub trait Tool: Send + Sync {
 pub mod code;
 pub mod file;
 pub mod git;
+pub mod lsp;
 pub mod shell;
 pub mod web;
 
@@ -118,8 +119,20 @@ impl ToolRegistry {
     /// Build a tool registry that wires `WriteFile`/`PatchFile` to a
     /// shared diff sink (YYC-66). Pass `Some(sink)` to capture edits;
     /// `None` keeps the legacy behavior (tools don't observe their own
-    /// writes).
+    /// writes). LSP tools are registered with their own manager so
+    /// callers don't have to thread it separately (YYC-46).
     pub fn new_with_diff_sink(sink: Option<EditDiffSink>) -> Self {
+        Self::new_with_diff_and_lsp(sink, None)
+    }
+
+    /// Same as `new_with_diff_sink`, plus an external LSP manager so
+    /// the agent can share one across tools and the diagnostics hook
+    /// (YYC-51). When `lsp` is `None`, a per-registry manager is
+    /// created.
+    pub fn new_with_diff_and_lsp(
+        sink: Option<EditDiffSink>,
+        lsp: Option<Arc<crate::code::lsp::LspManager>>,
+    ) -> Self {
         let mut registry = Self {
             tools: HashMap::new(),
         };
@@ -136,6 +149,17 @@ impl ToolRegistry {
         registry.register(Arc::new(code::CodeOutlineTool::new(parser_cache.clone())));
         registry.register(Arc::new(code::CodeExtractTool::new(parser_cache.clone())));
         registry.register(Arc::new(code::CodeQueryTool::new(parser_cache)));
+        // YYC-46: LSP-backed semantic tools. One manager pool — servers
+        // are spawned lazily on first use per language.
+        let lsp_mgr = lsp.unwrap_or_else(|| {
+            Arc::new(crate::code::lsp::LspManager::new(
+                std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")),
+            ))
+        });
+        registry.register(Arc::new(lsp::GotoDefinitionTool::new(lsp_mgr.clone())));
+        registry.register(Arc::new(lsp::FindReferencesTool::new(lsp_mgr.clone())));
+        registry.register(Arc::new(lsp::HoverTool::new(lsp_mgr.clone())));
+        registry.register(Arc::new(lsp::DiagnosticsTool::new(lsp_mgr)));
         // YYC-36: native git tools — agent stops composing brittle
         // `git ...` shell strings through bash.
         registry.register(Arc::new(git::GitStatusTool));
