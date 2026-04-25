@@ -48,6 +48,11 @@ tokio-util = { version = "0.7.18", features = ["rt"] }
 rusqlite = { version = "0.39.0", features = ["bundled"] }
 strsim = "0.11.1"
 portable-pty = "0.9.0"
+# Pure-Rust git plumbing (YYC-36). Used today only for repository
+# discovery — write ops dispatch through the `git` binary because gix's
+# commit/push surfaces are still maturing and a hybrid keeps the tool
+# semantics predictable. Plan: migrate one tool at a time.
+gix = "0.82"
 
 [profile.release]
 opt-level = "z"    # optimize for size

@@ -2,76 +2,155 @@
 
 > A Rust AI agent — forged at the forge, tested by fire.
 
-Vulcan is a pure-Rust personal AI agent for the command line. It combines an interactive TUI chat interface with a tool-calling LLM backend, designed for speed, portability, and deep extensibility.
+**Vulcan** is a pure-Rust AI agent that lives in your terminal. It gives you a powerful, interactive LLM-powered assistant with file editing, shell access, web search, persistent sessions, and a beautiful TUI — all in a single binary.
 
-Built on a **hook-driven architecture** — every lifecycle point (prompt assembly, tool dispatch, session boundaries) is an extension surface for audit, safety, skills injection, and custom behavior.
+```bash
+# Start the TUI
+vulcan
+
+# One-shot prompt
+vulcan prompt "Find all TODO comments in this project"
+
+# Resume your last session
+vulcan --continue
+
+# Full-text search across all past sessions
+vulcan search "some query"
+```
+
+---
 
 ## Features
 
-### 🖥️ Terminal UI
-- **Multi-view TUI** — 5 ratatui views (Trading Floor, Single Stack, Split Sessions, Tiled Mesh, Tree of Thought) with smooth keyboard navigation
+### 🖥️ Terminal UI (TUI)
+
+Vulcan's ratatui-powered terminal interface gives you five views to work with:
+
+| View | What it shows |
+|------|---------------|
+| **Single Stack** | A focused chat view — you and the agent, one conversation at a time |
+| **Split Sessions** | Chat on the left, session list/side panel on the right |
+| **Tiled Mesh** | Grid layout showing chat, tool activity, sessions, and telemetry |
+| **Trading Floor** | All panels at once — see everything happening in real-time |
+| **Tree of Thought** | Branching conversation trees for exploring multiple lines of reasoning |
+
+Switch between views instantly with `Ctrl+1` through `Ctrl+5`.
+
+**UI highlights:**
 - **Markdown rendering** — agent responses render inline code, lists, headings, and more
-- **Reasoning trace** — toggle visibility of model reasoning/thinking traces inline
-- **Prompt mode state machine** — Insert / Command / Ask / Busy modes with per-mode key binding hints
-- **Slash commands** — `/help`, `/clear`, `/view`, `/reasoning`, `/search`, `/exit` with fuzzy filter + tab completion + palette navigation
-- **Prompt queue** — queue inputs while the agent is busy; drained automatically when the turn completes
-- **Live tool activity** — see tool calls start/complete in real-time with ✓/✗ status
-- **Live edit diffs** — real file-edit diffs rendered in the UI (not demo data)
-- **Live telemetry** — per-session token counts, estimated cost (from provider pricing), tool/error counters, elapsed session time
-- **Auto-scroll** — viewport follows the latest content; pauses on manual scroll, re-engages on new submission
+- **Reasoning trace** — toggle visibility of model reasoning/thinking traces (`Ctrl+R`)
+- **Slash commands** — `/help`, `/clear`, `/view`, `/reasoning`, `/search`, `/exit` with fuzzy filtering, tab completion, and a navigable palette
+- **Prompt queue** — keep typing while the agent is busy; prompts drain automatically when the turn completes
+- **Live tool activity** — see tool calls start and complete in real-time with ✓/✗ status
+- **Live edit diffs** — real file-edit diffs rendered in the UI as the agent works
+- **Live telemetry** — per-session token counts, estimated cost, tool/error counters, elapsed time
+- **Auto-scroll** — viewport follows content; pauses on manual scroll, resumes on new input
 
 ### 🤖 Agent Capabilities
-- **Interactive chat** — multi-turn conversation with context management and history
-- **One-shot mode** — `vulcan prompt "your question"` for scripting and pipelines
-- **Session persistence** — SQLite-backed storage with FTS5 full-text search across all sessions
-- **Session resume** — resume the last session or a specific session by ID
-- **Cross-session search** — `vulcan search "query"` for BM25-ranked full-text search across saved conversations
+
+- **Interactive chat** — multi-turn conversations with full context management
+- **One-shot mode** — `vulcan prompt "your question"` for scripting and pipelines (streams tokens to stdout)
+- **Session persistence** — all conversations saved to SQLite with full-text search (FTS5)
+- **Session resume** — pick up where you left off with `vulcan --continue` or `vulcan session <id>`
+- **Cross-session search** — `vulcan search "query"` finds relevant messages across your entire history
 - **Session lineage** — parent-session tracking for branching conversation trees
 
 ### 🛠️ Tool System
-Seven built-in tools with schema validation and required-field checking:
 
-| Tool | Description |
+The agent can use these tools to help you:
+
+| Tool | What it does |
 |------|-------------|
 | `read_file` | Read files with optional offset/limit |
-| `write_file` | Write/create files (captures diff) |
-| `edit_file` | Find-and-replace edits (captures diff) |
-| `search_files` | Ripgrep-style regex search |
-| `bash` | One-shot shell command execution (PTY-backed) |
-| `pty_create` / `pty_write` / `pty_read` / `pty_resize` / `pty_close` / `pty_list` | Persistent interactive PTY sessions |
+| `write_file` | Write or create files (captures a diff) |
+| `edit_file` | Find-and-replace edits with fuzzy matching (captures a diff) |
+| `search_files` | Ripgrep-style regex search across your codebase |
+| `bash` | Execute shell commands (PTY-backed) |
+| `pty_*` | Full interactive PTY session management (create, write, read, resize, close, list) |
 | `web_search` | DuckDuckGo web search |
-| `web_fetch` | URL content fetch (markdown extraction) |
+| `web_fetch` | Fetch a URL and extract its content as markdown |
 
-### 🔌 Hook System (Pi-style Extension Surface)
-Seven wire-in points — every hook has priority ordering, timeout isolation, and error containment:
+### 🔒 Safety & Audit
 
-| Event | Purpose |
-|-------|---------|
-| `BeforePrompt` | Inject transient messages (skills, system prompts) |
-| `BeforeToolCall` | Block or modify tool arguments (safety gate) |
-| `AfterToolCall` | Inspect or replace tool results |
-| `BeforeAgentEnd` | Force the agent loop to continue |
-| `session_start` | Lifecycle — session opened |
-| `session_end` | Lifecycle — session closed |
+- **Safety system** — dangerous shell commands (`rm -rf /`, `dd`, `mkfs`, fork bombs, force pushes, `curl|bash`) are blocked with interactive approval prompts
+- **Audit log** — ring-buffered tool-call log viewable in the TUI
+- **Action pills** — approve/deny/remember inline responses for safety prompts
 
-**Built-in hooks:**
-- **SafetyHook** — blocks dangerous shell commands (rm -rf /, dd, mkfs, chmod 777, fork bombs, force pushes, curl|bash) with interactive approval (allow once / remember & allow / deny) via inline action pills
-- **AuditHook** — ring-buffered tool-call audit log, surfaced in the TUI tool-log pane
-- **SkillsHook** — injects available skills into the prompt at startup
+### 🧠 Skill System
 
-### ⏸️ AgentPause Mechanism
-Generic mid-loop user-interruption system. When a hook needs user input (safety approval, tool confirmation, skill-save prompt), it emits an `AgentPause` with inline action pills. The TUI renders an overlay, dispatches keystrokes back via oneshot channels, and the agent resumes — all without blocking other futures.
+Vulcan learns. Skills are markdown files with YAML frontmatter that get injected into the system prompt. They live in `~/.vulcan/skills/` and can auto-create when the agent detects repeated tool patterns.
 
-### 🔗 LLM Provider
-- **OpenAI-compatible** — works with OpenRouter, Anthropic, OpenAI, Ollama, DeepSeek, any OpenAI-compatible endpoint
-- **Streaming** — SSE-based streaming with text, reasoning, and tool call events
+### 🔗 LLM Provider Support
+
+- **OpenAI-compatible** — works with OpenRouter, Anthropic, OpenAI, Ollama, DeepSeek, or any OpenAI-compatible API endpoint
+- **Streaming** — SSE-based streaming with text, reasoning, and tool calls
 - **Retry logic** — exponential backoff with jitter (1s, 2s, 4s, 8s, 16s) for 429/5xx/network errors
-- **Structured error taxonomy** — `Auth`, `RateLimited`, `ModelNotFound`, `BadRequest`, `ServerError`, `Network` — each with actionable user-facing messages
-- **Reasoning passthrough** — supports DeepSeek `reasoning_content` with dual-field serialization (`reasoning_content` + `reasoning`) for OpenRouter compatibility
-- **Provider model catalog** — auto-fetches model metadata at startup, validates model exists, fuzzy-suggests alternatives, auto-populates `context_length` and pricing
+- **Model catalog** — auto-fetches model metadata at startup, validates the model exists, fuzzy-suggests alternatives, auto-populates context length and pricing
+- **Reasoning passthrough** — supports models like DeepSeek that emit `reasoning_content` alongside responses
 
-### ⚙️ Configuration
-TOML config at `~/.vulcan/config.toml` (or `./config.toml`):
+---
+
+## Installation
+
+### From Source
+
+```bash
+# Clone the repo
+git clone https://github.com/yycholla/vulcan.git
+cd vulcan
+
+# Build release binary (size-optimized: LTO, strip)
+cargo build --release
+
+# The binary is at ./target/release/vulcan — copy it somewhere on your PATH
+cp ./target/release/vulcan ~/.local/bin/
+```
+
+### Prerequisites
+
+- **Rust toolchain** — install via [rustup](https://rustup.rs/)
+- An API key from one of the supported LLM providers (see [Configuration](#configuration))
+
+---
+
+## Configuration
+
+Vulcan looks for config at `~/.vulcan/config.toml` (or `./config.toml` in the current directory).
+
+### 1. Create the config
+
+```bash
+mkdir -p ~/.vulcan
+cp config.example.toml ~/.vulcan/config.toml
+```
+
+### 2. Set your API key
+
+Either set the environment variable:
+
+```bash
+export VULCAN_API_KEY="sk-..."
+```
+
+Or add it to your config file:
+
+```toml
+[provider]
+api_key = "sk-..."
+```
+
+### 3. Choose a model
+
+The default works with OpenRouter (uses `deepseek/deepseek-v4-flash`). Change the `model` and `base_url` to use a different provider:
+
+```toml
+[provider]
+type = "openai-compat"
+base_url = "https://openrouter.ai/api/v1"
+model = "deepseek/deepseek-v4-flash"
+```
+
+### Full Configuration Reference
 
 | Setting | Default | Description |
 |---------|---------|-------------|
@@ -82,58 +161,81 @@ TOML config at `~/.vulcan/config.toml` (or `./config.toml`):
 | `provider.max_retries` | `4` | Transient error retries |
 | `provider.catalog_cache_ttl_hours` | `24` | Model catalog cache lifetime |
 | `provider.disable_catalog` | `false` | Skip catalog fetch at startup |
-| `provider.debug` | `"off"` | Debug logging level (`off`, `tool-fallback`, `wire`) |
+| `provider.debug` | `"off"` | Debug logging: `off`, `tool-fallback`, or `wire` |
 | `tools.yolo_mode` | `false` | Skip safety confirmations |
 | `compaction.enabled` | `true` | Auto-compress context at threshold |
 | `compaction.trigger_ratio` | `0.85` | Compaction trigger ratio |
 | `compaction.reserved_tokens` | `50000` | Reserved tokens for response |
 
-API key: set `VULCAN_API_KEY` env var or add `provider.api_key` to config.
+---
 
-### 📦 Skill System
-Markdown-based skill registry with YAML frontmatter, loaded as prompt injections via the SkillsHook. Skills live in `~/.vulcan/skills/` and auto-create when the agent detects repeated tool patterns.
+## Usage
 
-## Quick Start
+### Commands
 
 ```bash
-# Build
-cargo build --release
-
-# Run TUI (default)
+# Start interactive TUI (default)
 vulcan
 
-# One-shot prompt
+# One-shot mode — ask a question, get an answer
 vulcan prompt "What is the capital of France?"
 
-# Resume last session
+# Resume the most recent session
 vulcan --continue
 
-# Resume specific session
+# Resume a specific session by ID
 vulcan session <session-id>
 
-# Search past sessions
+# Full-text search across all saved sessions
 vulcan search "some query"
+# Optionally limit results: vulcan search "query" --limit 20
 ```
-
-The TUI uses ratatui with crossterm — it works on any terminal that supports an alternate screen.
 
 ### TUI Keyboard Shortcuts
 
 | Key | Action |
 |-----|--------|
 | `Enter` | Send prompt / run command |
-| `Esc` | Cancel / deny pause |
-| `Ctrl+1..5` | Switch views (1=Single Stack, 5=Trading Floor) |
-| `Ctrl+T` | Focus tools view |
+| `Esc` | Cancel / deny pause prompt |
+| `Ctrl+1` to `Ctrl+5` | Switch views (1=Single Stack, 5=Trading Floor) |
+| `Ctrl+T` | Focus tools/log view |
 | `Ctrl+K` | Focus sessions view |
-| `Ctrl+Backspace` | Drop last queued prompt |
-| `Ctrl+Shift+Backspace` | Clear entire prompt queue |
-| `Ctrl+C` | Cancel in-flight agent turn |
-| `Tab` | Complete slash command |
-| `↑↓` or `Ctrl+J/K` | Navigate slash command palette |
-| `y` / `n` / `r` | Allow / deny / remember (pause prompts) |
+| `Ctrl+R` | Toggle reasoning trace visibility |
+| `Ctrl+Backspace` | Drop the last queued prompt |
+| `Ctrl+Shift+Backspace` | Clear the entire prompt queue |
+| `Ctrl+C` | Cancel an in-flight agent turn |
+| `Tab` | Complete a slash command |
+| `↑` / `↓` or `Ctrl+J` / `Ctrl+K` | Navigate the slash command palette |
+| `y` / `n` / `r` | Allow / deny / remember (safety pause prompts) |
 
-## Architecture
+### Slash Commands
+
+Type `/` in the TUI to access slash commands:
+
+```
+/help       Show help information
+/clear      Clear the conversation
+/view       Switch views (equivalent to Ctrl+1..5)
+/reasoning  Toggle reasoning trace
+/search     Search past sessions
+/exit       Quit Vulcan
+```
+
+Use `Tab` to autocomplete, `↑`/`↓` to navigate suggestions.
+
+### Logging
+
+| Env Var | Effect |
+|---------|--------|
+| `VULCAN_LOG=info` | Default logging |
+| `VULCAN_LOG=debug` | Verbose debugging |
+| `VULCAN_LOG=trace` | Wire-level provider debugging |
+
+In TUI mode, logs go to `~/.vulcan/vulcan.log`. In one-shot/CLI mode, logs go to stderr.
+
+---
+
+## Architecture (for the curious)
 
 ```
 main.rs ──► Cli ──► Chat (TUI) ──► Agent ──► Provider ──► LLM API
@@ -142,68 +244,31 @@ main.rs ──► Cli ──► Chat (TUI) ──► Agent ──► Provider �
                     │              ├─ safety (blocks dangerous commands)
                     │              ├─ audit (ring-buffered tool log)
                     │              ├─ skills (prompt injections)
-                    │              └─ (user-defined)
+                    │              └─ (user-extensible)
                     │
                     │           AgentPause channel
                     │              └─ SafetyApproval / ToolArgConfirm / SkillSave
                     │
                  ToolSet
                   ├─ file (read, write, search, edit)
-                  ├─ shell/pty (bash, pty_create/write/read/resize/close/list)
+                  ├─ shell/pty (bash, pty sessions)
                   └─ web (search, fetch)
 ```
 
-## Project Structure
+Vulcan is built on a **hook-driven architecture** — every lifecycle point (prompt assembly, tool dispatch, session boundaries) is an extension surface for audit, safety, skills injection, and custom behavior.
 
-```
-src/
-├── main.rs             Entry point (CLI dispatch, logging init)
-├── lib.rs              Module tree
-├── cli.rs              CLI argument parsing (clap) — chat, prompt, session, search
-├── config.rs           TOML config loader, vulcan_home(), API key resolution
-├── agent.rs            Core agent loop (tool dispatch, hook wiring, streaming)
-├── context.rs          Context window management (token tracking, compaction)
-├── prompt_builder.rs   System prompt construction
-├── memory.rs           SQLite session store, FTS5 search, lineage tracking
-├── pause.rs            AgentPause mechanism (generic mid-loop user interruption)
-├── hooks/
-│   ├── mod.rs          Hook trait, outcomes, registry (priority, timeout)
-│   ├── audit.rs        Built-in audit hook (ring-buffered tool call log)
-│   ├── safety.rs       Built-in safety hook (dangerous command blocking)
-│   └── skills.rs       Skills-as-hooks injection
-├── platform/
-│   └── mod.rs          Platform abstraction
-├── provider/
-│   ├── mod.rs          Provider trait, error taxonomy, message types, streaming events
-│   ├── openai.rs       OpenAI-compatible streaming implementation (SSE, retry, reasoning)
-│   ├── catalog.rs      Model catalog fetcher (OpenRouter-rich / OpenAI-sparse, caching, fuzzy suggest)
-│   └── mock.rs         Test mock provider
-├── skills/
-│   └── mod.rs          Skill registry (markdown + YAML frontmatter)
-├── tools/
-│   ├── mod.rs          Tool trait, registry, schema validation, EditDiff
-│   ├── file.rs         ReadFile, WriteFile, SearchFiles, PatchFile (with diff capture)
-│   ├── shell.rs        Bash + PTY session management (create/write/read/resize/close/list)
-│   └── web.rs          Web search (DuckDuckGo) and fetch tools
-└── tui/
-    ├── mod.rs          TUI loop, key dispatch, pause handling, slash commands
-    ├── state.rs        App state, ChatMessage, PromptMode, orchestration state
-    ├── markdown.rs     Markdown-to-ratatui parser
-    ├── theme.rs        Color palette and styles
-    ├── views.rs        Five view renderers (TradingFloor, SingleStack, SplitSessions, etc.)
-    └── widgets.rs      Custom widgets (frame, section_header, sparkline, ticker, etc.)
-```
+---
 
-## Building
+## Development
 
 ```bash
-cargo build             # Debug build
-cargo build --release   # Optimized release (size-optimized: LTO, strip)
-cargo test              # Run all tests
-cargo test <name>       # Single test
+cargo build               # Debug build
+cargo build --release     # Optimized release (size-optimized)
+cargo test                # Run all tests
+cargo test <name>         # Run a single test by name
 ```
 
-Set `VULCAN_LOG=debug` for verbose logging; `VULCAN_LOG=trace` for wire-level provider debugging.
+---
 
 ## Roadmap
 
@@ -211,7 +276,9 @@ Set `VULCAN_LOG=debug` for verbose logging; `VULCAN_LOG=trace` for wire-level pr
 
 **Planned** — context compaction with LLM summarization, external hook handlers (Python/JS), platform connectors (Discord, Telegram), gateway daemon, cron scheduling, sub-agent orchestration.
 
-Tracked in Linear: [Vulcan — Rust AI Agent](https://linear.app/yycholla/project/vulcan-rust-ai-agent-37bc34d04e48)
+Tracked in [Linear — Vulcan: Rust AI Agent](https://linear.app/yycholla/project/vulcan-rust-ai-agent-37bc34d04e48).
+
+---
 
 ## License
 

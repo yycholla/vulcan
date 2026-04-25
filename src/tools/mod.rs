@@ -64,6 +64,7 @@ pub trait Tool: Send + Sync {
 }
 
 pub mod file;
+pub mod git;
 pub mod shell;
 pub mod web;
 
@@ -127,6 +128,14 @@ impl ToolRegistry {
         registry.register(Arc::new(file::PatchFile::new(sink)));
         registry.register(Arc::new(web::WebSearch));
         registry.register(Arc::new(web::WebFetch));
+        // YYC-36: native git tools — agent stops composing brittle
+        // `git ...` shell strings through bash.
+        registry.register(Arc::new(git::GitStatusTool));
+        registry.register(Arc::new(git::GitDiffTool));
+        registry.register(Arc::new(git::GitCommitTool));
+        registry.register(Arc::new(git::GitPushTool));
+        registry.register(Arc::new(git::GitBranchTool));
+        registry.register(Arc::new(git::GitLogTool));
         for tool in shell::make_tools() {
             registry.register(tool);
         }
