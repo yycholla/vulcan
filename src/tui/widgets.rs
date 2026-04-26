@@ -473,7 +473,7 @@ pub fn tool_card(
     output_preview: Option<&str>,
     result_meta: Option<&str>,
     elapsed_ms: Option<u64>,
-    accent: Color,
+    _accent: Color,
     width: u16,
 ) -> Vec<Line<'static>> {
     use super::state::ToolStatus;
@@ -483,7 +483,7 @@ pub fn tool_card(
         ToolStatus::Done(false) => ("✗", "ERR", Palette::RED),
     };
 
-    // Reserve "▎ " (2 cols) on the left; the row spans the full chat width.
+    // Card has a 1-col border on left + right (`│`).
     let inner_w = width.saturating_sub(2) as usize;
 
     // Left half of header: name pill + " · params"
@@ -519,13 +519,23 @@ pub fn tool_card(
     }
     let gap = inner_w.saturating_sub(left_chars + right_chars);
 
-    // Single-line header. Mid-row gets a faint paper-tint bg so the
-    // whole title bar reads as one shaded band — pills sit at the
-    // left/right edges, params float in the middle, gap pads to
-    // fill. Matches the design's title-bar treatment.
-    let header_bg = Palette::FAINT;
+    // Two-tone shading per the design (`tools.jsx` T01-T14):
+    // header sits on a dark SLATE band; body underneath on FAINT.
+    // Whole card is wrapped in a thin muted-color border.
+    let header_bg = Palette::SLATE;
+    let body_bg = Palette::FAINT;
+    let border_style = Style::default().fg(Palette::MUTED);
+
+    // ── Top border ┌──...──┐
+    let mut out = vec![Line::from(vec![
+        Span::styled("┌", border_style),
+        Span::styled("─".repeat(inner_w), border_style),
+        Span::styled("┐", border_style),
+    ])];
+
+    // ── Header row │ name_pill params  ...  status_pill │
     let mut header: Vec<Span<'static>> = Vec::new();
-    header.push(Span::styled("▎ ", Style::default().fg(accent)));
+    header.push(Span::styled("│", border_style));
     header.push(Span::styled(
         name_pill_text,
         Style::default()
@@ -536,7 +546,7 @@ pub fn tool_card(
     if !params_text.is_empty() {
         header.push(Span::styled(
             params_text,
-            Style::default().fg(Palette::INK).bg(header_bg),
+            Style::default().fg(Palette::PAPER).bg(header_bg),
         ));
     }
     if gap > 0 {
@@ -552,34 +562,35 @@ pub fn tool_card(
             .bg(color)
             .add_modifier(Modifier::BOLD),
     ));
+    header.push(Span::styled("│", border_style));
+    out.push(Line::from(header));
 
-    let mut out = vec![Line::from(header)];
-
-    // Body lines also pick up the faint bg so the card reads as one
-    // unified shaded block. Indent matches header pill alignment.
-    let body_indent = "    ";
+    // ── Body rows │  text...padding  │ on FAINT
+    let body_indent = "  ";
     let body_inner = inner_w.saturating_sub(body_indent.chars().count());
-    let pad_to_width = |line: &mut Vec<Span<'static>>, used: usize| {
+
+    let render_body = |spans: &mut Vec<Span<'static>>, used: usize| {
         let pad = inner_w.saturating_sub(used);
         if pad > 0 {
-            line.push(Span::styled(" ".repeat(pad), Style::default().bg(header_bg)));
+            spans.push(Span::styled(" ".repeat(pad), Style::default().bg(body_bg)));
         }
+        spans.push(Span::styled("│", border_style));
     };
 
     if let Some(meta) = result_meta {
         let used = body_indent.chars().count() + meta.chars().count();
         let mut spans = vec![
-            Span::styled("▎ ", Style::default().fg(accent)),
-            Span::styled(body_indent.to_string(), Style::default().bg(header_bg)),
+            Span::styled("│", border_style),
+            Span::styled(body_indent.to_string(), Style::default().bg(body_bg)),
             Span::styled(
                 meta.to_string(),
                 Style::default()
                     .fg(Palette::MUTED)
-                    .bg(header_bg)
+                    .bg(body_bg)
                     .add_modifier(Modifier::BOLD),
             ),
         ];
-        pad_to_width(&mut spans, used);
+        render_body(&mut spans, used);
         out.push(Line::from(spans));
     }
 
@@ -593,14 +604,21 @@ pub fn tool_card(
             let body: String = chars.iter().collect();
             let used = body_indent.chars().count() + body.chars().count();
             let mut spans = vec![
-                Span::styled("▎ ", Style::default().fg(accent)),
-                Span::styled(body_indent.to_string(), Style::default().bg(header_bg)),
-                Span::styled(body, Style::default().fg(Palette::INK).bg(header_bg)),
+                Span::styled("│", border_style),
+                Span::styled(body_indent.to_string(), Style::default().bg(body_bg)),
+                Span::styled(body, Style::default().fg(Palette::INK).bg(body_bg)),
             ];
-            pad_to_width(&mut spans, used);
+            render_body(&mut spans, used);
             out.push(Line::from(spans));
         }
     }
+
+    // ── Bottom border └──...──┘
+    out.push(Line::from(vec![
+        Span::styled("└", border_style),
+        Span::styled("─".repeat(inner_w), border_style),
+        Span::styled("┘", border_style),
+    ]));
 
     out
 }
