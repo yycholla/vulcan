@@ -143,6 +143,8 @@ impl ToolRegistry {
         registry.register(Arc::new(file::WriteFile::new(sink.clone())));
         registry.register(Arc::new(file::SearchFiles));
         registry.register(Arc::new(file::PatchFile::new(sink)));
+        // YYC-79: native tree listing.
+        registry.register(Arc::new(file::ListFiles));
         registry.register(Arc::new(web::WebSearch));
         registry.register(Arc::new(web::WebFetch));
         // YYC-45: tree-sitter structural code tools. One parser cache
