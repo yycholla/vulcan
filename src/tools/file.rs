@@ -12,7 +12,7 @@ impl Tool for ReadFile {
         "read_file"
     }
     fn description(&self) -> &str {
-        "Read a file from the filesystem. Returns content with line numbers."
+        "Read a file from the filesystem. Returns content with line numbers. Use this instead of `cat`, `head`, `tail`, or `sed -n` via bash."
     }
     fn schema(&self) -> Value {
         json!({
@@ -65,7 +65,7 @@ impl Tool for ListFiles {
         "list_files"
     }
     fn description(&self) -> &str {
-        "List files + directories under a path as a structured tree (JSON). Respects .gitignore. Cheaper than shelling out to `ls` or `tree` and won't drown in target/ or node_modules/."
+        "List files + directories under a path as a structured tree (JSON). Respects .gitignore. Use this instead of `ls`, `tree`, or `find -type f` via bash — won't drown in target/ or node_modules/."
     }
     fn schema(&self) -> Value {
         json!({
@@ -214,7 +214,7 @@ impl Tool for WriteFile {
         "write_file"
     }
     fn description(&self) -> &str {
-        "Write content to a file. Creates parent directories if needed. OVERWRITES existing content."
+        "Write content to a file. Creates parent directories if needed. OVERWRITES existing content. Use this instead of `echo > file` or `cat <<EOF` via bash."
     }
     fn schema(&self) -> Value {
         json!({
@@ -281,7 +281,7 @@ impl Tool for SearchFiles {
         "search_files"
     }
     fn description(&self) -> &str {
-        "Search file contents using regex patterns. Ripgrep-style. Fast for large codebases."
+        "Search file contents using regex patterns. Ripgrep-style, gitignore-aware. Use this instead of `rg`, `grep -r`, or `grep -rn` via bash."
     }
     fn schema(&self) -> Value {
         json!({
@@ -346,7 +346,7 @@ impl Tool for PatchFile {
         "edit_file"
     }
     fn description(&self) -> &str {
-        "Find and replace text in a file. Uses fuzzy matching so minor whitespace differences won't break it."
+        "Find and replace text in a file. Uses fuzzy matching so minor whitespace differences won't break it. Use this instead of `sed -i` via bash."
     }
     fn schema(&self) -> Value {
         json!({

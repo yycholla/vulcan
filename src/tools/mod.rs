@@ -369,6 +369,44 @@ mod tests {
         assert_eq!(missing, "b");
     }
 
+    /// YYC-85: every native tool that has a clear bash equivalent must
+    /// state it in its description, so the model sees the redirect on
+    /// every turn (descriptions ship in the tool spec). Failing here
+    /// means a tool was added without the "instead of" hint.
+    #[test]
+    fn native_tool_descriptions_call_out_bash_equivalents() {
+        let registry = ToolRegistry::new();
+        let must_redirect = [
+            "read_file",
+            "write_file",
+            "list_files",
+            "search_files",
+            "edit_file",
+            "cargo_check",
+            "code_outline",
+            "code_query",
+            "code_extract",
+            "git_status",
+            "git_diff",
+            "git_commit",
+            "git_push",
+            "git_branch",
+            "git_log",
+        ];
+        let defs = registry.definitions();
+        for name in must_redirect {
+            let def = defs
+                .iter()
+                .find(|d| d.function.name == name)
+                .unwrap_or_else(|| panic!("expected `{name}` in registry"));
+            let desc = &def.function.description;
+            assert!(
+                desc.contains("instead of"),
+                "{name} description missing 'instead of <bash>' clause: {desc:?}"
+            );
+        }
+    }
+
     #[tokio::test]
     async fn non_object_arguments_fail_before_tool_dispatch() {
         let registry = ToolRegistry::new();

@@ -24,7 +24,7 @@ impl Tool for CargoCheckTool {
         "cargo_check"
     }
     fn description(&self) -> &str {
-        "Run `cargo check --message-format=json` in the cwd and return the parsed compiler diagnostics. Works without rust-analyzer indexed; complements the LSP `diagnostics` tool."
+        "Run `cargo check --message-format=json` in the cwd and return the parsed compiler diagnostics. Works without rust-analyzer indexed; complements the LSP `diagnostics` tool. Use this instead of `cargo check` or `cargo build` via bash — structured errors with paths, lines, and rendered messages."
     }
     fn schema(&self) -> Value {
         json!({
