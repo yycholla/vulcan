@@ -476,20 +476,30 @@ pub async fn run_tui(config: &Config, resume: ResumeTarget) -> Result<()> {
     // and start fresh.
     let resume_note = {
         let mut a = agent.lock().await;
-        match &resume {
+        let outcome = match &resume {
             ResumeTarget::None => None,
             ResumeTarget::Pick => None, // session picker shown in UI later
             ResumeTarget::Last => match a.continue_last_session() {
-                Ok(()) => Some(format!(
+                Ok(()) => Some(Ok(format!(
                     "Resumed last session ({})",
                     short_id(a.session_id())
-                )),
-                Err(e) => Some(format!("Could not resume last session: {e}")),
+                ))),
+                Err(e) => Some(Err(format!("Could not resume last session: {e}"))),
             },
             ResumeTarget::Specific(id) => match a.resume_session(id) {
-                Ok(()) => Some(format!("Resumed session {}", short_id(id))),
-                Err(e) => Some(format!("Could not resume session: {e}")),
+                Ok(()) => Some(Ok(format!("Resumed session {}", short_id(id)))),
+                Err(e) => Some(Err(format!("Could not resume session: {e}"))),
             },
+        };
+        match outcome {
+            Some(Ok(note)) => {
+                if let Err(e) = a.restore_persisted_provider(config).await {
+                    tracing::warn!("provider restore failed during resume: {e}");
+                }
+                Some(note)
+            }
+            Some(Err(err)) => Some(err),
+            None => None,
         }
     };
 
@@ -507,10 +517,14 @@ pub async fn run_tui(config: &Config, resume: ResumeTarget) -> Result<()> {
     app.audit_log = Some(audit_buf);
     // YYC-66: clone the agent's diff sink so the TUI can render real edits.
     // YYC-67: pull catalog pricing for the cost estimate.
+    // YYC-95: if resume restored a provider profile the active model/context
+    // window changed under us — sync the app surface from the agent.
     {
         let a = agent.lock().await;
         app.diff_sink = Some(a.diff_sink().clone());
         app.pricing = a.pricing().cloned();
+        app.model_label = a.active_model().to_string();
+        app.token_max = a.max_context() as u32;
     }
     refresh_sessions(&agent, &mut app).await;
 
@@ -659,11 +673,22 @@ pub async fn run_tui(config: &Config, resume: ResumeTarget) -> Result<()> {
                                                 let (note, should_hydrate) = {
                                                     let mut a = agent.lock().await;
                                                     match a.resume_session(&picked) {
-                                                        Ok(()) => (Some(format!("Resumed session {}", short_id(&picked))), true),
+                                                        Ok(()) => {
+                                                            if let Err(e) = a.restore_persisted_provider(config).await {
+                                                                tracing::warn!("provider restore failed during picker resume: {e}");
+                                                            }
+                                                            (Some(format!("Resumed session {}", short_id(&picked))), true)
+                                                        }
                                                         Err(e) => (Some(format!("Could not resume session: {e}")), false),
                                                     }
                                                 };
                                                 app.show_session_picker = false;
+                                                if should_hydrate {
+                                                    let a = agent.lock().await;
+                                                    app.model_label = a.active_model().to_string();
+                                                    app.token_max = a.max_context() as u32;
+                                                    app.pricing = a.pricing().cloned();
+                                                }
                                                 if let Some(n) = note {
                                                     app.messages.push(ChatMessage {
                                                         role: ChatRole::System,
