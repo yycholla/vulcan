@@ -5,6 +5,9 @@
 //! helper module — render and key dispatch live in `tui::mod`.
 
 use crate::provider::catalog::ModelInfo;
+use crate::tui::miller_columns::{MillerEntry, MillerPreview, MillerSource};
+use ratatui::style::{Modifier, Style};
+use ratatui::text::{Line, Span};
 use std::collections::BTreeMap;
 
 /// One node in the model tree. Leaves point at a `ModelInfo` index in
@@ -188,6 +191,121 @@ fn build_series_node(series: &str, leaves: &[(usize, Vec<String>)]) -> TreeNode 
         node.children.push(version_node);
     }
     node
+}
+
+/// `MillerSource` adapter that drives the universal miller-columns
+/// widget from a `ModelTree` + the source catalog (YYC-102).
+pub struct ModelPickerSource<'a> {
+    pub tree: &'a ModelTree,
+    pub items: &'a [ModelInfo],
+    pub root_label: String,
+}
+
+impl<'a> ModelPickerSource<'a> {
+    pub fn new(tree: &'a ModelTree, items: &'a [ModelInfo], root_label: String) -> Self {
+        Self {
+            tree,
+            items,
+            root_label,
+        }
+    }
+
+    fn nodes_at(&self, path: &[usize]) -> &'a [TreeNode] {
+        self.tree.column_at(path.len(), path)
+    }
+
+    pub fn leaf_at(&self, path: &[usize]) -> Option<usize> {
+        let mut current: &[TreeNode] = &self.tree.labs;
+        let mut leaf: Option<usize> = None;
+        for &idx in path {
+            let node = current.get(idx)?;
+            if node.children.is_empty() {
+                return node.model_index;
+            }
+            leaf = node.model_index;
+            current = &node.children;
+        }
+        leaf
+    }
+}
+
+impl<'a> MillerSource for ModelPickerSource<'a> {
+    fn header(&self, path: &[usize]) -> String {
+        if path.is_empty() {
+            return self.root_label.clone();
+        }
+        let mut current: &[TreeNode] = &self.tree.labs;
+        let mut last = self.root_label.clone();
+        for &idx in path {
+            let Some(node) = current.get(idx) else {
+                return last;
+            };
+            last = node.label.clone();
+            if node.children.is_empty() {
+                return last;
+            }
+            current = &node.children;
+        }
+        last
+    }
+
+    fn entries(&self, path: &[usize]) -> Vec<MillerEntry> {
+        self.nodes_at(path)
+            .iter()
+            .map(|node| MillerEntry {
+                label: node.label.clone(),
+                icon: if node.children.is_empty() { "·" } else { "▸" }.to_string(),
+                has_children: !node.children.is_empty(),
+            })
+            .collect()
+    }
+
+    fn preview(&self, path: &[usize]) -> Option<MillerPreview> {
+        let leaf = self.leaf_at(path)?;
+        let model = self.items.get(leaf)?;
+        let mut lines: Vec<Line<'static>> = Vec::new();
+        lines.push(Line::from(Span::styled(
+            model.id.clone(),
+            Style::default().add_modifier(Modifier::BOLD),
+        )));
+        lines.push(Line::from(""));
+        if model.context_length > 0 {
+            lines.push(Line::from(format!(
+                "context  : {}",
+                crate::tui::state::format_thousands(model.context_length as u32)
+            )));
+        }
+        let mut feats = Vec::new();
+        if model.features.tools {
+            feats.push("tools");
+        }
+        if model.features.reasoning {
+            feats.push("reasoning");
+        }
+        if model.features.vision {
+            feats.push("vision");
+        }
+        if model.features.json_mode {
+            feats.push("json");
+        }
+        if !feats.is_empty() {
+            lines.push(Line::from(format!("features : {}", feats.join(", "))));
+        }
+        if let Some(p) = &model.pricing {
+            lines.push(Line::from(format!(
+                "pricing  : ${:.4}/1k in · ${:.4}/1k out",
+                p.input_per_token * 1000.0,
+                p.output_per_token * 1000.0,
+            )));
+        }
+        if let Some(top) = &model.top_provider {
+            lines.push(Line::from(format!("upstream : {top}")));
+        }
+        Some(MillerPreview {
+            title: model.id.clone(),
+            lines,
+        })
+    }
 }
 
 fn tokenize(rest: &str) -> Vec<String> {
