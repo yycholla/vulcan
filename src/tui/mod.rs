@@ -502,7 +502,7 @@ pub async fn run_tui(config: &Config, resume: ResumeTarget) -> Result<()> {
     let (stream_tx, mut stream_rx) = mpsc::unbounded_channel::<StreamEvent>();
 
     // ── Hook registry: audit-log + (room for safety-gate, etc.). Built-in
-    // hooks (skills) are registered by Agent::with_hooks itself.
+    // hooks (skills) are registered by AgentBuilder.
     let mut hook_reg = HookRegistry::new();
     let (audit_hook, audit_buf) = AuditHook::new(200);
     hook_reg.register(audit_hook);
@@ -516,7 +516,11 @@ pub async fn run_tui(config: &Config, resume: ResumeTarget) -> Result<()> {
     // ── Long-lived agent: one per TUI session, shared across prompts so
     // hook handlers' state (audit log, rate limits, etc.) survives turns.
     let agent = Arc::new(Mutex::new(
-        Agent::with_hooks_and_pause(config, hook_reg, Some(pause_tx_for_agent)).await?,
+        Agent::builder(config)
+            .with_hooks(hook_reg)
+            .with_pause_channel(pause_tx_for_agent)
+            .build()
+            .await?,
     ));
 
     // ── Apply resume target if any. Errors here are non-fatal — we report

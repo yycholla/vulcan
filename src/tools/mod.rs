@@ -91,7 +91,7 @@ pub trait Tool: Send + Sync {
 }
 
 /// Workspace context surfaced to tools at session start (YYC-107).
-/// Built once by `Agent::with_hooks_and_pause` and passed into
+/// Built once by `AgentBuilder::build` and passed into
 /// `is_relevant` / `dynamic_description` so tools can reflect what's
 /// actually in the cwd.
 #[derive(Debug, Clone)]
@@ -339,7 +339,7 @@ impl ToolRegistry {
     }
 
     /// YYC-107: drop tools whose `is_relevant(ctx)` returns false.
-    /// Called once at session start by `Agent::with_hooks_and_pause`
+    /// Called once at session start by `AgentBuilder::build`
     /// after the registry is fully populated.
     pub fn filter_for_context(&mut self, ctx: &ToolContext) {
         let drop_keys: Vec<String> = self
