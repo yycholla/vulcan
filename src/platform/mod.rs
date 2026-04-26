@@ -30,4 +30,20 @@ pub trait Platform: Send + Sync {
     async fn start(&self) -> Result<()>;
     async fn send(&self, msg: &OutboundMessage) -> Result<()>;
     async fn recv(&self) -> Result<InboundMessage>;
+
+    /// Verify a platform-specific webhook request and return the parsed
+    /// `InboundMessage`. The default impl errors so platforms that don't
+    /// accept webhooks (loopback in production, future poll-only platforms)
+    /// don't have to implement it. Webhook handlers (`POST /webhook/:platform`)
+    /// pass the raw request headers + body so each platform can apply its own
+    /// HMAC scheme + payload schema. Uses `http::HeaderMap` (not
+    /// `axum::http::HeaderMap`) so this trait stays free of an axum dep —
+    /// `http` is a small standalone crate axum re-exports anyway.
+    async fn verify_webhook(
+        &self,
+        _headers: &http::HeaderMap,
+        _body: &[u8],
+    ) -> Result<InboundMessage> {
+        anyhow::bail!("platform does not accept webhooks")
+    }
 }

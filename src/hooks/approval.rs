@@ -42,6 +42,10 @@ impl ApprovalHook {
             session_allow: Mutex::new(HashSet::new()),
         }
     }
+
+    pub fn auto_deny(cfg: ApprovalConfig) -> Self {
+        Self::new(cfg, None)
+    }
 }
 
 #[async_trait::async_trait]
@@ -170,5 +174,49 @@ impl HookHandler for ApprovalHook {
                 reason: "approval channel closed".into(),
             }),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::hooks::HookOutcome;
+
+    #[tokio::test]
+    async fn approval_hook_auto_denies_when_no_pause_channel() {
+        let cfg = ApprovalConfig {
+            default: ApprovalMode::Ask,
+            per_tool: Default::default(),
+        };
+        let hook = ApprovalHook::auto_deny(cfg);
+
+        let decision = hook
+            .before_tool_call(
+                "write_file",
+                &serde_json::json!({"path": "/tmp/x", "content": "hi"}),
+                CancellationToken::new(),
+            )
+            .await
+            .expect("hook result");
+
+        match decision {
+            HookOutcome::Block { reason } => {
+                assert!(reason.contains("requires Ask approval"));
+                assert!(reason.contains("no pause channel"));
+            }
+            other => panic!("expected Block, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn approval_hook_auto_deny_still_allows_always_mode() {
+        let hook = ApprovalHook::auto_deny(ApprovalConfig::default());
+
+        let decision = hook
+            .before_tool_call("read_file", &serde_json::json!({}), CancellationToken::new())
+            .await
+            .expect("hook result");
+
+        assert!(matches!(decision, HookOutcome::Continue));
     }
 }

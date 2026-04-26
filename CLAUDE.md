@@ -21,8 +21,10 @@ cargo build --all-targets        # compile everything, including tests
 cargo run                         # launch TUI (default subcommand: chat)
 cargo run -- prompt "your text"   # one-shot mode (no TUI)
 cargo run -- session <id>         # resume a saved session
+cargo run --features gateway -- gateway  # run gateway daemon mode
 cargo build --release             # size-optimized binary (opt-level=z, lto, strip)
 cargo test                        # run tests
+cargo test --features gateway gateway::  # gateway feature tests
 cargo test <name_substring>       # single test by name
 ```
 
@@ -49,6 +51,8 @@ Three load-bearing invariants:
 **Tool dispatch** runs `BeforeToolCall` (block / replace args) → execute → `AfterToolCall` (replace result). Today `Tool::call` returns `Result<String>`; the master plan specifies `ToolResult { output, media, is_error }` — that upgrade is tracked in Linear and is the natural next structural change.
 
 **Provider** is OpenAI-compatible (`src/provider/openai.rs`). Both buffered (`chat`) and streaming (`chat_stream`) paths are honored by every hook event; if you add a new event, wire it into both.
+
+**Gateway daemon mode** is the Phase 2 foundation surface under `src/gateway/`. Reading order: `src/gateway/mod.rs` → `src/gateway/lane.rs` → `src/gateway/agent_map.rs` → `src/gateway/queue.rs` → `src/gateway/server.rs`. It owns Axum HTTP routes, durable SQLite inbound/outbound queues, per-lane long-lived agents with idle eviction, and the loopback platform scaffold. Telegram/Discord platform adapters build on the same `PlatformRegistry` and queue contracts.
 
 ## Active naming wart
 

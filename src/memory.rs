@@ -7,11 +7,17 @@
 //!    tool_call_id, tool_calls_json, created_at)` indexed on `(session_id, position)`
 //! - `messages_fts` — external-content FTS5 over `messages.content`, kept in
 //!    sync via insert/update/delete triggers.
+//! - `inbound_queue(id PK, platform, chat_id, user_id, text, received_at,
+//!    attempts, state)` — gateway daemon ingress, indexed by lane+state and state+received_at.
+//! - `outbound_queue(id PK, platform, chat_id, text, attachments_json, enqueued_at,
+//!    next_attempt_at, attempts, state, last_error)` — gateway daemon egress, indexed by state+next_attempt_at.
 //!
 //! The JSONL format used previously is gone; old data under
 //! `~/.vulcan/sessions/*.jsonl` is left in place but not read. Migration is a
 //! manual one-off if it ever matters (see Linear YYC-14).
 
+#[cfg(feature = "gateway")]
+use std::sync::Arc;
 use std::sync::Mutex;
 
 use anyhow::{Context, Result};
@@ -65,6 +71,33 @@ CREATE TRIGGER IF NOT EXISTS messages_au AFTER UPDATE ON messages BEGIN
     INSERT INTO messages_fts(messages_fts, rowid, content) VALUES('delete', old.id, COALESCE(old.content, ''));
     INSERT INTO messages_fts(rowid, content) VALUES (new.id, COALESCE(new.content, ''));
 END;
+
+CREATE TABLE IF NOT EXISTS inbound_queue (
+  id INTEGER PRIMARY KEY,
+  platform TEXT NOT NULL,
+  chat_id  TEXT NOT NULL,
+  user_id  TEXT NOT NULL,
+  text     TEXT NOT NULL,
+  received_at INTEGER NOT NULL,
+  attempts INTEGER NOT NULL DEFAULT 0,
+  state    TEXT NOT NULL  -- 'pending'|'processing'|'failed'
+);
+CREATE INDEX IF NOT EXISTS idx_inbound_lane  ON inbound_queue(platform, chat_id, state);
+CREATE INDEX IF NOT EXISTS idx_inbound_state ON inbound_queue(state, received_at);
+
+CREATE TABLE IF NOT EXISTS outbound_queue (
+  id INTEGER PRIMARY KEY,
+  platform TEXT NOT NULL,
+  chat_id  TEXT NOT NULL,
+  text     TEXT NOT NULL,
+  attachments_json TEXT NOT NULL DEFAULT '[]',
+  enqueued_at INTEGER NOT NULL,
+  next_attempt_at INTEGER NOT NULL,
+  attempts INTEGER NOT NULL DEFAULT 0,
+  state    TEXT NOT NULL,  -- 'pending'|'sending'|'failed'
+  last_error TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_outbound_due ON outbound_queue(state, next_attempt_at);
 "#;
 
 pub struct SessionStore {
@@ -390,6 +423,17 @@ impl Default for SessionStore {
     }
 }
 
+#[cfg(feature = "gateway")]
+pub(crate) fn open_gateway_connection() -> Result<Arc<Mutex<Connection>>> {
+    let dir = crate::config::vulcan_home();
+    std::fs::create_dir_all(&dir).ok();
+    let path = dir.join("sessions.db");
+    let conn = Connection::open(&path)
+        .with_context(|| format!("Failed to open session DB at {}", path.display()))?;
+    initialize_conn(&conn).context("Failed to initialize session DB schema")?;
+    Ok(Arc::new(Mutex::new(conn)))
+}
+
 fn initialize_conn(conn: &Connection) -> Result<()> {
     conn.execute_batch(SCHEMA)?;
 
@@ -398,6 +442,11 @@ fn initialize_conn(conn: &Connection) -> Result<()> {
     let _ = conn.execute("ALTER TABLE sessions ADD COLUMN parent_session_id TEXT", []);
     let _ = conn.execute("ALTER TABLE sessions ADD COLUMN lineage_label TEXT", []);
     Ok(())
+}
+
+#[cfg(all(test, feature = "gateway"))]
+pub(crate) fn initialize_test_conn(conn: &Connection) -> Result<()> {
+    initialize_conn(conn)
 }
 
 fn upsert_session_metadata(
@@ -730,6 +779,36 @@ mod tests {
             }
             other => panic!("expected Assistant, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn queue_tables_created() {
+        let store = SessionStore::in_memory();
+        let conn = store.conn.lock().expect("lock");
+        let count: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM sqlite_master \
+             WHERE type='table' AND name IN ('inbound_queue','outbound_queue')",
+                [],
+                |r| r.get(0),
+            )
+            .expect("query");
+        assert_eq!(count, 2);
+    }
+
+    #[test]
+    fn queue_indexes_created() {
+        let store = SessionStore::in_memory();
+        let conn = store.conn.lock().expect("lock");
+        let count: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM sqlite_master \
+             WHERE type='index' AND name IN ('idx_inbound_lane','idx_inbound_state','idx_outbound_due')",
+                [],
+                |r| r.get(0),
+            )
+            .expect("query");
+        assert_eq!(count, 3);
     }
 
     #[test]

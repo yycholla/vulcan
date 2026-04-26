@@ -31,6 +31,16 @@ catalog_cache_ttl_hours = 24
 # ends with a "reached maximum iteration limit" message.
 # max_iterations = 0
 
+# Optional named provider profiles. The active TUI `/model` command uses
+# `[provider]` today; named profiles bind base URL, auth, and default model
+# together for provider switching work tracked after YYC-92.
+# [providers.local]
+# type = "openai-compat"
+# base_url = "http://localhost:11434/v1"
+# api_key = "ollama"
+# model = "qwen2.5-coder:latest"
+# disable_catalog = true
+
 [tools]
 # Enable dangerous tools (file overwrite, shell exec) without confirmation
 yolo_mode = false
@@ -74,3 +84,19 @@ dim = 1536
 #   default-light   — Bauhaus cream/ink, the formalized current look
 #   dracula         — canonical dark palette
 theme = "system"
+
+# [gateway]
+# bind = "127.0.0.1:7777"
+# api_token = "..."           # required when running `vulcan gateway`; generated on first run if absent
+# idle_ttl_secs = 1800
+# max_concurrent_lanes = 64
+# outbound_max_attempts = 5
+
+# [gateway.telegram]
+# enabled = false
+# bot_token = "..."
+# webhook_secret = "..."
+
+# [gateway.discord]
+# enabled = false
+# bot_token = "..."
