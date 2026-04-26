@@ -211,6 +211,20 @@ impl Agent {
             hooks.register(Arc::new(safety));
         }
 
+        // Built-in hook (YYC-87 / YYC-84): redirect bash invocations to
+        // native tools when there's a clear equivalent. Skipped entirely
+        // when the knob is `Off`. Sits at priority 5 — after safety
+        // (priority 0) so dangerous-bash still wins, before audit
+        // (priority 1).
+        if !matches!(
+            config.tools.native_enforcement,
+            crate::config::NativeEnforcement::Off
+        ) {
+            hooks.register(Arc::new(crate::hooks::prefer_native::PreferNativeToolsHook::new(
+                config.tools.native_enforcement,
+            )));
+        }
+
         Ok(Self {
             provider,
             tools,
