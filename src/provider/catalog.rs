@@ -230,12 +230,52 @@ impl ProviderCatalog for OpenAICatalog {
                 arr.iter()
                     .filter_map(|m| {
                         let id = m.get("id")?.as_str()?.to_string();
+                        let context_length = m
+                            .get("context_length")
+                            .and_then(|v| v.as_u64())
+                            .map(|n| n as usize)
+                            .unwrap_or(0);
+                        let pricing = m.get("pricing").and_then(|p| {
+                            let inp = p
+                                .get("prompt")
+                                .and_then(|v| v.as_str())
+                                .and_then(|s| s.parse::<f64>().ok())?;
+                            let out = p
+                                .get("completion")
+                                .and_then(|v| v.as_str())
+                                .and_then(|s| s.parse::<f64>().ok())?;
+                            Some(Pricing {
+                                input_per_token: inp,
+                                output_per_token: out,
+                            })
+                        });
+                        let supported = m
+                            .get("supported_parameters")
+                            .and_then(|v| v.as_array())
+                            .map(|a| {
+                                a.iter()
+                                    .filter_map(|s| s.as_str().map(|s| s.to_string()))
+                                    .collect::<Vec<_>>()
+                            })
+                            .unwrap_or_default();
                         Some(ModelInfo {
                             display_name: id.clone(),
                             id,
-                            context_length: 0,
-                            pricing: None,
-                            features: ModelFeatures::default(),
+                            context_length,
+                            pricing,
+                            features: ModelFeatures {
+                                tools: supported.iter().any(|s| s == "tools" || s == "tool_choice"),
+                                json_mode: supported.iter().any(|s| s == "response_format"),
+                                vision: m
+                                    .get("architecture")
+                                    .and_then(|a| a.get("input_modalities"))
+                                    .and_then(|v| v.as_array())
+                                    .map(|a| a.iter().any(|s| s.as_str() == Some("image")))
+                                    .unwrap_or(false),
+                                reasoning: supported
+                                    .iter()
+                                    .any(|s| s == "reasoning" || s == "include_reasoning"),
+                            },
                             top_provider: m
                                 .get("owned_by")
                                 .and_then(|v| v.as_str())

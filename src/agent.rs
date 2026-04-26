@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use crate::config::Config;
+use crate::config::{Config, ProviderConfig};
 use crate::context::ContextManager;
 use crate::hooks::approval::ApprovalHook;
 use crate::hooks::diagnostics::DiagnosticsHook;
@@ -46,6 +46,11 @@ pub struct Agent {
     /// catalog at startup (YYC-67). `None` when the catalog is disabled
     /// or the provider doesn't publish pricing.
     pricing: Option<crate::provider::catalog::Pricing>,
+    /// Active provider profile and resolved auth. Kept so user-facing
+    /// commands can switch models without reconstructing the long-lived
+    /// Agent, hook registry, tools, memory, or session state.
+    provider_config: ProviderConfig,
+    provider_api_key: String,
     /// LSP server pool (YYC-46). Lazy: servers spawn on first tool
     /// invocation that needs one. Reaped in `end_session`.
     lsp_manager: Arc<crate::code::lsp::LspManager>,
@@ -55,6 +60,13 @@ pub struct Agent {
     last_saved_count: usize,
     /// Max agent loop iterations per prompt. 0 = unlimited (default).
     max_iterations: u32,
+}
+
+#[derive(Debug, Clone)]
+pub struct ModelSelection {
+    pub model: crate::provider::catalog::ModelInfo,
+    pub max_context: usize,
+    pub pricing: Option<crate::provider::catalog::Pricing>,
 }
 
 impl Agent {
@@ -96,54 +108,10 @@ impl Agent {
         // max_context with whatever the catalog says it actually is. Non-fatal:
         // if the catalog endpoint fails, we log + continue with the configured
         // values rather than blocking startup over a metadata fetch.
-        let mut effective_max_context = config.provider.max_context;
-        let mut supports_json_mode = false;
-        let mut pricing: Option<crate::provider::catalog::Pricing> = None;
-        if !config.provider.disable_catalog {
-            match Self::fetch_catalog(config, &api_key).await {
-                Ok(models) => {
-                    let found = models.iter().find(|m| m.id == config.provider.model);
-                    match found {
-                        Some(model_info) => {
-                            supports_json_mode = model_info.features.json_mode;
-                            pricing = model_info.pricing.clone();
-                            if model_info.context_length > 0
-                                && config.provider.max_context == 128_000
-                            {
-                                effective_max_context = model_info.context_length;
-                                tracing::info!(
-                                    "catalog: using context_length={} for {} (json_mode={})",
-                                    model_info.context_length,
-                                    model_info.id,
-                                    supports_json_mode,
-                                );
-                            }
-                        }
-                        None => {
-                            let suggestions = crate::provider::catalog::fuzzy_suggest(
-                                &models,
-                                &config.provider.model,
-                                3,
-                            );
-                            let hint = if suggestions.is_empty() {
-                                String::new()
-                            } else {
-                                format!(" Did you mean: {}?", suggestions.join(", "))
-                            };
-                            anyhow::bail!(
-                                "Model '{}' not found in provider catalog.{} \
-                                 (See `[provider].model` in config.)",
-                                config.provider.model,
-                                hint,
-                            );
-                        }
-                    }
-                }
-                Err(e) => {
-                    tracing::warn!("catalog fetch failed (continuing with config defaults): {e}");
-                }
-            }
-        }
+        let selection = Self::resolve_model_selection(&config.provider, &api_key).await?;
+        let effective_max_context = selection.max_context;
+        let supports_json_mode = selection.model.features.json_mode;
+        let pricing = selection.pricing.clone();
 
         let provider: Box<dyn LLMProvider> = Box::new(
             OpenAIProvider::new(
@@ -225,7 +193,11 @@ impl Agent {
         if config.tools.yolo_mode {
             approval_cfg.default = crate::config::ApprovalMode::Always;
         }
-        hooks.register(Arc::new(ApprovalHook::new(approval_cfg, pause_tx.clone())));
+        let approval_hook = match pause_tx.clone() {
+            Some(tx) => ApprovalHook::new(approval_cfg, Some(tx)),
+            None => ApprovalHook::auto_deny(approval_cfg),
+        };
+        hooks.register(Arc::new(approval_hook));
 
         // Built-in hook: block dangerous shell invocations unless yolo_mode is on.
         // Skipped entirely (not even registered as observe-only) when yolo_mode
@@ -252,6 +224,8 @@ impl Agent {
             turn_cancel: CancellationToken::new(),
             diff_sink,
             pricing,
+            provider_config: config.provider.clone(),
+            provider_api_key: api_key,
             lsp_manager,
             last_saved_count: 0,
             max_iterations: config.provider.max_iterations,
@@ -271,26 +245,121 @@ impl Agent {
         self.pricing.as_ref()
     }
 
+    pub fn active_model(&self) -> &str {
+        &self.provider_config.model
+    }
+
+    pub fn max_context(&self) -> usize {
+        self.provider.max_context()
+    }
+
     pub fn session_id(&self) -> &str {
         &self.session_id
     }
 
-    /// Fetch the provider's model catalog (cached if fresh, otherwise
-    /// HTTP-fetched). Used for startup validation and `max_context`
-    /// auto-population. Runs inside the caller's tokio runtime — the
-    /// constructor is `async` for exactly this reason.
-    async fn fetch_catalog(
-        config: &Config,
+    pub async fn available_models(&self) -> Result<Vec<crate::provider::catalog::ModelInfo>> {
+        Self::fetch_catalog_for(&self.provider_config, &self.provider_api_key).await
+    }
+
+    pub async fn switch_model(&mut self, model_id: &str) -> Result<ModelSelection> {
+        if self.turn_cancel.is_cancelled() {
+            self.turn_cancel = CancellationToken::new();
+        }
+
+        let mut next_config = self.provider_config.clone();
+        next_config.model = model_id.to_string();
+        let selection = Self::resolve_model_selection(&next_config, &self.provider_api_key).await?;
+        let provider: Box<dyn LLMProvider> = Box::new(
+            OpenAIProvider::new(
+                &next_config.base_url,
+                &self.provider_api_key,
+                &next_config.model,
+                selection.max_context,
+                next_config.max_retries,
+                selection.model.features.json_mode,
+                next_config.debug,
+            )
+            .context("Failed to initialize LLM provider")?,
+        );
+
+        self.provider = provider;
+        self.provider_config = next_config;
+        self.context = ContextManager::new(selection.max_context);
+        self.pricing = selection.pricing.clone();
+
+        Ok(selection)
+    }
+
+    async fn fetch_catalog_for(
+        provider: &ProviderConfig,
         api_key: &str,
     ) -> Result<Vec<crate::provider::catalog::ModelInfo>> {
         use std::time::Duration;
         let client = reqwest::Client::builder()
             .timeout(Duration::from_secs(15))
             .build()?;
-        let ttl = Duration::from_secs(config.provider.catalog_cache_ttl_hours * 3600);
+        let ttl = Duration::from_secs(provider.catalog_cache_ttl_hours * 3600);
         let catalog =
-            crate::provider::catalog::for_base_url(client, &config.provider.base_url, api_key, ttl);
+            crate::provider::catalog::for_base_url(client, &provider.base_url, api_key, ttl);
         catalog.list_models().await.map_err(Into::into)
+    }
+
+    async fn resolve_model_selection(
+        provider: &ProviderConfig,
+        api_key: &str,
+    ) -> Result<ModelSelection> {
+        let mut effective_max_context = provider.max_context;
+        let mut model_info = crate::provider::catalog::ModelInfo {
+            id: provider.model.clone(),
+            display_name: provider.model.clone(),
+            context_length: 0,
+            pricing: None,
+            features: crate::provider::catalog::ModelFeatures::default(),
+            top_provider: None,
+        };
+
+        if !provider.disable_catalog {
+            match Self::fetch_catalog_for(provider, api_key).await {
+                Ok(models) => match models.iter().find(|m| m.id == provider.model) {
+                    Some(found) => {
+                        model_info = found.clone();
+                        if model_info.context_length > 0 && provider.max_context == 128_000 {
+                            effective_max_context = model_info.context_length;
+                            tracing::info!(
+                                "catalog: using context_length={} for {} (json_mode={})",
+                                model_info.context_length,
+                                model_info.id,
+                                model_info.features.json_mode,
+                            );
+                        }
+                    }
+                    None => {
+                        let suggestions =
+                            crate::provider::catalog::fuzzy_suggest(&models, &provider.model, 3);
+                        let hint = if suggestions.is_empty() {
+                            String::new()
+                        } else {
+                            format!(" Did you mean: {}?", suggestions.join(", "))
+                        };
+                        anyhow::bail!(
+                            "Model '{}' not found in provider catalog.{} \
+                             (See `[provider].model` in config.)",
+                            provider.model,
+                            hint,
+                        );
+                    }
+                },
+                Err(e) => {
+                    tracing::warn!("catalog fetch failed (continuing with config defaults): {e}");
+                }
+            }
+        }
+
+        Ok(ModelSelection {
+            pricing: model_info.pricing.clone(),
+            model: model_info,
+            max_context: effective_max_context,
+        })
     }
 
     /// Test/bench-only constructor that takes a fully-built provider and an
@@ -321,6 +390,8 @@ impl Agent {
             turn_cancel: CancellationToken::new(),
             diff_sink: crate::tools::new_diff_sink(),
             pricing: None,
+            provider_config: ProviderConfig::default(),
+            provider_api_key: "test-key".into(),
             lsp_manager: Arc::new(crate::code::lsp::LspManager::new(
                 std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")),
             )),
@@ -1300,6 +1371,78 @@ mod tests {
         assert_eq!(resp, "Hi!");
         // run_prompt's final save_messages would have stored the reasoning;
         // not asserting against the DB to avoid touching ~/.vulcan in tests.
+    }
+
+    #[tokio::test]
+    async fn switch_model_rebuilds_provider_metadata_without_restarting_session() {
+        let base_url = spawn_model_catalog_server().await;
+        let config = Config {
+            provider: crate::config::ProviderConfig {
+                base_url,
+                api_key: Some("test-key".into()),
+                model: "model-a".into(),
+                catalog_cache_ttl_hours: 0,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        let mut agent = Agent::new(&config).await.unwrap();
+        let session_id = agent.session_id().to_string();
+
+        assert_eq!(agent.active_model(), "model-a");
+        assert_eq!(agent.max_context(), 1_000);
+        assert_eq!(agent.pricing().map(|p| p.input_per_token), Some(0.000001));
+
+        let selection = agent.switch_model("model-b").await.unwrap();
+
+        assert_eq!(agent.session_id(), session_id);
+        assert_eq!(selection.model.id, "model-b");
+        assert_eq!(agent.active_model(), "model-b");
+        assert_eq!(agent.max_context(), 2_000);
+        assert_eq!(agent.pricing().map(|p| p.output_per_token), Some(0.000004));
+    }
+
+    async fn spawn_model_catalog_server() -> String {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind test server");
+        let addr = listener.local_addr().expect("local addr");
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut stream, _)) = listener.accept().await else {
+                    break;
+                };
+                tokio::spawn(async move {
+                    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+                    let mut buf = [0u8; 1024];
+                    let _ = stream.read(&mut buf).await;
+                    let body = r#"{
+                        "data": [
+                            {
+                                "id": "model-a",
+                                "context_length": 1000,
+                                "pricing": {"prompt": "0.000001", "completion": "0.000002"},
+                                "supported_parameters": ["tools", "response_format"]
+                            },
+                            {
+                                "id": "model-b",
+                                "context_length": 2000,
+                                "pricing": {"prompt": "0.000003", "completion": "0.000004"},
+                                "supported_parameters": ["tools"]
+                            }
+                        ]
+                    }"#;
+                    let response = format!(
+                        "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n{}",
+                        body.len(),
+                        body
+                    );
+                    let _ = stream.write_all(response.as_bytes()).await;
+                });
+            }
+        });
+        format!("http://{addr}/v1")
     }
 
     #[tokio::test]

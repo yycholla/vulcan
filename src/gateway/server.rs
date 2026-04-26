@@ -29,6 +29,7 @@ pub struct AppState {
 /// payload from filling the SQLite queue. Webhook routes (Task 16) may
 /// override this per-platform if a connector publishes large payloads.
 const V1_BODY_LIMIT_BYTES: usize = 64 * 1024;
+const WEBHOOK_BODY_LIMIT_BYTES: usize = 64 * 1024;
 
 pub fn build_router(state: AppState) -> Router {
     let v1 = Router::new()
@@ -55,7 +56,8 @@ pub fn build_router(state: AppState) -> Router {
         // is per-platform HMAC, not the daemon's API token.
         .route(
             "/webhook/{platform}",
-            axum::routing::post(crate::gateway::routes::webhook::handle),
+            axum::routing::post(crate::gateway::routes::webhook::handle)
+                .layer(axum::extract::DefaultBodyLimit::max(WEBHOOK_BODY_LIMIT_BYTES)),
         )
         .nest("/v1", v1)
         .with_state(state)

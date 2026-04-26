@@ -16,6 +16,8 @@
 //! `~/.vulcan/sessions/*.jsonl` is left in place but not read. Migration is a
 //! manual one-off if it ever matters (see Linear YYC-14).
 
+#[cfg(feature = "gateway")]
+use std::sync::Arc;
 use std::sync::Mutex;
 
 use anyhow::{Context, Result};
@@ -419,6 +421,17 @@ impl Default for SessionStore {
     fn default() -> Self {
         Self::new()
     }
+}
+
+#[cfg(feature = "gateway")]
+pub(crate) fn open_gateway_connection() -> Result<Arc<Mutex<Connection>>> {
+    let dir = crate::config::vulcan_home();
+    std::fs::create_dir_all(&dir).ok();
+    let path = dir.join("sessions.db");
+    let conn = Connection::open(&path)
+        .with_context(|| format!("Failed to open session DB at {}", path.display()))?;
+    initialize_conn(&conn).context("Failed to initialize session DB schema")?;
+    Ok(Arc::new(Mutex::new(conn)))
 }
 
 fn initialize_conn(conn: &Connection) -> Result<()> {

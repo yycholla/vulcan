@@ -16,6 +16,9 @@ vulcan --continue
 
 # Full-text search across all past sessions
 vulcan search "some query"
+
+# Run the gateway daemon (requires the gateway feature)
+cargo run --features gateway -- gateway
 ```
 
 ---
@@ -39,7 +42,7 @@ Switch between views instantly with `Ctrl+1` through `Ctrl+5`.
 **UI highlights:**
 - **Markdown rendering** — agent responses render inline code, lists, headings, and more
 - **Reasoning trace** — toggle visibility of model reasoning/thinking traces (`Ctrl+R`)
-- **Slash commands** — `/help`, `/clear`, `/view`, `/reasoning`, `/search`, `/exit` with fuzzy filtering, tab completion, and a navigable palette
+- **Slash commands** — `/help`, `/clear`, `/view`, `/reasoning`, `/model`, `/search`, `/exit` with fuzzy filtering, tab completion, and a navigable palette
 - **Prompt queue** — keep typing while the agent is busy; prompts drain automatically when the turn completes
 - **Live tool activity** — see tool calls start and complete in real-time with ✓/✗ status
 - **Live edit diffs** — real file-edit diffs rendered in the UI as the agent works
@@ -86,6 +89,7 @@ Vulcan learns. Skills are markdown files with YAML frontmatter that get injected
 - **Streaming** — SSE-based streaming with text, reasoning, and tool calls
 - **Retry logic** — exponential backoff with jitter (1s, 2s, 4s, 8s, 16s) for 429/5xx/network errors
 - **Model catalog** — auto-fetches model metadata at startup, validates the model exists, fuzzy-suggests alternatives, auto-populates context length and pricing
+- **Named providers** — configure multiple OpenAI-compatible endpoints and switch to catalog-listed models from the TUI
 - **Reasoning passthrough** — supports models like DeepSeek that emit `reasoning_content` alongside responses
 
 ---
@@ -162,6 +166,11 @@ model = "deepseek/deepseek-v4-flash"
 | `provider.catalog_cache_ttl_hours` | `24` | Model catalog cache lifetime |
 | `provider.disable_catalog` | `false` | Skip catalog fetch at startup |
 | `provider.debug` | `"off"` | Debug logging: `off`, `tool-fallback`, or `wire` |
+| `providers.<name>.*` | unset | Optional named provider profiles usable by `/model <name>/<model>` |
+| `gateway.bind` | `127.0.0.1:7373` | Gateway HTTP bind address |
+| `gateway.api_token` | unset | Bearer token required for `/v1/*` gateway routes |
+| `gateway.idle_ttl_secs` | `1800` | Per-lane agent idle eviction timeout |
+| `gateway.outbound_max_attempts` | `5` | Outbound delivery retries before failure |
 | `tools.yolo_mode` | `false` | Skip safety confirmations |
 | `compaction.enabled` | `true` | Auto-compress context at threshold |
 | `compaction.trigger_ratio` | `0.85` | Compaction trigger ratio |
@@ -189,6 +198,9 @@ vulcan session <session-id>
 # Full-text search across all saved sessions
 vulcan search "some query"
 # Optionally limit results: vulcan search "query" --limit 20
+
+# Gateway daemon mode
+cargo run --features gateway -- gateway
 ```
 
 ### TUI Keyboard Shortcuts
@@ -217,6 +229,7 @@ Type `/` in the TUI to access slash commands:
 /clear      Clear the conversation
 /view       Switch views (equivalent to Ctrl+1..5)
 /reasoning  Toggle reasoning trace
+/model      List available models or switch with /model <id>
 /search     Search past sessions
 /exit       Quit Vulcan
 ```

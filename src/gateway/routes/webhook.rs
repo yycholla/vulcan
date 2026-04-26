@@ -163,4 +163,32 @@ mod tests {
             .unwrap();
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
     }
+
+    #[tokio::test]
+    async fn webhook_rejects_oversized_body_before_verification() {
+        let db = fresh_db();
+        let mut reg = PlatformRegistry::new();
+        reg.register(
+            "loopback",
+            Arc::new(LoopbackPlatform::with_webhook_secret("hush")),
+        );
+        let state = app_state_with(reg, db);
+        let app = build_router(state);
+
+        let oversized = "x".repeat(70 * 1024);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/webhook/loopback")
+                    .header("content-type", "application/json")
+                    .header("x-loopback-signature", "irrelevant")
+                    .body(Body::from(oversized))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    }
 }

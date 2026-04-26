@@ -133,6 +133,13 @@ const SLASH_COMMANDS: &[SlashCommand] = &[
         mid_turn_safe: false,
     },
     SlashCommand {
+        name: "model",
+        description: "List or switch models: /model [id]",
+        // Rebuilds the provider for future turns and may fetch the catalog.
+        // Defer until idle so the in-flight provider stream is untouched.
+        mid_turn_safe: false,
+    },
+    SlashCommand {
         name: "diff-style",
         description: "Set diff render: /diff-style <unified|side-by-side|inline>",
         mid_turn_safe: true,
@@ -146,6 +153,42 @@ const SLASH_COMMANDS: &[SlashCommand] = &[
 
 fn short_id(id: &str) -> String {
     id.chars().take(8).collect()
+}
+
+fn format_model_list(active_model: &str, models: &[crate::provider::catalog::ModelInfo]) -> String {
+    let mut out = format!("Models from active provider ({} total):", models.len());
+    for model in models.iter().take(30) {
+        let marker = if model.id == active_model { "*" } else { " " };
+        let context = if model.context_length > 0 {
+            crate::tui::state::format_thousands(model.context_length as u32)
+        } else {
+            "unknown".into()
+        };
+        let mut flags = Vec::new();
+        if model.features.tools {
+            flags.push("tools");
+        }
+        if model.features.reasoning {
+            flags.push("reasoning");
+        }
+        if model.features.vision {
+            flags.push("vision");
+        }
+        if model.features.json_mode {
+            flags.push("json");
+        }
+        let flags = if flags.is_empty() {
+            String::new()
+        } else {
+            format!(" · {}", flags.join(","))
+        };
+        out.push_str(&format!("\n  {marker} {} · ctx {context}{flags}", model.id));
+    }
+    if models.len() > 30 {
+        out.push_str(&format!("\n  ... {} more", models.len() - 30));
+    }
+    out.push_str("\n\nUse /model <id> to switch.");
+    out
 }
 
 fn filter_commands(prefix: &str) -> Vec<&'static SlashCommand> {
@@ -1033,6 +1076,59 @@ pub async fn run_tui(config: &Config, resume: ResumeTarget) -> Result<()> {
                                                         });
                                                         continue;
                                                     }
+                                                    s if s == "model" || s.starts_with("model ") => {
+                                                        let arg = s["model".len()..].trim();
+                                                        if arg.is_empty() {
+                                                            let report = {
+                                                                let a = agent.lock().await;
+                                                                match a.available_models().await {
+                                                                    Ok(models) if models.is_empty() => {
+                                                                        "Provider catalog returned no models.".to_string()
+                                                                    }
+                                                                    Ok(models) => format_model_list(
+                                                                        a.active_model(),
+                                                                        &models,
+                                                                    ),
+                                                                    Err(e) => format!("Model catalog fetch failed: {e}"),
+                                                                }
+                                                            };
+                                                            app.messages.push(ChatMessage {
+                                                                role: ChatRole::System,
+                                                                content: report,
+                                                                ..Default::default()
+                                                            });
+                                                            continue;
+                                                        }
+
+                                                        let result = {
+                                                            let mut a = agent.lock().await;
+                                                            a.switch_model(arg).await
+                                                        };
+                                                        match result {
+                                                            Ok(selection) => {
+                                                                app.model_label = selection.model.id.clone();
+                                                                app.token_max = selection.max_context as u32;
+                                                                app.pricing = selection.pricing;
+                                                                app.messages.push(ChatMessage {
+                                                                    role: ChatRole::System,
+                                                                    content: format!(
+                                                                        "Model switched to {} · context {}",
+                                                                        app.model_label,
+                                                                        crate::tui::state::format_thousands(app.token_max),
+                                                                    ),
+                                                                    ..Default::default()
+                                                                });
+                                                            }
+                                                            Err(e) => {
+                                                                app.messages.push(ChatMessage {
+                                                                    role: ChatRole::System,
+                                                                    content: format!("Model switch failed: {e}"),
+                                                                    ..Default::default()
+                                                                });
+                                                            }
+                                                        }
+                                                        continue;
+                                                    }
                                                     _ => {
                                                         app.messages.push(ChatMessage {
                                                             role: ChatRole::System,
@@ -1184,6 +1280,50 @@ mod tests {
             render_wake_for_stream_batch(start, start + Duration::from_millis(1), true),
             RenderWake::Now
         );
+    }
+
+    #[test]
+    fn model_command_is_available_and_deferred_mid_turn() {
+        let command = SLASH_COMMANDS
+            .iter()
+            .find(|cmd| cmd.name == "model")
+            .expect("model slash command");
+
+        assert!(!command.mid_turn_safe);
+        assert_eq!(filter_commands("mod")[0].name, "model");
+    }
+
+    #[test]
+    fn format_model_list_marks_active_model() {
+        let models = vec![
+            crate::provider::catalog::ModelInfo {
+                id: "model-a".into(),
+                display_name: "Model A".into(),
+                context_length: 1_000,
+                pricing: None,
+                features: crate::provider::catalog::ModelFeatures {
+                    tools: true,
+                    vision: false,
+                    json_mode: true,
+                    reasoning: false,
+                },
+                top_provider: None,
+            },
+            crate::provider::catalog::ModelInfo {
+                id: "model-b".into(),
+                display_name: "Model B".into(),
+                context_length: 0,
+                pricing: None,
+                features: crate::provider::catalog::ModelFeatures::default(),
+                top_provider: None,
+            },
+        ];
+
+        let report = format_model_list("model-a", &models);
+
+        assert!(report.contains("* model-a · ctx 1,000 · tools,json"));
+        assert!(report.contains("  model-b · ctx unknown"));
+        assert!(report.contains("Use /model <id> to switch."));
     }
 }
 

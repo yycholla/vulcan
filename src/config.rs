@@ -1,5 +1,6 @@
 use anyhow::{Context, Result};
 use serde::Deserialize;
+use std::collections::HashMap;
 use std::path::PathBuf;
 
 /// Path to the Vulcan config directory (~/.vulcan/)
@@ -16,6 +17,13 @@ fn dirs_or_default() -> PathBuf {
 pub struct Config {
     #[serde(default)]
     pub provider: ProviderConfig,
+
+    /// Additional named provider profiles. The legacy `[provider]` table
+    /// remains the active profile for now; named profiles give config a place
+    /// to bind auth/base URL/model together before provider switching grows a
+    /// dedicated UI.
+    #[serde(default)]
+    pub providers: HashMap<String, ProviderConfig>,
 
     #[serde(default)]
     pub tools: ToolsConfig,
@@ -268,6 +276,7 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             provider: ProviderConfig::default(),
+            providers: HashMap::new(),
             tools: ToolsConfig::default(),
             skills_dir: default_skills_dir(),
             compaction: CompactionConfig::default(),
@@ -360,9 +369,16 @@ impl Config {
 
     /// Resolve the API key: env var > config > compile-time warning
     pub fn api_key(&self) -> Option<String> {
+        self.api_key_for(&self.provider)
+    }
+
+    /// Resolve the API key for a provider profile: env var wins, then the
+    /// profile-local key. Named providers intentionally use the same global
+    /// env override so one-off shells can redirect auth without editing TOML.
+    pub fn api_key_for(&self, provider: &ProviderConfig) -> Option<String> {
         std::env::var("VULCAN_API_KEY")
             .ok()
-            .or_else(|| self.provider.api_key.clone())
+            .or_else(|| provider.api_key.clone())
     }
 }
 
@@ -408,5 +424,31 @@ debug = "wire"
         assert_eq!(g.idle_ttl_secs, 1800);
         assert_eq!(g.max_concurrent_lanes, 64);
         assert_eq!(g.outbound_max_attempts, 5);
+    }
+
+    #[test]
+    fn named_provider_profiles_parse_without_breaking_legacy_provider() {
+        let toml = r#"
+            [provider]
+            base_url = "https://openrouter.ai/api/v1"
+            api_key = "openrouter-key"
+            model = "deepseek/deepseek-v4-flash"
+
+            [providers.local]
+            base_url = "http://localhost:11434/v1"
+            api_key = "ollama-key"
+            model = "qwen2.5-coder:latest"
+            disable_catalog = true
+        "#;
+
+        let cfg: Config = toml::from_str(toml).expect("config should parse");
+
+        assert_eq!(cfg.provider.model, "deepseek/deepseek-v4-flash");
+        assert_eq!(cfg.providers["local"].base_url, "http://localhost:11434/v1");
+        assert_eq!(
+            cfg.providers["local"].api_key.as_deref(),
+            Some("ollama-key")
+        );
+        assert!(cfg.providers["local"].disable_catalog);
     }
 }

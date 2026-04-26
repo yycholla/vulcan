@@ -121,10 +121,9 @@ impl AgentMap {
         // cold spawn on one lane doesn't block first-touches on every other
         // lane. Acquire the write lock only briefly to insert.
         //
-        // ApprovalHook is registered inside `with_hooks_and_pause` regardless
-        // of `pause_tx`. With `None` here, any non-`Always` approval mode in
-        // user config will block the lane on first prompt — Task 18 wires an
-        // auto-deny variant that closes that gap.
+        // ApprovalHook is registered inside `with_hooks_and_pause`; with
+        // `None` here it uses the explicit auto-deny constructor so gateway
+        // agents never block waiting for a TUI approval consumer.
         let mut hook_reg = HookRegistry::new();
         let (audit_hook, audit_buf) = AuditHook::new(AUDIT_BUFFER_CAPACITY);
         hook_reg.register(audit_hook);

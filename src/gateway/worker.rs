@@ -27,7 +27,7 @@ pub async fn process_one(
     row: InboundRow,
     agent_map: &AgentMap,
     inbound_queue: &InboundQueue,
-    outbound_queue: &OutboundQueue,
+    _outbound_queue: &OutboundQueue,
 ) -> anyhow::Result<()> {
     let lane = LaneKey {
         platform: row.platform.clone(),
@@ -57,15 +57,14 @@ pub async fn process_one(
 
     match result {
         Ok(reply) => {
-            outbound_queue
-                .enqueue(OutboundMessage {
+            inbound_queue
+                .complete_with_outbound(row.id, OutboundMessage {
                     platform: row.platform,
                     chat_id: row.chat_id,
                     text: reply,
                     attachments: vec![],
                 })
                 .await?;
-            inbound_queue.mark_done(row.id).await?;
             Ok(())
         }
         Err(e) => {

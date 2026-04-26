@@ -31,6 +31,16 @@ catalog_cache_ttl_hours = 24
 # ends with a "reached maximum iteration limit" message.
 # max_iterations = 0
 
+# Optional named provider profiles. The active TUI `/model` command uses
+# `[provider]` today; named profiles bind base URL, auth, and default model
+# together for provider switching work tracked after YYC-92.
+# [providers.local]
+# type = "openai-compat"
+# base_url = "http://localhost:11434/v1"
+# api_key = "ollama"
+# model = "qwen2.5-coder:latest"
+# disable_catalog = true
+
 [tools]
 # Enable dangerous tools (file overwrite, shell exec) without confirmation
 yolo_mode = false

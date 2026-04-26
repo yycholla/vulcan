@@ -68,6 +68,23 @@ impl InboundQueue {
         Ok(())
     }
 
+    pub async fn complete_with_outbound(&self, id: i64, msg: OutboundMessage) -> Result<i64> {
+        let mut conn = self.conn.lock().map_err(|_| anyhow!("queue DB poisoned"))?;
+        let tx = conn.transaction()?;
+        let now = chrono::Utc::now().timestamp();
+        let attachments_json = serde_json::to_string(&msg.attachments)?;
+        tx.execute(
+            "INSERT INTO outbound_queue \
+             (platform, chat_id, text, attachments_json, enqueued_at, next_attempt_at, state) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?5, 'pending')",
+            params![msg.platform, msg.chat_id, msg.text, attachments_json, now],
+        )?;
+        let outbound_id = tx.last_insert_rowid();
+        tx.execute("DELETE FROM inbound_queue WHERE id = ?1", params![id])?;
+        tx.commit()?;
+        Ok(outbound_id)
+    }
+
     pub async fn mark_failed(&self, id: i64, error: &str) -> Result<()> {
         let conn = self.conn.lock().map_err(|_| anyhow!("queue DB poisoned"))?;
         // inbound_queue has no last_error column; narrate via tracing instead.
@@ -407,5 +424,32 @@ mod tests {
         let recovered = q2.recover_processing().await.unwrap();
         assert_eq!(recovered, 1);
         assert!(q2.claim_next().await.unwrap().is_some());
+    }
+
+    #[tokio::test]
+    async fn complete_with_outbound_enqueues_reply_and_deletes_inbound_atomically() {
+        let conn = test_conn();
+        let inbound = InboundQueue::new(Arc::clone(&conn));
+        let outbound = OutboundQueue::new(Arc::clone(&conn), 5);
+        let id = inbound.enqueue(sample_msg()).await.unwrap();
+        let row = inbound.claim_next().await.unwrap().expect("row");
+        assert_eq!(row.id, id);
+
+        let outbound_id = inbound
+            .complete_with_outbound(
+                id,
+                OutboundMessage {
+                    platform: "loopback".into(),
+                    chat_id: "c1".into(),
+                    text: "reply".into(),
+                    attachments: vec![],
+                },
+            )
+            .await
+            .unwrap();
+
+        assert!(inbound.claim_next().await.unwrap().is_none());
+        let outbound_row = outbound.peek(outbound_id).await.unwrap();
+        assert_eq!(outbound_row.text, "reply");
     }
 }
