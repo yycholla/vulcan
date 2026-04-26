@@ -25,19 +25,6 @@ use crate::memory::SessionSummary;
 use super::theme::Palette;
 use super::views::{DiffKind, DiffLine, View};
 
-#[derive(Clone, Debug)]
-pub struct ChatLinesCache {
-    pub key: ChatLinesCacheKey,
-    pub lines: Vec<ratatui::text::Line<'static>>,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct ChatLinesCacheKey {
-    pub show_reasoning: bool,
-    pub dense: bool,
-    pub width: u16,
-}
-
 /// Diff render style (YYC-77). Toggled by `/diff-style`.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum DiffStyle {
@@ -515,12 +502,6 @@ pub struct AppState {
     /// (YYC-60) uses for capacity coloring.
     pub prompt_tokens_last: u32,
     pub token_max: u32,
-    /// Dirty flag + cache for the chat renderer. When false (and cache is
-    /// populated), `build_chat_lines_w` reuses cached lines instead of
-    /// re-rendering every message's markdown on every frame. Set to true
-    /// whenever a message is added, mutated, or the view is cleared.
-    pub chat_lines_dirty: Cell<bool>,
-    pub chat_lines_cache: RefCell<Option<ChatLinesCache>>,
     pub chat_render_store: RefCell<super::chat_render::ChatRenderStore>,
 
     /// When true, overlays a session picker on top of the normal view.
@@ -568,8 +549,6 @@ impl AppState {
             completion_tokens_total: 0,
             prompt_tokens_last: 0,
             token_max,
-            chat_lines_dirty: Cell::new(true),
-            chat_lines_cache: RefCell::new(None),
             chat_render_store: RefCell::new(super::chat_render::ChatRenderStore::default()),
 
             show_session_picker: false,
