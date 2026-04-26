@@ -4,6 +4,7 @@ use anyhow::Result;
 pub mod agent_map;
 pub mod lane;
 pub mod loopback;
+pub mod outbound;
 pub mod queue;
 pub mod registry;
 
