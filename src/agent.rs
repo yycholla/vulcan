@@ -820,6 +820,39 @@ impl Agent {
                 return Ok("Cancelled".to_string());
             }
 
+            // YYC-105: same compaction discipline as run_prompt — when the
+            // accumulated history would push the next request past the
+            // configured trigger ratio, summarize older turns and replace
+            // them with a single system primer. Without this, small-context
+            // models (llama-cpp Q2_0 quants, etc.) silently truncate the
+            // request and behave as if the session has no history.
+            if self.context.should_compact(&messages) {
+                match self.context.compact(&messages) {
+                    Ok(summary) => {
+                        let kept_count = messages.len();
+                        messages = vec![
+                            Message::System {
+                                content: format!("Previous conversation context:\n{summary}"),
+                            },
+                            Message::User {
+                                content: input.to_string(),
+                            },
+                        ];
+                        let _ = ui_tx.send(StreamEvent::Text(format!(
+                            "_(compacted {kept_count} earlier turns into a summary to fit context)_\n"
+                        )));
+                        tracing::info!(
+                            "agent iteration {iteration}: compacted {kept_count} prior messages"
+                        );
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            "agent iteration {iteration}: compaction failed: {e} (continuing with full history)"
+                        );
+                    }
+                }
+            }
+
             tracing::info!(
                 "agent iteration {iteration} starting (messages={})",
                 messages.len()
@@ -901,6 +934,13 @@ impl Agent {
                     return Err(anyhow::anyhow!(msg));
                 }
             };
+
+            // YYC-105: feed usage into the context manager so future
+            // iterations' should_compact() see realistic numbers.
+            if let Some(usage) = &response.usage {
+                self.context
+                    .record_usage(usage.prompt_tokens, usage.completion_tokens);
+            }
 
             tracing::info!(
                 "agent iteration {iteration}: response content_len={}, tool_calls={}, reasoning_len={}",
