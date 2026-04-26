@@ -364,6 +364,9 @@ pub enum StreamEvent {
         /// "847 lines · 26.8 KB", "5 matches", "+142 -3"). Rendered as
         /// a dimmed sub-header in the YYC-74 card.
         result_meta: Option<String>,
+        /// Lines elided beyond the preview (YYC-78 long-output
+        /// auto-collapse). 0 when the full output fit.
+        elided_lines: usize,
         elapsed_ms: u64,
     },
     /// The stream is complete (with optional final ChatResponse)

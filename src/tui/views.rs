@@ -145,15 +145,18 @@ fn build_chat_lines_w(
                         params_summary,
                         output_preview,
                         result_meta,
+                        elided_lines,
                         elapsed_ms,
                     } => {
                         // YYC-74: structured bordered tool-call card.
+                        // YYC-78: elided_lines drives the auto-collapse footer.
                         for line in super::widgets::tool_card(
                             name,
                             *status,
                             params_summary.as_deref(),
                             output_preview.as_deref(),
                             result_meta.as_deref(),
+                            *elided_lines,
                             *elapsed_ms,
                             accent,
                             width,
