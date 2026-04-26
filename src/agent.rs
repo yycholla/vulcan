@@ -51,6 +51,11 @@ pub struct Agent {
     /// Agent, hook registry, tools, memory, or session state.
     provider_config: ProviderConfig,
     provider_api_key: String,
+    /// Name of the active named provider profile from `[providers.<name>]`,
+    /// or `None` when running on the unnamed legacy `[provider]` block.
+    /// Set by `switch_provider`; surfaced via `active_profile()` so the
+    /// TUI can label which profile a turn will hit (YYC-94).
+    active_profile: Option<String>,
     /// LSP server pool (YYC-46). Lazy: servers spawn on first tool
     /// invocation that needs one. Reaped in `end_session`.
     lsp_manager: Arc<crate::code::lsp::LspManager>,
@@ -240,6 +245,7 @@ impl Agent {
             pricing,
             provider_config: config.provider.clone(),
             provider_api_key: api_key,
+            active_profile: None,
             lsp_manager,
             last_saved_count: 0,
             max_iterations: config.provider.max_iterations,
@@ -261,6 +267,12 @@ impl Agent {
 
     pub fn active_model(&self) -> &str {
         &self.provider_config.model
+    }
+
+    /// Name of the active named provider profile, or `None` when running
+    /// on the legacy unnamed `[provider]` block (YYC-94).
+    pub fn active_profile(&self) -> Option<&str> {
+        self.active_profile.as_deref()
     }
 
     pub fn max_context(&self) -> usize {
@@ -300,6 +312,61 @@ impl Agent {
         self.provider_config = next_config;
         self.context = ContextManager::new(selection.max_context);
         self.pricing = selection.pricing.clone();
+
+        Ok(selection)
+    }
+
+    /// Switch to a named provider profile from `Config.providers` (YYC-94).
+    /// Rebuilds the underlying `OpenAIProvider` against the chosen profile
+    /// (base URL, model, retries, debug mode), refreshes the model catalog,
+    /// and updates context window + pricing. Hooks, tools, memory, and the
+    /// in-flight session state are left untouched.
+    ///
+    /// Pass `None` to revert to the unnamed legacy `[provider]` block.
+    pub async fn switch_provider(
+        &mut self,
+        profile: Option<&str>,
+        config: &Config,
+    ) -> Result<ModelSelection> {
+        if self.turn_cancel.is_cancelled() {
+            self.turn_cancel = CancellationToken::new();
+        }
+
+        let next_config = match profile {
+            Some(name) => config
+                .providers
+                .get(name)
+                .cloned()
+                .ok_or_else(|| anyhow::anyhow!("Provider profile '{name}' not found in config"))?,
+            None => config.provider.clone(),
+        };
+        let api_key = config.api_key_for(&next_config).ok_or_else(|| {
+            anyhow::anyhow!(
+                "No API key for provider '{}' (set VULCAN_API_KEY or supply api_key in config)",
+                profile.unwrap_or("[provider]"),
+            )
+        })?;
+
+        let selection = Self::resolve_model_selection(&next_config, &api_key).await?;
+        let provider: Box<dyn LLMProvider> = Box::new(
+            OpenAIProvider::new(
+                &next_config.base_url,
+                &api_key,
+                &next_config.model,
+                selection.max_context,
+                next_config.max_retries,
+                selection.model.features.json_mode,
+                next_config.debug,
+            )
+            .context("Failed to initialize LLM provider")?,
+        );
+
+        self.provider = provider;
+        self.provider_config = next_config;
+        self.provider_api_key = api_key;
+        self.context = ContextManager::new(selection.max_context);
+        self.pricing = selection.pricing.clone();
+        self.active_profile = profile.map(str::to_string);
 
         Ok(selection)
     }
@@ -406,6 +473,7 @@ impl Agent {
             pricing: None,
             provider_config: ProviderConfig::default(),
             provider_api_key: "test-key".into(),
+            active_profile: None,
             lsp_manager: Arc::new(crate::code::lsp::LspManager::new(
                 std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")),
             )),
