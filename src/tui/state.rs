@@ -105,7 +105,7 @@ impl PromptMode {
     }
 }
 
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
 pub enum ChatRole {
     User,
     #[default]

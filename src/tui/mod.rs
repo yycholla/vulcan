@@ -19,6 +19,7 @@ use crate::hooks::audit::AuditHook;
 use crate::pause::{self, AgentResume, PauseKind};
 use crate::provider::StreamEvent;
 
+pub mod chat_render;
 pub mod markdown;
 pub mod state;
 pub mod theme;
