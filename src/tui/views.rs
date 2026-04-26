@@ -7,7 +7,7 @@ use ratatui::{
 };
 
 use super::markdown::render_markdown;
-use super::state::{AppState, ChatRole, MessageSegment, SessionStatus, ToolStatus};
+use super::state::{AppState, ChatRole, MessageSegment, SessionStatus};
 use super::theme::{Palette, body, faint_bg};
 use super::widgets::{fill, frame, message_header, section_header, ticker};
 
@@ -123,18 +123,23 @@ fn build_chat_lines(app: &AppState, show_reasoning: bool, dense: bool) -> Vec<Li
                         }
                     }
                     MessageSegment::Reasoning(_) => {}
-                    MessageSegment::ToolCall { name, status } => {
-                        let body = match status {
-                            ToolStatus::InProgress => format!("_[🔧 {name}…]_"),
-                            ToolStatus::Done(true) => format!("_[🔧 {name} ✓]_"),
-                            ToolStatus::Done(false) => format!("_[🔧 {name} ✗]_"),
-                        };
-                        let rendered = render_markdown(&body);
-                        for line in rendered {
-                            let mut spans =
-                                vec![Span::styled("▎ ", Style::default().fg(accent))];
-                            spans.extend(line.spans.into_iter());
-                            out.push(Line::from(spans));
+                    MessageSegment::ToolCall {
+                        name,
+                        status,
+                        params_summary,
+                        output_preview,
+                        elapsed_ms,
+                    } => {
+                        // YYC-74: structured tool-call card.
+                        for line in super::widgets::tool_card(
+                            name,
+                            *status,
+                            params_summary.as_deref(),
+                            output_preview.as_deref(),
+                            *elapsed_ms,
+                            accent,
+                        ) {
+                            out.push(line);
                         }
                     }
                     MessageSegment::Text(t) if !t.is_empty() => {
