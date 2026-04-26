@@ -76,7 +76,10 @@ impl Tool for GotoDefinitionTool {
         // LSP positions are 0-indexed; translate the more agent-friendly
         // 1-indexed line input.
         let line0 = (line as u32).saturating_sub(1);
-        let resp = goto_definition(&server, &pb, line0, character as u32).await?;
+        let resp = match goto_definition(&server, &pb, line0, character as u32).await {
+            Ok(r) => r,
+            Err(e) => return Ok(ToolResult::err(format!("{e}"))),
+        };
         let payload = json!({ "locations": resp.unwrap_or_default() });
         Ok(ToolResult::ok(serde_json::to_string_pretty(&payload)?))
     }
@@ -129,9 +132,10 @@ impl Tool for FindReferencesTool {
         };
         let pb = PathBuf::from(path);
         let line0 = (line as u32).saturating_sub(1);
-        let locs = find_references(&server, &pb, line0, character as u32)
-            .await?
-            .unwrap_or_default();
+        let locs = match find_references(&server, &pb, line0, character as u32).await {
+            Ok(r) => r.unwrap_or_default(),
+            Err(e) => return Ok(ToolResult::err(format!("{e}"))),
+        };
         let payload = json!({ "references": locs });
         Ok(ToolResult::ok(serde_json::to_string_pretty(&payload)?))
     }
@@ -184,7 +188,10 @@ impl Tool for HoverTool {
         };
         let pb = PathBuf::from(path);
         let line0 = (line as u32).saturating_sub(1);
-        let resp = hover(&server, &pb, line0, character as u32).await?;
+        let resp = match hover(&server, &pb, line0, character as u32).await {
+            Ok(r) => r,
+            Err(e) => return Ok(ToolResult::err(format!("{e}"))),
+        };
         let payload = json!({ "hover": resp });
         Ok(ToolResult::ok(serde_json::to_string_pretty(&payload)?))
     }
