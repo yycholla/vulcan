@@ -35,7 +35,8 @@ CREATE TABLE IF NOT EXISTS sessions (
     created_at        INTEGER NOT NULL,
     last_active       INTEGER NOT NULL,
     parent_session_id TEXT,
-    lineage_label     TEXT
+    lineage_label     TEXT,
+    provider_profile  TEXT
 );
 
 CREATE TABLE IF NOT EXISTS messages (
@@ -124,6 +125,9 @@ pub struct SessionSummary {
     pub message_count: usize,
     pub parent_session_id: Option<String>,
     pub lineage_label: Option<String>,
+    /// Active named provider profile when this session was last saved
+    /// (`None` means the legacy unnamed `[provider]` block, YYC-95).
+    pub provider_profile: Option<String>,
     /// First user-message content, truncated for the picker synopsis.
     pub preview: Option<String>,
 }
@@ -317,6 +321,43 @@ impl SessionStore {
         Ok(())
     }
 
+    /// Persist (or clear) the named provider profile active for a session
+    /// (YYC-95). `None` flags the session as running on the legacy unnamed
+    /// `[provider]` block. The session row is created if it doesn't exist
+    /// yet so the column is set even before the first message saves.
+    pub fn save_provider_profile(
+        &self,
+        session_id: &str,
+        provider_profile: Option<&str>,
+    ) -> Result<()> {
+        let now = Utc::now().timestamp();
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| anyhow::anyhow!("session DB poisoned"))?;
+        upsert_session_provider_profile(&conn, session_id, now, provider_profile)
+    }
+
+    /// Read the persisted active provider profile for a session, if any
+    /// (YYC-95). Returns `Ok(None)` when the session row doesn't exist or
+    /// the column is NULL — both interpretations mean "use the legacy
+    /// `[provider]` block".
+    pub fn load_provider_profile(&self, session_id: &str) -> Result<Option<String>> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| anyhow::anyhow!("session DB poisoned"))?;
+        let value = conn
+            .query_row(
+                "SELECT provider_profile FROM sessions WHERE id = ?1",
+                params![session_id],
+                |row| row.get::<_, Option<String>>(0),
+            )
+            .optional()?
+            .flatten();
+        Ok(value)
+    }
+
     /// Persist session metadata even before any messages exist. Used to create
     /// truthful child sessions with lineage before the first turn lands.
     pub fn save_session_metadata(
@@ -343,6 +384,7 @@ impl SessionStore {
 
         let mut stmt = conn.prepare(
             "SELECT s.id, s.created_at, s.last_active, s.parent_session_id, s.lineage_label,
+                    s.provider_profile,
                     (SELECT COUNT(*) FROM messages m WHERE m.session_id = s.id) AS msg_count,
                     (SELECT content FROM messages m WHERE m.session_id = s.id AND m.role = 'user'
                      ORDER BY m.position ASC LIMIT 1) AS preview
@@ -358,8 +400,9 @@ impl SessionStore {
                 last_active: row.get(2)?,
                 parent_session_id: row.get(3)?,
                 lineage_label: row.get(4)?,
-                message_count: row.get::<_, i64>(5)? as usize,
-                preview: row.get::<_, Option<String>>(6)?.map(|s| {
+                provider_profile: row.get(5)?,
+                message_count: row.get::<_, i64>(6)? as usize,
+                preview: row.get::<_, Option<String>>(7)?.map(|s| {
                     s.chars().take(60).collect::<String>().replace('\n', " ")
                 }),
             })
@@ -441,6 +484,7 @@ fn initialize_conn(conn: &Connection) -> Result<()> {
     let _ = conn.execute("ALTER TABLE messages ADD COLUMN reasoning_content TEXT", []);
     let _ = conn.execute("ALTER TABLE sessions ADD COLUMN parent_session_id TEXT", []);
     let _ = conn.execute("ALTER TABLE sessions ADD COLUMN lineage_label TEXT", []);
+    let _ = conn.execute("ALTER TABLE sessions ADD COLUMN provider_profile TEXT", []);
     Ok(())
 }
 
@@ -464,6 +508,26 @@ fn upsert_session_metadata(
              parent_session_id = COALESCE(excluded.parent_session_id, sessions.parent_session_id),
              lineage_label = COALESCE(excluded.lineage_label, sessions.lineage_label)",
         params![session_id, now, parent_session_id, lineage_label],
+    )?;
+    Ok(())
+}
+
+/// Persist (or clear) the active named provider profile for a session
+/// (YYC-95). `None` means the session uses the legacy unnamed `[provider]`
+/// block; the row is created if it doesn't exist yet.
+fn upsert_session_provider_profile(
+    conn: &Connection,
+    session_id: &str,
+    now: i64,
+    provider_profile: Option<&str>,
+) -> Result<()> {
+    conn.execute(
+        "INSERT INTO sessions (id, created_at, last_active, provider_profile)
+         VALUES (?1, ?2, ?2, ?3)
+         ON CONFLICT(id) DO UPDATE SET
+             last_active = excluded.last_active,
+             provider_profile = excluded.provider_profile",
+        params![session_id, now, provider_profile],
     )?;
     Ok(())
 }
@@ -587,6 +651,70 @@ mod tests {
             Message::User { content } => assert_eq!(content, "what is rust?"),
             other => panic!("expected User, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn provider_profile_round_trips() {
+        let dir = TempDir::new().unwrap();
+        let store = store_in(&dir);
+        let id = uuid::Uuid::new_v4().to_string();
+
+        // No row yet → None.
+        assert_eq!(store.load_provider_profile(&id).unwrap(), None);
+
+        // Set a profile (creates the row).
+        store.save_provider_profile(&id, Some("local")).unwrap();
+        assert_eq!(
+            store.load_provider_profile(&id).unwrap().as_deref(),
+            Some("local")
+        );
+
+        // Clearing collapses back to None.
+        store.save_provider_profile(&id, None).unwrap();
+        assert_eq!(store.load_provider_profile(&id).unwrap(), None);
+    }
+
+    #[test]
+    fn provider_profile_survives_save_messages() {
+        let dir = TempDir::new().unwrap();
+        let store = store_in(&dir);
+        let id = uuid::Uuid::new_v4().to_string();
+
+        store.save_provider_profile(&id, Some("local")).unwrap();
+        store
+            .save_messages(
+                &id,
+                &[Message::User {
+                    content: "hi".into(),
+                }],
+            )
+            .unwrap();
+
+        // save_messages must not clobber the profile column.
+        assert_eq!(
+            store.load_provider_profile(&id).unwrap().as_deref(),
+            Some("local")
+        );
+    }
+
+    #[test]
+    fn list_sessions_includes_provider_profile() {
+        let dir = TempDir::new().unwrap();
+        let store = store_in(&dir);
+        let id = uuid::Uuid::new_v4().to_string();
+        store
+            .save_messages(
+                &id,
+                &[Message::User {
+                    content: "hi".into(),
+                }],
+            )
+            .unwrap();
+        store.save_provider_profile(&id, Some("local")).unwrap();
+
+        let summaries = store.list_sessions(10).unwrap();
+        let summary = summaries.iter().find(|s| s.id == id).expect("summary");
+        assert_eq!(summary.provider_profile.as_deref(), Some("local"));
     }
 
     #[test]

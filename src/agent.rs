@@ -368,7 +368,52 @@ impl Agent {
         self.pricing = selection.pricing.clone();
         self.active_profile = profile.map(str::to_string);
 
+        // YYC-95: persist the active profile so resume restores it.
+        if let Err(e) = self
+            .memory
+            .save_provider_profile(&self.session_id, profile)
+        {
+            tracing::warn!("failed to persist provider profile: {e}");
+        }
+
         Ok(selection)
+    }
+
+    /// Reapply the persisted provider profile for the current session
+    /// (YYC-95). Call this after `resume_session` / `continue_last_session`
+    /// to swap the agent onto whichever profile the session was last using.
+    /// A stale profile reference (saved name that's been removed from
+    /// config, or a swap that fails the catalog check) is logged as a
+    /// warning and reverts to the legacy `[provider]` block — never an
+    /// error, so resume can't be locked out by a config edit.
+    pub async fn restore_persisted_provider(&mut self, config: &Config) -> Result<()> {
+        let session_id = self.session_id.clone();
+        let profile = self
+            .memory
+            .load_provider_profile(&session_id)
+            .unwrap_or_else(|e| {
+                tracing::warn!("could not read saved provider profile: {e}");
+                None
+            });
+        let Some(name) = profile.as_deref() else {
+            return Ok(());
+        };
+        if !config.providers.contains_key(name) {
+            tracing::warn!(
+                "saved provider profile '{name}' no longer exists; falling back to [provider]"
+            );
+            self.active_profile = None;
+            let _ = self.memory.save_provider_profile(&session_id, None);
+            return Ok(());
+        }
+        if let Err(e) = self.switch_provider(Some(name), config).await {
+            tracing::warn!(
+                "failed to restore provider profile '{name}': {e}; falling back to [provider]"
+            );
+            self.active_profile = None;
+            let _ = self.memory.save_provider_profile(&session_id, None);
+        }
+        Ok(())
     }
 
     async fn fetch_catalog_for(

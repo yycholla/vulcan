@@ -1132,6 +1132,7 @@ mod tests {
                 message_count: 3,
                 parent_session_id: Some(parent_id.clone()),
                 lineage_label: Some("branched from auth cleanup".into()),
+                provider_profile: None,
                 preview: None,
             }],
             &child_id,
