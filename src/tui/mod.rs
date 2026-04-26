@@ -519,12 +519,14 @@ pub async fn run_tui(config: &Config, resume: ResumeTarget) -> Result<()> {
     // YYC-67: pull catalog pricing for the cost estimate.
     // YYC-95: if resume restored a provider profile the active model/context
     // window changed under us — sync the app surface from the agent.
+    // YYC-96: surface the active profile name in the prompt-row status.
     {
         let a = agent.lock().await;
         app.diff_sink = Some(a.diff_sink().clone());
         app.pricing = a.pricing().cloned();
         app.model_label = a.active_model().to_string();
         app.token_max = a.max_context() as u32;
+        app.provider_label = a.active_profile().map(str::to_string);
     }
     refresh_sessions(&agent, &mut app).await;
 
@@ -688,6 +690,7 @@ pub async fn run_tui(config: &Config, resume: ResumeTarget) -> Result<()> {
                                                     app.model_label = a.active_model().to_string();
                                                     app.token_max = a.max_context() as u32;
                                                     app.pricing = a.pricing().cloned();
+                                                    app.provider_label = a.active_profile().map(str::to_string);
                                                 }
                                                 if let Some(n) = note {
                                                     app.messages.push(ChatMessage {
@@ -1187,6 +1190,7 @@ pub async fn run_tui(config: &Config, resume: ResumeTarget) -> Result<()> {
                                                                 app.model_label = selection.model.id.clone();
                                                                 app.token_max = selection.max_context as u32;
                                                                 app.pricing = selection.pricing;
+                                                                app.provider_label = target.map(str::to_string);
                                                                 let label = target.unwrap_or("default");
                                                                 app.messages.push(ChatMessage {
                                                                     role: ChatRole::System,

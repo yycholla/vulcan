@@ -506,6 +506,10 @@ pub struct AppState {
 
     cursor: Cell<(u16, u16)>,
     pub model_label: String,
+    /// Active named provider profile, if any (YYC-96). `None` means the
+    /// session is running on the legacy unnamed `[provider]` block —
+    /// `model_status()` omits the prefix in that case.
+    pub provider_label: Option<String>,
     /// Cumulative input tokens across the whole session (every turn's
     /// `usage.prompt_tokens` summed). Used by the cost telemetry pane
     /// (YYC-67).
@@ -611,6 +615,7 @@ impl AppState {
 
             cursor: Cell::new((0, 0)),
             model_label,
+            provider_label: None,
             prompt_tokens_total: 0,
             completion_tokens_total: 0,
             prompt_tokens_last: 0,
@@ -721,12 +726,24 @@ impl AppState {
         // grouping. `used` is the latest turn's prompt_tokens (current
         // context window size); the bar represents context capacity, not
         // lifetime cost.
-        format!(
-            "{} · {} / {}",
-            self.model_label,
-            format_thousands(self.prompt_tokens_last),
-            format_thousands(self.token_max),
-        )
+        // YYC-96: when running on a named provider profile, prefix the
+        // string with `{profile} · ` so the user can tell which provider
+        // any given turn will hit.
+        match &self.provider_label {
+            Some(profile) => format!(
+                "{} · {} · {} / {}",
+                profile,
+                self.model_label,
+                format_thousands(self.prompt_tokens_last),
+                format_thousands(self.token_max),
+            ),
+            None => format!(
+                "{} · {} / {}",
+                self.model_label,
+                format_thousands(self.prompt_tokens_last),
+                format_thousands(self.token_max),
+            ),
+        }
     }
 
     /// Estimated session cost in USD, computed from cumulative token
@@ -1220,6 +1237,24 @@ mod tests {
 
         m.finish_tool("bash", true);
         assert!(m.render_version() > after_tool_start);
+    }
+
+    #[test]
+    fn model_status_omits_prefix_when_no_provider_label() {
+        let mut app = AppState::new("deepseek/v4".into(), 128_000);
+        app.prompt_tokens_last = 18_402;
+        let status = app.model_status();
+        assert_eq!(status, "deepseek/v4 · 18,402 / 128,000");
+        assert!(!status.contains(" · deepseek/v4"));
+    }
+
+    #[test]
+    fn model_status_prefixes_active_provider_label() {
+        let mut app = AppState::new("deepseek/v4".into(), 128_000);
+        app.provider_label = Some("local".into());
+        app.prompt_tokens_last = 18_402;
+        let status = app.model_status();
+        assert_eq!(status, "local · deepseek/v4 · 18,402 / 128,000");
     }
 
     #[test]
