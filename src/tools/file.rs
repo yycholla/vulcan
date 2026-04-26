@@ -57,6 +57,99 @@ impl Tool for ReadFile {
     }
 }
 
+pub struct ListFiles;
+
+#[async_trait]
+impl Tool for ListFiles {
+    fn name(&self) -> &str {
+        "list_files"
+    }
+    fn description(&self) -> &str {
+        "List files + directories under a path as a structured tree (JSON). Respects .gitignore. Cheaper than shelling out to `ls` or `tree` and won't drown in target/ or node_modules/."
+    }
+    fn schema(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "path": { "type": "string", "description": "Root path to walk", "default": "." },
+                "depth": { "type": "integer", "description": "Max depth (default 2)", "default": 2 },
+                "include_hidden": { "type": "boolean", "default": false },
+                "max_entries": { "type": "integer", "default": 500 }
+            }
+        })
+    }
+    async fn call(&self, params: Value, _cancel: CancellationToken) -> Result<ToolResult> {
+        let path = params
+            .get("path")
+            .and_then(|v| v.as_str())
+            .unwrap_or(".")
+            .to_string();
+        let depth = params
+            .get("depth")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(2) as usize;
+        let include_hidden = params
+            .get("include_hidden")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        let max_entries = params
+            .get("max_entries")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(500) as usize;
+
+        let walker = ignore::WalkBuilder::new(&path)
+            .standard_filters(true)
+            .hidden(!include_hidden)
+            .max_depth(Some(depth + 1))
+            .build();
+        let root = std::path::PathBuf::from(&path);
+        let mut entries: Vec<Value> = Vec::new();
+        let mut truncated = false;
+        for entry in walker {
+            let entry = match entry {
+                Ok(e) => e,
+                Err(_) => continue,
+            };
+            // Skip the root itself.
+            if entry.depth() == 0 {
+                continue;
+            }
+            if entries.len() >= max_entries {
+                truncated = true;
+                break;
+            }
+            let p = entry.path();
+            let rel = p
+                .strip_prefix(&root)
+                .unwrap_or(p)
+                .to_string_lossy()
+                .into_owned();
+            let kind = if entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+                "dir"
+            } else if entry.file_type().map(|t| t.is_symlink()).unwrap_or(false) {
+                "symlink"
+            } else {
+                "file"
+            };
+            let size = std::fs::metadata(p).ok().map(|m| m.len());
+            entries.push(json!({
+                "path": rel,
+                "kind": kind,
+                "depth": entry.depth(),
+                "size": size,
+            }));
+        }
+        let payload = json!({
+            "root": path,
+            "depth": depth,
+            "count": entries.len(),
+            "truncated": truncated,
+            "entries": entries,
+        });
+        Ok(ToolResult::ok(serde_json::to_string_pretty(&payload)?))
+    }
+}
+
 pub struct WriteFile {
     diff_sink: Option<crate::tools::EditDiffSink>,
 }
@@ -291,6 +384,32 @@ mod tests {
         assert_eq!(diff.path, path_str);
         assert_eq!(diff.before, "old contents");
         assert_eq!(diff.after, "new contents");
+    }
+
+    #[tokio::test]
+    async fn list_files_returns_structured_tree() {
+        let dir = tempdir().unwrap();
+        std::fs::write(dir.path().join("a.txt"), "hello").unwrap();
+        std::fs::create_dir(dir.path().join("sub")).unwrap();
+        std::fs::write(dir.path().join("sub").join("b.txt"), "world").unwrap();
+        let result = ListFiles
+            .call(
+                json!({"path": dir.path().to_string_lossy(), "depth": 2}),
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+        assert!(!result.is_error, "{}", result.output);
+        let payload: Value = serde_json::from_str(&result.output).unwrap();
+        let entries = payload["entries"].as_array().unwrap();
+        let names: Vec<&str> = entries
+            .iter()
+            .map(|e| e["path"].as_str().unwrap_or(""))
+            .collect();
+        assert!(names.iter().any(|n| n == &"a.txt"));
+        assert!(names.iter().any(|n| n == &"sub"));
+        // The nested file should appear because depth=2 covers it.
+        assert!(names.iter().any(|n| n.ends_with("b.txt")), "got {names:?}");
     }
 
     #[tokio::test]
