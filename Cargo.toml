@@ -110,6 +110,7 @@ strip = true
 tempfile = "3.27.0"
 divan = "0.1"
 hdrhistogram = "7"
+tokio = { version = "1", features = ["full", "test-util"] }
 
 [[bench]]
 name = "tui_render"

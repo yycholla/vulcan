@@ -14,6 +14,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use tokio::sync::{Mutex, RwLock};
+use tokio::task::JoinHandle;
 
 use crate::agent::Agent;
 use crate::config::Config;
@@ -28,7 +29,6 @@ const AUDIT_BUFFER_CAPACITY: usize = 200;
 pub struct AgentMap {
     inner: Arc<RwLock<HashMap<LaneKey, LaneEntry>>>,
     config: Arc<Config>,
-    #[allow(dead_code)] // Consumed by Task 9's evictor.
     idle_ttl: Duration,
 }
 
@@ -117,6 +117,91 @@ impl AgentMap {
     pub(crate) fn inner(&self) -> Arc<RwLock<HashMap<LaneKey, LaneEntry>>> {
         Arc::clone(&self.inner)
     }
+
+    /// Spawn a background task that periodically evicts lanes idle longer
+    /// than `self.idle_ttl`. The returned handle aborts the loop on drop or
+    /// on `.abort()`.
+    pub fn spawn_evictor(&self) -> JoinHandle<()> {
+        const SCAN_INTERVAL: Duration = Duration::from_secs(60);
+        let inner = Arc::clone(&self.inner);
+        let ttl = self.idle_ttl;
+        tokio::spawn(async move {
+            let mut ticker = tokio::time::interval(SCAN_INTERVAL);
+            // Skip the immediate first tick; the first eviction happens after
+            // one full interval.
+            ticker.tick().await;
+            loop {
+                ticker.tick().await;
+                evict_idle(&inner, ttl).await;
+            }
+        })
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn insert_for_test(
+        &self,
+        lane: LaneKey,
+        agent: Arc<Mutex<Agent>>,
+        audit_buf: AuditBuffer,
+        last_activity: Instant,
+    ) {
+        let session_id = derive_session_id(&lane);
+        let mut map = self.inner.write().await;
+        map.insert(
+            lane,
+            LaneEntry {
+                agent,
+                session_id,
+                audit_buf,
+                last_activity,
+            },
+        );
+    }
+}
+
+pub(crate) async fn evict_idle(
+    inner: &Arc<RwLock<HashMap<LaneKey, LaneEntry>>>,
+    ttl: Duration,
+) {
+    // Build the to-evict list under the read lock; do the actual removal +
+    // end_session under the write lock + outside the map. This keeps the
+    // write lock window tight even if many lanes age out at once.
+    let now = Instant::now();
+    let candidates: Vec<LaneKey> = {
+        let map = inner.read().await;
+        map.iter()
+            .filter(|(_, entry)| now.duration_since(entry.last_activity) > ttl)
+            .map(|(k, _)| k.clone())
+            .collect()
+    };
+    if candidates.is_empty() {
+        return;
+    }
+    let evicted = {
+        let mut map = inner.write().await;
+        let mut taken = Vec::with_capacity(candidates.len());
+        for lane in &candidates {
+            if let Some(entry) = map.get(lane) {
+                // Re-check liveness — a concurrent get_or_spawn may have
+                // bumped last_activity between our snapshot and the write
+                // lock.
+                if now.duration_since(entry.last_activity) > ttl {
+                    if let Some(entry) = map.remove(lane) {
+                        taken.push((lane.clone(), entry));
+                    }
+                }
+            }
+        }
+        taken
+    };
+    for (lane, entry) in evicted {
+        let agent = entry.agent.lock().await;
+        agent.end_session().await;
+        tracing::info!(target: "gateway::agent_map",
+            platform = lane.platform.as_str(),
+            chat_id = lane.chat_id.as_str(),
+            "evicted idle lane");
+    }
 }
 
 /// Derive a stable session id for a lane. Used so future AgentMap eviction
@@ -129,6 +214,11 @@ pub fn derive_session_id(lane: &LaneKey) -> String {
 mod tests {
     use super::*;
     use crate::config::Config;
+    use crate::provider::mock::MockProvider;
+    use crate::provider::{ChatResponse, LLMProvider, Message, StreamEvent, ToolDefinition};
+    use crate::skills::SkillRegistry;
+    use crate::tools::ToolRegistry;
+    use tokio_util::sync::CancellationToken;
 
     fn test_config() -> Arc<Config> {
         Arc::new(Config::default())
@@ -139,6 +229,47 @@ mod tests {
             platform: "loopback".into(),
             chat_id: chat.into(),
         }
+    }
+
+    /// Build an Agent backed by `MockProvider` so eviction tests don't need
+    /// an API key. Mirrors `agent::tests::agent_with_mock`'s `ProviderHandle`
+    /// shim.
+    fn build_test_agent() -> Arc<Mutex<Agent>> {
+        struct ProviderHandle(Arc<MockProvider>);
+        #[async_trait::async_trait]
+        impl LLMProvider for ProviderHandle {
+            async fn chat(
+                &self,
+                m: &[Message],
+                t: &[ToolDefinition],
+                c: CancellationToken,
+            ) -> Result<ChatResponse> {
+                self.0.chat(m, t, c).await
+            }
+            async fn chat_stream(
+                &self,
+                m: &[Message],
+                t: &[ToolDefinition],
+                tx: tokio::sync::mpsc::UnboundedSender<StreamEvent>,
+                c: CancellationToken,
+            ) -> Result<()> {
+                self.0.chat_stream(m, t, tx, c).await
+            }
+            fn max_context(&self) -> usize {
+                self.0.max_context()
+            }
+        }
+        let mock = Arc::new(MockProvider::new(128_000));
+        let skills = Arc::new(SkillRegistry::new(&std::path::PathBuf::from(
+            "/tmp/vulcan-test-skills-nonexistent",
+        )));
+        let agent = Agent::for_test(
+            Box::new(ProviderHandle(mock)),
+            ToolRegistry::new(),
+            HookRegistry::new(),
+            skills,
+        );
+        Arc::new(Mutex::new(agent))
     }
 
     #[test]
@@ -174,5 +305,56 @@ mod tests {
         let b = map.get_or_spawn(&test_lane("b")).await.expect("b");
         assert!(!Arc::ptr_eq(&a, &b));
         assert_eq!(map.active_lanes().await, 2);
+    }
+
+    #[tokio::test(start_paused = true)]
+    #[ignore = "needs API key or MockProvider; Agent::with_hooks_and_pause + Config::default() has no api_key"]
+    async fn idle_lanes_evicted_after_ttl() {
+        let map = AgentMap::new(test_config(), Duration::from_secs(60));
+        let evictor = map.spawn_evictor();
+        let lane = test_lane("x");
+        map.get_or_spawn(&lane).await.expect("spawn");
+        assert_eq!(map.active_lanes().await, 1);
+
+        // Advance well past TTL + scan interval (60s + 60s = 120s minimum).
+        tokio::time::advance(Duration::from_secs(180)).await;
+        tokio::task::yield_now().await;
+        tokio::task::yield_now().await;
+
+        assert_eq!(map.active_lanes().await, 0, "lane should be evicted");
+        evictor.abort();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn evict_idle_removes_entries_past_ttl() {
+        // Advance the paused clock first so `Instant::now() - 120s` doesn't
+        // underflow at runtime startup.
+        tokio::time::advance(Duration::from_secs(200)).await;
+
+        let map = AgentMap::new(test_config(), Duration::from_secs(60));
+        let lane = test_lane("stale");
+        let agent = build_test_agent();
+        let (_h, audit_buf) = AuditHook::new(8);
+        let stale_when = Instant::now() - Duration::from_secs(120);
+        map.insert_for_test(lane.clone(), agent, audit_buf, stale_when)
+            .await;
+        assert_eq!(map.active_lanes().await, 1);
+
+        super::evict_idle(&map.inner, Duration::from_secs(60)).await;
+        assert_eq!(map.active_lanes().await, 0);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn evict_idle_keeps_recent_entries() {
+        let map = AgentMap::new(test_config(), Duration::from_secs(60));
+        let lane = test_lane("fresh");
+        let agent = build_test_agent();
+        let (_h, audit_buf) = AuditHook::new(8);
+        map.insert_for_test(lane.clone(), agent, audit_buf, Instant::now())
+            .await;
+        assert_eq!(map.active_lanes().await, 1);
+
+        super::evict_idle(&map.inner, Duration::from_secs(60)).await;
+        assert_eq!(map.active_lanes().await, 1);
     }
 }
