@@ -17,6 +17,7 @@ fn main() {
         show_reasoning: true,
         dense: false,
         width: WIDTH,
+        muted_style: ratatui::style::Style::default(),
     };
     let mut store = ChatRenderStore::default();
 

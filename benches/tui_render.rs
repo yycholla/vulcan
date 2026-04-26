@@ -79,6 +79,7 @@ fn visible_lines_first_render(b: Bencher, n: usize) {
         show_reasoning: true,
         dense: false,
         width: WIDTH,
+        muted_style: ratatui::style::Style::default(),
     };
     // Cold store per iter: each iter measures the no-cache path. `with_inputs`
     // builds the store outside the timed region.
@@ -95,6 +96,7 @@ fn visible_lines_cached_tail(b: Bencher, n: usize) {
         show_reasoning: true,
         dense: false,
         width: WIDTH,
+        muted_style: ratatui::style::Style::default(),
     };
     let mut store = ChatRenderStore::default();
     // Prime cache with one full render so subsequent iters hit warm paths.
@@ -125,6 +127,7 @@ fn main() {
             show_reasoning: true,
             dense: false,
             width: WIDTH,
+            muted_style: ratatui::style::Style::default(),
         };
 
         // first render — cold store per iter.
