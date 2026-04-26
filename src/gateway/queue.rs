@@ -1,6 +1,6 @@
 use std::sync::{Arc, Mutex};
 
-use anyhow::Result;
+use anyhow::{Result, anyhow};
 use rusqlite::{Connection, params};
 
 use crate::platform::InboundMessage;
@@ -26,7 +26,7 @@ impl InboundQueue {
     }
 
     pub async fn enqueue(&self, msg: InboundMessage) -> Result<i64> {
-        let conn = self.conn.lock().expect("queue mutex poisoned");
+        let conn = self.conn.lock().map_err(|_| anyhow!("queue DB poisoned"))?;
         let now = chrono::Utc::now().timestamp();
         conn.execute(
             "INSERT INTO inbound_queue (platform, chat_id, user_id, text, received_at, state) \
@@ -37,7 +37,7 @@ impl InboundQueue {
     }
 
     pub async fn claim_next(&self) -> Result<Option<InboundRow>> {
-        let conn = self.conn.lock().expect("queue mutex poisoned");
+        let conn = self.conn.lock().map_err(|_| anyhow!("queue DB poisoned"))?;
         // RETURNING (SQLite >= 3.35) makes the claim a single atomic statement.
         let mut stmt = conn.prepare(
             "UPDATE inbound_queue \
@@ -63,13 +63,13 @@ impl InboundQueue {
     }
 
     pub async fn mark_done(&self, id: i64) -> Result<()> {
-        let conn = self.conn.lock().expect("queue mutex poisoned");
+        let conn = self.conn.lock().map_err(|_| anyhow!("queue DB poisoned"))?;
         conn.execute("DELETE FROM inbound_queue WHERE id = ?1", params![id])?;
         Ok(())
     }
 
     pub async fn mark_failed(&self, id: i64, error: &str) -> Result<()> {
-        let conn = self.conn.lock().expect("queue mutex poisoned");
+        let conn = self.conn.lock().map_err(|_| anyhow!("queue DB poisoned"))?;
         // inbound_queue has no last_error column; narrate via tracing instead.
         tracing::warn!(target: "gateway::queue", id, error, "inbound message marked failed");
         conn.execute(
@@ -80,7 +80,7 @@ impl InboundQueue {
     }
 
     pub async fn recover_processing(&self) -> Result<usize> {
-        let conn = self.conn.lock().expect("queue mutex poisoned");
+        let conn = self.conn.lock().map_err(|_| anyhow!("queue DB poisoned"))?;
         let n = conn.execute(
             "UPDATE inbound_queue SET state='pending' WHERE state='processing'",
             [],
