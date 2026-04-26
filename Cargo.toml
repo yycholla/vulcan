@@ -13,10 +13,12 @@ readme = "README.md"
 autobenches = false
 
 [features]
+default = []
 # Enabled only when running the soak binary. Pulls in dhat-rs (heap
 # profiler that swaps the global allocator) and hdrhistogram (latency
 # percentiles) — both optional so production builds skip them entirely.
 bench-soak = ["dep:dhat", "dep:hdrhistogram"]
+gateway = ["dep:axum", "dep:tower", "dep:tower-http"]
 
 [dependencies]
 # Async runtime
@@ -83,6 +85,11 @@ lsp-types = "0.97"
 # Workspace walker that respects .gitignore (YYC-50). Used by the
 # code-graph indexer so we don't index target/, node_modules/, etc.
 ignore = "0.4.25"
+
+# Gateway daemon HTTP stack. Optional — only linked under `gateway`.
+axum = { version = "0.8.9", optional = true }
+tower = { version = "0.5.3", optional = true }
+tower-http = { version = "0.6.8", features = ["trace", "cors"], optional = true }
 
 # Heap profiler for the soak binary. Optional — only linked under `bench-soak`.
 dhat = { version = "0.3", optional = true }
