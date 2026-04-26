@@ -473,6 +473,7 @@ pub fn tool_card(
     status: super::state::ToolStatus,
     params_summary: Option<&str>,
     output_preview: Option<&str>,
+    result_meta: Option<&str>,
     elapsed_ms: Option<u64>,
     accent: Color,
     width: u16,
@@ -553,6 +554,24 @@ pub fn tool_card(
     top.push(Span::styled("─┐", Style::default().fg(accent)));
 
     let mut out = vec![Line::from(top)];
+
+    // ── Meta sub-header: │  N lines · 4.1 KB                │
+    if let Some(meta) = result_meta {
+        let body_chars = meta.chars().count();
+        let pad = inner_w.saturating_sub(body_chars + 2);
+        out.push(Line::from(vec![
+            Span::styled("│ ", Style::default().fg(accent)),
+            Span::raw(" "),
+            Span::styled(
+                meta.to_string(),
+                Style::default()
+                    .fg(Palette::MUTED)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::raw(" ".repeat(pad)),
+            Span::styled(" │", Style::default().fg(accent)),
+        ]));
+    }
 
     // ── Body: │ <preview line padded to inner_w> │
     if let Some(preview) = output_preview {

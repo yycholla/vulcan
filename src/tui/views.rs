@@ -144,6 +144,7 @@ fn build_chat_lines_w(
                         status,
                         params_summary,
                         output_preview,
+                        result_meta,
                         elapsed_ms,
                     } => {
                         // YYC-74: structured bordered tool-call card.
@@ -152,6 +153,7 @@ fn build_chat_lines_w(
                             *status,
                             params_summary.as_deref(),
                             output_preview.as_deref(),
+                            result_meta.as_deref(),
                             *elapsed_ms,
                             accent,
                             width,

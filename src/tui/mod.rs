@@ -879,17 +879,19 @@ pub async fn run_tui(config: &Config, resume: ResumeTarget) -> Result<()> {
                         name,
                         ok,
                         output_preview,
+                        result_meta,
                         elapsed_ms,
                         ..
                     }) => {
                         if let Some(last) = app.messages.last_mut() {
                             if matches!(last.role, ChatRole::Agent) {
-                                // YYC-74: stamp preview + timing onto
-                                // the matching segment for the card.
+                                // YYC-74: stamp preview + meta + timing
+                                // onto the matching segment for the card.
                                 last.finish_tool_with(
                                     &name,
                                     ok,
                                     output_preview,
+                                    result_meta,
                                     Some(elapsed_ms),
                                 );
                             }
