@@ -354,6 +354,16 @@ pub struct ToolLogRow {
     pub msg: String,
 }
 
+/// One row in the provider picker overlay (YYC-97). `None` name = the
+/// legacy unnamed `[provider]` block; `Some(name)` = a `[providers.<name>]`
+/// profile.
+#[derive(Clone, Debug)]
+pub struct ProviderPickerEntry {
+    pub name: Option<String>,
+    pub model: String,
+    pub base_url: String,
+}
+
 #[derive(Clone, Debug)]
 pub struct TickerCell {
     pub sub: String,
@@ -530,6 +540,20 @@ pub struct AppState {
     /// Index into `sessions` for the highlighted row in the picker.
     pub session_picker_selection: usize,
 
+    /// Model picker overlay (YYC-97). Opened by `/model` with no args;
+    /// items are populated from the active provider's catalog at open
+    /// time. Selecting a row triggers `Agent::switch_model`.
+    pub show_model_picker: bool,
+    pub model_picker_selection: usize,
+    pub model_picker_items: Vec<crate::provider::catalog::ModelInfo>,
+
+    /// Provider picker overlay (YYC-97). Opened by `/provider` with no
+    /// args; items are the legacy `[provider]` block followed by named
+    /// `[providers.<name>]` profiles. `name = None` is the legacy entry.
+    pub show_provider_picker: bool,
+    pub provider_picker_selection: usize,
+    pub provider_picker_items: Vec<ProviderPickerEntry>,
+
     /// Active TUI theme — render code reads role styles via `state.theme.<role>`.
     /// Defaults to `Theme::system()` in `AppState::new` so unconfigured/test
     /// callers inherit terminal palette; production wires the real config-derived
@@ -624,6 +648,14 @@ impl AppState {
 
             show_session_picker: false,
             session_picker_selection: 0,
+
+            show_model_picker: false,
+            model_picker_selection: 0,
+            model_picker_items: Vec::new(),
+
+            show_provider_picker: false,
+            provider_picker_selection: 0,
+            provider_picker_items: Vec::new(),
 
             theme: Theme::system(),
             keybinds: Keybinds::default(),
