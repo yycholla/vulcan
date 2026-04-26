@@ -108,3 +108,17 @@ theme = "system"
 # enabled = false
 # bot_token = "..."
 # allow_bots = false
+
+[keybinds]
+# TUI key bindings (YYC-90). Strings are parsed at startup; unparseable
+# values fall back to the defaults shown here with a tracing warning.
+# Recognised forms:
+#   - "Ctrl+K" / "Alt+T" / "Shift+F4"
+#   - Caret sigils:  "⌃K" (Ctrl), "⌥T" (Alt), "⇧F4" (Shift)
+#   - Function keys: "F1" .. "F24"
+#   - Named keys:    "Esc", "Enter", "Tab", "Backspace", "Up"/"Down"/"Left"/"Right"
+toggle_sessions  = "Ctrl+K"        # open the session picker (Insert mode)
+toggle_tools     = "Ctrl+T"        # switch to the trading-floor tool log
+toggle_reasoning = "Ctrl+R"        # show/hide reasoning traces
+cancel           = "Ctrl+C"        # cancel current turn / quit
+queue_drop       = "Ctrl+Backspace" # pop the most recent queued submission

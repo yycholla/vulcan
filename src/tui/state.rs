@@ -1,6 +1,8 @@
 use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
 
+use super::keybinds::Keybinds;
+
 /// Format a u32 with comma thousands separators (YYC-60).
 /// `18402 → "18,402"`. Pure utility, no allocation beyond the result.
 pub fn format_thousands(n: u32) -> String {
@@ -529,6 +531,51 @@ pub struct AppState {
     /// callers inherit terminal palette; production wires the real config-derived
     /// theme via `.with_theme(...)` post-construction.
     pub theme: Theme,
+
+    /// Active key bindings — drives both the input handler in `tui::mod`
+    /// and the prompt-row hint cache below (YYC-90).
+    pub keybinds: Keybinds,
+    /// Pre-formatted hint pairs per `PromptMode`. Built once in
+    /// `with_keybinds`; `prompt_hints()` returns a slice into one of
+    /// these vectors so the render hot path never allocates.
+    prompt_hints_cache: PromptHintsCache,
+}
+
+#[derive(Clone, Debug)]
+struct PromptHintsCache {
+    insert: Vec<(String, String)>,
+    command: Vec<(String, String)>,
+    ask: Vec<(String, String)>,
+    busy: Vec<(String, String)>,
+}
+
+impl PromptHintsCache {
+    fn build(kb: &Keybinds) -> Self {
+        Self {
+            insert: vec![
+                ("↵".into(), "send".into()),
+                (kb.toggle_tools.label(), "tools".into()),
+                (kb.toggle_sessions.label(), "sessions".into()),
+                ("/".into(), "cmds".into()),
+            ],
+            command: vec![
+                ("↵".into(), "run".into()),
+                ("↑↓".into(), "select".into()),
+                ("Tab".into(), "complete".into()),
+                ("Esc".into(), "cancel".into()),
+            ],
+            ask: vec![
+                ("y".into(), "proceed".into()),
+                ("n".into(), "deny".into()),
+                ("Esc".into(), "cancel".into()),
+            ],
+            busy: vec![
+                ("↵".into(), "queue".into()),
+                (kb.cancel.label(), "cancel".into()),
+                (kb.queue_drop.label(), "drop last".into()),
+            ],
+        }
+    }
 }
 
 impl AppState {
@@ -574,6 +621,8 @@ impl AppState {
             session_picker_selection: 0,
 
             theme: Theme::system(),
+            keybinds: Keybinds::default(),
+            prompt_hints_cache: PromptHintsCache::build(&Keybinds::default()),
         }
     }
 
@@ -581,6 +630,15 @@ impl AppState {
     /// default `Theme::system()` for the user's configured theme.
     pub fn with_theme(mut self, theme: Theme) -> Self {
         self.theme = theme;
+        self
+    }
+
+    /// Replace the active key bindings and rebuild the prompt-row hint
+    /// cache (YYC-90). Builder-style so existing `AppState::new` call
+    /// sites don't change.
+    pub fn with_keybinds(mut self, keybinds: Keybinds) -> Self {
+        self.prompt_hints_cache = PromptHintsCache::build(&keybinds);
+        self.keybinds = keybinds;
         self
     }
 
@@ -623,25 +681,15 @@ impl AppState {
         self.prompt_mode.badge()
     }
 
-    /// Per-mode hint pairs for the prompt-row footer (YYC-58). Centralized
-    /// so call sites in views don't drift apart on the bindings each mode
-    /// advertises.
-    pub fn prompt_hints(&self) -> &'static [(&'static str, &'static str)] {
+    /// Per-mode hint pairs for the prompt-row footer (YYC-58, YYC-90).
+    /// Returns a slice into the cached, pre-formatted vector so the
+    /// render hot path never allocates. Bindings come from `self.keybinds`.
+    pub fn prompt_hints(&self) -> &[(String, String)] {
         match self.prompt_mode {
-            PromptMode::Insert => &[
-                ("↵", "send"),
-                ("⌃T", "tools"),
-                ("⌃K", "sessions"),
-                ("/", "cmds"),
-            ],
-            PromptMode::Command => &[
-                ("↵", "run"),
-                ("↑↓", "select"),
-                ("Tab", "complete"),
-                ("Esc", "cancel"),
-            ],
-            PromptMode::Ask => &[("y", "proceed"), ("n", "deny"), ("Esc", "cancel")],
-            PromptMode::Busy => &[("↵", "queue"), ("⌃C", "cancel"), ("⌃⌫", "drop last")],
+            PromptMode::Insert => &self.prompt_hints_cache.insert,
+            PromptMode::Command => &self.prompt_hints_cache.command,
+            PromptMode::Ask => &self.prompt_hints_cache.ask,
+            PromptMode::Busy => &self.prompt_hints_cache.busy,
         }
     }
 
@@ -1216,6 +1264,54 @@ mod tests {
         app.input = "/queue".into();
         app.refresh_prompt_mode();
         assert_eq!(app.prompt_mode, PromptMode::Busy);
+    }
+
+    #[test]
+    fn prompt_hints_default_keybinds_match_legacy_labels() {
+        // Default Keybinds should produce the exact static labels the
+        // pre-config code shipped: ⌃T for tools, ⌃K for sessions, etc.
+        let app = AppState::new("test".into(), 100);
+        let hints = app.prompt_hints();
+        let pairs: Vec<(String, String)> = hints.iter().cloned().collect();
+        assert!(
+            pairs.contains(&("⌃T".into(), "tools".into())),
+            "expected ⌃T tools in {pairs:?}"
+        );
+        assert!(
+            pairs.contains(&("⌃K".into(), "sessions".into())),
+            "expected ⌃K sessions in {pairs:?}"
+        );
+    }
+
+    #[test]
+    fn prompt_hints_reflect_overridden_keybind() {
+        use super::super::keybinds::{KeyBinding, Keybinds};
+        use crossterm::event::{KeyCode, KeyModifiers};
+        let mut kb = Keybinds::defaults();
+        kb.toggle_tools = KeyBinding {
+            code: KeyCode::F(2),
+            mods: KeyModifiers::NONE,
+        };
+        let app = AppState::new("test".into(), 100).with_keybinds(kb);
+        let pairs: Vec<(String, String)> = app.prompt_hints().iter().cloned().collect();
+        assert!(
+            pairs.contains(&("F2".into(), "tools".into())),
+            "expected F2 tools in {pairs:?}"
+        );
+        assert!(
+            !pairs.iter().any(|(k, _)| k == "⌃T"),
+            "stale ⌃T label leaked into {pairs:?}"
+        );
+    }
+
+    #[test]
+    fn prompt_hints_returns_borrowed_slice_no_alloc() {
+        // Two consecutive calls in the same mode must return slices to
+        // the same cached storage — proves we're not allocating per call.
+        let app = AppState::new("test".into(), 100);
+        let first = app.prompt_hints().as_ptr();
+        let second = app.prompt_hints().as_ptr();
+        assert_eq!(first, second, "prompt_hints reallocated between calls");
     }
 
     #[test]
