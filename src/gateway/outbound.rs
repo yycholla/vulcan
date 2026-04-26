@@ -71,13 +71,14 @@ async fn dispatch_loop(
     poll_interval: Duration,
 ) {
     let mut ticker = tokio::time::interval(poll_interval);
-    // First tick fires immediately so the dispatcher reacts to enqueues
-    // without waiting a full interval. The OutboundQueue is durable, so the
-    // loop also drains anything that survived a restart.
+    // Skip missed ticks rather than bursting them after a long pause (laptop
+    // sleep, GC stall) — drain_due is idempotent so the next tick handles
+    // whatever the burst would have done in one pass.
+    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop {
         ticker.tick().await;
         if let Err(e) = drain_due(&queue, &registry).await {
-            tracing::warn!(target: "gateway::outbound", error = %e, "drain_due errored");
+            tracing::error!(target: "gateway::outbound", error = %e, "drain_due errored");
         }
     }
 }
@@ -88,18 +89,16 @@ async fn drain_due(queue: &OutboundQueue, registry: &PlatformRegistry) -> anyhow
         let Some(row) = queue.claim_due(now).await? else {
             return Ok(());
         };
+        let id = row.id;
         let msg = OutboundMessage {
-            platform: row.platform.clone(),
-            chat_id: row.chat_id.clone(),
-            text: row.text.clone(),
-            attachments: row.attachments.clone(),
+            platform: row.platform,
+            chat_id: row.chat_id,
+            text: row.text,
+            attachments: row.attachments,
         };
         match registry.send(&msg).await {
-            Ok(()) => queue.mark_done(row.id).await?,
-            Err(e) => {
-                let err_str = e.to_string();
-                queue.mark_failed(row.id, &err_str).await?;
-            }
+            Ok(()) => queue.mark_done(id).await?,
+            Err(e) => queue.mark_failed(id, &e.to_string()).await?,
         }
     }
 }
