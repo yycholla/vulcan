@@ -171,6 +171,11 @@ impl HookHandler for SafetyHook {
                     reason: format!("{reason} (user denied)"),
                 },
                 Ok(AgentResume::DenyWithReason(r)) => HookOutcome::Block { reason: r },
+                // YYC-81 added Custom — meaningless to a safety hook;
+                // treat as a deny.
+                Ok(AgentResume::Custom(_)) => HookOutcome::Block {
+                    reason: format!("{reason} (custom response on safety prompt — denying)"),
+                },
                 Err(_) => HookOutcome::Block {
                     reason: format!("{reason} (approval channel closed)"),
                 },

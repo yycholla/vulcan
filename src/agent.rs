@@ -160,6 +160,15 @@ impl Agent {
             Some(lsp_manager.clone()),
         );
 
+        // YYC-81: ask_user is only useful in interactive (TUI) mode.
+        // Register it whenever a pause channel is wired; it self-
+        // reports when called without one.
+        if pause_tx.is_some() {
+            tools.register(Arc::new(crate::tools::ask_user::AskUserTool::new(
+                pause_tx.clone(),
+            )));
+        }
+
         // YYC-48: register embedding tools when [embeddings] is
         // enabled. The index opens its own SQLite store; failure is
         // logged but non-fatal — the agent still has every other tool.

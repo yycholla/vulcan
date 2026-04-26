@@ -74,6 +74,9 @@ pub enum PauseKind {
         suggested_name: String,
         body: String,
     },
+    /// Agent-initiated multiple-choice prompt (YYC-81). Each option's
+    /// chosen value comes back as `AgentResume::Custom(value)`.
+    UserChoice { question: String },
 }
 
 /// The user's decision.
@@ -89,6 +92,10 @@ pub enum AgentResume {
     Deny,
     /// Deny with a reason that gets surfaced to the LLM as the block reason.
     DenyWithReason(String),
+    /// Custom value carried back to an agent-initiated pause (YYC-81
+    /// `ask_user`). Hooks that receive this will typically pass the
+    /// inner string through to the tool result as-is.
+    Custom(String),
 }
 
 pub type PauseSender = tokio::sync::mpsc::Sender<AgentPause>;

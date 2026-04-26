@@ -398,6 +398,10 @@ pub async fn run_tui(config: &Config, resume: ResumeTarget) -> Result<()> {
                         (PauseKind::SkillSave { suggested_name, .. }, false) => {
                             format!("Save this as a skill named '{suggested_name}'?")
                         }
+                        // YYC-81: ask_user always supplies its own pills,
+                        // so the legacy hint case is unreachable but kept
+                        // for exhaustiveness.
+                        (PauseKind::UserChoice { question }, _) => question.clone(),
                         // No options → legacy bracket-list hint stays in.
                         (PauseKind::SafetyApproval { command, reason, .. }, true) => {
                             format!("Safety: {reason}\n  $ {command}\n  [a]llow once, [r]emember & allow, [d]eny")
@@ -461,6 +465,7 @@ pub async fn run_tui(config: &Config, resume: ResumeTarget) -> Result<()> {
                                                 AgentResume::AllowAndRemember => "allowed (remembered)",
                                                 AgentResume::Deny => "denied",
                                                 AgentResume::DenyWithReason(_) => "denied",
+                                                AgentResume::Custom(_) => "responded",
                                             };
                                             let _ = p.reply.send(r);
                                             app.messages.push(ChatMessage {
