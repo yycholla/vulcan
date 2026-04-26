@@ -82,7 +82,23 @@ fn publish_chat_max_scroll(app: &AppState, line_count: usize, viewport_height: u
 /// Build flat lines for the primary chat — user/agent messages with markdown.
 /// `show_reasoning` toggles a stylized reasoning block before the first agent
 /// message (used by views that show a reasoning trace).
-fn build_chat_lines(app: &AppState, show_reasoning: bool, dense: bool) -> Vec<Line<'static>> {
+fn build_chat_lines(
+    app: &AppState,
+    show_reasoning: bool,
+    dense: bool,
+) -> Vec<Line<'static>> {
+    // Default width when caller doesn't know the viewport. Renderers that
+    // do (single_stack, split_sessions, trading_floor) call
+    // `build_chat_lines_w` directly with the actual width.
+    build_chat_lines_w(app, show_reasoning, dense, 80)
+}
+
+fn build_chat_lines_w(
+    app: &AppState,
+    show_reasoning: bool,
+    dense: bool,
+    width: u16,
+) -> Vec<Line<'static>> {
     let mut out: Vec<Line<'static>> = Vec::new();
     out.push(Line::from(Span::styled(
         format!("── session · {} ──", app.session_label),
@@ -130,7 +146,7 @@ fn build_chat_lines(app: &AppState, show_reasoning: bool, dense: bool) -> Vec<Li
                         output_preview,
                         elapsed_ms,
                     } => {
-                        // YYC-74: structured tool-call card.
+                        // YYC-74: structured bordered tool-call card.
                         for line in super::widgets::tool_card(
                             name,
                             *status,
@@ -138,6 +154,7 @@ fn build_chat_lines(app: &AppState, show_reasoning: bool, dense: bool) -> Vec<Li
                             output_preview.as_deref(),
                             *elapsed_ms,
                             accent,
+                            width,
                         ) {
                             out.push(line);
                         }
@@ -279,7 +296,8 @@ fn single_stack(f: &mut TuiFrame, area: Rect, app: &AppState) {
         Some("ses 1/1 · ●live"),
         None,
     );
-    let lines = build_chat_lines(app, app.show_reasoning, false);
+    let chat_w = inner.width.saturating_sub(2);
+    let lines = build_chat_lines_w(app, app.show_reasoning, false, chat_w);
     publish_chat_max_scroll(app, lines.len(), inner.height);
     f.render_widget(
         Paragraph::new(lines)
@@ -289,7 +307,7 @@ fn single_stack(f: &mut TuiFrame, area: Rect, app: &AppState) {
         Rect {
             x: inner.x + 1,
             y: inner.y,
-            width: inner.width.saturating_sub(2),
+            width: chat_w,
             height: inner.height,
         },
     );
