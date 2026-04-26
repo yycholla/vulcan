@@ -62,7 +62,7 @@ pub(crate) struct LaneEntry {
 /// Per-lane summary returned by `AgentMap::snapshot` and surfaced through
 /// `GET /v1/lanes`. Owned strings + a relative timestamp so the JSON output
 /// is stable across calls (no `Instant` serialization gymnastics).
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, serde::Serialize)]
 pub struct LaneSnapshot {
     pub platform: String,
     pub chat_id: String,
@@ -191,8 +191,14 @@ impl AgentMap {
                     .as_secs(),
             })
             .collect();
-        // Most-recent first.
-        out.sort_by_key(|s| s.last_activity_secs_ago);
+        // Most-recent first; tie-break on (platform, chat_id) so JSON output
+        // is deterministic when two lanes land in the same second bucket.
+        out.sort_by(|a, b| {
+            a.last_activity_secs_ago
+                .cmp(&b.last_activity_secs_ago)
+                .then_with(|| a.platform.cmp(&b.platform))
+                .then_with(|| a.chat_id.cmp(&b.chat_id))
+        });
         out
     }
 
