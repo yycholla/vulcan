@@ -7,6 +7,10 @@
 //!    tool_call_id, tool_calls_json, created_at)` indexed on `(session_id, position)`
 //! - `messages_fts` — external-content FTS5 over `messages.content`, kept in
 //!    sync via insert/update/delete triggers.
+//! - `inbound_queue(id PK, platform, chat_id, user_id, text, received_at,
+//!    attempts, state)` — gateway daemon ingress, indexed by lane+state and state+received_at.
+//! - `outbound_queue(id PK, platform, chat_id, text, attachments_json, enqueued_at,
+//!    next_attempt_at, attempts, state, last_error)` — gateway daemon egress, indexed by state+next_attempt_at.
 //!
 //! The JSONL format used previously is gone; old data under
 //! `~/.vulcan/sessions/*.jsonl` is left in place but not read. Migration is a
@@ -65,6 +69,33 @@ CREATE TRIGGER IF NOT EXISTS messages_au AFTER UPDATE ON messages BEGIN
     INSERT INTO messages_fts(messages_fts, rowid, content) VALUES('delete', old.id, COALESCE(old.content, ''));
     INSERT INTO messages_fts(rowid, content) VALUES (new.id, COALESCE(new.content, ''));
 END;
+
+CREATE TABLE IF NOT EXISTS inbound_queue (
+  id INTEGER PRIMARY KEY,
+  platform TEXT NOT NULL,
+  chat_id  TEXT NOT NULL,
+  user_id  TEXT NOT NULL,
+  text     TEXT NOT NULL,
+  received_at INTEGER NOT NULL,
+  attempts INTEGER NOT NULL DEFAULT 0,
+  state    TEXT NOT NULL  -- 'pending'|'processing'|'failed'
+);
+CREATE INDEX IF NOT EXISTS idx_inbound_lane  ON inbound_queue(platform, chat_id, state);
+CREATE INDEX IF NOT EXISTS idx_inbound_state ON inbound_queue(state, received_at);
+
+CREATE TABLE IF NOT EXISTS outbound_queue (
+  id INTEGER PRIMARY KEY,
+  platform TEXT NOT NULL,
+  chat_id  TEXT NOT NULL,
+  text     TEXT NOT NULL,
+  attachments_json TEXT NOT NULL DEFAULT '[]',
+  enqueued_at INTEGER NOT NULL,
+  next_attempt_at INTEGER NOT NULL,
+  attempts INTEGER NOT NULL DEFAULT 0,
+  state    TEXT NOT NULL,  -- 'pending'|'sending'|'failed'
+  last_error TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_outbound_due ON outbound_queue(state, next_attempt_at);
 "#;
 
 pub struct SessionStore {
@@ -730,6 +761,36 @@ mod tests {
             }
             other => panic!("expected Assistant, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn queue_tables_created() {
+        let store = SessionStore::in_memory();
+        let conn = store.conn.lock().expect("lock");
+        let count: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM sqlite_master \
+             WHERE type='table' AND name IN ('inbound_queue','outbound_queue')",
+                [],
+                |r| r.get(0),
+            )
+            .expect("query");
+        assert_eq!(count, 2);
+    }
+
+    #[test]
+    fn queue_indexes_created() {
+        let store = SessionStore::in_memory();
+        let conn = store.conn.lock().expect("lock");
+        let count: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM sqlite_master \
+             WHERE type='index' AND name IN ('idx_inbound_lane','idx_inbound_state','idx_outbound_due')",
+                [],
+                |r| r.get(0),
+            )
+            .expect("query");
+        assert_eq!(count, 3);
     }
 
     #[test]
