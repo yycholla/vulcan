@@ -28,6 +28,29 @@ pub struct Config {
 
     #[serde(default)]
     pub embeddings: EmbeddingsConfig,
+
+    #[serde(default)]
+    pub tui: TuiConfig,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct TuiConfig {
+    /// Selected theme name. Built-ins: "system" (default), "default-light",
+    /// "dracula". Unknown names log a warning and fall back to "system".
+    #[serde(default = "default_theme_name")]
+    pub theme: String,
+}
+
+fn default_theme_name() -> String {
+    "system".into()
+}
+
+impl Default for TuiConfig {
+    fn default() -> Self {
+        Self {
+            theme: default_theme_name(),
+        }
+    }
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -220,6 +243,7 @@ impl Default for Config {
             skills_dir: default_skills_dir(),
             compaction: CompactionConfig::default(),
             embeddings: EmbeddingsConfig::default(),
+            tui: TuiConfig::default(),
         }
     }
 }
