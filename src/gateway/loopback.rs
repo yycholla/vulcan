@@ -3,14 +3,22 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use anyhow::Result;
+use hmac::{Hmac, Mac};
+use sha2::Sha256;
 use tokio::sync::Mutex;
 
 use crate::platform::{InboundMessage, OutboundMessage, Platform};
+
+type HmacSha256 = Hmac<Sha256>;
 
 #[derive(Default)]
 pub struct LoopbackPlatform {
     recorded: Arc<Mutex<Vec<OutboundMessage>>>,
     failures_remaining: Arc<AtomicUsize>,
+    /// `None` means webhooks are disabled — `verify_webhook` will reject every
+    /// request. Tests that exercise the webhook path use
+    /// `with_webhook_secret`.
+    webhook_secret: Arc<Option<String>>,
 }
 
 impl LoopbackPlatform {
@@ -25,6 +33,18 @@ impl LoopbackPlatform {
         Self {
             recorded: Arc::default(),
             failures_remaining: Arc::new(AtomicUsize::new(n)),
+            webhook_secret: Arc::new(None),
+        }
+    }
+
+    /// Configure a loopback that accepts webhook requests signed with `secret`
+    /// using HMAC-SHA256 over the raw body, hex-encoded in the
+    /// `X-Loopback-Signature` header.
+    pub fn with_webhook_secret(secret: impl Into<String>) -> Self {
+        Self {
+            recorded: Arc::default(),
+            failures_remaining: Arc::default(),
+            webhook_secret: Arc::new(Some(secret.into())),
         }
     }
 
@@ -69,6 +89,52 @@ impl Platform for LoopbackPlatform {
         // future would silently starve any consumer that polls multiple
         // platforms.
         anyhow::bail!("loopback has no inbound channel")
+    }
+
+    async fn verify_webhook(
+        &self,
+        headers: &http::HeaderMap,
+        body: &[u8],
+    ) -> Result<InboundMessage> {
+        let Some(secret) = self.webhook_secret.as_ref().as_deref() else {
+            anyhow::bail!("loopback webhook not configured (no secret)");
+        };
+        let provided = headers
+            .get("x-loopback-signature")
+            .and_then(|v| v.to_str().ok())
+            .ok_or_else(|| anyhow::anyhow!("missing X-Loopback-Signature header"))?;
+
+        let mut mac = HmacSha256::new_from_slice(secret.as_bytes())
+            .map_err(|e| anyhow::anyhow!("hmac key error: {e}"))?;
+        mac.update(body);
+        let expected_bytes = mac.finalize().into_bytes();
+        // Manual lower-case hex avoids an extra `hex` dep — the encoding fits
+        // in one expression and matches what `hex::encode` would emit.
+        let expected_hex: String = expected_bytes.iter().map(|b| format!("{b:02x}")).collect();
+
+        // Constant-time compare so signature verification doesn't leak the
+        // matching prefix length via byte-by-byte early-out.
+        use subtle::ConstantTimeEq;
+        if provided
+            .as_bytes()
+            .ct_eq(expected_hex.as_bytes())
+            .unwrap_u8()
+            == 0
+        {
+            anyhow::bail!("invalid signature");
+        }
+
+        // Body shape mirrors /v1/inbound: {chat_id, user_id, text}. The
+        // platform field is implicit ("loopback") — webhook callers don't
+        // need to repeat it, the route already carries that context.
+        let parsed: serde_json::Value =
+            serde_json::from_slice(body).map_err(|e| anyhow::anyhow!("invalid JSON body: {e}"))?;
+        Ok(InboundMessage {
+            platform: "loopback".into(),
+            chat_id: parsed["chat_id"].as_str().unwrap_or_default().to_string(),
+            user_id: parsed["user_id"].as_str().unwrap_or_default().to_string(),
+            text: parsed["text"].as_str().unwrap_or_default().to_string(),
+        })
     }
 }
 

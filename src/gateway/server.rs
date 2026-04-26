@@ -51,6 +51,12 @@ pub fn build_router(state: AppState) -> Router {
             "/health",
             axum::routing::get(crate::gateway::routes::health::handle),
         )
+        // Webhook routes live OUTSIDE the `/v1` bearer-auth nest — webhook auth
+        // is per-platform HMAC, not the daemon's API token.
+        .route(
+            "/webhook/{platform}",
+            axum::routing::post(crate::gateway::routes::webhook::handle),
+        )
         .nest("/v1", v1)
         .with_state(state)
 }

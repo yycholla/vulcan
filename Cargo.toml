@@ -18,7 +18,7 @@ default = []
 # profiler that swaps the global allocator) and hdrhistogram (latency
 # percentiles) — both optional so production builds skip them entirely.
 bench-soak = ["dep:dhat", "dep:hdrhistogram"]
-gateway = ["dep:axum", "dep:tower", "dep:tower-http", "dep:subtle"]
+gateway = ["dep:axum", "dep:tower", "dep:tower-http", "dep:subtle", "dep:hmac", "dep:sha2"]
 
 [dependencies]
 # Async runtime
@@ -91,6 +91,16 @@ axum = { version = "0.8.9", optional = true }
 tower = { version = "0.5.3", features = ["util"], optional = true }
 tower-http = { version = "0.6.8", features = ["trace", "cors"], optional = true }
 subtle = { version = "2.6.1", optional = true }
+# Webhook HMAC verification (Task 16). hmac 0.12 + sha2 0.10 share `digest 0.10`,
+# already in Cargo.lock transitively — picking the matching majors avoids
+# pulling a second copy of `digest`.
+hmac = { version = "0.12.1", optional = true }
+sha2 = { version = "0.10.9", optional = true }
+
+# `http` types are shared between axum and the `Platform` trait method
+# `verify_webhook`. Promoted to a direct, NON-feature-gated dep so the trait
+# signature compiles in builds without the `gateway` feature too.
+http = "1.4.0"
 
 # Heap profiler for the soak binary. Optional — only linked under `bench-soak`.
 dhat = { version = "0.3", optional = true }
