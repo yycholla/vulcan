@@ -8,7 +8,7 @@ use ratatui::{
 use super::{
     markdown::render_markdown,
     state::{ChatMessage, ChatRole, MessageSegment},
-    theme::Palette,
+    theme::{Palette, Theme},
     widgets::{message_header, reasoning_lines, tool_card},
 };
 
@@ -55,18 +55,26 @@ impl ChatRenderStore {
         &mut self,
         messages: &[ChatMessage],
         options: ChatRenderOptions,
+        theme: &Theme,
         scroll: u16,
         height: u16,
         _pending_pause: Option<&crate::pause::AgentPause>,
         _queue_len: usize,
     ) -> VisibleChatLines {
-        self.visible_lines_at(messages, options, usize::from(scroll), usize::from(height))
+        self.visible_lines_at(
+            messages,
+            options,
+            theme,
+            usize::from(scroll),
+            usize::from(height),
+        )
     }
 
     pub fn visible_lines_at(
         &mut self,
         messages: &[ChatMessage],
         options: ChatRenderOptions,
+        theme: &Theme,
         scroll: usize,
         height: usize,
     ) -> VisibleChatLines {
@@ -80,7 +88,7 @@ impl ChatRenderStore {
         let mut materialized_line_count = 0usize;
 
         for (index, message) in messages.iter().enumerate() {
-            let block = self.render_message_block(index, message, options);
+            let block = self.render_message_block(index, message, options, theme);
             let block_start = total_lines;
             let block_end = block_start.saturating_add(block.lines.len());
             total_lines = block_end;
@@ -120,6 +128,7 @@ impl ChatRenderStore {
         index: usize,
         message: &ChatMessage,
         options: ChatRenderOptions,
+        theme: &Theme,
     ) -> &RenderedMessageBlock {
         let key = MessageRenderKey {
             index,
@@ -130,7 +139,7 @@ impl ChatRenderStore {
 
         if !self.blocks.contains_key(&key) {
             self.render_count = self.render_count.saturating_add(1);
-            let block = self.build_message_block(index, message, options);
+            let block = self.build_message_block(index, message, options, theme);
             self.blocks.insert(key, block);
         }
 
@@ -144,6 +153,7 @@ impl ChatRenderStore {
         _index: usize,
         message: &ChatMessage,
         options: ChatRenderOptions,
+        theme: &Theme,
     ) -> RenderedMessageBlock {
         let (role_label, accent) = match message.role {
             ChatRole::User => ("you", Palette::RED),
@@ -151,7 +161,7 @@ impl ChatRenderStore {
             ChatRole::System => ("system", Palette::YELLOW),
         };
         let is_agent = matches!(message.role, ChatRole::Agent);
-        let mut lines = vec![message_header(role_label, accent, None)];
+        let mut lines = vec![message_header(role_label, accent, None, theme)];
 
         if is_agent && !message.segments.is_empty() {
             let mut text_emitted = false;
@@ -160,7 +170,7 @@ impl ChatRenderStore {
                     MessageSegment::Reasoning(reasoning)
                         if options.show_reasoning && !reasoning.is_empty() =>
                     {
-                        lines.extend(reasoning_lines(reasoning, false));
+                        lines.extend(reasoning_lines(reasoning, false, theme));
                     }
                     MessageSegment::Reasoning(_) => {}
                     MessageSegment::ToolCall {
@@ -186,7 +196,7 @@ impl ChatRenderStore {
                     }
                     MessageSegment::Text(text) if !text.is_empty() => {
                         text_emitted = true;
-                        push_markdown_body(&mut lines, text, accent);
+                        push_markdown_body(&mut lines, text, accent, theme);
                     }
                     MessageSegment::Text(_) => {}
                 }
@@ -200,7 +210,7 @@ impl ChatRenderStore {
             }
         } else {
             if options.show_reasoning && is_agent && !message.reasoning.is_empty() {
-                lines.extend(reasoning_lines(&message.reasoning, false));
+                lines.extend(reasoning_lines(&message.reasoning, false, theme));
             }
             if is_agent && message.content.is_empty() {
                 lines.push(agent_placeholder(
@@ -208,7 +218,7 @@ impl ChatRenderStore {
                     options.muted_style,
                 ));
             } else {
-                push_markdown_body(&mut lines, &message.content, accent);
+                push_markdown_body(&mut lines, &message.content, accent, theme);
             }
         }
 
@@ -238,8 +248,13 @@ impl ChatRenderStore {
     }
 }
 
-fn push_markdown_body(lines: &mut Vec<Line<'static>>, text: &str, accent: ratatui::style::Color) {
-    for line in render_markdown(text) {
+fn push_markdown_body(
+    lines: &mut Vec<Line<'static>>,
+    text: &str,
+    accent: ratatui::style::Color,
+    theme: &Theme,
+) {
+    for line in render_markdown(text, theme) {
         let mut spans = vec![Span::styled("▎ ", Style::default().fg(accent))];
         spans.extend(line.spans.into_iter());
         lines.push(Line::from(spans));
@@ -277,7 +292,8 @@ mod tests {
             muted_style: Style::default(),
         };
 
-        let window = store.visible_lines(&messages, options, 10, 5, None, 0);
+        let theme = Theme::system();
+        let window = store.visible_lines(&messages, options, &theme, 10, 5, None, 0);
         assert_eq!(window.lines.len(), 5);
         assert!(window.total_lines > 5);
     }
@@ -294,12 +310,13 @@ mod tests {
             muted_style: Style::default(),
         };
         let narrow = ChatRenderOptions { width: 20, ..wide };
+        let theme = Theme::system();
 
-        let _ = store.visible_lines(&messages, wide, 0, 10, None, 0);
+        let _ = store.visible_lines(&messages, wide, &theme, 0, 10, None, 0);
         let renders_after_wide = store.render_count_for_tests();
-        let _ = store.visible_lines(&messages, wide, 0, 10, None, 0);
+        let _ = store.visible_lines(&messages, wide, &theme, 0, 10, None, 0);
         assert_eq!(store.render_count_for_tests(), renders_after_wide);
-        let _ = store.visible_lines(&messages, narrow, 0, 10, None, 0);
+        let _ = store.visible_lines(&messages, narrow, &theme, 0, 10, None, 0);
         assert!(store.render_count_for_tests() > renders_after_wide);
     }
 
@@ -316,7 +333,8 @@ mod tests {
             muted_style: Style::default(),
         };
 
-        let window = store.visible_lines(&messages, options, 90, 3, None, 0);
+        let theme = Theme::system();
+        let window = store.visible_lines(&messages, options, &theme, 90, 3, None, 0);
 
         assert_eq!(window.lines.len(), 3);
         assert!(window.total_lines > window.lines.len());
@@ -336,7 +354,8 @@ mod tests {
             muted_style: Style::default(),
         };
 
-        let window = store.visible_lines(&messages, options, 4_900, 20, None, 0);
+        let theme = Theme::system();
+        let window = store.visible_lines(&messages, options, &theme, 4_900, 20, None, 0);
 
         assert_eq!(window.lines.len(), 20);
         assert!(window.total_lines > 5_000);
@@ -355,10 +374,11 @@ mod tests {
             width: 100,
             muted_style: Style::default(),
         };
-        let first = store.visible_lines_at(&messages, options, 0, 20);
+        let theme = Theme::system();
+        let first = store.visible_lines_at(&messages, options, &theme, 0, 20);
         let tail_scroll = first.total_lines.saturating_sub(20);
 
-        let window = store.visible_lines_at(&messages, options, tail_scroll, 20);
+        let window = store.visible_lines_at(&messages, options, &theme, tail_scroll, 20);
         let text = window
             .lines
             .iter()
@@ -390,11 +410,12 @@ mod tests {
             muted_style: Style::default(),
         };
 
-        let _ = store.visible_lines(&messages, options, 0, 20, None, 0);
+        let theme = Theme::system();
+        let _ = store.visible_lines(&messages, options, &theme, 0, 20, None, 0);
         let first_count = store.render_count_for_tests();
 
         messages[1].append_text("hello");
-        let _ = store.visible_lines(&messages, options, 0, 20, None, 0);
+        let _ = store.visible_lines(&messages, options, &theme, 0, 20, None, 0);
 
         assert_eq!(store.render_count_for_tests(), first_count + 1);
     }
@@ -409,8 +430,9 @@ mod tests {
             width: 80,
             muted_style: Style::default(),
         };
+        let theme = Theme::system();
 
-        let block = store.render_message_block(0, &message, options);
+        let block = store.render_message_block(0, &message, options, &theme);
         let rendered = block
             .lines
             .iter()
@@ -449,8 +471,9 @@ mod tests {
             width: 80,
             muted_style: Style::default(),
         };
+        let theme = Theme::system();
 
-        let block = store.render_message_block(0, &message, options);
+        let block = store.render_message_block(0, &message, options, &theme);
         let rendered = block
             .lines
             .iter()
