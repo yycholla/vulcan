@@ -214,3 +214,33 @@ impl LLMProvider for MockProvider {
         self.max_context
     }
 }
+
+#[cfg(test)]
+mod generated_tests {
+    use super::*;
+    use crate::provider::Message;
+    use tokio_util::sync::CancellationToken;
+
+    #[tokio::test]
+    async fn generated_provider_calls_script_with_turn_index() {
+        let provider = GeneratedProvider::new(128_000, |turn| ChatResponse {
+            content: Some(format!("turn-{turn}")),
+            tool_calls: None,
+            usage: None,
+            finish_reason: Some("stop".into()),
+            reasoning_content: None,
+        });
+
+        let cancel = CancellationToken::new();
+        let r1 = provider
+            .chat(&[Message::User { content: "hi".into() }], &[], cancel.clone())
+            .await
+            .unwrap();
+        let r2 = provider
+            .chat(&[Message::User { content: "hi".into() }], &[], cancel)
+            .await
+            .unwrap();
+        assert_eq!(r1.content.as_deref(), Some("turn-0"));
+        assert_eq!(r2.content.as_deref(), Some("turn-1"));
+    }
+}
