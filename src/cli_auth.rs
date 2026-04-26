@@ -9,8 +9,10 @@ use clap::Args;
 use dialoguer::{Confirm, FuzzySelect, Input, Password};
 use std::io::IsTerminal;
 use std::path::Path;
+use std::time::Duration;
 
 use crate::cli_provider::{AddArgs, Preset, add, lookup_preset, presets};
+use crate::provider::catalog::{self, ModelInfo};
 
 #[derive(Args, Debug)]
 pub struct AuthArgs {
@@ -33,13 +35,13 @@ pub async fn run(args: AuthArgs, dir: std::path::PathBuf) -> Result<()> {
     let theme = dialoguer_theme();
 
     if args.custom {
-        return run_custom(&theme, &dir);
+        return run_custom(&theme, &dir).await;
     }
 
     if let Some(key) = args.preset.as_deref() {
         let preset = lookup_preset(key)
             .with_context(|| format!("unknown preset '{key}'. See `vulcan provider presets`."))?;
-        return run_preset(&theme, &dir, preset);
+        return run_preset(&theme, &dir, preset).await;
     }
 
     // No preset supplied → fuzzy picker.
@@ -59,13 +61,17 @@ pub async fn run(args: AuthArgs, dir: std::path::PathBuf) -> Result<()> {
         .context("provider picker cancelled")?;
 
     if pick == presets.len() {
-        run_custom(&theme, &dir)
+        run_custom(&theme, &dir).await
     } else {
-        run_preset(&theme, &dir, &presets[pick])
+        run_preset(&theme, &dir, &presets[pick]).await
     }
 }
 
-fn run_preset(theme: &dyn dialoguer::theme::Theme, dir: &Path, preset: &Preset) -> Result<()> {
+async fn run_preset(
+    theme: &dyn dialoguer::theme::Theme,
+    dir: &Path,
+    preset: &Preset,
+) -> Result<()> {
     println!();
     println!("Selected: {} ({})", preset.display, preset.key);
     println!("  base_url     : {}", preset.base_url);
@@ -79,40 +85,21 @@ fn run_preset(theme: &dyn dialoguer::theme::Theme, dir: &Path, preset: &Preset) 
     let name: String = Input::with_theme(theme)
         .with_prompt("Profile name")
         .default(preset.key.to_string())
-        .validate_with(|input: &String| -> Result<(), &str> {
-            if input.eq_ignore_ascii_case("default") {
-                Err("'default' is reserved for the legacy [provider] block")
-            } else if input.trim().is_empty() {
-                Err("name required")
-            } else {
-                Ok(())
-            }
-        })
+        .validate_with(validate_profile_name)
         .interact_text()?;
 
-    let api_key: String = Password::with_theme(theme)
-        .with_prompt(format!(
-            "API key (Press Enter to skip and rely on env var: {})",
-            preset.auth_hint
-        ))
-        .allow_empty_password(true)
-        .interact()?;
+    let api_key_opt = prompt_api_key(theme, preset.base_url, preset.auth_hint)?;
 
-    let model: String = Input::with_theme(theme)
-        .with_prompt("Default model id")
-        .default(preset.model.to_string())
-        .interact_text()?;
+    let model = pick_or_input_model(
+        theme,
+        preset.base_url,
+        api_key_opt.as_deref().unwrap_or(""),
+        preset.model,
+        preset.disable_catalog,
+    )
+    .await?;
 
-    let force = if profile_exists(dir, &name)? {
-        Confirm::with_theme(theme)
-            .with_prompt(format!(
-                "Profile '{name}' already exists in providers.toml. Overwrite?"
-            ))
-            .default(false)
-            .interact()?
-    } else {
-        false
-    };
+    let force = profile_exists_prompt(theme, dir, &name)?;
 
     let confirm = Confirm::with_theme(theme)
         .with_prompt(format!(
@@ -126,11 +113,6 @@ fn run_preset(theme: &dyn dialoguer::theme::Theme, dir: &Path, preset: &Preset) 
         return Ok(());
     }
 
-    let api_key_opt = if api_key.trim().is_empty() {
-        None
-    } else {
-        Some(api_key)
-    };
     add(
         AddArgs {
             name: name.clone(),
@@ -149,22 +131,14 @@ fn run_preset(theme: &dyn dialoguer::theme::Theme, dir: &Path, preset: &Preset) 
     Ok(())
 }
 
-fn run_custom(theme: &dyn dialoguer::theme::Theme, dir: &Path) -> Result<()> {
+async fn run_custom(theme: &dyn dialoguer::theme::Theme, dir: &Path) -> Result<()> {
     println!();
     println!("Custom provider — enter the OpenAI-compatible endpoint by hand.");
     println!();
 
     let name: String = Input::with_theme(theme)
         .with_prompt("Profile name")
-        .validate_with(|input: &String| -> Result<(), &str> {
-            if input.eq_ignore_ascii_case("default") {
-                Err("'default' is reserved for the legacy [provider] block")
-            } else if input.trim().is_empty() {
-                Err("name required")
-            } else {
-                Ok(())
-            }
-        })
+        .validate_with(validate_profile_name)
         .interact_text()?;
 
     let base_url: String = Input::with_theme(theme)
@@ -178,30 +152,37 @@ fn run_custom(theme: &dyn dialoguer::theme::Theme, dir: &Path) -> Result<()> {
         })
         .interact_text()?;
 
-    let model: String = Input::with_theme(theme)
-        .with_prompt("Default model id")
-        .interact_text()?;
+    let api_key_opt = prompt_api_key(
+        theme,
+        &base_url,
+        "auth resolves via VULCAN_API_KEY when blank",
+    )?;
 
-    let api_key: String = Password::with_theme(theme)
-        .with_prompt("API key (Enter to skip — auth then resolves via VULCAN_API_KEY)")
-        .allow_empty_password(true)
-        .interact()?;
-
-    let disable_catalog = Confirm::with_theme(theme)
-        .with_prompt("Skip the /models catalog fetch at startup? (yes for self-hosted endpoints)")
-        .default(false)
-        .interact()?;
-
-    let force = if profile_exists(dir, &name)? {
+    let disable_catalog = if is_local_endpoint(&base_url) {
+        // Local endpoints (Ollama, llama.cpp, vLLM, etc.) frequently
+        // don't ship an OpenAI-shape `/models` route. Default to off
+        // so the agent doesn't fail at startup probing it.
         Confirm::with_theme(theme)
-            .with_prompt(format!(
-                "Profile '{name}' already exists in providers.toml. Overwrite?"
-            ))
-            .default(false)
+            .with_prompt("Local endpoint detected — skip the /models catalog fetch at startup?")
+            .default(true)
             .interact()?
     } else {
-        false
+        Confirm::with_theme(theme)
+            .with_prompt("Skip the /models catalog fetch at startup? (rare; mainly for self-hosted endpoints)")
+            .default(false)
+            .interact()?
     };
+
+    let model = pick_or_input_model(
+        theme,
+        &base_url,
+        api_key_opt.as_deref().unwrap_or(""),
+        "",
+        disable_catalog,
+    )
+    .await?;
+
+    let force = profile_exists_prompt(theme, dir, &name)?;
 
     let confirm = Confirm::with_theme(theme)
         .with_prompt(format!(
@@ -214,12 +195,6 @@ fn run_custom(theme: &dyn dialoguer::theme::Theme, dir: &Path) -> Result<()> {
         println!("Aborted — nothing written.");
         return Ok(());
     }
-
-    let api_key_opt = if api_key.trim().is_empty() {
-        None
-    } else {
-        Some(api_key)
-    };
 
     add(
         AddArgs {
@@ -237,6 +212,161 @@ fn run_custom(theme: &dyn dialoguer::theme::Theme, dir: &Path) -> Result<()> {
     println!();
     println!("Done. Switch into the new profile with `/provider {name}` in the TUI.");
     Ok(())
+}
+
+fn validate_profile_name(input: &String) -> Result<(), &'static str> {
+    if input.eq_ignore_ascii_case("default") {
+        Err("'default' is reserved for the legacy [provider] block")
+    } else if input.trim().is_empty() {
+        Err("name required")
+    } else {
+        Ok(())
+    }
+}
+
+fn profile_exists_prompt(
+    theme: &dyn dialoguer::theme::Theme,
+    dir: &Path,
+    name: &str,
+) -> Result<bool> {
+    if profile_exists(dir, name)? {
+        Ok(Confirm::with_theme(theme)
+            .with_prompt(format!(
+                "Profile '{name}' already exists in providers.toml. Overwrite?"
+            ))
+            .default(false)
+            .interact()?)
+    } else {
+        Ok(false)
+    }
+}
+
+/// Prompt for an API key, but skip the prompt entirely when the
+/// endpoint looks local — most self-hosted endpoints (Ollama, llama.cpp,
+/// vLLM in unauth mode) don't need one. Returns `None` when the user
+/// declines to set a key (or local + opted out), `Some(s)` otherwise.
+fn prompt_api_key(
+    theme: &dyn dialoguer::theme::Theme,
+    base_url: &str,
+    auth_hint: &str,
+) -> Result<Option<String>> {
+    if is_local_endpoint(base_url) {
+        let want = Confirm::with_theme(theme)
+            .with_prompt(
+                "Local endpoint detected — set an API key? (most self-hosted servers don't need one)",
+            )
+            .default(false)
+            .interact()?;
+        if !want {
+            return Ok(None);
+        }
+        let key: String = Password::with_theme(theme)
+            .with_prompt("API key (placeholder is fine, e.g. \"ollama\")")
+            .allow_empty_password(true)
+            .interact()?;
+        return Ok(if key.trim().is_empty() {
+            None
+        } else {
+            Some(key)
+        });
+    }
+
+    let key: String = Password::with_theme(theme)
+        .with_prompt(format!(
+            "API key (Press Enter to skip — {auth_hint})"
+        ))
+        .allow_empty_password(true)
+        .interact()?;
+    Ok(if key.trim().is_empty() {
+        None
+    } else {
+        Some(key)
+    })
+}
+
+/// Heuristic for "local" endpoints — used to default-skip the API key
+/// prompt and the catalog fetch. Matches the loopback hosts and `.local`.
+fn is_local_endpoint(base_url: &str) -> bool {
+    let lower = base_url.to_ascii_lowercase();
+    lower.contains("localhost")
+        || lower.contains("127.0.0.1")
+        || lower.contains("0.0.0.0")
+        || lower.contains("[::1]")
+        || lower.contains(".local")
+}
+
+/// Fetch the provider's `/models` catalog and present a fuzzy picker;
+/// fall back to a typed input pre-filled with `default_model` when the
+/// fetch is disabled, fails, or returns nothing.
+async fn pick_or_input_model(
+    theme: &dyn dialoguer::theme::Theme,
+    base_url: &str,
+    api_key: &str,
+    default_model: &str,
+    disable_catalog: bool,
+) -> Result<String> {
+    if disable_catalog {
+        let value: String = Input::with_theme(theme)
+            .with_prompt("Default model id")
+            .default(default_model.to_string())
+            .interact_text()?;
+        return Ok(value);
+    }
+
+    println!("Fetching models from {base_url} …");
+    let models = match fetch_models_with_timeout(base_url, api_key).await {
+        Ok(list) if !list.is_empty() => list,
+        Ok(_) => {
+            println!("  (catalog returned no models — typed input)");
+            let value: String = Input::with_theme(theme)
+                .with_prompt("Default model id")
+                .default(default_model.to_string())
+                .interact_text()?;
+            return Ok(value);
+        }
+        Err(e) => {
+            println!("  (catalog fetch failed: {e} — typed input)");
+            let value: String = Input::with_theme(theme)
+                .with_prompt("Default model id")
+                .default(default_model.to_string())
+                .interact_text()?;
+            return Ok(value);
+        }
+    };
+
+    let labels: Vec<String> = models
+        .iter()
+        .map(|m| {
+            if m.context_length > 0 {
+                format!("{}  · ctx {}", m.id, m.context_length)
+            } else {
+                m.id.clone()
+            }
+        })
+        .collect();
+    let default_idx = models
+        .iter()
+        .position(|m| m.id == default_model)
+        .unwrap_or(0);
+    let pick = FuzzySelect::with_theme(theme)
+        .with_prompt(format!("Pick default model ({} available)", models.len()))
+        .items(&labels)
+        .default(default_idx)
+        .interact()?;
+    Ok(models[pick].id.clone())
+}
+
+async fn fetch_models_with_timeout(
+    base_url: &str,
+    api_key: &str,
+) -> Result<Vec<ModelInfo>> {
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(8))
+        .build()?;
+    let cache_ttl = Duration::from_secs(0); // bypass cache during interactive setup
+    let cat = catalog::for_base_url(client, base_url, api_key, cache_ttl);
+    let models = cat.list_models().await.map_err(anyhow::Error::from)?;
+    Ok(models)
 }
 
 fn profile_exists(dir: &Path, name: &str) -> Result<bool> {
