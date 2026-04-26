@@ -519,23 +519,26 @@ pub fn tool_card(
     }
     let gap = inner_w.saturating_sub(left_chars + right_chars);
 
-    // Header is its own bordered box (top border + content row +
-    // bottom border) on SLATE. Body rows follow underneath without
-    // a surrounding border, on the regular paper bg with a 2-col
-    // indent so they nest under the title bar.
+    // Continuous border around the whole card. Header rows sit on
+    // SLATE (including the top border row's bg); body rows sit on
+    // FAINT (which is darker than the TUI's PAPER but lighter than
+    // SLATE) so the title visually separates without ever breaking
+    // the outer rectangle.
     let header_bg = Palette::SLATE;
-    let border_style = Style::default().fg(Palette::MUTED);
+    let body_bg = Palette::FAINT;
+    let header_border = Style::default().fg(Palette::MUTED).bg(header_bg);
+    let body_border = Style::default().fg(Palette::MUTED).bg(body_bg);
 
-    // ── Top border of header box: ┌──...──┐
+    // ── Top border: ┌──...──┐ on SLATE so it merges with the header.
     let mut out = vec![Line::from(vec![
-        Span::styled("┌", border_style),
-        Span::styled("─".repeat(inner_w), border_style),
-        Span::styled("┐", border_style),
+        Span::styled("┌", header_border),
+        Span::styled("─".repeat(inner_w), header_border),
+        Span::styled("┐", header_border),
     ])];
 
-    // ── Header content row: │ pill params  ...  status_pill │
+    // ── Header content: │ pill params  ...  status_pill │ on SLATE.
     let mut header: Vec<Span<'static>> = Vec::new();
-    header.push(Span::styled("│", border_style));
+    header.push(Span::styled("│", header_border));
     header.push(Span::styled(
         name_pill_text,
         Style::default()
@@ -562,30 +565,36 @@ pub fn tool_card(
             .bg(color)
             .add_modifier(Modifier::BOLD),
     ));
-    header.push(Span::styled("│", border_style));
+    header.push(Span::styled("│", header_border));
     out.push(Line::from(header));
 
-    // ── Bottom border of header box: └──...──┘
-    out.push(Line::from(vec![
-        Span::styled("└", border_style),
-        Span::styled("─".repeat(inner_w), border_style),
-        Span::styled("┘", border_style),
-    ]));
-
-    // ── Body rows: indented under the title, no surrounding border.
+    // ── Body rows: │  text...padding  │ on FAINT.
     let body_indent = "  ";
     let body_inner = inner_w.saturating_sub(body_indent.chars().count());
 
+    let render_body = |spans: &mut Vec<Span<'static>>, used: usize| {
+        let pad = inner_w.saturating_sub(used);
+        if pad > 0 {
+            spans.push(Span::styled(" ".repeat(pad), Style::default().bg(body_bg)));
+        }
+        spans.push(Span::styled("│", body_border));
+    };
+
     if let Some(meta) = result_meta {
-        out.push(Line::from(vec![
-            Span::raw(body_indent.to_string()),
+        let used = body_indent.chars().count() + meta.chars().count();
+        let mut spans = vec![
+            Span::styled("│", body_border),
+            Span::styled(body_indent.to_string(), Style::default().bg(body_bg)),
             Span::styled(
                 meta.to_string(),
                 Style::default()
                     .fg(Palette::MUTED)
+                    .bg(body_bg)
                     .add_modifier(Modifier::BOLD),
             ),
-        ]));
+        ];
+        render_body(&mut spans, used);
+        out.push(Line::from(spans));
     }
 
     if let Some(preview) = output_preview {
@@ -596,12 +605,23 @@ pub fn tool_card(
                 chars.push('…');
             }
             let body: String = chars.iter().collect();
-            out.push(Line::from(vec![
-                Span::raw(body_indent.to_string()),
-                Span::styled(body, Style::default().fg(Palette::INK)),
-            ]));
+            let used = body_indent.chars().count() + body.chars().count();
+            let mut spans = vec![
+                Span::styled("│", body_border),
+                Span::styled(body_indent.to_string(), Style::default().bg(body_bg)),
+                Span::styled(body, Style::default().fg(Palette::INK).bg(body_bg)),
+            ];
+            render_body(&mut spans, used);
+            out.push(Line::from(spans));
         }
     }
+
+    // ── Bottom border on FAINT, closing the rectangle.
+    out.push(Line::from(vec![
+        Span::styled("└", body_border),
+        Span::styled("─".repeat(inner_w), body_border),
+        Span::styled("┘", body_border),
+    ]));
 
     out
 }
