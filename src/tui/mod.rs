@@ -266,7 +266,7 @@ async fn handle_stream_event(
         StreamEvent::Error(e) => {
             if let Some(last) = app.messages.last_mut() {
                 if last.content.is_empty() {
-                    last.content = format!("⚠ Error: {e}");
+                    last.set_content(format!("⚠ Error: {e}"));
                     app.chat_lines_dirty.set(true);
                 }
             }
@@ -416,6 +416,7 @@ pub async fn run_tui(config: &Config, resume: ResumeTarget) -> Result<()> {
             content: note,
             reasoning: String::new(),
             segments: Vec::new(),
+            render_version: 0,
         });
 
         // Hydrate prior turns into the chat panel so resumed sessions show their
@@ -446,6 +447,7 @@ pub async fn run_tui(config: &Config, resume: ResumeTarget) -> Result<()> {
                             content: content.unwrap_or_default(),
                             reasoning: reasoning_content.unwrap_or_default(),
                             segments: Vec::new(),
+                            render_version: 0,
                         });
                     }
                     Message::Tool { .. } => {} // skip — audit log shows tool activity
@@ -582,6 +584,7 @@ pub async fn run_tui(config: &Config, resume: ResumeTarget) -> Result<()> {
                                                                         content: content.unwrap_or_default(),
                                                                         reasoning: reasoning_content.unwrap_or_default(),
                                                                         segments: Vec::new(),
+                                                                        render_version: 0,
                                                                     });
                                                                 }
                                                                 Message::Tool { .. } => {}
@@ -667,6 +670,7 @@ pub async fn run_tui(config: &Config, resume: ResumeTarget) -> Result<()> {
                         content: format!("⏸  Agent paused — {summary}"),
                         reasoning: String::new(),
                             segments: Vec::new(),
+                        render_version: 0,
                     });
                     app.chat_lines_dirty.set(true);
                     app.note_pause(&summary);
@@ -723,6 +727,7 @@ pub async fn run_tui(config: &Config, resume: ResumeTarget) -> Result<()> {
                                                 content: format!("▶  Resumed — {label}"),
                                                 reasoning: String::new(),
                             segments: Vec::new(),
+                                                render_version: 0,
                                             });
                                             app.chat_lines_dirty.set(true);
                                             app.note_resume(label);
@@ -790,6 +795,7 @@ pub async fn run_tui(config: &Config, resume: ResumeTarget) -> Result<()> {
                                                     content: "Cancelling current turn… (Ctrl+C again to quit)".into(),
                                                     reasoning: String::new(),
                             segments: Vec::new(),
+                                                    render_version: 0,
                                                 });
                                                 app.chat_lines_dirty.set(true);
                                                 pending_quit = true;
@@ -800,6 +806,7 @@ pub async fn run_tui(config: &Config, resume: ResumeTarget) -> Result<()> {
                                                     content: "Press Ctrl+C again to quit, or any key to cancel.".into(),
                                                     reasoning: String::new(),
                             segments: Vec::new(),
+                                                    render_version: 0,
                                                 });
                                                 app.chat_lines_dirty.set(true);
                                                 continue;
@@ -905,6 +912,7 @@ pub async fn run_tui(config: &Config, resume: ResumeTarget) -> Result<()> {
                                                             content: format!("Reasoning trace: {}", if app.show_reasoning { "on" } else { "off" }),
                                                             reasoning: String::new(),
                             segments: Vec::new(),
+                                                            render_version: 0,
                                                         });
                                                         app.chat_lines_dirty.set(true);
                                                         continue;
@@ -967,6 +975,7 @@ pub async fn run_tui(config: &Config, resume: ResumeTarget) -> Result<()> {
                                                                 content: "Usage: /search <query>".into(),
                                                                 reasoning: String::new(),
                             segments: Vec::new(),
+                                                                render_version: 0,
                                                             });
                                                             app.chat_lines_dirty.set(true);
                                                             continue;
@@ -997,6 +1006,7 @@ pub async fn run_tui(config: &Config, resume: ResumeTarget) -> Result<()> {
                                                             content: report,
                                                             reasoning: String::new(),
                             segments: Vec::new(),
+                                                            render_version: 0,
                                                         });
                                                         app.chat_lines_dirty.set(true);
                                                         continue;
@@ -1007,6 +1017,7 @@ pub async fn run_tui(config: &Config, resume: ResumeTarget) -> Result<()> {
                                                             content: format!("Unknown command: {msg}. Try /help"),
                                                             reasoning: String::new(),
                             segments: Vec::new(),
+                                                            render_version: 0,
                                                         });
                                                         app.chat_lines_dirty.set(true);
                                                         continue;
@@ -1195,7 +1206,12 @@ fn draw_session_picker(f: &mut ratatui::Frame, area: Rect, app: &AppState) {
     let x = area.x + (area.width.saturating_sub(width)) / 2;
     let y = area.y + (area.height.saturating_sub(height)) / 2;
 
-    let box_area = Rect { x, y, width, height };
+    let box_area = Rect {
+        x,
+        y,
+        width,
+        height,
+    };
     if box_area.height < 4 {
         return;
     }
@@ -1203,8 +1219,7 @@ fn draw_session_picker(f: &mut ratatui::Frame, area: Rect, app: &AppState) {
     // Fill the box with solid paper background to obscure the view behind.
     let fill_bg = rect_with_border(box_area, 0);
     f.render_widget(
-        Paragraph::new(Line::from(""))
-            .style(Style::default().bg(Palette::PAPER)),
+        Paragraph::new(Line::from("")).style(Style::default().bg(Palette::PAPER)),
         fill_bg,
     );
 
@@ -1218,7 +1233,12 @@ fn draw_session_picker(f: &mut ratatui::Frame, area: Rect, app: &AppState) {
     let mut title = "  Resume a Session  ".to_string();
     if (title.chars().count() as u16) < bar.width {
         let pad = bar.width as usize - title.chars().count();
-        title = format!("{}{}{}", " ".repeat(pad / 2), title.trim(), " ".repeat(pad - pad / 2));
+        title = format!(
+            "{}{}{}",
+            " ".repeat(pad / 2),
+            title.trim(),
+            " ".repeat(pad - pad / 2)
+        );
     }
     f.render_widget(
         Paragraph::new(title).style(
@@ -1249,10 +1269,16 @@ fn draw_session_picker(f: &mut ratatui::Frame, area: Rect, app: &AppState) {
             Style::default().fg(Palette::FAINT),
         )));
     } else {
-        let active = app.session_picker_selection.min(app.sessions.len().saturating_sub(1));
+        let active = app
+            .session_picker_selection
+            .min(app.sessions.len().saturating_sub(1));
         for (i, s) in app.sessions.iter().enumerate() {
             let is_active = i == active;
-            let bg = if is_active { Palette::FAINT } else { Palette::PAPER };
+            let bg = if is_active {
+                Palette::FAINT
+            } else {
+                Palette::PAPER
+            };
             let marker = if is_active { "▸ " } else { "  " };
             let status_color = match s.status {
                 SessionStatus::Live => Palette::GREEN,
@@ -1265,34 +1291,38 @@ fn draw_session_picker(f: &mut ratatui::Frame, area: Rect, app: &AppState) {
 
             // Format the date/time
             let dt = chrono::DateTime::from_timestamp(s.last_active, 0)
-                .map(|d| d.with_timezone(&chrono::Local).format("%b %d %H:%M").to_string())
+                .map(|d| {
+                    d.with_timezone(&chrono::Local)
+                        .format("%b %d %H:%M")
+                        .to_string()
+                })
                 .unwrap_or_default();
 
-            let name_style = Style::default().fg(Palette::INK).bg(bg).add_modifier(if is_active {
-                Modifier::BOLD
-            } else {
-                Modifier::empty()
-            });
+            let name_style = Style::default()
+                .fg(Palette::INK)
+                .bg(bg)
+                .add_modifier(if is_active {
+                    Modifier::BOLD
+                } else {
+                    Modifier::empty()
+                });
             let meta_style = Style::default().fg(Palette::MUTED).bg(bg);
 
             lines.push(Line::from(vec![
                 Span::styled(marker, name_style.add_modifier(Modifier::BOLD)),
                 Span::styled("█ ", Style::default().fg(status_color).bg(bg)),
-                Span::styled(
-                    format!("{:<12}", short_id(&s.id)),
-                    name_style.clone(),
-                ),
-                Span::styled(
-                    format!("{:>4}m", s.message_count),
-                    meta_style,
-                ),
+                Span::styled(format!("{:<12}", short_id(&s.id)), name_style.clone()),
+                Span::styled(format!("{:>4}m", s.message_count), meta_style),
                 Span::styled(
                     format!("  {} ", dt),
                     Style::default().fg(Palette::FAINT).bg(bg),
                 ),
                 Span::styled(
                     status_label,
-                    Style::default().fg(status_color).bg(bg).add_modifier(Modifier::BOLD),
+                    Style::default()
+                        .fg(status_color)
+                        .bg(bg)
+                        .add_modifier(Modifier::BOLD),
                 ),
             ]));
         }
@@ -1307,8 +1337,7 @@ fn draw_session_picker(f: &mut ratatui::Frame, area: Rect, app: &AppState) {
     )));
 
     f.render_widget(
-        Paragraph::new(lines)
-            .style(Style::default().bg(Palette::PAPER)),
+        Paragraph::new(lines).style(Style::default().bg(Palette::PAPER)),
         list_area,
     );
 
@@ -1334,7 +1363,12 @@ fn draw_picker_border(f: &mut ratatui::Frame, r: Rect) {
         let top = "─".repeat(r.width as usize);
         f.render_widget(
             Paragraph::new(top).style(style),
-            Rect { x: r.x, y: r.y, width: r.width, height: 1 },
+            Rect {
+                x: r.x,
+                y: r.y,
+                width: r.width,
+                height: 1,
+            },
         );
     }
     // Bottom
@@ -1342,7 +1376,12 @@ fn draw_picker_border(f: &mut ratatui::Frame, r: Rect) {
         let bot = "─".repeat(r.width as usize);
         f.render_widget(
             Paragraph::new(bot).style(style),
-            Rect { x: r.x, y: r.y + r.height - 1, width: r.width, height: 1 },
+            Rect {
+                x: r.x,
+                y: r.y + r.height - 1,
+                width: r.width,
+                height: 1,
+            },
         );
     }
     // Left edge (corners overlap — good enough for a 1px line)
@@ -1352,14 +1391,24 @@ fn draw_picker_border(f: &mut ratatui::Frame, r: Rect) {
             .collect();
         f.render_widget(
             Paragraph::new(left),
-            Rect { x: r.x, y: r.y + 1, width: 1, height: r.height - 2 },
+            Rect {
+                x: r.x,
+                y: r.y + 1,
+                width: 1,
+                height: r.height - 2,
+            },
         );
         let right: Vec<Line<'static>> = (1..r.height - 1)
             .map(|_| Line::from(Span::styled("│", style)))
             .collect();
         f.render_widget(
             Paragraph::new(right),
-            Rect { x: r.x + r.width - 1, y: r.y + 1, width: 1, height: r.height - 2 },
+            Rect {
+                x: r.x + r.width - 1,
+                y: r.y + 1,
+                width: 1,
+                height: r.height - 2,
+            },
         );
     }
 }
