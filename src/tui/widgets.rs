@@ -455,19 +455,17 @@ pub fn ticker(f: &mut TuiFrame, area: Rect, cells: &[(String, String, Color)]) {
 }
 
 /// Render a structured tool-call card per the design canvas (YYC-74).
-/// Returns owned `Line`s so the caller (`build_chat_lines`) can splice
-/// them into the chat surface alongside reasoning + text segments.
+/// Single-line title bar (no surrounding box) — name pill on the
+/// left, status pill on the right, body indented underneath with the
+/// chat surface's left accent bar.
 ///
-/// Layout (matches `Private/.../tools.jsx` T01–T14):
+/// Layout (matches `Private/.../tools.jsx` T01–T14 title bars):
 /// ```text
-/// ┌─ × tool_name · params_summary ─────────── ✓ OK · 0.34s ─┐
-/// │  output_preview line 1                                  │
-/// │  output_preview line 2                                  │
-/// └─────────────────────────────────────────────────────────┘
+/// ▎ × tool_name · params_summary               ✓ OK · 0.34s
+/// ▎   N lines · 4.1 KB
+/// ▎   output_preview line 1
+/// ▎   output_preview line 2
 /// ```
-///
-/// Status drives the right-pill glyph + color (`tools.jsx::STATUS`).
-/// `width` is the available chat width so the card stretches to fill.
 pub fn tool_card(
     name: &str,
     status: super::state::ToolStatus,
@@ -485,19 +483,19 @@ pub fn tool_card(
         ToolStatus::Done(false) => ("✗", "ERR", Palette::RED),
     };
 
-    // Inner width inside the box border (`│ ... │`).
-    let inner_w = width.saturating_sub(4) as usize;
+    // Reserve "▎ " (2 cols) on the left; the row spans the full chat width.
+    let inner_w = width.saturating_sub(2) as usize;
 
-    // Left side of header: tool name pill + " · params_summary"
+    // Left half of header: name pill + " · params"
     let name_pill_text = format!(" × {name} ");
     let mut left_chars = name_pill_text.chars().count();
     let mut params_text = String::new();
     if let Some(p) = params_summary {
-        params_text = format!(" · {p}");
+        params_text = format!("  {p}");
         left_chars += params_text.chars().count();
     }
 
-    // Right side: status pill " ✓ OK 0.34s "
+    // Right half: status pill " ✓ OK 0.34s "
     let pill_body = match (status, elapsed_ms) {
         (ToolStatus::InProgress, _) => format!(" {glyph} {label} "),
         (_, Some(ms)) => format!(" {glyph} {label} {} ", format_elapsed(ms)),
@@ -505,12 +503,11 @@ pub fn tool_card(
     };
     let right_chars = pill_body.chars().count();
 
-    // Border characters between pieces. Available `─` runs = inner_w - left - right.
-    // Need at least 2 dashes between left and right; truncate params if not enough.
-    let min_runs = 2;
-    if left_chars + right_chars + min_runs > inner_w && !params_text.is_empty() {
+    // Truncate params if pill + name + minimum gap don't fit.
+    let min_gap = 2;
+    if left_chars + right_chars + min_gap > inner_w && !params_text.is_empty() {
         let max_params = inner_w
-            .saturating_sub(name_pill_text.chars().count() + right_chars + min_runs);
+            .saturating_sub(name_pill_text.chars().count() + right_chars + min_gap);
         if max_params >= 4 {
             let chars: Vec<char> = params_text.chars().collect();
             let kept: String = chars.iter().take(max_params - 1).collect();
@@ -520,12 +517,12 @@ pub fn tool_card(
         }
         left_chars = name_pill_text.chars().count() + params_text.chars().count();
     }
-    let dashes_between = inner_w.saturating_sub(left_chars + right_chars);
+    let gap = inner_w.saturating_sub(left_chars + right_chars);
 
-    // ── Top border: ┌─ name_pill params ── … ── status_pill ─┐
-    let mut top: Vec<Span<'static>> = Vec::new();
-    top.push(Span::styled("┌─", Style::default().fg(accent)));
-    top.push(Span::styled(
+    // Single-line header.
+    let mut header: Vec<Span<'static>> = Vec::new();
+    header.push(Span::styled("▎ ", Style::default().fg(accent)));
+    header.push(Span::styled(
         name_pill_text,
         Style::default()
             .fg(Palette::PAPER)
@@ -533,75 +530,55 @@ pub fn tool_card(
             .add_modifier(Modifier::BOLD),
     ));
     if !params_text.is_empty() {
-        top.push(Span::styled(
+        header.push(Span::styled(
             params_text,
             Style::default().fg(Palette::MUTED),
         ));
     }
-    if dashes_between > 0 {
-        top.push(Span::styled(
-            "─".repeat(dashes_between),
-            Style::default().fg(accent),
-        ));
-    }
-    top.push(Span::styled(
+    header.push(Span::raw(" ".repeat(gap)));
+    header.push(Span::styled(
         pill_body,
         Style::default()
             .fg(Palette::PAPER)
             .bg(color)
             .add_modifier(Modifier::BOLD),
     ));
-    top.push(Span::styled("─┐", Style::default().fg(accent)));
 
-    let mut out = vec![Line::from(top)];
+    let mut out = vec![Line::from(header)];
 
-    // ── Meta sub-header: │  N lines · 4.1 KB                │
+    // Body indent: same left accent bar + 4-col indent so meta + preview
+    // visually nest under the title.
+    let body_indent = "    ";
+    let body_inner = inner_w.saturating_sub(body_indent.chars().count());
+
     if let Some(meta) = result_meta {
-        let body_chars = meta.chars().count();
-        let pad = inner_w.saturating_sub(body_chars + 2);
         out.push(Line::from(vec![
-            Span::styled("│ ", Style::default().fg(accent)),
-            Span::raw(" "),
+            Span::styled("▎ ", Style::default().fg(accent)),
+            Span::raw(body_indent.to_string()),
             Span::styled(
                 meta.to_string(),
                 Style::default()
                     .fg(Palette::MUTED)
                     .add_modifier(Modifier::BOLD),
             ),
-            Span::raw(" ".repeat(pad)),
-            Span::styled(" │", Style::default().fg(accent)),
         ]));
     }
 
-    // ── Body: │ <preview line padded to inner_w> │
     if let Some(preview) = output_preview {
-        let preview_inner = inner_w.saturating_sub(2); // room for leading "  " indent
         for raw in preview.lines() {
             let mut chars: Vec<char> = raw.chars().collect();
-            if chars.len() > preview_inner {
-                chars.truncate(preview_inner.saturating_sub(1));
+            if chars.len() > body_inner {
+                chars.truncate(body_inner.saturating_sub(1));
                 chars.push('…');
             }
             let body: String = chars.iter().collect();
-            let body_chars = body.chars().count();
-            let pad = inner_w.saturating_sub(body_chars + 2);
             out.push(Line::from(vec![
-                Span::styled("│ ", Style::default().fg(accent)),
-                Span::raw(" ".to_string()),
+                Span::styled("▎ ", Style::default().fg(accent)),
+                Span::raw(body_indent.to_string()),
                 Span::styled(body, Style::default().fg(Palette::INK)),
-                Span::raw(" ".repeat(pad)),
-                Span::styled(" │", Style::default().fg(accent)),
             ]));
         }
     }
-
-    // ── Bottom border
-    let bot_dashes = inner_w;
-    out.push(Line::from(vec![
-        Span::styled("└─", Style::default().fg(accent)),
-        Span::styled("─".repeat(bot_dashes), Style::default().fg(accent)),
-        Span::styled("─┘", Style::default().fg(accent)),
-    ]));
 
     out
 }
