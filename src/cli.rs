@@ -1,5 +1,7 @@
 use clap::{Parser, Subcommand};
 
+use crate::cli_provider::ProviderCommand;
+
 /// vulcan — a Rust AI agent. Forged at the forge, tested by fire.
 #[derive(Parser, Debug)]
 #[command(name = "vulcan", version, about, long_about = None)]
@@ -54,5 +56,10 @@ pub enum Command {
     MigrateConfig {
         #[arg(long)]
         force: bool,
+    },
+    /// Manage named provider profiles in ~/.vulcan/providers.toml (YYC-98).
+    Provider {
+        #[command(subcommand)]
+        cmd: ProviderCommand,
     },
 }
