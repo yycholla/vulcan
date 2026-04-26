@@ -84,6 +84,45 @@ impl HookHandler for PreferNativeToolsHook {
     }
 }
 
+/// Stable short tag the audit telemetry (YYC-88) groups counts by.
+/// Matches the bash-tool head — `rg`, `grep`, `cat`, `git`, etc.
+pub fn match_native_category(command: &str) -> Option<&'static str> {
+    let cmd = command.trim();
+    if cmd.is_empty() {
+        return None;
+    }
+    if cmd.contains('|')
+        || cmd.contains("&&")
+        || cmd.contains(';')
+        || cmd.contains('>')
+        || cmd.contains("$(")
+    {
+        return None;
+    }
+    let mut parts = cmd.split_ascii_whitespace();
+    let head = parts.next()?;
+    let sub = parts.next();
+    match head {
+        "rg" => Some("rg"),
+        "grep" => Some("grep"),
+        "find" => Some("find"),
+        "ls" => Some("ls"),
+        "cat" => Some("cat"),
+        "head" => Some("head"),
+        "tail" => Some("tail"),
+        "cargo" => match sub {
+            Some("check") | Some("build") => Some("cargo"),
+            _ => None,
+        },
+        "git" => match sub {
+            Some("status") | Some("diff") | Some("log") | Some("commit") | Some("push")
+            | Some("branch") | Some("checkout") => Some("git"),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
 /// Inspect a bash `command` string and return a one-line redirect
 /// message naming the native tool the agent should use, or `None` when
 /// the command should pass through. Trims leading whitespace and bails
