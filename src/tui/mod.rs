@@ -141,6 +141,13 @@ const SLASH_COMMANDS: &[SlashCommand] = &[
         mid_turn_safe: false,
     },
     SlashCommand {
+        name: "provider",
+        description: "List or switch named providers: /provider [name|default]",
+        // Rebuilds the provider against a different profile; same idle
+        // requirement as /model.
+        mid_turn_safe: false,
+    },
+    SlashCommand {
         name: "diff-style",
         description: "Set diff render: /diff-style <unified|side-by-side|inline>",
         mid_turn_safe: true,
@@ -189,6 +196,31 @@ fn format_model_list(active_model: &str, models: &[crate::provider::catalog::Mod
         out.push_str(&format!("\n  ... {} more", models.len() - 30));
     }
     out.push_str("\n\nUse /model <id> to switch.");
+    out
+}
+
+fn format_provider_list(config: &Config, active: Option<&str>) -> String {
+    let mut out = String::from("Provider profiles:");
+    let default_marker = if active.is_none() { "*" } else { " " };
+    out.push_str(&format!(
+        "\n  {default_marker} default · {} · {}",
+        config.provider.base_url, config.provider.model,
+    ));
+
+    let mut names: Vec<&String> = config.providers.keys().collect();
+    names.sort();
+    for name in names {
+        let cfg = &config.providers[name];
+        let marker = if active == Some(name.as_str()) { "*" } else { " " };
+        out.push_str(&format!(
+            "\n  {marker} {name} · {} · {}",
+            cfg.base_url, cfg.model,
+        ));
+    }
+    if config.providers.is_empty() {
+        out.push_str("\n  (no named [providers.<name>] profiles configured)");
+    }
+    out.push_str("\n\nUse /provider <name> to switch, /provider default to revert.");
     out
 }
 
@@ -1101,6 +1133,56 @@ pub async fn run_tui(config: &Config, resume: ResumeTarget) -> Result<()> {
                                                         });
                                                         continue;
                                                     }
+                                                    s if s == "provider" || s.starts_with("provider ") => {
+                                                        let arg = s["provider".len()..].trim();
+                                                        if arg.is_empty() {
+                                                            let report = {
+                                                                let a = agent.lock().await;
+                                                                format_provider_list(config, a.active_profile())
+                                                            };
+                                                            app.messages.push(ChatMessage {
+                                                                role: ChatRole::System,
+                                                                content: report,
+                                                                ..Default::default()
+                                                            });
+                                                            continue;
+                                                        }
+
+                                                        let target: Option<&str> = if arg.eq_ignore_ascii_case("default") {
+                                                            None
+                                                        } else {
+                                                            Some(arg)
+                                                        };
+                                                        let result = {
+                                                            let mut a = agent.lock().await;
+                                                            a.switch_provider(target, config).await
+                                                        };
+                                                        match result {
+                                                            Ok(selection) => {
+                                                                app.model_label = selection.model.id.clone();
+                                                                app.token_max = selection.max_context as u32;
+                                                                app.pricing = selection.pricing;
+                                                                let label = target.unwrap_or("default");
+                                                                app.messages.push(ChatMessage {
+                                                                    role: ChatRole::System,
+                                                                    content: format!(
+                                                                        "Provider switched to {label} · {} · context {}",
+                                                                        app.model_label,
+                                                                        crate::tui::state::format_thousands(app.token_max),
+                                                                    ),
+                                                                    ..Default::default()
+                                                                });
+                                                            }
+                                                            Err(e) => {
+                                                                app.messages.push(ChatMessage {
+                                                                    role: ChatRole::System,
+                                                                    content: format!("Provider switch failed: {e}"),
+                                                                    ..Default::default()
+                                                                });
+                                                            }
+                                                        }
+                                                        continue;
+                                                    }
                                                     s if s == "model" || s.starts_with("model ") => {
                                                         let arg = s["model".len()..].trim();
                                                         if arg.is_empty() {
@@ -1316,6 +1398,51 @@ mod tests {
 
         assert!(!command.mid_turn_safe);
         assert_eq!(filter_commands("mod")[0].name, "model");
+    }
+
+    #[test]
+    fn provider_command_is_available_and_deferred_mid_turn() {
+        let command = SLASH_COMMANDS
+            .iter()
+            .find(|cmd| cmd.name == "provider")
+            .expect("provider slash command");
+
+        assert!(!command.mid_turn_safe);
+        assert_eq!(filter_commands("prov")[0].name, "provider");
+    }
+
+    #[test]
+    fn format_provider_list_marks_active_profile_and_lists_named() {
+        use crate::config::{Config, ProviderConfig};
+        use std::collections::HashMap;
+
+        let mut providers = HashMap::new();
+        let mut local = ProviderConfig::default();
+        local.base_url = "http://localhost:11434/v1".into();
+        local.model = "qwen2.5".into();
+        providers.insert("local".into(), local);
+
+        let mut config = Config::default();
+        config.provider.base_url = "https://openrouter.ai/api/v1".into();
+        config.provider.model = "deepseek/v4".into();
+        config.providers = providers;
+
+        let active_default = format_provider_list(&config, None);
+        assert!(active_default.contains("* default · https://openrouter.ai/api/v1 · deepseek/v4"));
+        assert!(active_default.contains("  local · http://localhost:11434/v1 · qwen2.5"));
+
+        let active_local = format_provider_list(&config, Some("local"));
+        assert!(active_local.contains("  default · https://openrouter.ai/api/v1"));
+        assert!(active_local.contains("* local · http://localhost:11434/v1"));
+    }
+
+    #[test]
+    fn format_provider_list_handles_no_named_profiles() {
+        use crate::config::Config;
+        let config = Config::default();
+        let report = format_provider_list(&config, None);
+        assert!(report.contains("* default"));
+        assert!(report.contains("(no named [providers.<name>] profiles configured)"));
     }
 
     #[test]
