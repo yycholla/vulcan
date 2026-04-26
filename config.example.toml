@@ -31,6 +31,17 @@ catalog_cache_ttl_hours = 24
 # Enable dangerous tools (file overwrite, shell exec) without confirmation
 yolo_mode = false
 
+# Per-tool approval gate (YYC-76). Default is "always" (no prompts) so
+# the gate is opt-in. Set entries to "ask" or "session" for per-tool
+# granularity — TUI will pause on the gate and render inline pills.
+# `yolo_mode = true` above forces the default back to "always" no matter
+# what's set here.
+[tools.approval]
+default = "always"
+# write_file = "session"   # prompt once per session
+# git_push   = "ask"        # prompt every push
+# bash       = "ask"
+
 [compaction]
 # Auto-compress context when token usage is high
 enabled = true

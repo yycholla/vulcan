@@ -114,9 +114,48 @@ pub struct ProviderConfig {
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct ToolsConfig {
-    /// Enable dangerous tools (file overwrite, shell exec) without confirmation
+    /// Enable dangerous tools (file overwrite, shell exec) without confirmation.
+    /// Legacy alias — when true, the `approval.default` falls back to
+    /// `always` (YYC-76).
     #[serde(default)]
     pub yolo_mode: bool,
+    /// Per-tool approval modes (YYC-76). When unset, every tool runs
+    /// without prompting (matches pre-YYC-76 behavior).
+    #[serde(default)]
+    pub approval: ApprovalConfig,
+}
+
+/// Per-tool approval gate (YYC-76).
+#[derive(Debug, Deserialize, Clone, Copy, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum ApprovalMode {
+    /// Block on every invocation, prompting the user.
+    Ask,
+    /// Pause once per session; subsequent calls run silently.
+    Session,
+    /// Run without prompting (default).
+    #[default]
+    Always,
+}
+
+#[derive(Debug, Deserialize, Clone, Default)]
+pub struct ApprovalConfig {
+    /// Default mode for tools not in the per-tool overrides map.
+    /// Defaults to `always` (no prompts) so the gate is opt-in.
+    #[serde(default)]
+    pub default: ApprovalMode,
+    /// Per-tool overrides keyed by tool name (`write_file`, `bash`, etc).
+    #[serde(flatten)]
+    pub per_tool: std::collections::HashMap<String, ApprovalMode>,
+}
+
+impl ApprovalConfig {
+    pub fn mode_for(&self, tool: &str) -> ApprovalMode {
+        self.per_tool
+            .get(tool)
+            .copied()
+            .unwrap_or(self.default)
+    }
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -150,7 +189,10 @@ impl Default for ProviderConfig {
 
 impl Default for ToolsConfig {
     fn default() -> Self {
-        Self { yolo_mode: false }
+        Self {
+            yolo_mode: false,
+            approval: ApprovalConfig::default(),
+        }
     }
 }
 
