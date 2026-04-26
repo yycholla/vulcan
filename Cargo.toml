@@ -7,6 +7,10 @@ authors = ["Colin Hanway"]
 license = "MIT"
 repository = "https://github.com/yycholla/vulcan"
 readme = "README.md"
+# benches/soak.rs is the vulcan-soak [[bin]]; disable auto-discovery so cargo
+# doesn't also register it as a bench target (which would conflict with the
+# explicit [[bin]] declaration).
+autobenches = false
 
 [features]
 # Enabled only when running the soak binary. Pulls in dhat-rs, which swaps
