@@ -167,6 +167,7 @@ pub struct ChatMessage {
     /// as they arrived. Populated for live streamed agent messages; empty
     /// for user/system messages and hydrated history.
     pub segments: Vec<MessageSegment>,
+    pub(crate) render_version: u64,
 }
 
 impl ChatMessage {
@@ -176,7 +177,21 @@ impl ChatMessage {
             content: content.into(),
             reasoning: String::new(),
             segments: Vec::new(),
+            render_version: 0,
         }
+    }
+
+    pub fn render_version(&self) -> u64 {
+        self.render_version
+    }
+
+    fn bump_render_version(&mut self) {
+        self.render_version = self.render_version.wrapping_add(1);
+    }
+
+    pub fn set_content(&mut self, content: impl Into<String>) {
+        self.content = content.into();
+        self.bump_render_version();
     }
 
     /// True if neither the live segment timeline nor the hydrated content
@@ -209,6 +224,7 @@ impl ChatMessage {
             Some(MessageSegment::Text(t)) => t.push_str(chunk),
             _ => self.segments.push(MessageSegment::Text(chunk.to_string())),
         }
+        self.bump_render_version();
     }
 
     /// Append a reasoning chunk to the segment timeline, coalescing with the
@@ -222,6 +238,7 @@ impl ChatMessage {
                 .segments
                 .push(MessageSegment::Reasoning(chunk.to_string())),
         }
+        self.bump_render_version();
     }
 
     pub fn push_tool_start(&mut self, name: impl Into<String>) {
@@ -244,6 +261,7 @@ impl ChatMessage {
             elided_lines: 0,
             elapsed_ms: None,
         });
+        self.bump_render_version();
     }
 
     /// Mark the most recent in-progress ToolCall with this name as done.
@@ -281,6 +299,7 @@ impl ChatMessage {
                     *rm = result_meta;
                     *el = elided_lines;
                     *em = elapsed_ms;
+                    self.bump_render_version();
                     return;
                 }
             }
@@ -1120,6 +1139,33 @@ mod tests {
             MessageSegment::Reasoning(r) => assert_eq!(r, "after tool"),
             other => panic!("expected reasoning, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn chat_message_render_version_bumps_on_mutation() {
+        let mut m = ChatMessage::new(ChatRole::Agent, "");
+        let initial = m.render_version();
+
+        m.append_text("hello");
+        assert!(m.render_version() > initial);
+        let after_text = m.render_version();
+
+        m.append_reasoning("thinking");
+        assert!(m.render_version() > after_text);
+        let after_reasoning = m.render_version();
+
+        m.push_tool_start("bash");
+        assert!(m.render_version() > after_reasoning);
+        let after_tool_start = m.render_version();
+
+        m.finish_tool("bash", true);
+        assert!(m.render_version() > after_tool_start);
+    }
+
+    #[test]
+    fn chat_message_new_starts_at_zero_render_version() {
+        let m = ChatMessage::new(ChatRole::User, "hello");
+        assert_eq!(m.render_version(), 0);
     }
 
     #[test]
