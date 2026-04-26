@@ -42,6 +42,9 @@ pub struct Config {
 
     #[serde(default)]
     pub gateway: Option<GatewayConfig>,
+
+    #[serde(default)]
+    pub keybinds: KeybindsConfig,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -60,6 +63,37 @@ impl Default for TuiConfig {
     fn default() -> Self {
         Self {
             theme: default_theme_name(),
+        }
+    }
+}
+
+/// Raw, unparsed key-binding strings the user can override in
+/// `~/.vulcan/config.toml`. The TUI parses these into
+/// `crate::tui::keybinds::Keybinds` at startup; unparseable values fall
+/// back to defaults with a tracing warning, so a typo never silently
+/// drops a binding (YYC-90).
+#[derive(Debug, Deserialize, Clone)]
+pub struct KeybindsConfig {
+    #[serde(default = "default_key_sessions")]
+    pub toggle_sessions: String,
+    #[serde(default = "default_key_tools")]
+    pub toggle_tools: String,
+    #[serde(default = "default_key_reasoning")]
+    pub toggle_reasoning: String,
+    #[serde(default = "default_key_cancel")]
+    pub cancel: String,
+    #[serde(default = "default_key_queue_drop")]
+    pub queue_drop: String,
+}
+
+impl Default for KeybindsConfig {
+    fn default() -> Self {
+        Self {
+            toggle_sessions: default_key_sessions(),
+            toggle_tools: default_key_tools(),
+            toggle_reasoning: default_key_reasoning(),
+            cancel: default_key_cancel(),
+            queue_drop: default_key_queue_drop(),
         }
     }
 }
@@ -100,6 +134,22 @@ fn default_gateway_max_concurrent_lanes() -> usize {
 }
 fn default_gateway_outbound_max_attempts() -> u32 {
     5
+}
+
+fn default_key_sessions() -> String {
+    "Ctrl+K".into()
+}
+fn default_key_tools() -> String {
+    "Ctrl+T".into()
+}
+fn default_key_reasoning() -> String {
+    "Ctrl+R".into()
+}
+fn default_key_cancel() -> String {
+    "Ctrl+C".into()
+}
+fn default_key_queue_drop() -> String {
+    "Ctrl+Backspace".into()
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -316,6 +366,7 @@ impl Default for Config {
             embeddings: EmbeddingsConfig::default(),
             tui: TuiConfig::default(),
             gateway: None,
+            keybinds: KeybindsConfig::default(),
         }
     }
 }
@@ -451,6 +502,29 @@ debug = "wire"
         assert_eq!(cfg.tools.native_enforcement, NativeEnforcement::Block);
         let cfg: Config = toml::from_str("[tools]\n").expect("empty tools parses");
         assert_eq!(cfg.tools.native_enforcement, NativeEnforcement::Block);
+    }
+
+    #[test]
+    fn keybinds_block_parses_with_overrides() {
+        let config: Config = toml::from_str(
+            r#"
+[keybinds]
+toggle_tools = "F2"
+"#,
+        )
+        .expect("config should parse");
+
+        assert_eq!(config.keybinds.toggle_tools, "F2");
+        assert_eq!(config.keybinds.toggle_sessions, "Ctrl+K");
+        assert_eq!(config.keybinds.cancel, "Ctrl+C");
+    }
+
+    #[test]
+    fn keybinds_default_when_section_missing() {
+        let config: Config = toml::from_str("").expect("empty toml is valid");
+        let defaults = KeybindsConfig::default();
+        assert_eq!(config.keybinds.toggle_tools, defaults.toggle_tools);
+        assert_eq!(config.keybinds.toggle_sessions, defaults.toggle_sessions);
     }
 
     #[test]

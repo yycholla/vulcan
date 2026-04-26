@@ -328,7 +328,7 @@ pub fn prompt_row(
     area: Rect,
     mode: &str,
     input: &str,
-    hints: &[(&str, &str)],
+    hints: &[(String, String)],
     model_status: &str,
     // capacity_ratio (YYC-60): current context / max. Drives the
     // model_status fg color: ≤70% body_fg, 70-90% yellow, >90% red.

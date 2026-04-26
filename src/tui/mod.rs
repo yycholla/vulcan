@@ -21,6 +21,7 @@ use crate::pause::{self, AgentResume, PauseKind};
 use crate::provider::StreamEvent;
 
 pub mod chat_render;
+pub mod keybinds;
 pub mod markdown;
 pub mod state;
 pub mod theme;
@@ -469,7 +470,8 @@ pub async fn run_tui(config: &Config, resume: ResumeTarget) -> Result<()> {
         config.provider.model.clone(),
         config.provider.max_context as u32,
     )
-    .with_theme(Theme::from_name(&config.tui.theme));
+    .with_theme(Theme::from_name(&config.tui.theme))
+    .with_keybinds(keybinds::Keybinds::from_config(&config.keybinds));
     app.audit_log = Some(audit_buf);
     // YYC-66: clone the agent's diff sink so the TUI can render real edits.
     // YYC-67: pull catalog pricing for the cost estimate.
@@ -806,6 +808,33 @@ pub async fn run_tui(config: &Config, resume: ResumeTarget) -> Result<()> {
                                     }
                                 }
 
+                                // ── configurable bindings (YYC-90).
+                                // Run before the legacy Ctrl-modifier match
+                                // so user overrides win. The session-picker
+                                // bind only fires when the slash menu isn't
+                                // active, so Ctrl+K nav still works while
+                                // typing a `/command`. Cancel and queue_drop
+                                // stay in the hardcoded match below because
+                                // they carry compound behavior (pending_quit,
+                                // Shift-to-clear) that doesn't reduce to a
+                                // simple binding.
+                                if app.keybinds.toggle_tools.matches(&key) {
+                                    app.view = View::TradingFloor;
+                                    continue;
+                                }
+                                if app.keybinds.toggle_sessions.matches(&key)
+                                    && !app.input.starts_with('/')
+                                {
+                                    refresh_sessions(&agent, &mut app).await;
+                                    app.show_session_picker = true;
+                                    app.session_picker_selection = 0;
+                                    continue;
+                                }
+                                if app.keybinds.toggle_reasoning.matches(&key) {
+                                    app.show_reasoning = !app.show_reasoning;
+                                    continue;
+                                }
+
                                 // ── view switching: Ctrl+1..5
                                 if key.modifiers.contains(KeyModifiers::CONTROL) {
                                     match key.code {
@@ -844,10 +873,6 @@ pub async fn run_tui(config: &Config, resume: ResumeTarget) -> Result<()> {
                                                     continue;
                                                 }
                                             }
-                                        }
-                                        KeyCode::Char('r') => {
-                                            app.show_reasoning = !app.show_reasoning;
-                                            continue;
                                         }
                                         KeyCode::Char('c') => {
                                             if pending_quit {
