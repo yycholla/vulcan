@@ -25,11 +25,10 @@ impl ContextManager {
 
     /// Record token usage from an LLM response
     pub fn record_usage(&mut self, prompt_tokens: usize, completion_tokens: usize) {
-        // Simple moving estimate — total is approximate
-        self.current_tokens = self
-            .current_tokens
-            .saturating_add(completion_tokens)
-            .max(prompt_tokens);
+        // Provider usage already includes the prompt sent on this request.
+        // Replace the previous estimate instead of adding to it, or a compacted
+        // summary gets counted again on the next response.
+        self.current_tokens = prompt_tokens.saturating_add(completion_tokens);
     }
 
     /// Check if context should be compacted based on token usage
@@ -111,5 +110,97 @@ impl ContextManager {
     fn estimate_tokens_str(&self, text: &str) -> usize {
         // Rough estimate: ~4 characters per token for English text
         text.len() / 4 + 1
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn manager(max_context: usize) -> ContextManager {
+        ContextManager {
+            max_context,
+            current_tokens: 0,
+            summary: None,
+            reserved_tokens: 0,
+            trigger_ratio: 0.85,
+        }
+    }
+
+    fn user_with_len(len: usize) -> Message {
+        Message::User {
+            content: "x".repeat(len),
+        }
+    }
+
+    fn user(content: impl Into<String>) -> Message {
+        Message::User {
+            content: content.into(),
+        }
+    }
+
+    #[test]
+    fn compaction_triggers_at_ratio_boundary() {
+        let ctx = manager(100);
+
+        assert!(!ctx.should_compact(&[user_with_len(335)]));
+        assert!(ctx.should_compact(&[user_with_len(336)]));
+        assert!(ctx.should_compact(&[user_with_len(340)]));
+    }
+
+    #[test]
+    fn messages_below_trigger_ratio_are_never_modified() {
+        let ctx = manager(100);
+        let messages = vec![user("small prompt")];
+        let before = format!("{messages:?}");
+
+        assert!(!ctx.should_compact(&messages));
+        let after = format!("{messages:?}");
+
+        assert_eq!(before, after);
+        assert!(ctx.summary.is_none());
+    }
+
+    #[test]
+    fn compact_summary_preserves_latest_user_input() {
+        let mut ctx = manager(100);
+        let messages = vec![
+            user("first topic"),
+            Message::Assistant {
+                content: Some("assistant answer".into()),
+                tool_calls: None,
+                reasoning_content: None,
+            },
+            user("latest user request"),
+        ];
+
+        let summary = ctx.compact(&messages).unwrap();
+
+        assert!(summary.contains("latest user request"));
+    }
+
+    #[test]
+    fn record_usage_after_compaction_does_not_double_count_summary_tokens() {
+        let mut ctx = manager(1000);
+        let summary = ctx.compact(&[user("latest user request")]).unwrap();
+        let summary_tokens = ctx.estimate_tokens_str(&summary);
+        assert_eq!(ctx.current_tokens, summary_tokens);
+
+        ctx.record_usage(10, 5);
+
+        assert_eq!(ctx.current_tokens, 15);
+    }
+
+    #[test]
+    fn long_history_heuristic_fires_only_once_per_session() {
+        let mut ctx = manager(1_000_000);
+        let messages = (0..51)
+            .map(|n| user(format!("turn {n}")))
+            .collect::<Vec<_>>();
+
+        assert!(ctx.should_compact(&messages));
+        ctx.compact(&messages).unwrap();
+
+        assert!(!ctx.should_compact(&messages));
     }
 }
