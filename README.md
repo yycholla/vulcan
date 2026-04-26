@@ -171,6 +171,9 @@ model = "deepseek/deepseek-v4-flash"
 | `gateway.api_token` | unset | Bearer token required for `/v1/*` gateway routes |
 | `gateway.idle_ttl_secs` | `1800` | Per-lane agent idle eviction timeout |
 | `gateway.outbound_max_attempts` | `5` | Outbound delivery retries before failure |
+| `gateway.discord.enabled` | `false` | Enable Discord gateway connector |
+| `gateway.discord.bot_token` | unset | Discord bot token for Serenity |
+| `gateway.discord.allow_bots` | `false` | Allow bot-authored Discord messages into the agent queue |
 | `tools.yolo_mode` | `false` | Skip safety confirmations |
 | `compaction.enabled` | `true` | Auto-compress context at threshold |
 | `compaction.trigger_ratio` | `0.85` | Compaction trigger ratio |
@@ -285,9 +288,9 @@ cargo test <name>         # Run a single test by name
 
 ## Roadmap
 
-**Current** — core agent, multi-view TUI, SQLite persistence with FTS5, tool system (file/shell/pty/web), hook system (safety/audit/skills), provider model catalog, streaming with reasoning passthrough, inline segment timeline, prompt queue, live cost/telemetry, edit diffs, session lineage.
+**Current** — core agent, multi-view TUI, SQLite persistence with FTS5, tool system (file/shell/pty/web), hook system (safety/audit/skills), provider model catalog, streaming with reasoning passthrough, inline segment timeline, prompt queue, live cost/telemetry, edit diffs, session lineage, gateway daemon, Discord connector scaffold.
 
-**Planned** — context compaction with LLM summarization, external hook handlers (Python/JS), platform connectors (Discord, Telegram), gateway daemon, cron scheduling, sub-agent orchestration.
+**Planned** — context compaction with LLM summarization, external hook handlers (Python/JS), Telegram connector, richer Discord controls, cron scheduling, sub-agent orchestration.
 
 Tracked in [Linear — Vulcan: Rust AI Agent](https://linear.app/yycholla/project/vulcan-rust-ai-agent-37bc34d04e48).
 

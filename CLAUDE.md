@@ -52,7 +52,7 @@ Three load-bearing invariants:
 
 **Provider** is OpenAI-compatible (`src/provider/openai.rs`). Both buffered (`chat`) and streaming (`chat_stream`) paths are honored by every hook event; if you add a new event, wire it into both.
 
-**Gateway daemon mode** is the Phase 2 foundation surface under `src/gateway/`. Reading order: `src/gateway/mod.rs` → `src/gateway/lane.rs` → `src/gateway/agent_map.rs` → `src/gateway/queue.rs` → `src/gateway/server.rs`. It owns Axum HTTP routes, durable SQLite inbound/outbound queues, per-lane long-lived agents with idle eviction, and the loopback platform scaffold. Telegram/Discord platform adapters build on the same `PlatformRegistry` and queue contracts.
+**Gateway daemon mode** is the Phase 2 foundation surface under `src/gateway/`. Reading order: `src/gateway/mod.rs` → `src/gateway/lane.rs` → `src/gateway/agent_map.rs` → `src/gateway/queue.rs` → `src/gateway/server.rs`. It owns Axum HTTP routes, durable SQLite inbound/outbound queues, per-lane long-lived agents with idle eviction, loopback test platform, and the Serenity-based Discord connector. Telegram and richer Discord controls build on the same `PlatformRegistry` and queue contracts.
 
 ## Active naming wart
 

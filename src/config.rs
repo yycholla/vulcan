@@ -75,6 +75,18 @@ pub struct GatewayConfig {
     pub max_concurrent_lanes: usize,
     #[serde(default = "default_gateway_outbound_max_attempts")]
     pub outbound_max_attempts: u32,
+    #[serde(default)]
+    pub discord: DiscordConfig,
+}
+
+#[derive(Debug, Deserialize, Clone, Default)]
+pub struct DiscordConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub bot_token: String,
+    #[serde(default)]
+    pub allow_bots: bool,
 }
 
 fn default_gateway_bind() -> String {
@@ -424,6 +436,23 @@ debug = "wire"
         assert_eq!(g.idle_ttl_secs, 1800);
         assert_eq!(g.max_concurrent_lanes, 64);
         assert_eq!(g.outbound_max_attempts, 5);
+    }
+
+    #[test]
+    fn gateway_discord_section_parses_with_defaults() {
+        let toml = r#"
+            [gateway]
+            api_token = "test-token"
+
+            [gateway.discord]
+            enabled = true
+            bot_token = "discord-token"
+        "#;
+        let cfg: Config = toml::from_str(toml).expect("parse");
+        let discord = cfg.gateway.expect("gateway present").discord;
+        assert!(discord.enabled);
+        assert_eq!(discord.bot_token, "discord-token");
+        assert!(!discord.allow_bots);
     }
 
     #[test]

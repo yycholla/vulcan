@@ -4,6 +4,7 @@ use std::time::Duration;
 
 use crate::config::Config;
 use crate::gateway::agent_map::AgentMap;
+use crate::gateway::discord::DiscordPlatform;
 use crate::gateway::lane::{LaneKey, LaneRouter, from_closure};
 use crate::gateway::loopback::LoopbackPlatform;
 use crate::gateway::outbound::OutboundDispatcher;
@@ -16,6 +17,7 @@ use tokio::net::TcpListener;
 use tokio::task::JoinHandle;
 
 pub mod agent_map;
+pub mod discord;
 pub mod lane;
 pub mod loopback;
 pub mod outbound;
@@ -45,6 +47,12 @@ where
     let db = crate::memory::open_gateway_connection()?;
     let mut registry = PlatformRegistry::new();
     registry.register("loopback", Arc::new(LoopbackPlatform::default()));
+    if gateway.discord.enabled {
+        registry.register(
+            "discord",
+            Arc::new(DiscordPlatform::new(&gateway.discord.bot_token)?),
+        );
+    }
     let registry = Arc::new(registry);
     let agent_map = Arc::new(AgentMap::new(
         Arc::new(config),
@@ -90,7 +98,17 @@ where
     }
 
     let evictor = agent_map.spawn_evictor();
-    let outbound_dispatcher = OutboundDispatcher::new(Arc::clone(&outbound), Arc::clone(&registry)).spawn();
+    let outbound_dispatcher =
+        OutboundDispatcher::new(Arc::clone(&outbound), Arc::clone(&registry)).spawn();
+    let discord_dispatcher = if gateway.discord.enabled {
+        Some(DiscordPlatform::spawn_gateway_client(
+            gateway.discord.bot_token.clone(),
+            gateway.discord.allow_bots,
+            Arc::clone(&inbound),
+        )?)
+    } else {
+        None
+    };
     let inbound_dispatcher = spawn_inbound_dispatcher(
         Arc::clone(&inbound),
         Arc::clone(&outbound),
@@ -113,6 +131,9 @@ where
         .context("gateway server failed");
 
     inbound_dispatcher.abort();
+    if let Some(handle) = discord_dispatcher {
+        handle.abort();
+    }
     drop(outbound_dispatcher);
     drop(evictor);
 
@@ -217,6 +238,7 @@ mod tests {
             idle_ttl_secs: 1800,
             max_concurrent_lanes: 64,
             outbound_max_attempts: 5,
+            discord: crate::config::DiscordConfig::default(),
         });
         config
     }
