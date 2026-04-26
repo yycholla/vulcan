@@ -19,24 +19,25 @@ impl Palette {
     pub const GREEN: Color = Color::Rgb(0x3F, 0x7A, 0x4F);
 }
 
-/// Default body style — ink on paper.
+/// Default body style — terminal-default background.
 pub fn body() -> Style {
-    Style::default().fg(Palette::INK).bg(Palette::PAPER)
+    Style::default().fg(Palette::INK)
 }
 
-/// Inverse — paper on ink (used for header bars, ticker, mode pill).
+/// Bold emphasis for header bars and chrome. No background paint so
+/// the active terminal theme shows through.
 pub fn inverse() -> Style {
-    Style::default().fg(Palette::PAPER).bg(Palette::INK)
+    Style::default().fg(Palette::INK).add_modifier(Modifier::BOLD)
 }
 
 /// Muted body text.
 pub fn muted() -> Style {
-    Style::default().fg(Palette::MUTED).bg(Palette::PAPER)
+    Style::default().fg(Palette::MUTED)
 }
 
-/// Faint backdrop — used for inactive rails and reasoning trace.
+/// Inset trace style (reasoning, side rails).
 pub fn faint_bg() -> Style {
-    Style::default().fg(Palette::INK).bg(Palette::FAINT)
+    Style::default().fg(Palette::MUTED).add_modifier(Modifier::ITALIC)
 }
 
 /// Centralized style table — one entry per theming role.
@@ -119,7 +120,7 @@ impl Theme {
             heading_4: bold,
             heading_5: bold,
             heading_6: bold,
-            code_block: Style::default().fg(Color::White).bg(Color::Black),
+            code_block: Style::default().fg(Color::White),
             inline_code: Style::default().fg(Color::Cyan),
             link: Style::default().fg(Color::Blue).add_modifier(Modifier::UNDERLINED),
             blockquote: italic,
@@ -131,23 +132,23 @@ impl Theme {
         }
     }
 
-    /// Bauhaus / brutalist palette — formalizes today's hardcoded look.
-    /// Cream paper, ink black, primary accents.
+    /// Bauhaus / brutalist foreground palette. Backgrounds inherit from the
+    /// terminal so copy-paste behaves naturally and OS theming wins.
     pub fn default_light() -> Self {
-        let body = Style::default().fg(Palette::INK).bg(Palette::PAPER);
+        let body = Style::default().fg(Palette::INK);
         let bold = body.add_modifier(Modifier::BOLD);
         let italic = body.add_modifier(Modifier::ITALIC);
         Self {
             user: body,
             assistant: body,
-            system: Style::default().fg(Palette::BLUE).bg(Palette::PAPER),
-            tool_call: Style::default().fg(Palette::YELLOW).bg(Palette::PAPER),
-            tool_result: Style::default().fg(Palette::GREEN).bg(Palette::PAPER),
-            error: Style::default().fg(Palette::RED).bg(Palette::PAPER).add_modifier(Modifier::BOLD),
-            success: Style::default().fg(Palette::GREEN).bg(Palette::PAPER),
-            muted: Style::default().fg(Palette::MUTED).bg(Palette::PAPER),
-            accent: Style::default().fg(Palette::RED).bg(Palette::PAPER),
-            border: Style::default().fg(Palette::INK).bg(Palette::PAPER),
+            system: Style::default().fg(Palette::BLUE),
+            tool_call: Style::default().fg(Palette::YELLOW),
+            tool_result: Style::default().fg(Palette::GREEN),
+            error: Style::default().fg(Palette::RED).add_modifier(Modifier::BOLD),
+            success: Style::default().fg(Palette::GREEN),
+            muted: Style::default().fg(Palette::MUTED),
+            accent: Style::default().fg(Palette::RED),
+            border: Style::default().fg(Palette::INK),
 
             heading_1: bold,
             heading_2: bold,
@@ -155,22 +156,21 @@ impl Theme {
             heading_4: bold,
             heading_5: bold,
             heading_6: bold,
-            code_block: Style::default().fg(Palette::INK).bg(Palette::FAINT),
-            inline_code: Style::default().fg(Palette::RED).bg(Palette::FAINT),
-            link: Style::default().fg(Palette::BLUE).bg(Palette::PAPER).add_modifier(Modifier::UNDERLINED),
+            code_block: Style::default().fg(Palette::INK),
+            inline_code: Style::default().fg(Palette::RED),
+            link: Style::default().fg(Palette::BLUE).add_modifier(Modifier::UNDERLINED),
             blockquote: italic,
-            list_marker: Style::default().fg(Palette::BLUE).bg(Palette::PAPER),
+            list_marker: Style::default().fg(Palette::BLUE),
             strikethrough: body.add_modifier(Modifier::CROSSED_OUT),
 
-            body_bg: Palette::PAPER,
+            body_bg: Color::Reset,
             body_fg: Palette::INK,
         }
     }
 
-    /// Canonical Dracula palette — https://draculatheme.com/contribute
+    /// Canonical Dracula foreground palette — https://draculatheme.com/contribute
+    /// Backgrounds inherit from the terminal so copy-paste behaves naturally.
     pub fn dracula() -> Self {
-        const BG: Color = Color::Rgb(0x28, 0x2a, 0x36);
-        const CURRENT_LINE: Color = Color::Rgb(0x44, 0x47, 0x5a);
         const FG: Color = Color::Rgb(0xf8, 0xf8, 0xf2);
         const COMMENT: Color = Color::Rgb(0x62, 0x72, 0xa4);
         const CYAN: Color = Color::Rgb(0x8b, 0xe9, 0xfd);
@@ -181,19 +181,19 @@ impl Theme {
         const RED: Color = Color::Rgb(0xff, 0x55, 0x55);
         const YELLOW: Color = Color::Rgb(0xf1, 0xfa, 0x8c);
 
-        let body = Style::default().fg(FG).bg(BG);
-        let bold_pink = Style::default().fg(PINK).bg(BG).add_modifier(Modifier::BOLD);
+        let body = Style::default().fg(FG);
+        let bold_pink = Style::default().fg(PINK).add_modifier(Modifier::BOLD);
         Self {
             user: body,
             assistant: body,
-            system: Style::default().fg(CYAN).bg(BG),
-            tool_call: Style::default().fg(YELLOW).bg(BG),
-            tool_result: Style::default().fg(GREEN).bg(BG),
-            error: Style::default().fg(RED).bg(BG).add_modifier(Modifier::BOLD),
-            success: Style::default().fg(GREEN).bg(BG),
-            muted: Style::default().fg(COMMENT).bg(BG),
-            accent: Style::default().fg(PURPLE).bg(BG),
-            border: Style::default().fg(COMMENT).bg(BG),
+            system: Style::default().fg(CYAN),
+            tool_call: Style::default().fg(YELLOW),
+            tool_result: Style::default().fg(GREEN),
+            error: Style::default().fg(RED).add_modifier(Modifier::BOLD),
+            success: Style::default().fg(GREEN),
+            muted: Style::default().fg(COMMENT),
+            accent: Style::default().fg(PURPLE),
+            border: Style::default().fg(COMMENT),
 
             heading_1: bold_pink,
             heading_2: bold_pink,
@@ -201,14 +201,14 @@ impl Theme {
             heading_4: bold_pink,
             heading_5: bold_pink,
             heading_6: bold_pink,
-            code_block: Style::default().fg(FG).bg(CURRENT_LINE),
-            inline_code: Style::default().fg(ORANGE).bg(CURRENT_LINE),
-            link: Style::default().fg(CYAN).bg(BG).add_modifier(Modifier::UNDERLINED),
-            blockquote: Style::default().fg(COMMENT).bg(BG).add_modifier(Modifier::ITALIC),
-            list_marker: Style::default().fg(PURPLE).bg(BG),
+            code_block: Style::default().fg(FG),
+            inline_code: Style::default().fg(ORANGE),
+            link: Style::default().fg(CYAN).add_modifier(Modifier::UNDERLINED),
+            blockquote: Style::default().fg(COMMENT).add_modifier(Modifier::ITALIC),
+            list_marker: Style::default().fg(PURPLE),
             strikethrough: body.add_modifier(Modifier::CROSSED_OUT),
 
-            body_bg: BG,
+            body_bg: Color::Reset,
             body_fg: FG,
         }
     }
@@ -226,16 +226,15 @@ mod theme_tests {
     }
 
     #[test]
-    fn from_name_default_light_returns_paper_bg() {
-        let t = Theme::from_name("default-light");
-        // default-light formalizes today's Bauhaus palette.
-        assert_eq!(t.body_bg, Palette::PAPER);
-    }
-
-    #[test]
-    fn from_name_dracula_returns_dracula_bg() {
-        let t = Theme::from_name("dracula");
-        assert_eq!(t.body_bg, Color::Rgb(0x28, 0x2a, 0x36));
+    fn all_themes_inherit_terminal_bg() {
+        for name in ["system", "default-light", "dracula"] {
+            let t = Theme::from_name(name);
+            assert_eq!(
+                t.body_bg,
+                Color::Reset,
+                "{name} must not paint a background"
+            );
+        }
     }
 
     #[test]

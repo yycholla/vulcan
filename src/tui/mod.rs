@@ -29,7 +29,7 @@ pub mod views;
 pub mod widgets;
 
 use state::{AppState, ChatMessage, ChatRole, SessionStatus};
-use theme::{Palette, Theme, body};
+use theme::{Theme, body};
 use views::{View, render_view};
 
 const STREAM_FRAME_BUDGET: Duration = Duration::from_millis(16);
@@ -1396,14 +1396,8 @@ fn draw_palette(
             // YYC-70: highlight the active row by swapping fg/bg of accent
             // (gives a visible selection bar regardless of active theme).
             let (prefix, name_style, desc_style) = if is_active {
-                let active_fg = theme.accent.bg.unwrap_or(theme.body_bg);
-                let active_bg = theme.accent.fg.unwrap_or(theme.body_fg);
-                let active_style = Style::default().fg(active_fg).bg(active_bg);
-                (
-                    "▸ ",
-                    active_style.add_modifier(Modifier::BOLD),
-                    active_style,
-                )
+                let active_style = theme.accent.add_modifier(Modifier::BOLD);
+                ("▸ ", active_style, active_style)
             } else {
                 (
                     "  ",
@@ -1436,13 +1430,6 @@ fn draw_session_picker(f: &mut ratatui::Frame, area: Rect, app: &AppState) {
     if box_area.height < 4 {
         return;
     }
-
-    // Fill the box with solid theme-bg to obscure the view behind.
-    let fill_bg = rect_with_border(box_area, 0);
-    f.render_widget(
-        Paragraph::new(Line::from("")).style(Style::default().bg(theme.body_bg)),
-        fill_bg,
-    );
 
     // Title bar
     let bar = Rect {
@@ -1490,13 +1477,6 @@ fn draw_session_picker(f: &mut ratatui::Frame, area: Rect, app: &AppState) {
             .min(app.sessions.len().saturating_sub(1));
         for (i, s) in app.sessions.iter().enumerate() {
             let is_active = i == active;
-            // YYC-52: active rows get a subtle highlight bg via FAINT;
-            // inactive rows sit on the theme body bg.
-            let bg = if is_active {
-                Palette::FAINT
-            } else {
-                theme.body_bg
-            };
             let marker = if is_active { "▸ " } else { "  " };
             let status_style = match s.status {
                 SessionStatus::Live => theme.success,
@@ -1507,7 +1487,6 @@ fn draw_session_picker(f: &mut ratatui::Frame, area: Rect, app: &AppState) {
                 SessionStatus::Saved => "saved",
             };
 
-            // Format the date/time
             let dt = chrono::DateTime::from_timestamp(s.last_active, 0)
                 .map(|d| {
                     d.with_timezone(&chrono::Local)
@@ -1518,41 +1497,30 @@ fn draw_session_picker(f: &mut ratatui::Frame, area: Rect, app: &AppState) {
 
             let name_style = Style::default()
                 .fg(theme.body_fg)
-                .bg(bg)
                 .add_modifier(if is_active {
                     Modifier::BOLD
                 } else {
                     Modifier::empty()
                 });
-            let meta_style = theme.muted.bg(bg);
 
             lines.push(Line::from(vec![
                 Span::styled(marker, name_style.add_modifier(Modifier::BOLD)),
-                Span::styled("█ ", status_style.bg(bg)),
-                Span::styled(format!("{:<12}", short_id(&s.id)), name_style.clone()),
-                Span::styled(format!("{:>4}m", s.message_count), meta_style),
-                Span::styled(
-                    format!("  {} ", dt),
-                    theme.muted.bg(bg),
-                ),
+                Span::styled("█ ", status_style),
+                Span::styled(format!("{:<12}", short_id(&s.id)), name_style),
+                Span::styled(format!("{:>4}m", s.message_count), theme.muted),
+                Span::styled(format!("  {} ", dt), theme.muted),
                 Span::styled(
                     status_label,
-                    status_style.bg(bg).add_modifier(Modifier::BOLD),
+                    status_style.add_modifier(Modifier::BOLD),
                 ),
             ]));
 
-            // Preview synopsis from first user message, if available.
             if let Some(preview) = &s.preview {
                 lines.push(Line::from(vec![
-                    // Invisible spacer — fg=bg so the marker column stays
-                    // blank but the row keeps its background fill.
-                    Span::styled(
-                        if is_active { "▸ " } else { "  " },
-                        Style::default().fg(bg).bg(bg),
-                    ),
+                    Span::raw("  "),
                     Span::styled(
                         format!("  {}", preview),
-                        theme.muted.bg(bg).add_modifier(Modifier::DIM),
+                        theme.muted.add_modifier(Modifier::DIM),
                     ),
                 ]));
             }
@@ -1571,16 +1539,6 @@ fn draw_session_picker(f: &mut ratatui::Frame, area: Rect, app: &AppState) {
 
     // Draw a border around the whole thing
     draw_picker_border(f, box_area, theme);
-}
-
-/// Fill the interior of a bordered rect. `border_w` pixels from each edge.
-fn rect_with_border(r: Rect, border_w: u16) -> Rect {
-    Rect {
-        x: r.x + border_w,
-        y: r.y + border_w,
-        width: r.width.saturating_sub(border_w * 2),
-        height: r.height.saturating_sub(border_w * 2),
-    }
 }
 
 /// Simple border drawn with box-drawing characters.
