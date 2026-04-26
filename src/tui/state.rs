@@ -540,12 +540,19 @@ pub struct AppState {
     /// Index into `sessions` for the highlighted row in the picker.
     pub session_picker_selection: usize,
 
-    /// Model picker overlay (YYC-97). Opened by `/model` with no args;
-    /// items are populated from the active provider's catalog at open
-    /// time. Selecting a row triggers `Agent::switch_model`.
+    /// Model picker overlay (YYC-97 → YYC-101 hierarchical). Opened by
+    /// `/model` with no args; items are populated from the active
+    /// provider's catalog at open time. Tree columns drill
+    /// lab → series → version. `Enter` triggers `Agent::switch_model`.
     pub show_model_picker: bool,
-    pub model_picker_selection: usize,
+    /// Source catalog for the picker; rebuilt each open.
     pub model_picker_items: Vec<crate::provider::catalog::ModelInfo>,
+    /// Hierarchical tree built from `model_picker_items`.
+    pub model_picker_tree: super::model_picker::ModelTree,
+    /// Selection index per drilled column.
+    pub model_picker_path: Vec<usize>,
+    /// Which column currently has focus (0 = column 0, etc.).
+    pub model_picker_focus: usize,
 
     /// Provider picker overlay (YYC-97). Opened by `/provider` with no
     /// args; items are the legacy `[provider]` block followed by named
@@ -663,8 +670,10 @@ impl AppState {
             session_picker_selection: 0,
 
             show_model_picker: false,
-            model_picker_selection: 0,
             model_picker_items: Vec::new(),
+            model_picker_tree: super::model_picker::ModelTree::default(),
+            model_picker_path: Vec::new(),
+            model_picker_focus: 0,
 
             show_provider_picker: false,
             provider_picker_selection: 0,

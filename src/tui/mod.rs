@@ -9,7 +9,7 @@ use ratatui::{
     prelude::Position,
     style::{Modifier, Style},
     text::{Line, Span},
-    widgets::Paragraph,
+    widgets::{Paragraph, Wrap},
 };
 use tokio::sync::{Mutex, mpsc};
 
@@ -23,6 +23,7 @@ use crate::provider::StreamEvent;
 pub mod chat_render;
 pub mod keybinds;
 pub mod markdown;
+pub mod model_picker;
 pub mod state;
 pub mod theme;
 pub mod views;
@@ -786,7 +787,8 @@ pub async fn run_tui(config: &Config, resume: ResumeTarget) -> Result<()> {
             continue;
         }
 
-        // ── Model picker overlay (YYC-97): intercept input until dismissed.
+        // ── Hierarchical model picker (YYC-101): miller columns,
+        // hjkl drill-down. Intercepts input until dismissed.
         if app.show_model_picker {
             tokio::select! {
                 ev = key_rx.recv() => {
@@ -794,51 +796,76 @@ pub async fn run_tui(config: &Config, resume: ResumeTarget) -> Result<()> {
                         Some(KeyEv::Press(event)) => {
                             if let Event::Key(key) = event {
                                 if key.kind == KeyEventKind::Press {
+                                    let mut commit_id: Option<String> = None;
+                                    let mut close = false;
                                     match key.code {
                                         KeyCode::Up | KeyCode::Char('k') => {
-                                            app.model_picker_selection = app.model_picker_selection.saturating_sub(1);
+                                            picker_move(&mut app, -1);
                                         }
                                         KeyCode::Down | KeyCode::Char('j') => {
-                                            let max = app.model_picker_items.len().saturating_sub(1);
-                                            app.model_picker_selection = app.model_picker_selection.saturating_add(1).min(max);
+                                            picker_move(&mut app, 1);
+                                        }
+                                        KeyCode::Left | KeyCode::Char('h') => {
+                                            if app.model_picker_focus == 0 {
+                                                close = true;
+                                            } else {
+                                                app.model_picker_focus -= 1;
+                                                app.model_picker_path
+                                                    .truncate(app.model_picker_focus + 1);
+                                            }
+                                        }
+                                        KeyCode::Right | KeyCode::Char('l') => {
+                                            if let Some(id) = picker_drill_or_commit(&mut app)
+                                            {
+                                                commit_id = Some(id);
+                                            }
                                         }
                                         KeyCode::Enter => {
-                                            let idx = app.model_picker_selection.min(app.model_picker_items.len().saturating_sub(1));
-                                            if let Some(picked) = app.model_picker_items.get(idx).cloned() {
-                                                let result = {
-                                                    let mut a = agent.lock().await;
-                                                    a.switch_model(&picked.id).await
-                                                };
-                                                match result {
-                                                    Ok(selection) => {
-                                                        app.model_label = selection.model.id.clone();
-                                                        app.token_max = selection.max_context as u32;
-                                                        app.pricing = selection.pricing;
-                                                        app.messages.push(ChatMessage {
-                                                            role: ChatRole::System,
-                                                            content: format!(
-                                                                "Model switched to {} · context {}",
-                                                                app.model_label,
-                                                                crate::tui::state::format_thousands(app.token_max),
-                                                            ),
-                                                            ..Default::default()
-                                                        });
-                                                    }
-                                                    Err(e) => {
-                                                        app.messages.push(ChatMessage {
-                                                            role: ChatRole::System,
-                                                            content: format!("Model switch failed: {e}"),
-                                                            ..Default::default()
-                                                        });
-                                                    }
-                                                }
+                                            if let Some(id) = picker_commit_current(&app) {
+                                                commit_id = Some(id);
                                             }
-                                            app.show_model_picker = false;
                                         }
-                                        KeyCode::Esc => {
-                                            app.show_model_picker = false;
-                                        }
+                                        KeyCode::Esc | KeyCode::Char('q') => close = true,
                                         _ => {}
+                                    }
+                                    if let Some(id) = commit_id {
+                                        let result = {
+                                            let mut a = agent.lock().await;
+                                            a.switch_model(&id).await
+                                        };
+                                        match result {
+                                            Ok(selection) => {
+                                                app.model_label =
+                                                    selection.model.id.clone();
+                                                app.token_max =
+                                                    selection.max_context as u32;
+                                                app.pricing = selection.pricing;
+                                                app.messages.push(ChatMessage {
+                                                    role: ChatRole::System,
+                                                    content: format!(
+                                                        "Model switched to {} · context {}",
+                                                        app.model_label,
+                                                        crate::tui::state::format_thousands(
+                                                            app.token_max
+                                                        ),
+                                                    ),
+                                                    ..Default::default()
+                                                });
+                                            }
+                                            Err(e) => {
+                                                app.messages.push(ChatMessage {
+                                                    role: ChatRole::System,
+                                                    content: format!("Model switch failed: {e}"),
+                                                    ..Default::default()
+                                                });
+                                            }
+                                        }
+                                        close = true;
+                                    }
+                                    if close {
+                                        app.show_model_picker = false;
+                                        app.model_picker_path.clear();
+                                        app.model_picker_focus = 0;
                                     }
                                 }
                             }
@@ -1531,12 +1558,29 @@ pub async fn run_tui(config: &Config, resume: ResumeTarget) -> Result<()> {
                                                                     });
                                                                 }
                                                                 Ok(models) => {
-                                                                    let active_idx = models
-                                                                        .iter()
-                                                                        .position(|m| m.id == active)
-                                                                        .unwrap_or(0);
+                                                                    let provider_label = {
+                                                                        let a = agent.lock().await;
+                                                                        a.active_profile()
+                                                                            .map(str::to_string)
+                                                                            .unwrap_or_else(|| "default".into())
+                                                                    };
+                                                                    let tree =
+                                                                        crate::tui::model_picker::build_model_tree(
+                                                                            &provider_label,
+                                                                            &models,
+                                                                        );
+                                                                    app.model_picker_path =
+                                                                        initial_path_for_active_model(
+                                                                            &tree,
+                                                                            &active,
+                                                                            &models,
+                                                                        );
+                                                                    app.model_picker_focus = app
+                                                                        .model_picker_path
+                                                                        .len()
+                                                                        .saturating_sub(1);
+                                                                    app.model_picker_tree = tree;
                                                                     app.model_picker_items = models;
-                                                                    app.model_picker_selection = active_idx;
                                                                     app.show_model_picker = true;
                                                                 }
                                                                 Err(e) => {
@@ -2079,77 +2123,330 @@ fn draw_model_picker(f: &mut ratatui::Frame, area: Rect, app: &AppState) {
         height: box_area.height.saturating_sub(2),
     };
 
-    let mut lines: Vec<Line<'static>> = Vec::new();
     if app.model_picker_items.is_empty() {
-        lines.push(Line::from(Span::styled(
-            "  No models in provider catalog.",
-            theme.muted,
-        )));
+        f.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                "  No models in provider catalog.",
+                theme.muted,
+            ))),
+            list_area,
+        );
+        draw_picker_border(f, box_area, theme);
+        return;
+    }
+
+    // Mini-files-style miller columns. The number of visible columns is
+    // capped to whatever the box width can fit (each column is roughly
+    // 20–28 chars). Always reserve the rightmost column for details.
+    let drilled_depth = app.model_picker_path.len();
+    let max_tree_depth = app.model_picker_tree.max_depth();
+    let total_columns = max_tree_depth.max(1) + 1; // +1 for details
+
+    let col_width = (list_area.width / total_columns as u16).max(16);
+    let cols: Vec<Rect> = (0..total_columns)
+        .map(|i| Rect {
+            x: list_area.x + i as u16 * col_width,
+            y: list_area.y,
+            width: col_width,
+            height: list_area.height,
+        })
+        .collect();
+
+    // Render each tree column.
+    for col_idx in 0..max_tree_depth {
+        let path_prefix: Vec<usize> = app
+            .model_picker_path
+            .iter()
+            .copied()
+            .take(col_idx)
+            .collect();
+        let nodes = app.model_picker_tree.column_at(col_idx, &path_prefix);
+        let selection = app
+            .model_picker_path
+            .get(col_idx)
+            .copied()
+            .unwrap_or(0)
+            .min(nodes.len().saturating_sub(1));
+        let is_focused = col_idx == app.model_picker_focus;
+        render_picker_column(f, cols[col_idx], nodes, selection, is_focused, theme);
+    }
+
+    // Details panel at the rightmost column.
+    let details_col = cols.last().copied().unwrap_or(list_area);
+    let detail_lines = build_picker_details(app);
+    f.render_widget(Paragraph::new(detail_lines).wrap(Wrap { trim: false }), details_col);
+
+    let hint = "  hjkl move · Enter select · Esc cancel  (drilled: column ";
+    let footer_line = format!(
+        "{hint}{}/{})",
+        app.model_picker_focus + 1,
+        max_tree_depth.max(1)
+    );
+    let footer_rect = Rect {
+        x: list_area.x,
+        y: list_area.y + list_area.height.saturating_sub(1),
+        width: list_area.width,
+        height: 1,
+    };
+    f.render_widget(
+        Paragraph::new(Line::from(Span::styled(footer_line, theme.muted))),
+        footer_rect,
+    );
+    let _ = drilled_depth; // reserved for future filter UI
+
+    draw_picker_border(f, box_area, theme);
+}
+
+fn render_picker_column(
+    f: &mut ratatui::Frame,
+    area: Rect,
+    nodes: &[crate::tui::model_picker::TreeNode],
+    selection: usize,
+    is_focused: bool,
+    theme: &Theme,
+) {
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    if nodes.is_empty() {
+        lines.push(Line::from(Span::styled("  ·", theme.muted)));
     } else {
-        let visible = list_area.height.saturating_sub(2) as usize;
-        let active = app
-            .model_picker_selection
-            .min(app.model_picker_items.len().saturating_sub(1));
-        let start = active.saturating_sub(visible.saturating_sub(1) / 2);
-        let end = (start + visible).min(app.model_picker_items.len());
-        for (i, m) in app.model_picker_items.iter().enumerate().take(end).skip(start) {
-            let is_active = i == active;
-            let marker = if is_active { "▸ " } else { "  " };
-            let context = if m.context_length > 0 {
-                crate::tui::state::format_thousands(m.context_length as u32)
+        let visible = area.height.saturating_sub(2) as usize;
+        let start = selection.saturating_sub(visible.saturating_sub(1) / 2);
+        let end = (start + visible).min(nodes.len());
+        for (i, node) in nodes.iter().enumerate().take(end).skip(start) {
+            let is_active = i == selection;
+            let marker = if is_active && is_focused {
+                "▸ "
+            } else if is_active {
+                "│ "
             } else {
-                "?".into()
+                "  "
             };
-            let mut flags = Vec::new();
-            if m.features.tools {
-                flags.push("tools");
+            let mut style = Style::default();
+            if is_active {
+                style = style.add_modifier(Modifier::BOLD);
+                if is_focused {
+                    style = if let Some(fg) = theme.accent.fg {
+                        style.fg(fg)
+                    } else {
+                        style.add_modifier(Modifier::REVERSED)
+                    };
+                }
             }
-            if m.features.reasoning {
-                flags.push("reasoning");
-            }
-            if m.features.vision {
-                flags.push("vision");
-            }
-            if m.features.json_mode {
-                flags.push("json");
-            }
-            let flag_str = if flags.is_empty() {
-                String::new()
+            let suffix = if node.children.is_empty() && node.model_index.is_some() {
+                ""
             } else {
-                format!(" · {}", flags.join(","))
+                "›"
             };
-            let row_style = Style::default()
-                .fg(theme.body_fg)
-                .add_modifier(if is_active {
-                    Modifier::BOLD
-                } else {
-                    Modifier::empty()
-                });
+            let label = trim_to_width(&node.label, area.width.saturating_sub(4) as usize);
             lines.push(Line::from(vec![
-                Span::styled(marker, row_style.add_modifier(Modifier::BOLD)),
-                Span::styled(m.id.clone(), row_style),
-                Span::styled(format!("  ctx {context}{flag_str}"), theme.muted),
+                Span::styled(marker, style),
+                Span::styled(label, style),
+                Span::styled(format!(" {suffix}"), theme.muted),
             ]));
         }
-        if start > 0 || end < app.model_picker_items.len() {
+        if start > 0 || end < nodes.len() {
             lines.push(Line::from(Span::styled(
-                format!(
-                    "  …showing {}–{} of {}",
-                    start + 1,
-                    end,
-                    app.model_picker_items.len()
-                ),
+                format!("  …{}/{}", end, nodes.len()),
                 theme.muted.add_modifier(Modifier::DIM),
             )));
         }
     }
+    f.render_widget(Paragraph::new(lines), area);
+}
 
-    let hint = "  ↑↓ navigate · Enter select · Esc cancel  ";
+fn build_picker_details(app: &AppState) -> Vec<Line<'static>> {
+    let theme = &app.theme;
+    let mut lines = Vec::new();
+    let leaf_idx = picker_current_leaf(&app.model_picker_tree, &app.model_picker_path);
+    let Some(idx) = leaf_idx else {
+        lines.push(Line::from(Span::styled(
+            "  drill in (l/→) for details",
+            theme.muted,
+        )));
+        return lines;
+    };
+    let Some(model) = app.model_picker_items.get(idx) else {
+        return lines;
+    };
+    lines.push(Line::from(Span::styled(
+        format!(" {}", model.id),
+        Style::default().add_modifier(Modifier::BOLD),
+    )));
     lines.push(Line::from(""));
-    lines.push(Line::from(Span::styled(hint, theme.muted)));
+    let ctx = if model.context_length > 0 {
+        crate::tui::state::format_thousands(model.context_length as u32)
+    } else {
+        "?".into()
+    };
+    lines.push(Line::from(Span::styled(
+        format!(" context  : {ctx}"),
+        theme.muted,
+    )));
+    let mut flags = Vec::new();
+    if model.features.tools {
+        flags.push("tools");
+    }
+    if model.features.reasoning {
+        flags.push("reasoning");
+    }
+    if model.features.vision {
+        flags.push("vision");
+    }
+    if model.features.json_mode {
+        flags.push("json");
+    }
+    let flag_str = if flags.is_empty() {
+        "(none reported)".to_string()
+    } else {
+        flags.join(", ")
+    };
+    lines.push(Line::from(Span::styled(
+        format!(" features : {flag_str}"),
+        theme.muted,
+    )));
+    if let Some(p) = &model.pricing {
+        lines.push(Line::from(Span::styled(
+            format!(
+                " pricing  : ${:.4}/1k in · ${:.4}/1k out",
+                p.input_per_token * 1000.0,
+                p.output_per_token * 1000.0,
+            ),
+            theme.muted,
+        )));
+    }
+    if let Some(top) = &model.top_provider {
+        lines.push(Line::from(Span::styled(
+            format!(" upstream : {top}"),
+            theme.muted,
+        )));
+    }
+    lines
+}
 
-    f.render_widget(Paragraph::new(lines), list_area);
-    draw_picker_border(f, box_area, theme);
+fn trim_to_width(s: &str, width: usize) -> String {
+    if width == 0 {
+        return String::new();
+    }
+    let chars: Vec<char> = s.chars().collect();
+    if chars.len() <= width {
+        return s.to_string();
+    }
+    let head: String = chars.iter().take(width.saturating_sub(1)).collect();
+    format!("{head}…")
+}
+
+fn picker_move(app: &mut AppState, delta: i32) {
+    let depth = app.model_picker_focus;
+    let path_prefix: Vec<usize> = app
+        .model_picker_path
+        .iter()
+        .copied()
+        .take(depth)
+        .collect();
+    let len = app
+        .model_picker_tree
+        .column_at(depth, &path_prefix)
+        .len();
+    if len == 0 {
+        return;
+    }
+    while app.model_picker_path.len() <= depth {
+        app.model_picker_path.push(0);
+    }
+    let cur = app.model_picker_path[depth] as i32 + delta;
+    let max = (len - 1) as i32;
+    app.model_picker_path[depth] = cur.clamp(0, max) as usize;
+    // Reset deeper selections — the active branch changed.
+    app.model_picker_path.truncate(depth + 1);
+}
+
+fn picker_drill_or_commit(app: &mut AppState) -> Option<String> {
+    let depth = app.model_picker_focus;
+    let path_prefix: Vec<usize> = app
+        .model_picker_path
+        .iter()
+        .copied()
+        .take(depth)
+        .collect();
+    let nodes = app
+        .model_picker_tree
+        .column_at(depth, &path_prefix)
+        .to_vec();
+    let sel = app.model_picker_path.get(depth).copied().unwrap_or(0);
+    let Some(node) = nodes.get(sel) else {
+        return None;
+    };
+    if node.children.is_empty() {
+        // Leaf — commit.
+        return node
+            .model_index
+            .and_then(|i| app.model_picker_items.get(i))
+            .map(|m| m.id.clone());
+    }
+    // Drill: focus next column, default selection 0.
+    while app.model_picker_path.len() <= depth + 1 {
+        app.model_picker_path.push(0);
+    }
+    app.model_picker_path[depth + 1] = 0;
+    app.model_picker_focus = depth + 1;
+    None
+}
+
+fn picker_commit_current(app: &AppState) -> Option<String> {
+    picker_current_leaf(&app.model_picker_tree, &app.model_picker_path)
+        .and_then(|i| app.model_picker_items.get(i))
+        .map(|m| m.id.clone())
+}
+
+fn picker_current_leaf(
+    tree: &crate::tui::model_picker::ModelTree,
+    path: &[usize],
+) -> Option<usize> {
+    let mut current: &[crate::tui::model_picker::TreeNode] = &tree.labs;
+    let mut leaf: Option<usize> = None;
+    for &idx in path {
+        let node = current.get(idx)?;
+        if node.children.is_empty() {
+            return node.model_index;
+        }
+        leaf = node.model_index;
+        current = &node.children;
+    }
+    // Path didn't reach a leaf — return last seen leaf marker (None for
+    // internal-only nodes).
+    leaf
+}
+
+fn initial_path_for_active_model(
+    tree: &crate::tui::model_picker::ModelTree,
+    active_id: &str,
+    items: &[crate::provider::catalog::ModelInfo],
+) -> Vec<usize> {
+    let target = items.iter().position(|m| m.id == active_id);
+    fn find_path(
+        nodes: &[crate::tui::model_picker::TreeNode],
+        target: Option<usize>,
+        path: &mut Vec<usize>,
+    ) -> bool {
+        for (i, node) in nodes.iter().enumerate() {
+            path.push(i);
+            if node.model_index.is_some() && node.model_index == target {
+                return true;
+            }
+            if find_path(&node.children, target, path) {
+                return true;
+            }
+            path.pop();
+        }
+        false
+    }
+    let mut path = Vec::new();
+    if !find_path(&tree.labs, target, &mut path) {
+        // No exact match — start from column 0 with no drilled selection.
+        path.clear();
+        path.push(0);
+    }
+    path
 }
 
 fn draw_provider_picker(f: &mut ratatui::Frame, area: Rect, app: &AppState) {
