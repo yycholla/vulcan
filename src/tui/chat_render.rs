@@ -198,7 +198,7 @@ impl ChatRenderStore {
                     }
                     MessageSegment::Text(text) if !text.is_empty() => {
                         text_emitted = true;
-                        push_markdown_body(&mut lines, text, accent, theme);
+                        push_markdown_body(&mut lines, text, accent, theme, options.width);
                     }
                     MessageSegment::Text(_) => {}
                 }
@@ -229,7 +229,7 @@ impl ChatRenderStore {
                     options.muted_style,
                 ));
             } else {
-                push_markdown_body(&mut lines, &message.content, accent, theme);
+                push_markdown_body(&mut lines, &message.content, accent, theme, options.width);
             }
         }
 
@@ -264,12 +264,60 @@ fn push_markdown_body(
     text: &str,
     accent: ratatui::style::Color,
     theme: &Theme,
+    width: u16,
 ) {
+    // YYC-104: pre-wrap each rendered markdown line so the `▎` accent
+    // bar stays on every visual row. Letting Paragraph::wrap handle it
+    // breaks the bar after the first row.
+    let inner_width = width.saturating_sub(2).max(1) as usize;
     for line in render_markdown(text, theme) {
-        let mut spans = vec![Span::styled("▎ ", Style::default().fg(accent))];
-        spans.extend(line.spans.into_iter());
-        lines.push(Line::from(spans));
+        for row in wrap_spans(line.spans, inner_width) {
+            let mut spans = vec![Span::styled("▎ ", Style::default().fg(accent))];
+            spans.extend(row.into_iter());
+            lines.push(Line::from(spans));
+        }
     }
+}
+
+/// Soft-wrap a sequence of spans into rows that each fit `width`
+/// columns. Splits inside spans when a span itself is wider than the
+/// remaining space; preserves per-span styles.
+fn wrap_spans(spans: Vec<Span<'static>>, width: usize) -> Vec<Vec<Span<'static>>> {
+    if width == 0 {
+        return vec![spans];
+    }
+    let mut rows: Vec<Vec<Span<'static>>> = vec![Vec::new()];
+    let mut col = 0usize;
+    for span in spans {
+        let style = span.style;
+        let chars: Vec<char> = span.content.chars().collect();
+        let mut idx = 0usize;
+        while idx < chars.len() {
+            let remaining = width.saturating_sub(col);
+            if remaining == 0 {
+                rows.push(Vec::new());
+                col = 0;
+                continue;
+            }
+            let take = chars.len() - idx;
+            let take = take.min(remaining);
+            let chunk: String = chars[idx..idx + take].iter().collect();
+            rows.last_mut().unwrap().push(Span::styled(chunk, style));
+            col += take;
+            idx += take;
+            if col >= width {
+                rows.push(Vec::new());
+                col = 0;
+            }
+        }
+    }
+    if rows.last().is_some_and(|r| r.is_empty()) {
+        rows.pop();
+    }
+    if rows.is_empty() {
+        rows.push(Vec::new());
+    }
+    rows
 }
 
 fn agent_placeholder(has_reasoning: bool, muted: Style) -> Line<'static> {
