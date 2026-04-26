@@ -46,7 +46,14 @@ pub async fn process_one(
     })
     .catch_unwind()
     .await
-    .unwrap_or_else(|_| Err(anyhow::anyhow!("agent panicked while running prompt")));
+    .unwrap_or_else(|payload| {
+        let msg = payload
+            .downcast_ref::<&'static str>()
+            .map(|s| (*s).to_string())
+            .or_else(|| payload.downcast_ref::<String>().cloned())
+            .unwrap_or_else(|| "<non-string panic payload>".to_string());
+        Err(anyhow::anyhow!("agent panicked while running prompt: {msg}"))
+    });
 
     match result {
         Ok(reply) => {
