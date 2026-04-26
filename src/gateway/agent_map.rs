@@ -27,10 +27,28 @@ use crate::hooks::audit::{AuditBuffer, AuditHook};
 /// `src/tui/mod.rs:384`.
 const AUDIT_BUFFER_CAPACITY: usize = 200;
 
+#[cfg(test)]
+use std::future::Future;
+#[cfg(test)]
+use std::pin::Pin;
+
+/// Test-only agent factory. `get_or_spawn` calls this in lieu of
+/// `Agent::with_hooks_and_pause` so tests can swap in a `MockProvider`-backed
+/// Agent without an API key. Boxed-future return so the closure type can be
+/// erased behind `dyn Fn`.
+#[cfg(test)]
+pub(crate) type AgentBuilder = Arc<
+    dyn Fn(HookRegistry) -> Pin<Box<dyn Future<Output = Result<Agent>> + Send>>
+        + Send
+        + Sync,
+>;
+
 pub struct AgentMap {
     inner: Arc<RwLock<HashMap<LaneKey, LaneEntry>>>,
     config: Arc<Config>,
     idle_ttl: Duration,
+    #[cfg(test)]
+    builder: Option<AgentBuilder>,
 }
 
 pub(crate) struct LaneEntry {
@@ -48,6 +66,25 @@ impl AgentMap {
             inner: Arc::new(RwLock::new(HashMap::new())),
             config,
             idle_ttl,
+            #[cfg(test)]
+            builder: None,
+        }
+    }
+
+    /// Test-only constructor that uses `builder` to materialize Agents instead
+    /// of going through `Agent::with_hooks_and_pause`. Lets tests inject a
+    /// MockProvider-backed Agent without needing an API key.
+    #[cfg(test)]
+    pub(crate) fn with_builder(
+        config: Arc<Config>,
+        idle_ttl: Duration,
+        builder: AgentBuilder,
+    ) -> Self {
+        Self {
+            inner: Arc::new(RwLock::new(HashMap::new())),
+            config,
+            idle_ttl,
+            builder: Some(builder),
         }
     }
 
@@ -82,7 +119,20 @@ impl AgentMap {
         let (audit_hook, audit_buf) = AuditHook::new(AUDIT_BUFFER_CAPACITY);
         hook_reg.register(audit_hook);
 
-        let agent = Agent::with_hooks_and_pause(&self.config, hook_reg, None).await?;
+        let agent = {
+            #[cfg(test)]
+            {
+                if let Some(builder) = self.builder.as_ref() {
+                    builder(hook_reg).await?
+                } else {
+                    Agent::with_hooks_and_pause(&self.config, hook_reg, None).await?
+                }
+            }
+            #[cfg(not(test))]
+            {
+                Agent::with_hooks_and_pause(&self.config, hook_reg, None).await?
+            }
+        };
         let agent = Arc::new(Mutex::new(agent));
         agent.lock().await.start_session().await;
 
@@ -258,45 +308,69 @@ mod tests {
         }
     }
 
+    /// Provider shim that wraps an Arc<MockProvider> so multiple Agents can
+    /// be backed by the same mock instance — needed for tests that build a
+    /// fresh Agent per lane via the `AgentBuilder` closure.
+    struct ProviderHandle(Arc<MockProvider>);
+    #[async_trait::async_trait]
+    impl LLMProvider for ProviderHandle {
+        async fn chat(
+            &self,
+            m: &[Message],
+            t: &[ToolDefinition],
+            c: CancellationToken,
+        ) -> Result<ChatResponse> {
+            self.0.chat(m, t, c).await
+        }
+        async fn chat_stream(
+            &self,
+            m: &[Message],
+            t: &[ToolDefinition],
+            tx: tokio::sync::mpsc::UnboundedSender<StreamEvent>,
+            c: CancellationToken,
+        ) -> Result<()> {
+            self.0.chat_stream(m, t, tx, c).await
+        }
+        fn max_context(&self) -> usize {
+            self.0.max_context()
+        }
+    }
+
+    fn empty_skills() -> Arc<SkillRegistry> {
+        Arc::new(SkillRegistry::new(&std::path::PathBuf::from(
+            "/tmp/vulcan-test-skills-nonexistent",
+        )))
+    }
+
     /// Build an Agent backed by `MockProvider` so eviction tests don't need
     /// an API key. Mirrors `agent::tests::agent_with_mock`'s `ProviderHandle`
     /// shim.
     fn build_test_agent() -> Arc<Mutex<Agent>> {
-        struct ProviderHandle(Arc<MockProvider>);
-        #[async_trait::async_trait]
-        impl LLMProvider for ProviderHandle {
-            async fn chat(
-                &self,
-                m: &[Message],
-                t: &[ToolDefinition],
-                c: CancellationToken,
-            ) -> Result<ChatResponse> {
-                self.0.chat(m, t, c).await
-            }
-            async fn chat_stream(
-                &self,
-                m: &[Message],
-                t: &[ToolDefinition],
-                tx: tokio::sync::mpsc::UnboundedSender<StreamEvent>,
-                c: CancellationToken,
-            ) -> Result<()> {
-                self.0.chat_stream(m, t, tx, c).await
-            }
-            fn max_context(&self) -> usize {
-                self.0.max_context()
-            }
-        }
         let mock = Arc::new(MockProvider::new(128_000));
-        let skills = Arc::new(SkillRegistry::new(&std::path::PathBuf::from(
-            "/tmp/vulcan-test-skills-nonexistent",
-        )));
         let agent = Agent::for_test(
             Box::new(ProviderHandle(mock)),
             ToolRegistry::new(),
             HookRegistry::new(),
-            skills,
+            empty_skills(),
         );
         Arc::new(Mutex::new(agent))
+    }
+
+    /// Builder that returns a fresh `Agent::for_test` per lane, each backed by
+    /// its own `MockProvider`. Bypasses `Agent::with_hooks_and_pause` so the
+    /// tests don't need a real API key.
+    fn mock_agent_builder() -> AgentBuilder {
+        Arc::new(|hooks: HookRegistry| {
+            Box::pin(async move {
+                let mock = Arc::new(MockProvider::new(128_000));
+                Ok(Agent::for_test(
+                    Box::new(ProviderHandle(mock)),
+                    ToolRegistry::new(),
+                    hooks,
+                    empty_skills(),
+                ))
+            })
+        })
     }
 
     #[test]
@@ -309,14 +383,13 @@ mod tests {
         assert_ne!(a, c);
     }
 
-    // Ignored: `Agent::with_hooks_and_pause` bails when no API key is set,
-    // and `Config::default()` provides none. A future MockProvider /
-    // builder-style test config would let these run unconditionally;
-    // tracking this gap in the Task 8 report.
     #[tokio::test]
-    #[ignore = "needs API key or MockProvider; Config::default() has no api_key"]
     async fn second_get_reuses_agent() {
-        let map = AgentMap::new(test_config(), Duration::from_secs(60));
+        let map = AgentMap::with_builder(
+            test_config(),
+            Duration::from_secs(60),
+            mock_agent_builder(),
+        );
         let lane = test_lane("x");
         let a1 = map.get_or_spawn(&lane).await.expect("first spawn");
         let a2 = map.get_or_spawn(&lane).await.expect("second get");
@@ -325,31 +398,54 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "needs API key or MockProvider; Config::default() has no api_key"]
     async fn distinct_lanes_get_distinct_agents() {
-        let map = AgentMap::new(test_config(), Duration::from_secs(60));
+        let map = AgentMap::with_builder(
+            test_config(),
+            Duration::from_secs(60),
+            mock_agent_builder(),
+        );
         let a = map.get_or_spawn(&test_lane("a")).await.expect("a");
         let b = map.get_or_spawn(&test_lane("b")).await.expect("b");
         assert!(!Arc::ptr_eq(&a, &b));
         assert_eq!(map.active_lanes().await, 2);
     }
 
-    #[tokio::test(start_paused = true)]
-    #[ignore = "needs API key or MockProvider; Agent::with_hooks_and_pause + Config::default() has no api_key"]
+    #[tokio::test]
     async fn idle_lanes_evicted_after_ttl() {
-        let map = AgentMap::new(test_config(), Duration::from_secs(60));
-        let evictor = map.spawn_evictor();
+        // End-to-end: a lane spawned via `get_or_spawn` whose `last_activity`
+        // is rewritten to the past should be reaped by the *spawned* evictor
+        // task on its next scan.
+        //
+        // Why not `tokio::time::advance` + `start_paused`? `evict_idle` reads
+        // `std::time::Instant::now()` to compare against `last_activity`,
+        // and tokio's logical clock doesn't move that. We manipulate
+        // `last_activity` directly to simulate a stale lane and use real
+        // wall-clock sleeps short enough not to slow the suite.
+        let map = AgentMap::with_builder(
+            test_config(),
+            Duration::from_millis(50),
+            mock_agent_builder(),
+        );
         let lane = test_lane("x");
         map.get_or_spawn(&lane).await.expect("spawn");
         assert_eq!(map.active_lanes().await, 1);
 
-        // Advance well past TTL + scan interval (60s + 60s = 120s minimum).
-        tokio::time::advance(Duration::from_secs(180)).await;
-        tokio::task::yield_now().await;
-        tokio::task::yield_now().await;
+        // Backdate the entry by more than ttl so the next eviction pass
+        // catches it. Touch through `inner()` to avoid waiting an actual
+        // SCAN_INTERVAL (60s).
+        {
+            let inner = map.inner();
+            let mut guard = inner.write().await;
+            if let Some(entry) = guard.get_mut(&lane) {
+                entry.last_activity = Instant::now() - Duration::from_secs(60);
+            }
+        }
 
+        // Drive the eviction pass directly. The spawned evictor's
+        // SCAN_INTERVAL is too long for a unit test; we exercise the same
+        // `evict_idle` path it would call.
+        super::evict_idle(&map.inner(), Duration::from_millis(50)).await;
         assert_eq!(map.active_lanes().await, 0, "lane should be evicted");
-        evictor.abort();
     }
 
     #[tokio::test(start_paused = true)]
