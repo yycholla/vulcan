@@ -1,6 +1,7 @@
 use crate::config::Config;
 use anyhow::Result;
 
+pub mod agent_map;
 pub mod lane;
 pub mod queue;
 
