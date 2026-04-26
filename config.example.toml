@@ -26,6 +26,10 @@ catalog_cache_ttl_hours = 24
 # - "tool-fallback": log raw assistant content when fallback tool-call parsing is used
 # - "wire": also log request and raw response bodies
 # debug = "off"
+# Max agent loop iterations per prompt. 0 = unlimited (default).
+# When the agent hits this limit without a text-only response, the turn
+# ends with a "reached maximum iteration limit" message.
+# max_iterations = 0
 
 [tools]
 # Enable dangerous tools (file overwrite, shell exec) without confirmation

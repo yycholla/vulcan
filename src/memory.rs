@@ -190,6 +190,9 @@ impl SessionStore {
     /// upserted (`last_active` bumped); existing messages for the session are
     /// deleted and replaced with `messages` — full-snapshot semantics matching
     /// the per-prompt save the agent emits.
+    ///
+    /// Prefer `append_messages` when only new messages need saving — this
+    /// does a full DELETE + re-INSERT which is O(n) in the total message count.
     pub fn save_messages(&self, session_id: &str, messages: &[Message]) -> Result<()> {
         let now = Utc::now().timestamp();
 
@@ -219,6 +222,52 @@ impl SessionStore {
                 params![
                     session_id,
                     idx as i64,
+                    role,
+                    content,
+                    tool_call_id,
+                    tool_calls_json,
+                    reasoning_content,
+                    now,
+                ],
+            )?;
+        }
+
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Append new messages to a session — no DELETE, no full-snapshot
+    /// overhead. Finds the current max position for the session and inserts
+    /// from there. Use this from the agent loop to avoid O(n) delete+reinsert
+    /// on every turn.
+    pub fn append_messages(&self, session_id: &str, messages: &[Message]) -> Result<()> {
+        let now = Utc::now().timestamp();
+        let mut conn = self
+            .conn
+            .lock()
+            .map_err(|_| anyhow::anyhow!("session DB poisoned"))?;
+        let tx = conn.transaction()?;
+
+        upsert_session_metadata(&tx, session_id, now, None, None)?;
+
+        let next_pos: i64 = tx
+            .query_row(
+                "SELECT COALESCE(MAX(position), -1) + 1 FROM messages WHERE session_id = ?1",
+                params![session_id],
+                |row| row.get(0),
+            )
+            .unwrap_or(0);
+
+        for (offset, msg) in messages.iter().enumerate() {
+            let (role, content, tool_call_id, tool_calls_json, reasoning_content) =
+                encode_message(msg)?;
+            tx.execute(
+                "INSERT INTO messages
+                 (session_id, position, role, content, tool_call_id, tool_calls_json, reasoning_content, created_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                params![
+                    session_id,
+                    next_pos + offset as i64,
                     role,
                     content,
                     tool_call_id,
