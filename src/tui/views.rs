@@ -7,7 +7,7 @@ use ratatui::{
 };
 
 use super::markdown::render_markdown;
-use super::state::{AppState, ChatRole, MessageSegment, SessionStatus};
+use super::state::{AppState, ChatRole, DiffStyle, MessageSegment, SessionStatus};
 use super::theme::{Palette, body, faint_bg};
 use super::widgets::{fill, frame, message_header, section_header, ticker};
 
@@ -919,32 +919,73 @@ fn trading_floor(f: &mut TuiFrame, area: Rect, app: &AppState) {
     // wired up (sink wired but empty → render an honest empty state).
     let live_diff = app.latest_diff();
     let diff_title: String = match (&live_diff, app.diff_sink.is_some()) {
-        (Some(d), _) => format!("diff · {}", d.path),
+        (Some(d), _) => format!("diff · {} · {}", d.path, app.diff_style.label()),
         (None, true) => "diff · no edits this session".into(),
         (None, false) => "diff · users/auth.rs".into(),
     };
     let diff_inner = section_header(f, bot[1], &diff_title, None);
     let mut lines: Vec<Line<'static>> = Vec::new();
     if let Some(d) = live_diff {
-        // Compact two-block render: prefix old lines with "-" in red,
-        // new lines with "+" in green. Header shows tool + timestamp.
         lines.push(Line::from(Span::styled(
             format!("@@ {} · {}", d.tool, d.at.format("%H:%M:%S")),
             Style::default()
                 .fg(Palette::MUTED)
                 .add_modifier(Modifier::DIM),
         )));
-        for line in d.before.lines() {
-            lines.push(Line::from(Span::styled(
-                format!("- {line}"),
-                Style::default().fg(Palette::RED),
-            )));
-        }
-        for line in d.after.lines() {
-            lines.push(Line::from(Span::styled(
-                format!("+ {line}"),
-                Style::default().fg(Palette::GREEN),
-            )));
+        match app.diff_style {
+            DiffStyle::Unified => {
+                for line in d.before.lines() {
+                    lines.push(Line::from(Span::styled(
+                        format!("- {line}"),
+                        Style::default().fg(Palette::RED),
+                    )));
+                }
+                for line in d.after.lines() {
+                    lines.push(Line::from(Span::styled(
+                        format!("+ {line}"),
+                        Style::default().fg(Palette::GREEN),
+                    )));
+                }
+            }
+            DiffStyle::SideBySide => {
+                let before_lines: Vec<&str> = d.before.lines().collect();
+                let after_lines: Vec<&str> = d.after.lines().collect();
+                let n = before_lines.len().max(after_lines.len());
+                let half = (diff_inner.width.saturating_sub(3) / 2) as usize;
+                for i in 0..n {
+                    let l = before_lines.get(i).copied().unwrap_or("");
+                    let r = after_lines.get(i).copied().unwrap_or("");
+                    let l_pad = format!("{l:<half$}", half = half).chars().take(half).collect::<String>();
+                    let r_pad = format!("{r:<half$}", half = half).chars().take(half).collect::<String>();
+                    lines.push(Line::from(vec![
+                        Span::styled(l_pad, Style::default().fg(Palette::RED)),
+                        Span::styled(" │ ", Style::default().fg(Palette::MUTED)),
+                        Span::styled(r_pad, Style::default().fg(Palette::GREEN)),
+                    ]));
+                }
+            }
+            DiffStyle::Inline => {
+                // Render the new line(s) with the old text highlighted
+                // in red strikethrough at the start, then the new text.
+                for line in d.before.lines() {
+                    lines.push(Line::from(vec![
+                        Span::styled(
+                            line.to_string(),
+                            Style::default()
+                                .fg(Palette::RED)
+                                .add_modifier(Modifier::CROSSED_OUT),
+                        ),
+                    ]));
+                }
+                for line in d.after.lines() {
+                    lines.push(Line::from(Span::styled(
+                        line.to_string(),
+                        Style::default()
+                            .fg(Palette::GREEN)
+                            .add_modifier(Modifier::BOLD),
+                    )));
+                }
+            }
         }
     } else if app.diff_sink.is_some() {
         // Sink wired but empty — be honest, no fake diff.

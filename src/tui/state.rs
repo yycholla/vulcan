@@ -25,6 +25,43 @@ use crate::memory::SessionSummary;
 use super::theme::Palette;
 use super::views::{DiffKind, DiffLine, View};
 
+/// Diff render style (YYC-77). Toggled by `/diff-style`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum DiffStyle {
+    /// Classic `+ -` lines, single column. Default.
+    #[default]
+    Unified,
+    /// Before / after columns separated by `│`.
+    SideBySide,
+    /// Word-level highlight on the new line; useful for tiny edits.
+    Inline,
+}
+
+impl DiffStyle {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Unified => "unified",
+            Self::SideBySide => "side-by-side",
+            Self::Inline => "inline",
+        }
+    }
+    pub fn next(self) -> Self {
+        match self {
+            Self::Unified => Self::SideBySide,
+            Self::SideBySide => Self::Inline,
+            Self::Inline => Self::Unified,
+        }
+    }
+    pub fn parse(name: &str) -> Option<Self> {
+        match name.trim() {
+            "unified" | "u" => Some(Self::Unified),
+            "side-by-side" | "split" | "sbs" | "s" => Some(Self::SideBySide),
+            "inline" | "i" => Some(Self::Inline),
+            _ => None,
+        }
+    }
+}
+
 /// Prompt-row state machine (YYC-58). Drives the mode badge and the
 /// per-mode key dispatch + hint set. `Busy` is a transient state pinned
 /// while the agent is mid-turn (YYC-61); it lives on this enum so the
@@ -393,6 +430,8 @@ pub struct AppState {
     /// Prompt-row mode (YYC-58). Drives the mode badge, the per-mode
     /// hint set, and which key bindings the dispatcher honors.
     pub prompt_mode: PromptMode,
+    /// Diff render style (YYC-77). Toggled via `/diff-style`.
+    pub diff_style: DiffStyle,
     /// Pending prompts submitted while the agent was busy (YYC-61).
     /// Drained one-at-a-time from the front when each turn completes.
     /// In-memory only — never persisted to sessions.db.
@@ -459,6 +498,7 @@ impl AppState {
             chat_max_scroll: Cell::new(0),
             slash_menu_selection: 0,
             prompt_mode: PromptMode::Insert,
+            diff_style: DiffStyle::default(),
             queue: VecDeque::new(),
             show_reasoning: true,
             session_label: "new session".into(),

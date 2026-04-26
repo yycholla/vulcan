@@ -97,6 +97,11 @@ const SLASH_COMMANDS: &[SlashCommand] = &[
         // run_prompt_stream task. Defer until idle.
         mid_turn_safe: false,
     },
+    SlashCommand {
+        name: "diff-style",
+        description: "Set diff render: /diff-style <unified|side-by-side|inline>",
+        mid_turn_safe: true,
+    },
 ];
 
 fn short_id(id: &str) -> String {
@@ -659,6 +664,35 @@ pub async fn run_tui(config: &Config, resume: ResumeTarget) -> Result<()> {
                                                             View::TradingFloor => View::SingleStack,
                                                         };
                                                         app.view = next;
+                                                        continue;
+                                                    }
+                                                    s if s.starts_with("diff-style") => {
+                                                        let arg = s["diff-style".len()..].trim();
+                                                        let next = if arg.is_empty() {
+                                                            app.diff_style.next()
+                                                        } else {
+                                                            match crate::tui::state::DiffStyle::parse(arg) {
+                                                                Some(d) => d,
+                                                                None => {
+                                                                    app.messages.push(ChatMessage {
+                                                                        role: ChatRole::System,
+                                                                        content: format!(
+                                                                            "Unknown diff style '{arg}'. Use unified | side-by-side | inline."
+                                                                        ),
+                                                                        ..Default::default()
+                                                                    });
+                                                                    continue;
+                                                                }
+                                                            }
+                                                        };
+                                                        app.diff_style = next;
+                                                        app.messages.push(ChatMessage {
+                                                            role: ChatRole::System,
+                                                            content: format!(
+                                                                "Diff style: {}", next.label()
+                                                            ),
+                                                            ..Default::default()
+                                                        });
                                                         continue;
                                                     }
                                                     s if s.starts_with("view ") => {
