@@ -245,3 +245,33 @@ mod theme_tests {
         assert_eq!(unknown.body_bg, system.body_bg);
     }
 }
+
+#[cfg(test)]
+mod theme_swap_tests {
+    use super::*;
+
+    // Pin the property that dracula and default-light differ on roles where
+    // a swap should be visible. If a future palette change accidentally
+    // aligns them, this test forces the change-author to acknowledge it.
+
+    #[test]
+    fn dracula_assistant_differs_from_default_light() {
+        let light = Theme::default_light();
+        let drac = Theme::dracula();
+        assert_ne!(light.assistant, drac.assistant);
+    }
+
+    #[test]
+    fn dracula_code_block_differs_from_default_light() {
+        let light = Theme::default_light();
+        let drac = Theme::dracula();
+        assert_ne!(light.code_block, drac.code_block);
+    }
+
+    #[test]
+    fn system_assistant_inherits_terminal_fg() {
+        // system theme must not paint over the terminal's default text color.
+        let t = Theme::system();
+        assert_eq!(t.assistant.fg, None);
+    }
+}
