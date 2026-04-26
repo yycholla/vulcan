@@ -8,6 +8,11 @@ license = "MIT"
 repository = "https://github.com/yycholla/vulcan"
 readme = "README.md"
 
+[features]
+# Enabled only when running the soak binary. Pulls in dhat-rs, which swaps
+# the global allocator for heap profiling — never enabled by default.
+bench-soak = ["dep:dhat"]
+
 [dependencies]
 # Async runtime
 tokio = { version = "1", features = ["full"] }
@@ -74,6 +79,9 @@ lsp-types = "0.97"
 # code-graph indexer so we don't index target/, node_modules/, etc.
 ignore = "0.4.25"
 
+# Heap profiler for the soak binary. Optional — only linked under `bench-soak`.
+dhat = { version = "0.3", optional = true }
+
 [profile.release]
 opt-level = "z"    # optimize for size
 lto = true
@@ -82,3 +90,18 @@ strip = true
 
 [dev-dependencies]
 tempfile = "3.27.0"
+divan = "0.1"
+hdrhistogram = "7"
+
+[[bench]]
+name = "tui_render"
+harness = false
+
+[[bench]]
+name = "agent_core"
+harness = false
+
+[[bin]]
+name = "vulcan-soak"
+path = "benches/soak.rs"
+required-features = ["bench-soak"]
