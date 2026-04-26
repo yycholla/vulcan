@@ -19,7 +19,7 @@ use crate::agent::Agent;
 use crate::config::Config;
 use crate::gateway::lane::LaneKey;
 use crate::hooks::HookRegistry;
-use crate::hooks::audit::AuditHook;
+use crate::hooks::audit::{AuditBuffer, AuditHook};
 
 /// Capacity of the per-lane audit ring. Matches the TUI's default in
 /// `src/tui/mod.rs:384`.
@@ -36,6 +36,8 @@ pub(crate) struct LaneEntry {
     pub agent: Arc<Mutex<Agent>>,
     #[allow(dead_code)] // Stored for observability + Task 9 rehydration.
     pub session_id: String,
+    #[allow(dead_code)] // Surfaced by GET /v1/lanes (Task 15).
+    pub audit_buf: AuditBuffer,
     pub last_activity: Instant,
 }
 
@@ -67,22 +69,29 @@ impl AgentMap {
             }
         }
 
-        // Slow path: write-lock + double-check + spawn.
-        let mut map = self.inner.write().await;
-        if let Some(entry) = map.get_mut(lane) {
-            entry.last_activity = Instant::now();
-            return Ok(Arc::clone(&entry.agent));
-        }
-
-        // No pause channel — gateway has no interactive surface; Task 18
-        // swaps approval for auto-deny before any real traffic flows.
+        // Slow path: build the Agent OUTSIDE the map's write lock so a slow
+        // cold spawn on one lane doesn't block first-touches on every other
+        // lane. Acquire the write lock only briefly to insert.
+        //
+        // ApprovalHook is registered inside `with_hooks_and_pause` regardless
+        // of `pause_tx`. With `None` here, any non-`Always` approval mode in
+        // user config will block the lane on first prompt — Task 18 wires an
+        // auto-deny variant that closes that gap.
         let mut hook_reg = HookRegistry::new();
-        let (audit_hook, _audit_buf) = AuditHook::new(AUDIT_BUFFER_CAPACITY);
+        let (audit_hook, audit_buf) = AuditHook::new(AUDIT_BUFFER_CAPACITY);
         hook_reg.register(audit_hook);
 
         let agent = Agent::with_hooks_and_pause(&self.config, hook_reg, None).await?;
         let agent = Arc::new(Mutex::new(agent));
         agent.lock().await.start_session().await;
+
+        // Triple-check: another task may have spawned the same lane while we
+        // were building. If so, drop our agent and adopt theirs.
+        let mut map = self.inner.write().await;
+        if let Some(entry) = map.get_mut(lane) {
+            entry.last_activity = Instant::now();
+            return Ok(Arc::clone(&entry.agent));
+        }
 
         let session_id = derive_session_id(lane);
         map.insert(
@@ -90,6 +99,7 @@ impl AgentMap {
             LaneEntry {
                 agent: Arc::clone(&agent),
                 session_id,
+                audit_buf,
                 last_activity: Instant::now(),
             },
         );
