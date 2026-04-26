@@ -272,9 +272,7 @@ fn prompt_api_key(
     }
 
     let key: String = Password::with_theme(theme)
-        .with_prompt(format!(
-            "API key (Press Enter to skip — {auth_hint})"
-        ))
+        .with_prompt(format!("API key (Press Enter to skip — {auth_hint})"))
         .allow_empty_password(true)
         .interact()?;
     Ok(if key.trim().is_empty() {
@@ -322,10 +320,7 @@ fn is_local_endpoint(base_url: &str) -> bool {
 /// Lowercased. IPv6 brackets stripped. Returns "" on malformed input.
 fn extract_host(base_url: &str) -> &str {
     let s = base_url.trim();
-    let after_scheme = s
-        .split_once("://")
-        .map(|(_, rest)| rest)
-        .unwrap_or(s);
+    let after_scheme = s.split_once("://").map(|(_, rest)| rest).unwrap_or(s);
     // Strip path/query: everything before the first '/' (or '?').
     let host_port = after_scheme
         .split(|c| c == '/' || c == '?')
@@ -451,7 +446,10 @@ mod tests {
 
     #[test]
     fn extract_host_strips_scheme_port_and_path() {
-        assert_eq!(extract_host("https://api.example.com/v1"), "api.example.com");
+        assert_eq!(
+            extract_host("https://api.example.com/v1"),
+            "api.example.com"
+        );
         assert_eq!(extract_host("http://localhost:11434/v1"), "localhost");
         assert_eq!(extract_host("http://[::1]:8080/x"), "::1");
         assert_eq!(extract_host("https://10.0.0.5"), "10.0.0.5");
@@ -459,10 +457,7 @@ mod tests {
     }
 }
 
-async fn fetch_models_with_timeout(
-    base_url: &str,
-    api_key: &str,
-) -> Result<Vec<ModelInfo>> {
+async fn fetch_models_with_timeout(base_url: &str, api_key: &str) -> Result<Vec<ModelInfo>> {
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(8))
         .build()?;

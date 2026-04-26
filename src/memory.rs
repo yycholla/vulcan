@@ -402,9 +402,9 @@ impl SessionStore {
                 lineage_label: row.get(4)?,
                 provider_profile: row.get(5)?,
                 message_count: row.get::<_, i64>(6)? as usize,
-                preview: row.get::<_, Option<String>>(7)?.map(|s| {
-                    s.chars().take(60).collect::<String>().replace('\n', " ")
-                }),
+                preview: row
+                    .get::<_, Option<String>>(7)?
+                    .map(|s| s.chars().take(60).collect::<String>().replace('\n', " ")),
             })
         })?;
 

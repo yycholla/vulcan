@@ -299,8 +299,14 @@ mod tests {
         assert_eq!(row.state, "pending");
         assert_eq!(row.last_error.as_deref(), Some("boom"));
         let elapsed = row.next_attempt_at - claim_at;
-        assert!(elapsed >= 5, "next_attempt_at should be >= claim+5, got {elapsed}");
-        assert!(elapsed <= 10, "next_attempt_at should be < claim+10, got {elapsed}");
+        assert!(
+            elapsed >= 5,
+            "next_attempt_at should be >= claim+5, got {elapsed}"
+        );
+        assert!(
+            elapsed <= 10,
+            "next_attempt_at should be < claim+10, got {elapsed}"
+        );
     }
 
     #[tokio::test]
@@ -337,7 +343,12 @@ mod tests {
         let q2 = OutboundQueue::new(conn, 5);
         let recovered = q2.recover_sending().await.unwrap();
         assert_eq!(recovered, 1);
-        assert!(q2.claim_due(chrono::Utc::now().timestamp()).await.unwrap().is_some());
+        assert!(
+            q2.claim_due(chrono::Utc::now().timestamp())
+                .await
+                .unwrap()
+                .is_some()
+        );
     }
 
     #[test]
@@ -358,8 +369,18 @@ mod tests {
         let id = q.enqueue(sample_out_msg()).await.unwrap();
         let _ = q.claim_due(chrono::Utc::now().timestamp()).await.unwrap();
         q.mark_failed(id, "nope").await.unwrap();
-        assert!(q.claim_due(chrono::Utc::now().timestamp()).await.unwrap().is_none());
-        assert!(q.claim_due(chrono::Utc::now().timestamp() + 100).await.unwrap().is_some());
+        assert!(
+            q.claim_due(chrono::Utc::now().timestamp())
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            q.claim_due(chrono::Utc::now().timestamp() + 100)
+                .await
+                .unwrap()
+                .is_some()
+        );
     }
 
     #[tokio::test]

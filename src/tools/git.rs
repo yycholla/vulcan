@@ -179,10 +179,7 @@ impl Tool for GitCommitTool {
             .get("message")
             .and_then(|v| v.as_str())
             .ok_or_else(|| anyhow::anyhow!("message required"))?;
-        let all = params
-            .get("all")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false);
+        let all = params.get("all").and_then(|v| v.as_bool()).unwrap_or(false);
 
         let mut args: Vec<&str> = vec!["commit"];
         if all {
@@ -282,15 +279,13 @@ impl Tool for GitBranchTool {
         match action {
             "list" => run_git(&["branch", "--list", "-vv"], cancel).await,
             "create" => {
-                let n =
-                    name.ok_or_else(|| anyhow::anyhow!("name required for action='create'"))?;
+                let n = name.ok_or_else(|| anyhow::anyhow!("name required for action='create'"))?;
                 // -b creates and switches in one step; matches the
                 // common agent intent "make this branch and use it".
                 run_git(&["checkout", "-b", n], cancel).await
             }
             "switch" => {
-                let n =
-                    name.ok_or_else(|| anyhow::anyhow!("name required for action='switch'"))?;
+                let n = name.ok_or_else(|| anyhow::anyhow!("name required for action='switch'"))?;
                 run_git(&["checkout", n], cancel).await
             }
             other => Ok(ToolResult::err(format!(

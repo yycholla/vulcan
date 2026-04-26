@@ -63,10 +63,7 @@ pub fn append(path: &Path, additions: BTreeMap<String, Vec<Measurement>>) -> std
         fresh_doc()
     };
     for (group, measurements) in additions {
-        doc.groups
-            .entry(group)
-            .or_default()
-            .extend(measurements);
+        doc.groups.entry(group).or_default().extend(measurements);
     }
     let serialized = serde_json::to_vec_pretty(&doc).expect("serialize bench results");
     if let Some(parent) = path.parent() {

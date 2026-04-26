@@ -156,7 +156,11 @@ pub fn render<S: MillerSource>(
     // then adds non-focused columns while space remains.
     let mut budget = area.width;
     let preview_w = if show_preview {
-        WIDTH_PREVIEW.min(budget.saturating_sub(WIDTH_FOCUS).max(WIDTH_PREVIEW.min(20)))
+        WIDTH_PREVIEW.min(
+            budget
+                .saturating_sub(WIDTH_FOCUS)
+                .max(WIDTH_PREVIEW.min(20)),
+        )
     } else {
         0
     };
@@ -184,7 +188,11 @@ pub fn render<S: MillerSource>(
         let selection = state.path.get(col_idx).copied().unwrap_or(0);
         let header = source.header(&prefix);
         let is_focused = col_idx == state.focus;
-        let width = if is_focused { WIDTH_FOCUS } else { WIDTH_NOFOCUS };
+        let width = if is_focused {
+            WIDTH_FOCUS
+        } else {
+            WIDTH_NOFOCUS
+        };
 
         let rect = Rect {
             x: x_cursor,
@@ -280,12 +288,7 @@ fn draw_column(
     f.render_widget(Paragraph::new(lines), inner);
 }
 
-fn draw_preview(
-    f: &mut Frame,
-    rect: Rect,
-    preview: Option<&MillerPreview>,
-    theme: &Theme,
-) {
+fn draw_preview(f: &mut Frame, rect: Rect, preview: Option<&MillerPreview>, theme: &Theme) {
     if rect.width < 6 || rect.height < 3 {
         return;
     }
@@ -301,7 +304,9 @@ fn draw_preview(
     f.render_widget(block, rect);
 
     let body = match preview {
-        Some(p) if !p.lines.is_empty() => Paragraph::new(p.lines.clone()).wrap(Wrap { trim: false }),
+        Some(p) if !p.lines.is_empty() => {
+            Paragraph::new(p.lines.clone()).wrap(Wrap { trim: false })
+        }
         Some(_) => Paragraph::new(Line::from(Span::styled("  (empty)", theme.muted))),
         None => Paragraph::new(Line::from(Span::styled(
             "  drill in to preview",

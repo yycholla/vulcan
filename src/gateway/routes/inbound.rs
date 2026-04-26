@@ -24,9 +24,7 @@ pub async fn handle(
             platform = %body.platform, "unknown platform rejected");
         return Err((
             StatusCode::BAD_REQUEST,
-            Json(
-                serde_json::json!({"error": format!("unknown platform: {}", body.platform)}),
-            ),
+            Json(serde_json::json!({"error": format!("unknown platform: {}", body.platform)})),
         ));
     }
 
@@ -73,14 +71,15 @@ mod tests {
         // Config::default() and an AgentMap::new — neither is exercised
         // by /v1/inbound (it just enqueues), so that's fine.
         let config = Arc::new(crate::config::Config::default());
-        let agent_map = crate::gateway::agent_map::AgentMap::new(
-            config,
-            std::time::Duration::from_secs(60),
-        );
+        let agent_map =
+            crate::gateway::agent_map::AgentMap::new(config, std::time::Duration::from_secs(60));
         AppState {
             api_token: Arc::new("secret".into()),
             inbound: Arc::new(crate::gateway::queue::InboundQueue::new(Arc::clone(&db))),
-            outbound: Arc::new(crate::gateway::queue::OutboundQueue::new(Arc::clone(&db), 5)),
+            outbound: Arc::new(crate::gateway::queue::OutboundQueue::new(
+                Arc::clone(&db),
+                5,
+            )),
             registry: Arc::new(registry),
             agent_map: Arc::new(agent_map),
         }
@@ -186,14 +185,17 @@ mod tests {
         ));
         // Build the state pointing at the unschemed db.
         let config = Arc::new(crate::config::Config::default());
-        let agent_map = crate::gateway::agent_map::AgentMap::new(
-            config,
-            std::time::Duration::from_secs(60),
-        );
+        let agent_map =
+            crate::gateway::agent_map::AgentMap::new(config, std::time::Duration::from_secs(60));
         let state = AppState {
             api_token: Arc::new("secret".into()),
-            inbound: Arc::new(crate::gateway::queue::InboundQueue::new(Arc::clone(&unschemed))),
-            outbound: Arc::new(crate::gateway::queue::OutboundQueue::new(Arc::clone(&unschemed), 5)),
+            inbound: Arc::new(crate::gateway::queue::InboundQueue::new(Arc::clone(
+                &unschemed,
+            ))),
+            outbound: Arc::new(crate::gateway::queue::OutboundQueue::new(
+                Arc::clone(&unschemed),
+                5,
+            )),
             registry: Arc::new(registry_with_loopback()),
             agent_map: Arc::new(agent_map),
         };

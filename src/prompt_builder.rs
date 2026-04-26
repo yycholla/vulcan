@@ -15,7 +15,11 @@ impl PromptBuilder {
     ) -> String {
         let cwd = ctx
             .map(|c| c.cwd.display().to_string())
-            .or_else(|| std::env::current_dir().ok().map(|p| p.display().to_string()))
+            .or_else(|| {
+                std::env::current_dir()
+                    .ok()
+                    .map(|p| p.display().to_string())
+            })
             .unwrap_or_else(|| "(unknown)".into());
         let mut env_lines = vec![format!("- working directory: `{cwd}`")];
         if let Some(c) = ctx {
@@ -29,14 +33,12 @@ impl PromptBuilder {
                     manifest.display()
                 ));
                 if !c.cargo_bin_targets.is_empty() {
-                    env_lines.push(format!(
-                        "- bin targets: {}",
-                        c.cargo_bin_targets.join(", ")
-                    ));
+                    env_lines.push(format!("- bin targets: {}", c.cargo_bin_targets.join(", ")));
                 }
             } else {
-                env_lines
-                    .push("- no Cargo.toml within depth=4 — `cargo_check` is not registered".into());
+                env_lines.push(
+                    "- no Cargo.toml within depth=4 — `cargo_check` is not registered".into(),
+                );
             }
             if c.git_present {
                 env_lines.push("- git: working tree present".into());
@@ -124,7 +126,13 @@ mod tests {
             prompt.contains("Tool preferences"),
             "prompt missing 'Tool preferences' section: {prompt:?}"
         );
-        for native in ["search_files", "cargo_check", "git_status", "read_file", "list_files"] {
+        for native in [
+            "search_files",
+            "cargo_check",
+            "git_status",
+            "read_file",
+            "list_files",
+        ] {
             assert!(
                 prompt.contains(native),
                 "preference table missing `{native}` reference: {prompt:?}"

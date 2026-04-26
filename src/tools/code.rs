@@ -113,9 +113,8 @@ impl Tool for CodeExtractTool {
             .as_str()
             .ok_or_else(|| anyhow::anyhow!("symbol required"))?;
         let pb = PathBuf::from(path);
-        let lang = Language::from_path(&pb).ok_or_else(|| {
-            anyhow::anyhow!("Unsupported file type for code_extract: {path}")
-        })?;
+        let lang = Language::from_path(&pb)
+            .ok_or_else(|| anyhow::anyhow!("Unsupported file type for code_extract: {path}"))?;
         let source = tokio::fs::read_to_string(path).await?;
         let symbols = outline(&self.cache, lang, &source)?;
         let hit = symbols.into_iter().find(|s| s.name == symbol);
@@ -179,9 +178,8 @@ impl Tool for CodeQueryTool {
             .as_str()
             .ok_or_else(|| anyhow::anyhow!("query required"))?;
         let pb = PathBuf::from(path);
-        let lang = Language::from_path(&pb).ok_or_else(|| {
-            anyhow::anyhow!("Unsupported file type for code_query: {path}")
-        })?;
+        let lang = Language::from_path(&pb)
+            .ok_or_else(|| anyhow::anyhow!("Unsupported file type for code_query: {path}"))?;
         let source = tokio::fs::read_to_string(path).await?;
         let hits = run_query(&self.cache, lang, &source, query_text)?;
         let truncated = hits.len() >= MAX_QUERY_HITS;
@@ -203,19 +201,15 @@ pub struct OutlineSymbol {
     pub end_line: usize,
 }
 
-fn outline(
-    cache: &ParserCache,
-    lang: Language,
-    source: &str,
-) -> Result<Vec<OutlineSymbol>> {
+fn outline(cache: &ParserCache, lang: Language, source: &str) -> Result<Vec<OutlineSymbol>> {
     let query_text = lang.outline_query();
     if query_text.is_empty() {
         return Ok(Vec::new());
     }
     cache.with_parser(lang, |parser| {
-        let tree = parser.parse(source, None).ok_or_else(|| {
-            anyhow::anyhow!("tree-sitter failed to parse source")
-        })?;
+        let tree = parser
+            .parse(source, None)
+            .ok_or_else(|| anyhow::anyhow!("tree-sitter failed to parse source"))?;
         let query = Query::new(&lang.grammar_for_query(), query_text)
             .map_err(|e| anyhow::anyhow!("query compile: {e}"))?;
         let name_idx = query.capture_index_for_name("name");

@@ -82,10 +82,7 @@ impl Tool for FindSymbolTool {
         let name = params["name"]
             .as_str()
             .ok_or_else(|| anyhow::anyhow!("name required"))?;
-        let limit = params["limit"]
-            .as_u64()
-            .map(|n| n as usize)
-            .unwrap_or(25);
+        let limit = params["limit"].as_u64().map(|n| n as usize).unwrap_or(25);
         let graph = self.graph.clone();
         let name_owned = name.to_string();
         let rows =

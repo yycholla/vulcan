@@ -16,9 +16,7 @@
 
 use crate::config::{ApprovalConfig, ApprovalMode};
 use crate::hooks::{HookHandler, HookOutcome};
-use crate::pause::{
-    AgentPause, AgentResume, OptionKind, PauseKind, PauseOption, PauseSender,
-};
+use crate::pause::{AgentPause, AgentResume, OptionKind, PauseKind, PauseOption, PauseSender};
 use anyhow::Result;
 use serde_json::Value;
 use std::collections::HashSet;
@@ -89,9 +87,7 @@ impl HookHandler for ApprovalHook {
             }
         };
 
-        let summary = format!(
-            "Tool '{tool}' requires approval (mode: {mode:?}). Args: {args}"
-        );
+        let summary = format!("Tool '{tool}' requires approval (mode: {mode:?}). Args: {args}");
         let options = match mode {
             ApprovalMode::Session => vec![
                 PauseOption {
@@ -218,7 +214,11 @@ mod tests {
         let hook = ApprovalHook::auto_deny(ApprovalConfig::default());
 
         let decision = hook
-            .before_tool_call("read_file", &serde_json::json!({}), CancellationToken::new())
+            .before_tool_call(
+                "read_file",
+                &serde_json::json!({}),
+                CancellationToken::new(),
+            )
             .await
             .expect("hook result");
 

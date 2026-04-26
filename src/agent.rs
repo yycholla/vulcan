@@ -192,10 +192,8 @@ impl Agent {
         // drop irrelevant tools (cargo_check off-Rust, etc.) and the
         // remaining tools can render runtime-aware descriptions.
         let tool_context = crate::tools::ToolContext::probe(cwd);
-        let mut tools = ToolRegistry::new_with_diff_and_lsp(
-            Some(diff_sink.clone()),
-            Some(lsp_manager.clone()),
-        );
+        let mut tools =
+            ToolRegistry::new_with_diff_and_lsp(Some(diff_sink.clone()), Some(lsp_manager.clone()));
 
         // YYC-81: ask_user is only useful in interactive (TUI) mode.
         // Register it whenever a pause channel is wired; it self-
@@ -289,9 +287,11 @@ impl Agent {
             config.tools.native_enforcement,
             crate::config::NativeEnforcement::Off
         ) {
-            hooks.register(Arc::new(crate::hooks::prefer_native::PreferNativeToolsHook::new(
-                config.tools.native_enforcement,
-            )));
+            hooks.register(Arc::new(
+                crate::hooks::prefer_native::PreferNativeToolsHook::new(
+                    config.tools.native_enforcement,
+                ),
+            ));
         }
 
         // YYC-107: drop tools that aren't relevant to this workspace.
@@ -400,14 +400,13 @@ impl Agent {
             self.turn_cancel = CancellationToken::new();
         }
 
-        let next_config = match profile {
-            Some(name) => config
-                .providers
-                .get(name)
-                .cloned()
-                .ok_or_else(|| anyhow::anyhow!("Provider profile '{name}' not found in config"))?,
-            None => config.provider.clone(),
-        };
+        let next_config =
+            match profile {
+                Some(name) => config.providers.get(name).cloned().ok_or_else(|| {
+                    anyhow::anyhow!("Provider profile '{name}' not found in config")
+                })?,
+                None => config.provider.clone(),
+            };
         // Local / self-hosted endpoints (Ollama, llama.cpp, vLLM unauth)
         // typically don't need an API key; skip the requirement when the
         // base URL looks local or the user explicitly disabled catalog
@@ -448,10 +447,7 @@ impl Agent {
         self.active_profile = profile.map(str::to_string);
 
         // YYC-95: persist the active profile so resume restores it.
-        if let Err(e) = self
-            .memory
-            .save_provider_profile(&self.session_id, profile)
-        {
+        if let Err(e) = self.memory.save_provider_profile(&self.session_id, profile) {
             tracing::warn!("failed to persist provider profile: {e}");
         }
 
@@ -798,7 +794,8 @@ impl Agent {
         ui_tx: mpsc::UnboundedSender<StreamEvent>,
     ) -> Result<String> {
         let cancel = CancellationToken::new();
-        self.run_prompt_stream_with_cancel(input, ui_tx, cancel).await
+        self.run_prompt_stream_with_cancel(input, ui_tx, cancel)
+            .await
     }
 
     /// Streaming variant that accepts an external cancel token. The TUI uses
@@ -1038,10 +1035,8 @@ impl Agent {
                         // Tools like write_file/edit_file populate
                         // `display_preview` with a real diff; prefer it
                         // over the LLM-facing terse `output`.
-                        let preview_source = result
-                            .display_preview
-                            .as_deref()
-                            .unwrap_or(&result.output);
+                        let preview_source =
+                            result.display_preview.as_deref().unwrap_or(&result.output);
                         let output_preview = preview_output(preview_source);
                         let result_meta = summarize_tool_result(&name, &result.output);
                         let elided = elided_lines(preview_source, output_preview.as_deref());
@@ -1304,7 +1299,10 @@ fn summarize_tool_args(name: &str, raw_args: &str) -> Option<String> {
             full
         } else {
             let chars: Vec<char> = full.chars().collect();
-            format!("…{}", chars[chars.len() - n + 1..].iter().collect::<String>())
+            format!(
+                "…{}",
+                chars[chars.len() - n + 1..].iter().collect::<String>()
+            )
         }
     };
     let truncate = |full: String, n: usize| -> String {
@@ -1317,9 +1315,7 @@ fn summarize_tool_args(name: &str, raw_args: &str) -> Option<String> {
     };
     let summary = match name {
         // File tools — path is the salient bit.
-        "read_file" | "write_file" | "edit_file" | "list_files" => {
-            s("path").map(|p| tail(p, 60))
-        }
+        "read_file" | "write_file" | "edit_file" | "list_files" => s("path").map(|p| tail(p, 60)),
         // Search tools — pattern/query.
         "search_files" => s("pattern").map(|p| truncate(p, 60)),
         "code_query" => s("query").map(|q| truncate(q, 60)),
@@ -1429,9 +1425,7 @@ fn summarize_tool_result(name: &str, output: &str) -> Option<String> {
                 .and_then(|s| s.parse::<usize>().ok())?;
             Some(format!("{n} occurrence{}", if n == 1 { "" } else { "s" }))
         }
-        "read_file" | "list_files" => {
-            Some(format!("{lines} lines · {}", format_size(bytes)))
-        }
+        "read_file" | "list_files" => Some(format!("{lines} lines · {}", format_size(bytes))),
         "search_files" => {
             // ripgrep output: each non-empty line is a hit
             let hits = text.lines().filter(|l| !l.is_empty()).count();
@@ -1442,8 +1436,14 @@ fn summarize_tool_result(name: &str, output: &str) -> Option<String> {
             Some(format!("{n} commit{}", if n == 1 { "" } else { "s" }))
         }
         "git_diff" => {
-            let plus = text.lines().filter(|l| l.starts_with('+') && !l.starts_with("+++")).count();
-            let minus = text.lines().filter(|l| l.starts_with('-') && !l.starts_with("---")).count();
+            let plus = text
+                .lines()
+                .filter(|l| l.starts_with('+') && !l.starts_with("+++"))
+                .count();
+            let minus = text
+                .lines()
+                .filter(|l| l.starts_with('-') && !l.starts_with("---"))
+                .count();
             if plus == 0 && minus == 0 {
                 None
             } else {
@@ -1452,11 +1452,17 @@ fn summarize_tool_result(name: &str, output: &str) -> Option<String> {
         }
         "git_status" => {
             // First line is "## branch...origin/branch [ahead N]"; rest are file changes.
-            let changes = text.lines().filter(|l| !l.starts_with("##") && !l.is_empty()).count();
+            let changes = text
+                .lines()
+                .filter(|l| !l.starts_with("##") && !l.is_empty())
+                .count();
             if changes == 0 {
                 Some("clean".to_string())
             } else {
-                Some(format!("{changes} change{}", if changes == 1 { "" } else { "s" }))
+                Some(format!(
+                    "{changes} change{}",
+                    if changes == 1 { "" } else { "s" }
+                ))
             }
         }
         "code_outline" | "find_symbol" => {
@@ -1476,12 +1482,8 @@ fn summarize_tool_result(name: &str, output: &str) -> Option<String> {
             .ok()
             .and_then(|v| v.get("matches")?.as_array().map(|a| a.len()))
             .map(|n| format!("{n} hit{}", if n == 1 { "" } else { "s" })),
-        "web_search" | "web_fetch" => {
-            Some(format!("{lines} lines · {}", format_size(bytes)))
-        }
-        "bash" | "run_command" => {
-            Some(format!("{lines} lines · {}", format_size(bytes)))
-        }
+        "web_search" | "web_fetch" => Some(format!("{lines} lines · {}", format_size(bytes))),
+        "bash" | "run_command" => Some(format!("{lines} lines · {}", format_size(bytes))),
         "diagnostics" => serde_json::from_str::<serde_json::Value>(text)
             .ok()
             .and_then(|v| v.get("count")?.as_u64())
@@ -1887,15 +1889,13 @@ mod tests {
             Some("YYC-74")
         );
         assert_eq!(
-            summarize_tool_args("git_branch", r#"{"action":"create","name":"foo"}"#)
-                .as_deref(),
+            summarize_tool_args("git_branch", r#"{"action":"create","name":"foo"}"#).as_deref(),
             Some("create foo")
         );
         // Long path tail-truncates rather than head-truncates.
         let long_path = "/very/long/leading/path/segments/that/blow/the/budget/file.rs";
         let result =
-            summarize_tool_args("read_file", &format!(r#"{{"path":"{long_path}"}}"#))
-                .unwrap();
+            summarize_tool_args("read_file", &format!(r#"{{"path":"{long_path}"}}"#)).unwrap();
         assert!(result.starts_with('…'));
         assert!(result.ends_with("file.rs"), "got {result}");
         // Generic fallback for unknown tools surfaces first string field.
@@ -1909,7 +1909,10 @@ mod tests {
     fn preview_output_caps_to_twelve_lines_and_one_kb() {
         // YYC-78 raised the cap so collapsed cards still show useful
         // context up front.
-        let big = (1..=40).map(|n| format!("line {n}")).collect::<Vec<_>>().join("\n");
+        let big = (1..=40)
+            .map(|n| format!("line {n}"))
+            .collect::<Vec<_>>()
+            .join("\n");
         let preview = preview_output(&big).unwrap();
         assert_eq!(preview.lines().count(), 12);
         assert!(preview.contains("line 1"));
@@ -1918,7 +1921,10 @@ mod tests {
 
     #[test]
     fn elided_lines_counts_what_was_clipped() {
-        let big = (1..=40).map(|n| format!("line {n}")).collect::<Vec<_>>().join("\n");
+        let big = (1..=40)
+            .map(|n| format!("line {n}"))
+            .collect::<Vec<_>>()
+            .join("\n");
         let preview = preview_output(&big);
         let elided = elided_lines(&big, preview.as_deref());
         assert_eq!(elided, 28);
@@ -1949,15 +1955,17 @@ mod tests {
             summarize_tool_result("git_status", "## main\n M src/foo.rs\n?? new.rs").as_deref(),
             Some("2 changes")
         );
-        assert_eq!(summarize_tool_result("git_status", "## main").as_deref(), Some("clean"));
+        assert_eq!(
+            summarize_tool_result("git_status", "## main").as_deref(),
+            Some("clean")
+        );
         assert_eq!(
             summarize_tool_result("git_diff", "+++ a\n+ added\n--- b\n- removed\n- removed2")
                 .as_deref(),
             Some("+1 -2")
         );
         // Generic fallback (unknown tool) gets line/byte count.
-        let s =
-            summarize_tool_result("unknown_tool", "line one\nline two\nline three").unwrap();
+        let s = summarize_tool_result("unknown_tool", "line one\nline two\nline three").unwrap();
         assert!(s.starts_with("3 lines"), "got {s}");
     }
 }
