@@ -14,7 +14,10 @@ async fn main() -> anyhow::Result<()> {
     match cli.command {
         None | Some(Command::Chat) => {
             init_tui_logging();
-            let resume = if cli.r#continue {
+            let resume = if cli.resume {
+                // --resume takes priority over --continue
+                ResumeTarget::Pick
+            } else if cli.r#continue {
                 ResumeTarget::Last
             } else {
                 ResumeTarget::None

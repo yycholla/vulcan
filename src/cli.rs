@@ -12,6 +12,11 @@ pub struct Cli {
     /// specific ID) and `search`.
     #[arg(long, global = true)]
     pub r#continue: bool,
+
+    /// Open the TUI with a session picker to choose which session to resume.
+    /// Lists recent sessions — arrow-key to select, Enter to resume.
+    #[arg(long, global = true)]
+    pub resume: bool,
 }
 
 #[derive(Subcommand, Debug)]

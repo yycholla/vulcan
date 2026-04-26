@@ -25,7 +25,7 @@ pub mod theme;
 pub mod views;
 pub mod widgets;
 
-use state::{AppState, ChatMessage, ChatRole};
+use state::{AppState, ChatMessage, ChatRole, SessionStatus};
 use theme::{Palette, body};
 use views::{View, render_view};
 
@@ -38,6 +38,10 @@ pub enum ResumeTarget {
     Last,
     /// Resume a specific session by ID.
     Specific(String),
+    /// Open the TUI with a session-picker overlay so the user can
+    /// choose which session to resume. Falls back to fresh if
+    /// dismissed without a selection.
+    Pick,
 }
 
 enum KeyEv {
@@ -182,6 +186,7 @@ fn submit_prompt(
     });
     app.thinking = true;
     app.at_bottom = true;
+    app.chat_lines_dirty.set(true);
     app.note_prompt_submitted(&msg);
 
     let tx = stream_tx.clone();
@@ -201,6 +206,122 @@ async fn refresh_sessions(agent: &Arc<Mutex<Agent>>, app: &mut AppState) {
         )
     };
     app.hydrate_sessions(&summaries, &active_session_id);
+}
+
+async fn handle_stream_event(
+    app: &mut AppState,
+    agent: &Arc<Mutex<Agent>>,
+    stream_tx: &mpsc::UnboundedSender<StreamEvent>,
+    ev: StreamEvent,
+) {
+    match ev {
+        StreamEvent::Text(chunk) => {
+            if let Some(last) = app.messages.last_mut() {
+                if matches!(last.role, ChatRole::Agent) {
+                    // Append to both the segment timeline (the YYC-71
+                    // ordered renderer) and the legacy `content` field
+                    // (kept so other code that peeks at .content keeps working).
+                    last.append_text(&chunk);
+                    last.content.push_str(&chunk);
+                    app.chat_lines_dirty.set(true);
+                }
+            }
+        }
+        StreamEvent::Reasoning(chunk) => {
+            // Per-token reasoning trace from thinking-mode models. Push to
+            // the segment timeline so it interleaves with tool calls in
+            // render order; also append to the legacy `reasoning` field so
+            // latest_reasoning() etc. continue to work.
+            if let Some(last) = app.messages.last_mut() {
+                if matches!(last.role, ChatRole::Agent) {
+                    last.append_reasoning(&chunk);
+                    last.reasoning.push_str(&chunk);
+                    app.chat_lines_dirty.set(true);
+                }
+            }
+            app.note_reasoning();
+        }
+        StreamEvent::Done(resp) => {
+            app.thinking = false;
+            app.chat_lines_dirty.set(true);
+            if let Some(usage) = resp.usage {
+                // YYC-60: track lifetime totals for cost (YYC-67) and the
+                // latest prompt size for the in-status capacity bar.
+                app.prompt_tokens_total = app
+                    .prompt_tokens_total
+                    .saturating_add(usage.prompt_tokens as u32);
+                app.completion_tokens_total = app
+                    .completion_tokens_total
+                    .saturating_add(usage.completion_tokens as u32);
+                app.prompt_tokens_last = usage.prompt_tokens as u32;
+            }
+            app.note_done();
+            refresh_sessions(agent, app).await;
+            // YYC-61: drain one queued prompt per turn end. Subsequent queued
+            // prompts ride the next Done event in the same way.
+            if let Some(next) = app.queue.pop_front() {
+                submit_prompt(app, agent, stream_tx, next);
+            }
+        }
+        StreamEvent::Error(e) => {
+            if let Some(last) = app.messages.last_mut() {
+                if last.content.is_empty() {
+                    last.content = format!("⚠ Error: {e}");
+                    app.chat_lines_dirty.set(true);
+                }
+            }
+            app.thinking = false;
+            // YYC-67: record provider-level error for telemetry.
+            app.provider_errors_total = app.provider_errors_total.saturating_add(1);
+            app.note_error(&e);
+        }
+        StreamEvent::ToolCallStart {
+            name, args_summary, ..
+        } => {
+            // YYC-71: push the tool-call segment into the timeline
+            // (interleaved with reasoning/text). YYC-74: carry the args
+            // summary so the card has structured context.
+            if let Some(last) = app.messages.last_mut() {
+                if matches!(last.role, ChatRole::Agent) {
+                    last.push_tool_start_with(name.clone(), args_summary);
+                    app.chat_lines_dirty.set(true);
+                }
+            }
+            app.note_tool_start(&name);
+        }
+        StreamEvent::ToolCallEnd {
+            name,
+            ok,
+            output_preview,
+            result_meta,
+            elided_lines,
+            elapsed_ms,
+            ..
+        } => {
+            if let Some(last) = app.messages.last_mut() {
+                if matches!(last.role, ChatRole::Agent) {
+                    // YYC-74: stamp preview + meta + timing onto the matching
+                    // segment for the card. YYC-78: stash elided count for the
+                    // collapse footer.
+                    last.finish_tool_with(
+                        &name,
+                        ok,
+                        output_preview,
+                        result_meta,
+                        elided_lines,
+                        Some(elapsed_ms),
+                    );
+                    app.chat_lines_dirty.set(true);
+                }
+            }
+            // YYC-67: tool call telemetry.
+            app.tool_calls_total = app.tool_calls_total.saturating_add(1);
+            if !ok {
+                app.tool_errors_total = app.tool_errors_total.saturating_add(1);
+            }
+            app.note_tool_end(&name, ok);
+        }
+    }
 }
 
 pub async fn run_tui(config: &Config, resume: ResumeTarget) -> Result<()> {
@@ -238,19 +359,21 @@ pub async fn run_tui(config: &Config, resume: ResumeTarget) -> Result<()> {
     // input mid-loop, it sends an AgentPause; the main TUI loop renders an
     // overlay and routes the response back via the pause's oneshot reply.
     let (pause_tx, mut pause_rx) = pause::channel(8);
+    let pause_tx_for_agent = pause_tx.clone();
 
     // ── Long-lived agent: one per TUI session, shared across prompts so
     // hook handlers' state (audit log, rate limits, etc.) survives turns.
     let agent = Arc::new(Mutex::new(
-        Agent::with_hooks_and_pause(config, hook_reg, Some(pause_tx)).await?,
+        Agent::with_hooks_and_pause(config, hook_reg, Some(pause_tx_for_agent)).await?,
     ));
 
     // ── Apply resume target if any. Errors here are non-fatal — we report
     // and start fresh.
     let resume_note = {
         let mut a = agent.lock().await;
-        match resume {
+        match &resume {
             ResumeTarget::None => None,
+            ResumeTarget::Pick => None, // session picker shown in UI later
             ResumeTarget::Last => match a.continue_last_session() {
                 Ok(()) => Some(format!(
                     "Resumed last session ({})",
@@ -258,8 +381,8 @@ pub async fn run_tui(config: &Config, resume: ResumeTarget) -> Result<()> {
                 )),
                 Err(e) => Some(format!("Could not resume last session: {e}")),
             },
-            ResumeTarget::Specific(id) => match a.resume_session(&id) {
-                Ok(()) => Some(format!("Resumed session {}", short_id(&id))),
+            ResumeTarget::Specific(id) => match a.resume_session(id) {
+                Ok(()) => Some(format!("Resumed session {}", short_id(id))),
                 Err(e) => Some(format!("Could not resume session: {e}")),
             },
         }
@@ -284,12 +407,15 @@ pub async fn run_tui(config: &Config, resume: ResumeTarget) -> Result<()> {
     }
     refresh_sessions(&agent, &mut app).await;
 
+    // YYC-86: if the user invoked --resume, activate the session picker.
+    app.show_session_picker = matches!(resume, ResumeTarget::Pick);
+
     if let Some(note) = resume_note {
         app.messages.push(ChatMessage {
             role: ChatRole::System,
             content: note,
             reasoning: String::new(),
-                            segments: Vec::new(),
+            segments: Vec::new(),
         });
 
         // Hydrate prior turns into the chat panel so resumed sessions show their
@@ -325,6 +451,7 @@ pub async fn run_tui(config: &Config, resume: ResumeTarget) -> Result<()> {
                     Message::Tool { .. } => {} // skip — audit log shows tool activity
                 }
             }
+            app.chat_lines_dirty.set(true);
         }
     }
 
@@ -386,7 +513,124 @@ pub async fn run_tui(config: &Config, resume: ResumeTarget) -> Result<()> {
             if let (Some(pal), Some(area)) = (palette.as_ref(), palette_area) {
                 draw_palette(f, area, pal, app.slash_menu_selection);
             }
+
+            // YYC-86: session picker overlay (--resume flag).
+            if app.show_session_picker {
+                draw_session_picker(f, area, &app);
+            }
         })?;
+
+        // ── Session picker mode: intercept all input until dismissed.
+        if app.show_session_picker {
+            tokio::select! {
+                ev = key_rx.recv() => {
+                    match ev {
+                        Some(KeyEv::Press(event)) => {
+                            if let Event::Key(key) = event {
+                                if key.kind == KeyEventKind::Press {
+                                    match key.code {
+                                        KeyCode::Up | KeyCode::Char('k') => {
+                                            app.session_picker_selection = app.session_picker_selection.saturating_sub(1);
+                                        }
+                                        KeyCode::Down | KeyCode::Char('j') => {
+                                            let max = app.sessions.len().saturating_sub(1);
+                                            app.session_picker_selection = app.session_picker_selection.saturating_add(1).min(max);
+                                        }
+                                        KeyCode::Enter => {
+                                            let idx = app.session_picker_selection.min(app.sessions.len().saturating_sub(1));
+                                            let picked = app.sessions[idx].id.clone();
+                                            let current = app.active_session_id.clone().unwrap_or_default();
+
+                                            if picked == current {
+                                                // Already on this session — just dismiss.
+                                                app.show_session_picker = false;
+                                            } else {
+                                                // Resume the selected session, then hydrate.
+                                                let (note, should_hydrate) = {
+                                                    let mut a = agent.lock().await;
+                                                    match a.resume_session(&picked) {
+                                                        Ok(()) => (Some(format!("Resumed session {}", short_id(&picked))), true),
+                                                        Err(e) => (Some(format!("Could not resume session: {e}")), false),
+                                                    }
+                                                };
+                                                app.show_session_picker = false;
+                                                if let Some(n) = note {
+                                                    app.messages.push(ChatMessage {
+                                                        role: ChatRole::System,
+                                                        content: n,
+                                                        ..Default::default()
+                                                    });
+                                                }
+                                                if should_hydrate {
+                                                    let history = {
+                                                        let a = agent.lock().await;
+                                                        a.memory().load_history(&picked).ok().flatten()
+                                                    };
+                                                    if let Some(msgs) = history {
+                                                        for msg in msgs {
+                                                            use crate::provider::Message;
+                                                            match msg {
+                                                                Message::User { content } => {
+                                                                    app.messages.push(ChatMessage::new(ChatRole::User, content));
+                                                                }
+                                                                Message::System { content } => {
+                                                                    app.messages.push(ChatMessage::new(ChatRole::System, content));
+                                                                }
+                                                                Message::Assistant { content, reasoning_content, .. } => {
+                                                                    app.messages.push(ChatMessage {
+                                                                        role: ChatRole::Agent,
+                                                                        content: content.unwrap_or_default(),
+                                                                        reasoning: reasoning_content.unwrap_or_default(),
+                                                                        segments: Vec::new(),
+                                                                    });
+                                                                }
+                                                                Message::Tool { .. } => {}
+                                                            }
+                                                        }
+                                                        app.chat_lines_dirty.set(true);
+                                                    }
+                                                }
+                                                refresh_sessions(&agent, &mut app).await;
+                                            }
+                                        }
+                                        KeyCode::Esc => {
+                                            app.show_session_picker = false;
+                                            app.messages.push(ChatMessage {
+                                                role: ChatRole::System,
+                                                content: "Starting a new session — use /search to find past conversations.".into(),
+                                                ..Default::default()
+                                            });
+                                            app.chat_lines_dirty.set(true);
+                                        }
+                                        _ => {}
+                                    }
+                                }
+                            }
+                        }
+                        Some(KeyEv::Error(e)) => {
+                            tracing::error!("Terminal input error (picker): {e}");
+                            app.show_session_picker = false;
+                        }
+                        None => app.show_session_picker = false,
+                    }
+                }
+                pause = pause_rx.recv() => {
+                    // If a pause arrives while the picker is open, dismiss the
+                    // picker and let the normal loop handle it.
+                    if let Some(p) = pause {
+                        app.show_session_picker = false;
+                        // Re-route to normal pause handling by pushing it back.
+                        // The pause channel is multi-consumer safe; redeliver.
+                        // In practice this won't happen because no agent turn
+                        // is running at startup, but be defensive.
+                        if let Err(e) = pause_tx.send(p).await {
+                            tracing::warn!("failed to re-route pause: {e}");
+                        }
+                    }
+                }
+            }
+            continue;
+        }
 
         tokio::select! {
             pause = pause_rx.recv() => {
@@ -424,6 +668,7 @@ pub async fn run_tui(config: &Config, resume: ResumeTarget) -> Result<()> {
                         reasoning: String::new(),
                             segments: Vec::new(),
                     });
+                    app.chat_lines_dirty.set(true);
                     app.note_pause(&summary);
                     app.pending_pause = Some(p);
                 }
@@ -479,6 +724,7 @@ pub async fn run_tui(config: &Config, resume: ResumeTarget) -> Result<()> {
                                                 reasoning: String::new(),
                             segments: Vec::new(),
                                             });
+                                            app.chat_lines_dirty.set(true);
                                             app.note_resume(label);
                                         }
                                         continue;
@@ -504,6 +750,7 @@ pub async fn run_tui(config: &Config, resume: ResumeTarget) -> Result<()> {
                                             } else {
                                                 app.queue.pop_back();
                                             }
+                                            app.chat_lines_dirty.set(true);
                                             continue;
                                         }
                                         // YYC-70: Ctrl+J / Ctrl+K navigate the
@@ -544,6 +791,7 @@ pub async fn run_tui(config: &Config, resume: ResumeTarget) -> Result<()> {
                                                     reasoning: String::new(),
                             segments: Vec::new(),
                                                 });
+                                                app.chat_lines_dirty.set(true);
                                                 pending_quit = true;
                                             } else {
                                                 pending_quit = true;
@@ -553,8 +801,9 @@ pub async fn run_tui(config: &Config, resume: ResumeTarget) -> Result<()> {
                                                     reasoning: String::new(),
                             segments: Vec::new(),
                                                 });
+                                                app.chat_lines_dirty.set(true);
+                                                continue;
                                             }
-                                            continue;
                                         }
                                         _ => {}
                                     }
@@ -603,6 +852,7 @@ pub async fn run_tui(config: &Config, resume: ResumeTarget) -> Result<()> {
                                                 ),
                                                 ..Default::default()
                                             });
+                                            app.chat_lines_dirty.set(true);
                                             continue;
                                         }
                                         // YYC-61: plain text during busy → queue.
@@ -613,6 +863,7 @@ pub async fn run_tui(config: &Config, resume: ResumeTarget) -> Result<()> {
                                             let msg = app.input.trim().to_string();
                                             if !msg.is_empty() {
                                                 app.queue.push_back(msg);
+                                                app.chat_lines_dirty.set(true);
                                             }
                                             app.input.clear();
                                             app.slash_menu_selection = 0;
@@ -639,10 +890,12 @@ pub async fn run_tui(config: &Config, resume: ResumeTarget) -> Result<()> {
                                                         }
                                                         help.push_str("\n\nKeys:\n  Ctrl+1..5  switch view (1=stack 2=split 3=tiled 4=tree 5=floor)\n  Ctrl+R     toggle reasoning trace\n  Tab        complete slash command");
                                                         app.messages.push(ChatMessage { role: ChatRole::System, content: help, ..Default::default() });
+                                                        app.chat_lines_dirty.set(true);
                                                         continue;
                                                     }
                                                     "clear" => {
                                                         app.messages.clear();
+                                                        app.chat_lines_dirty.set(true);
                                                         continue;
                                                     }
                                                     "reasoning" => {
@@ -653,6 +906,7 @@ pub async fn run_tui(config: &Config, resume: ResumeTarget) -> Result<()> {
                                                             reasoning: String::new(),
                             segments: Vec::new(),
                                                         });
+                                                        app.chat_lines_dirty.set(true);
                                                         continue;
                                                     }
                                                     "view" => {
@@ -681,6 +935,7 @@ pub async fn run_tui(config: &Config, resume: ResumeTarget) -> Result<()> {
                                                                         ),
                                                                         ..Default::default()
                                                                     });
+                                                                    app.chat_lines_dirty.set(true);
                                                                     continue;
                                                                 }
                                                             }
@@ -693,6 +948,7 @@ pub async fn run_tui(config: &Config, resume: ResumeTarget) -> Result<()> {
                                                             ),
                                                             ..Default::default()
                                                         });
+                                                        app.chat_lines_dirty.set(true);
                                                         continue;
                                                     }
                                                     s if s.starts_with("view ") => {
@@ -712,6 +968,7 @@ pub async fn run_tui(config: &Config, resume: ResumeTarget) -> Result<()> {
                                                                 reasoning: String::new(),
                             segments: Vec::new(),
                                                             });
+                                                            app.chat_lines_dirty.set(true);
                                                             continue;
                                                         }
                                                         let hits = {
@@ -741,6 +998,7 @@ pub async fn run_tui(config: &Config, resume: ResumeTarget) -> Result<()> {
                                                             reasoning: String::new(),
                             segments: Vec::new(),
                                                         });
+                                                        app.chat_lines_dirty.set(true);
                                                         continue;
                                                     }
                                                     _ => {
@@ -750,6 +1008,7 @@ pub async fn run_tui(config: &Config, resume: ResumeTarget) -> Result<()> {
                                                             reasoning: String::new(),
                             segments: Vec::new(),
                                                         });
+                                                        app.chat_lines_dirty.set(true);
                                                         continue;
                                                     }
                                                 }
@@ -839,111 +1098,11 @@ pub async fn run_tui(config: &Config, resume: ResumeTarget) -> Result<()> {
             }
             ev = stream_rx.recv() => {
                 match ev {
-                    Some(StreamEvent::Text(chunk)) => {
-                        if let Some(last) = app.messages.last_mut() {
-                            if matches!(last.role, ChatRole::Agent) {
-                                // Append to both the segment timeline (the
-                                // YYC-71 ordered renderer) and the legacy
-                                // `content` field (kept so other code that
-                                // peeks at .content keeps working).
-                                last.append_text(&chunk);
-                                last.content.push_str(&chunk);
-                            }
+                    Some(ev) => {
+                        handle_stream_event(&mut app, &agent, &stream_tx, ev).await;
+                        while let Ok(ev) = stream_rx.try_recv() {
+                            handle_stream_event(&mut app, &agent, &stream_tx, ev).await;
                         }
-                    }
-                    Some(StreamEvent::Reasoning(chunk)) => {
-                        // Per-token reasoning trace from thinking-mode models.
-                        // Push to the segment timeline so it interleaves with
-                        // tool calls in render order; also append to the
-                        // legacy `reasoning` field so latest_reasoning() etc.
-                        // continue to work.
-                        if let Some(last) = app.messages.last_mut() {
-                            if matches!(last.role, ChatRole::Agent) {
-                                last.append_reasoning(&chunk);
-                                last.reasoning.push_str(&chunk);
-                            }
-                        }
-                        app.note_reasoning();
-                    }
-                    Some(StreamEvent::Done(resp)) => {
-                        app.thinking = false;
-                        if let Some(usage) = resp.usage {
-                            // YYC-60: track lifetime totals for cost (YYC-67)
-                            // and the latest prompt size for the in-status
-                            // capacity bar.
-                            app.prompt_tokens_total = app
-                                .prompt_tokens_total
-                                .saturating_add(usage.prompt_tokens as u32);
-                            app.completion_tokens_total = app
-                                .completion_tokens_total
-                                .saturating_add(usage.completion_tokens as u32);
-                            app.prompt_tokens_last = usage.prompt_tokens as u32;
-                        }
-                        app.note_done();
-                        refresh_sessions(&agent, &mut app).await;
-                        // YYC-61: drain one queued prompt per turn end. Subsequent
-                        // queued prompts ride the next Done event in the same way.
-                        if let Some(next) = app.queue.pop_front() {
-                            submit_prompt(&mut app, &agent, &stream_tx, next);
-                        }
-                    }
-                    Some(StreamEvent::Error(e)) => {
-                        if let Some(last) = app.messages.last_mut() {
-                            if last.content.is_empty() {
-                                last.content = format!("⚠ Error: {e}");
-                            }
-                        }
-                        app.thinking = false;
-                        // YYC-67: record provider-level error for telemetry.
-                        app.provider_errors_total = app.provider_errors_total.saturating_add(1);
-                        app.note_error(&e);
-                    }
-                    Some(StreamEvent::ToolCallStart {
-                        name,
-                        args_summary,
-                        ..
-                    }) => {
-                        // YYC-71: push the tool-call segment into the
-                        // timeline (interleaved with reasoning/text).
-                        // YYC-74: carry the args summary so the card has
-                        // structured context.
-                        if let Some(last) = app.messages.last_mut() {
-                            if matches!(last.role, ChatRole::Agent) {
-                                last.push_tool_start_with(name.clone(), args_summary);
-                            }
-                        }
-                        app.note_tool_start(&name);
-                    }
-                    Some(StreamEvent::ToolCallEnd {
-                        name,
-                        ok,
-                        output_preview,
-                        result_meta,
-                        elided_lines,
-                        elapsed_ms,
-                        ..
-                    }) => {
-                        if let Some(last) = app.messages.last_mut() {
-                            if matches!(last.role, ChatRole::Agent) {
-                                // YYC-74: stamp preview + meta + timing
-                                // onto the matching segment for the card.
-                                // YYC-78: stash elided count for collapse footer.
-                                last.finish_tool_with(
-                                    &name,
-                                    ok,
-                                    output_preview,
-                                    result_meta,
-                                    elided_lines,
-                                    Some(elapsed_ms),
-                                );
-                            }
-                        }
-                        // YYC-67: tool call telemetry.
-                        app.tool_calls_total = app.tool_calls_total.saturating_add(1);
-                        if !ok {
-                            app.tool_errors_total = app.tool_errors_total.saturating_add(1);
-                        }
-                        app.note_tool_end(&name, ok);
                     }
                     None => app.thinking = false,
                 }
@@ -962,12 +1121,7 @@ pub async fn run_tui(config: &Config, resume: ResumeTarget) -> Result<()> {
     Ok(())
 }
 
-fn draw_palette(
-    f: &mut ratatui::Frame,
-    area: Rect,
-    cmds: &[&SlashCommand],
-    selected: usize,
-) {
+fn draw_palette(f: &mut ratatui::Frame, area: Rect, cmds: &[&SlashCommand], selected: usize) {
     if area.height == 0 {
         return;
     }
@@ -1033,6 +1187,181 @@ fn draw_palette(
         }
     }
     f.render_widget(Paragraph::new(lines).style(body()), inner);
+}
+
+fn draw_session_picker(f: &mut ratatui::Frame, area: Rect, app: &AppState) {
+    let width = area.width.min(56);
+    let height = (app.sessions.len() as u16 + 6).min(area.height.saturating_sub(2));
+    let x = area.x + (area.width.saturating_sub(width)) / 2;
+    let y = area.y + (area.height.saturating_sub(height)) / 2;
+
+    let box_area = Rect { x, y, width, height };
+    if box_area.height < 4 {
+        return;
+    }
+
+    // Fill the box with solid paper background to obscure the view behind.
+    let fill_bg = rect_with_border(box_area, 0);
+    f.render_widget(
+        Paragraph::new(Line::from(""))
+            .style(Style::default().bg(Palette::PAPER)),
+        fill_bg,
+    );
+
+    // Title bar
+    let bar = Rect {
+        x: box_area.x,
+        y: box_area.y,
+        width: box_area.width,
+        height: 1,
+    };
+    let mut title = "  Resume a Session  ".to_string();
+    if (title.chars().count() as u16) < bar.width {
+        let pad = bar.width as usize - title.chars().count();
+        title = format!("{}{}{}", " ".repeat(pad / 2), title.trim(), " ".repeat(pad - pad / 2));
+    }
+    f.render_widget(
+        Paragraph::new(title).style(
+            Style::default()
+                .fg(Palette::PAPER)
+                .bg(Palette::INK)
+                .add_modifier(Modifier::BOLD),
+        ),
+        bar,
+    );
+
+    // Session list
+    let list_area = Rect {
+        x: box_area.x,
+        y: box_area.y + 1,
+        width: box_area.width,
+        height: box_area.height.saturating_sub(2),
+    };
+    let mut lines: Vec<Line<'static>> = Vec::new();
+
+    if app.sessions.is_empty() {
+        lines.push(Line::from(Span::styled(
+            "  No saved sessions found.",
+            Style::default().fg(Palette::MUTED),
+        )));
+        lines.push(Line::from(Span::styled(
+            "  Start a conversation and sessions will appear here.",
+            Style::default().fg(Palette::FAINT),
+        )));
+    } else {
+        let active = app.session_picker_selection.min(app.sessions.len().saturating_sub(1));
+        for (i, s) in app.sessions.iter().enumerate() {
+            let is_active = i == active;
+            let bg = if is_active { Palette::FAINT } else { Palette::PAPER };
+            let marker = if is_active { "▸ " } else { "  " };
+            let status_color = match s.status {
+                SessionStatus::Live => Palette::GREEN,
+                SessionStatus::Saved => Palette::BLUE,
+            };
+            let status_label = match s.status {
+                SessionStatus::Live => "LIVE",
+                SessionStatus::Saved => "saved",
+            };
+
+            // Format the date/time
+            let dt = chrono::DateTime::from_timestamp(s.last_active, 0)
+                .map(|d| d.with_timezone(&chrono::Local).format("%b %d %H:%M").to_string())
+                .unwrap_or_default();
+
+            let name_style = Style::default().fg(Palette::INK).bg(bg).add_modifier(if is_active {
+                Modifier::BOLD
+            } else {
+                Modifier::empty()
+            });
+            let meta_style = Style::default().fg(Palette::MUTED).bg(bg);
+
+            lines.push(Line::from(vec![
+                Span::styled(marker, name_style.add_modifier(Modifier::BOLD)),
+                Span::styled("█ ", Style::default().fg(status_color).bg(bg)),
+                Span::styled(
+                    format!("{:<12}", short_id(&s.id)),
+                    name_style.clone(),
+                ),
+                Span::styled(
+                    format!("{:>4}m", s.message_count),
+                    meta_style,
+                ),
+                Span::styled(
+                    format!("  {} ", dt),
+                    Style::default().fg(Palette::FAINT).bg(bg),
+                ),
+                Span::styled(
+                    status_label,
+                    Style::default().fg(status_color).bg(bg).add_modifier(Modifier::BOLD),
+                ),
+            ]));
+        }
+    }
+
+    // Footer hint
+    let hint = "  ↑↓ navigate · Enter select · Esc cancel  ";
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        hint,
+        Style::default().fg(Palette::MUTED),
+    )));
+
+    f.render_widget(
+        Paragraph::new(lines)
+            .style(Style::default().bg(Palette::PAPER)),
+        list_area,
+    );
+
+    // Draw a border around the whole thing
+    draw_picker_border(f, box_area);
+}
+
+/// Fill the interior of a bordered rect. `border_w` pixels from each edge.
+fn rect_with_border(r: Rect, border_w: u16) -> Rect {
+    Rect {
+        x: r.x + border_w,
+        y: r.y + border_w,
+        width: r.width.saturating_sub(border_w * 2),
+        height: r.height.saturating_sub(border_w * 2),
+    }
+}
+
+/// Simple border drawn with box-drawing characters.
+fn draw_picker_border(f: &mut ratatui::Frame, r: Rect) {
+    let style = Style::default().fg(Palette::INK).bg(Palette::PAPER);
+    // Top
+    if r.height > 0 {
+        let top = "─".repeat(r.width as usize);
+        f.render_widget(
+            Paragraph::new(top).style(style),
+            Rect { x: r.x, y: r.y, width: r.width, height: 1 },
+        );
+    }
+    // Bottom
+    if r.height > 1 {
+        let bot = "─".repeat(r.width as usize);
+        f.render_widget(
+            Paragraph::new(bot).style(style),
+            Rect { x: r.x, y: r.y + r.height - 1, width: r.width, height: 1 },
+        );
+    }
+    // Left edge (corners overlap — good enough for a 1px line)
+    if r.height > 2 {
+        let left: Vec<Line<'static>> = (1..r.height - 1)
+            .map(|_| Line::from(Span::styled("│", style)))
+            .collect();
+        f.render_widget(
+            Paragraph::new(left),
+            Rect { x: r.x, y: r.y + 1, width: 1, height: r.height - 2 },
+        );
+        let right: Vec<Line<'static>> = (1..r.height - 1)
+            .map(|_| Line::from(Span::styled("│", style)))
+            .collect();
+        f.render_widget(
+            Paragraph::new(right),
+            Rect { x: r.x + r.width - 1, y: r.y + 1, width: 1, height: r.height - 2 },
+        );
+    }
 }
 
 fn init_terminal() -> Result<Terminal<ratatui::backend::CrosstermBackend<std::io::Stdout>>> {

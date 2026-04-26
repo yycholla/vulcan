@@ -49,6 +49,12 @@ pub struct Agent {
     /// LSP server pool (YYC-46). Lazy: servers spawn on first tool
     /// invocation that needs one. Reaped in `end_session`.
     lsp_manager: Arc<crate::code::lsp::LspManager>,
+    /// Number of messages in `run_prompt[_stream]`'s `messages` Vec that have
+    /// already been persisted to SQLite. Used to skip the O(n) DELETE + re-INSERT
+    /// on every turn — only `messages[last_saved_count..]` are new (YYC-76).
+    last_saved_count: usize,
+    /// Max agent loop iterations per prompt. 0 = unlimited (default).
+    max_iterations: u32,
 }
 
 impl Agent {
@@ -247,6 +253,8 @@ impl Agent {
             diff_sink,
             pricing,
             lsp_manager,
+            last_saved_count: 0,
+            max_iterations: config.provider.max_iterations,
         })
     }
 
@@ -316,6 +324,8 @@ impl Agent {
             lsp_manager: Arc::new(crate::code::lsp::LspManager::new(
                 std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")),
             )),
+            last_saved_count: 0,
+            max_iterations: 0,
         }
     }
 
@@ -380,7 +390,12 @@ impl Agent {
             content: input.to_string(),
         });
 
-        for iteration in 0..10 {
+        let max_iter = if self.max_iterations > 0 {
+            self.max_iterations as usize
+        } else {
+            usize::MAX
+        };
+        for iteration in 0..max_iter {
             tracing::debug!("Agent iteration {iteration}");
 
             if self.context.should_compact(&messages) {
@@ -466,7 +481,7 @@ impl Agent {
                     continue;
                 }
 
-                self.memory.save_messages(&self.session_id, &messages)?;
+                self.save_messages(&messages)?;
                 self.turns = self.turns.saturating_add(1);
                 if iteration >= 5 {
                     self.skills.try_auto_create(input, &text)?;
@@ -505,7 +520,12 @@ impl Agent {
 
         let mut full_response = String::new();
 
-        for iteration in 0..10 {
+        let max_iter = if self.max_iterations > 0 {
+            self.max_iterations as usize
+        } else {
+            usize::MAX
+        };
+        for iteration in 0..max_iter {
             if cancel.is_cancelled() {
                 let _ = ui_tx.send(StreamEvent::Done(crate::provider::ChatResponse {
                     content: Some("Cancelled".into()),
@@ -711,7 +731,7 @@ impl Agent {
                     reasoning_content: reasoning.clone(),
                 });
 
-                self.memory.save_messages(&self.session_id, &messages)?;
+                self.save_messages(&messages)?;
                 self.turns = self.turns.saturating_add(1);
                 if iteration >= 5 {
                     self.skills.try_auto_create(input, &full_response)?;
@@ -740,6 +760,20 @@ impl Agent {
             }
         }
 
+        // Send a Done event so the TUI exits thinking mode, even
+        // though there's no text-only final turn. The loop maxed out
+        // at 10 iterations of tool calls — without this, the UI hangs
+        // in thinking=true forever (YYC-76).
+        let _ = ui_tx.send(StreamEvent::Text(
+            "Agent reached maximum iteration limit.".into(),
+        ));
+        let _ = ui_tx.send(StreamEvent::Done(crate::provider::ChatResponse {
+            content: Some("Agent reached maximum iteration limit.".into()),
+            tool_calls: None,
+            usage: None,
+            finish_reason: Some("max_iterations".into()),
+            reasoning_content: None,
+        }));
         Ok("Agent reached maximum iteration limit.".to_string())
     }
 
@@ -788,6 +822,19 @@ impl Agent {
     /// command and the `vulcan search` CLI subcommand to run FTS queries.
     pub fn memory(&self) -> &crate::memory::SessionStore {
         &self.memory
+    }
+
+    /// Save only new messages since the last save, avoiding the O(n) DELETE +
+    /// re-INSERT that `save_messages` does. Tracks `last_saved_count` so
+    /// subsequent calls only persist `messages[last_saved_count..]`.
+    pub fn save_messages(&mut self, messages: &[Message]) -> Result<()> {
+        let new_count = messages.len();
+        if new_count > self.last_saved_count {
+            let to_save = &messages[self.last_saved_count..];
+            self.memory.append_messages(&self.session_id, to_save)?;
+            self.last_saved_count = new_count;
+        }
+        Ok(())
     }
 
     /// Dispatch a single tool call, running BeforeToolCall + AfterToolCall

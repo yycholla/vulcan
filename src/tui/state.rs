@@ -1,4 +1,4 @@
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
 
 /// Format a u32 with comma thousands separators (YYC-60).
@@ -24,6 +24,19 @@ use crate::memory::SessionSummary;
 
 use super::theme::Palette;
 use super::views::{DiffKind, DiffLine, View};
+
+#[derive(Clone, Debug)]
+pub struct ChatLinesCache {
+    pub key: ChatLinesCacheKey,
+    pub lines: Vec<ratatui::text::Line<'static>>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ChatLinesCacheKey {
+    pub show_reasoning: bool,
+    pub dense: bool,
+    pub width: u16,
+}
 
 /// Diff render style (YYC-77). Toggled by `/diff-style`.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -273,7 +286,6 @@ impl ChatMessage {
             }
         }
     }
-
 }
 
 #[derive(Clone, Debug)]
@@ -484,6 +496,19 @@ pub struct AppState {
     /// (YYC-60) uses for capacity coloring.
     pub prompt_tokens_last: u32,
     pub token_max: u32,
+    /// Dirty flag + cache for the chat renderer. When false (and cache is
+    /// populated), `build_chat_lines_w` reuses cached lines instead of
+    /// re-rendering every message's markdown on every frame. Set to true
+    /// whenever a message is added, mutated, or the view is cleared.
+    pub chat_lines_dirty: Cell<bool>,
+    pub chat_lines_cache: RefCell<Option<ChatLinesCache>>,
+
+    /// When true, overlays a session picker on top of the normal view.
+    /// Set by `ResumeTarget::Pick` at startup; cleared when the user
+    /// selects a session or dismisses with Esc.
+    pub show_session_picker: bool,
+    /// Index into `sessions` for the highlighted row in the picker.
+    pub session_picker_selection: usize,
 }
 
 impl AppState {
@@ -523,6 +548,11 @@ impl AppState {
             completion_tokens_total: 0,
             prompt_tokens_last: 0,
             token_max,
+            chat_lines_dirty: Cell::new(true),
+            chat_lines_cache: RefCell::new(None),
+
+            show_session_picker: false,
+            session_picker_selection: 0,
         }
     }
 
@@ -583,11 +613,7 @@ impl AppState {
                 ("Esc", "cancel"),
             ],
             PromptMode::Ask => &[("y", "proceed"), ("n", "deny"), ("Esc", "cancel")],
-            PromptMode::Busy => &[
-                ("↵", "queue"),
-                ("⌃C", "cancel"),
-                ("⌃⌫", "drop last"),
-            ],
+            PromptMode::Busy => &[("↵", "queue"), ("⌃C", "cancel"), ("⌃⌫", "drop last")],
         }
     }
 
@@ -1237,9 +1263,9 @@ mod tests {
         let mut m = ChatMessage::new(ChatRole::Agent, "");
         m.push_tool_start_with("read_file", Some("src/foo.rs".into()));
         match &m.segments[0] {
-            MessageSegment::ToolCall {
-                params_summary, ..
-            } => assert_eq!(params_summary.as_deref(), Some("src/foo.rs")),
+            MessageSegment::ToolCall { params_summary, .. } => {
+                assert_eq!(params_summary.as_deref(), Some("src/foo.rs"))
+            }
             other => panic!("expected ToolCall, got {other:?}"),
         }
     }
