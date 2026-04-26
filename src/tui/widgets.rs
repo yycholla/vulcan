@@ -454,6 +454,87 @@ pub fn ticker(f: &mut TuiFrame, area: Rect, cells: &[(String, String, Color)]) {
     f.render_widget(Paragraph::new(Line::from(spans)).style(inverse()), area);
 }
 
+/// Render a structured tool-call card (YYC-74). Returns owned `Line`s so
+/// the caller (`build_chat_lines`) can splice them into the chat
+/// surface alongside reasoning + text segments.
+///
+/// Layout:
+/// ```text
+/// ▎ ◐ name · params_summary               1.2s
+/// ▎    output_preview line 1
+/// ▎    output_preview line 2
+/// ```
+///
+/// Status drives the leading glyph + color (see `tools.jsx::STATUS`).
+pub fn tool_card(
+    name: &str,
+    status: super::state::ToolStatus,
+    params_summary: Option<&str>,
+    output_preview: Option<&str>,
+    elapsed_ms: Option<u64>,
+    accent: Color,
+) -> Vec<Line<'static>> {
+    use super::state::ToolStatus;
+    let (glyph, label, color) = match status {
+        ToolStatus::InProgress => ("◐", "RUNNING", Palette::YELLOW),
+        ToolStatus::Done(true) => ("✓", "OK", Palette::GREEN),
+        ToolStatus::Done(false) => ("✗", "ERR", Palette::RED),
+    };
+
+    let mut header: Vec<Span<'static>> = Vec::new();
+    header.push(Span::styled("▎ ", Style::default().fg(accent)));
+    header.push(Span::styled(
+        format!("{glyph} "),
+        Style::default().fg(color).add_modifier(Modifier::BOLD),
+    ));
+    header.push(Span::styled(
+        name.to_string(),
+        Style::default().fg(Palette::INK).add_modifier(Modifier::BOLD),
+    ));
+    if let Some(p) = params_summary {
+        header.push(Span::styled(
+            format!(" · {p}"),
+            Style::default().fg(Palette::INK),
+        ));
+    }
+    // Right-aligned status / timing note.
+    let trail = match (status, elapsed_ms) {
+        (ToolStatus::InProgress, _) => format!(" · {label}"),
+        (_, Some(ms)) => format!(" · {label} · {}", format_elapsed(ms)),
+        (_, None) => format!(" · {label}"),
+    };
+    header.push(Span::styled(
+        trail,
+        Style::default().fg(color).add_modifier(Modifier::DIM),
+    ));
+
+    let mut out = vec![Line::from(header)];
+
+    if let Some(preview) = output_preview {
+        for line in preview.lines() {
+            out.push(Line::from(vec![
+                Span::styled("▎    ", Style::default().fg(accent)),
+                Span::styled(
+                    line.to_string(),
+                    Style::default().fg(Palette::MUTED),
+                ),
+            ]));
+        }
+    }
+    out
+}
+
+fn format_elapsed(ms: u64) -> String {
+    if ms < 1000 {
+        format!("{ms}ms")
+    } else if ms < 60_000 {
+        format!("{:.2}s", (ms as f64) / 1000.0)
+    } else {
+        let secs = ms / 1000;
+        format!("{}m{:02}s", secs / 60, secs % 60)
+    }
+}
+
 /// Fill a rect with a solid background color (paper by default).
 pub fn fill(f: &mut TuiFrame, area: Rect, style: Style) {
     if area.height == 0 || area.width == 0 {

@@ -608,9 +608,14 @@ impl Agent {
                 // point). `join_all` preserves order for the message vector
                 // so tool_call_id alignment stays deterministic.
                 for tc in tool_calls {
+                    // YYC-74: derive a one-line args summary so the TUI's
+                    // tool-card has structured context to show.
+                    let args_summary =
+                        summarize_tool_args(&tc.function.name, &tc.function.arguments);
                     let _ = ui_tx.send(StreamEvent::ToolCallStart {
                         id: tc.id.clone(),
                         name: tc.function.name.clone(),
+                        args_summary,
                     });
                 }
                 let this: &Self = self;
@@ -622,12 +627,18 @@ impl Agent {
                     let ui_tx = ui_tx.clone();
                     async move {
                         tracing::info!("Executing tool: {name} (call {id})");
+                        let started = std::time::Instant::now();
                         let result = this.dispatch_tool(&name, &args, cancel).await;
+                        let elapsed_ms = started.elapsed().as_millis() as u64;
                         let ok = !result.is_error;
+                        // YYC-74: truncated output preview for the card body.
+                        let output_preview = preview_output(&result.output);
                         let _ = ui_tx.send(StreamEvent::ToolCallEnd {
                             id: id.clone(),
                             name: name.clone(),
                             ok,
+                            output_preview,
+                            elapsed_ms,
                         });
                         (id, result)
                     }
@@ -828,6 +839,124 @@ fn flatten_for_message(result: ToolResult) -> String {
     } else {
         format!("{}\n\n{media_block}", result.output)
     }
+}
+
+/// One-line projection of a tool's args for the YYC-74 card. Tool-aware
+/// for the common tools we ship; falls back to a generic JSON peek so
+/// new tools still get something useful before someone writes a
+/// custom summarizer for them.
+fn summarize_tool_args(name: &str, raw_args: &str) -> Option<String> {
+    let args: serde_json::Value = match serde_json::from_str(raw_args) {
+        Ok(v) => v,
+        Err(_) => return None,
+    };
+    let s = |k: &str| args.get(k).and_then(|v| v.as_str()).map(str::to_string);
+    let tail = |full: String, n: usize| -> String {
+        if full.chars().count() <= n {
+            full
+        } else {
+            let chars: Vec<char> = full.chars().collect();
+            format!("…{}", chars[chars.len() - n + 1..].iter().collect::<String>())
+        }
+    };
+    let truncate = |full: String, n: usize| -> String {
+        if full.chars().count() <= n {
+            full
+        } else {
+            let chars: Vec<char> = full.chars().collect();
+            format!("{}…", chars[..n - 1].iter().collect::<String>())
+        }
+    };
+    let summary = match name {
+        // File tools — path is the salient bit.
+        "read_file" | "write_file" | "edit_file" | "list_files" => {
+            s("path").map(|p| tail(p, 60))
+        }
+        // Search tools — pattern/query.
+        "search_files" => s("pattern").map(|p| truncate(p, 60)),
+        "code_query" => s("query").map(|q| truncate(q, 60)),
+        "code_outline" | "code_extract" => s("path").map(|p| tail(p, 60)),
+        "find_symbol" => s("name"),
+        // Code semantics — file:line.
+        "goto_definition" | "find_references" | "hover" | "diagnostics" => {
+            let p = s("path").map(|x| tail(x, 40));
+            let line = args.get("line").and_then(|v| v.as_u64());
+            match (p, line) {
+                (Some(p), Some(l)) => Some(format!("{p}:{l}")),
+                (Some(p), None) => Some(p),
+                _ => None,
+            }
+        }
+        "rename_symbol" => {
+            let p = s("path").map(|x| tail(x, 40));
+            let new = s("new_name");
+            match (p, new) {
+                (Some(p), Some(n)) => Some(format!("{p} → {n}")),
+                (Some(p), None) => Some(p),
+                _ => None,
+            }
+        }
+        "replace_function_body" => {
+            let p = s("path").map(|x| tail(x, 40));
+            let sym = s("symbol");
+            match (p, sym) {
+                (Some(p), Some(sym)) => Some(format!("{p}::{sym}")),
+                (Some(p), None) => Some(p),
+                _ => None,
+            }
+        }
+        // Web tools.
+        "web_search" | "code_search_semantic" => s("query").map(|q| truncate(q, 60)),
+        "web_fetch" => s("url").map(|u| truncate(u, 60)),
+        // Shell tools.
+        "bash" | "run_command" | "pty_create" | "pty_write" => {
+            s("command").map(|c| truncate(c, 60))
+        }
+        "pty_read" | "pty_close" | "pty_resize" => s("session_id").map(|i| truncate(i, 16)),
+        "pty_list" => Some("(all sessions)".into()),
+        // Git tools.
+        "git_status" | "git_log" | "git_diff" => Some(name.to_string()),
+        "git_commit" => s("message").map(|m| truncate(m, 60)),
+        "git_branch" => {
+            let act = s("action").unwrap_or_else(|| "list".into());
+            let nm = s("name");
+            match nm {
+                Some(n) => Some(format!("{act} {n}")),
+                None => Some(act),
+            }
+        }
+        "git_push" => {
+            let r = s("remote").unwrap_or_else(|| "origin".into());
+            let b = s("branch");
+            match b {
+                Some(b) => Some(format!("{r} {b}")),
+                None => Some(r),
+            }
+        }
+        "index_code_graph" | "index_code_embeddings" => Some("(workspace)".into()),
+        _ => {
+            // Generic: surface the first string-valued field.
+            args.as_object().and_then(|o| {
+                o.iter()
+                    .find_map(|(_, v)| v.as_str().map(|s| truncate(s.to_string(), 60)))
+            })
+        }
+    };
+    summary.filter(|s| !s.is_empty())
+}
+
+/// Truncated tool result for the YYC-74 card preview block — caps at
+/// ~6 lines / 400 chars. The full output still goes to the LLM via
+/// `Message::Tool`; this is purely for rendering.
+fn preview_output(text: &str) -> Option<String> {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let chars: Vec<char> = trimmed.chars().take(400).collect();
+    let head: String = chars.iter().collect();
+    let lines: Vec<&str> = head.lines().take(6).collect();
+    Some(lines.join("\n"))
 }
 
 #[cfg(test)]
@@ -1111,5 +1240,50 @@ mod tests {
             })
             .collect();
         assert_eq!(tool_ids, vec!["call_a", "call_b", "call_c"]);
+    }
+
+    #[test]
+    fn summarize_tool_args_picks_meaningful_field_per_tool() {
+        // YYC-74 — the YYC-74 card needs a one-line projection.
+        assert_eq!(
+            summarize_tool_args("read_file", r#"{"path":"src/foo.rs"}"#).as_deref(),
+            Some("src/foo.rs")
+        );
+        assert_eq!(
+            summarize_tool_args("git_commit", r#"{"message":"YYC-74"}"#).as_deref(),
+            Some("YYC-74")
+        );
+        assert_eq!(
+            summarize_tool_args("git_branch", r#"{"action":"create","name":"foo"}"#)
+                .as_deref(),
+            Some("create foo")
+        );
+        // Long path tail-truncates rather than head-truncates.
+        let long_path = "/very/long/leading/path/segments/that/blow/the/budget/file.rs";
+        let result =
+            summarize_tool_args("read_file", &format!(r#"{{"path":"{long_path}"}}"#))
+                .unwrap();
+        assert!(result.starts_with('…'));
+        assert!(result.ends_with("file.rs"), "got {result}");
+        // Generic fallback for unknown tools surfaces first string field.
+        assert_eq!(
+            summarize_tool_args("custom_tool", r#"{"x":42,"label":"hello"}"#).as_deref(),
+            Some("hello")
+        );
+    }
+
+    #[test]
+    fn preview_output_caps_to_six_lines_and_400_chars() {
+        let big = (1..=20).map(|n| format!("line {n}")).collect::<Vec<_>>().join("\n");
+        let preview = preview_output(&big).unwrap();
+        assert_eq!(preview.lines().count(), 6);
+        assert!(preview.contains("line 1"));
+        assert!(!preview.contains("line 7"));
+    }
+
+    #[test]
+    fn preview_output_returns_none_for_empty() {
+        assert!(preview_output("").is_none());
+        assert!(preview_output("   \n  ").is_none());
     }
 }
