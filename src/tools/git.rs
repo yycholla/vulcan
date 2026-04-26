@@ -341,6 +341,9 @@ mod tests {
     use super::*;
     use serde_json::json;
     use tempfile::tempdir;
+    use tokio::sync::Mutex;
+
+    static CWD_LOCK: Mutex<()> = Mutex::const_new(());
 
     /// Run `args` in `cwd`. Wraps tokio's Command directly so the test
     /// doesn't need to hop through the public Tool trait.
@@ -366,6 +369,7 @@ mod tests {
         let cwd = dir.path();
         git(cwd, &["init", "-q"]).await;
         std::fs::write(cwd.join("a.txt"), "hello\n").unwrap();
+        let _cwd = CWD_LOCK.lock().await;
         // The tool reads from the process cwd, so chdir for this test.
         let prev = std::env::current_dir().unwrap();
         std::env::set_current_dir(cwd).unwrap();
@@ -385,6 +389,7 @@ mod tests {
     #[tokio::test]
     async fn git_status_outside_repo_returns_clean_error() {
         let dir = tempdir().unwrap();
+        let _cwd = CWD_LOCK.lock().await;
         let prev = std::env::current_dir().unwrap();
         std::env::set_current_dir(dir.path()).unwrap();
         let result = GitStatusTool

@@ -123,23 +123,45 @@ struct StreamTurn {
     tool_defs: Vec<ToolDefinition>,
 }
 
+pub struct AgentBuilder<'a> {
+    config: &'a Config,
+    hooks: HookRegistry,
+    pause_tx: Option<PauseSender>,
+    max_iterations: Option<u32>,
+}
+
+impl<'a> AgentBuilder<'a> {
+    pub fn with_hooks(mut self, hooks: HookRegistry) -> Self {
+        self.hooks = hooks;
+        self
+    }
+
+    pub fn with_pause_channel(mut self, pause_tx: PauseSender) -> Self {
+        self.pause_tx = Some(pause_tx);
+        self
+    }
+
+    pub fn with_max_iterations(mut self, max_iterations: u32) -> Self {
+        self.max_iterations = Some(max_iterations);
+        self
+    }
+
+    pub async fn build(self) -> Result<Agent> {
+        Agent::build_from_parts(self.config, self.hooks, self.pause_tx, self.max_iterations).await
+    }
+}
+
 impl Agent {
-    /// Construct an Agent with no caller-supplied hooks. Built-in hooks (skills
-    /// injection, etc.) are still registered.
-    pub async fn new(config: &Config) -> Result<Self> {
-        Self::with_hooks_and_pause(config, HookRegistry::new(), None).await
+    pub fn builder(config: &Config) -> AgentBuilder<'_> {
+        AgentBuilder {
+            config,
+            hooks: HookRegistry::new(),
+            pause_tx: None,
+            max_iterations: None,
+        }
     }
 
-    /// Construct with caller-supplied hooks and no interactive pause channel.
-    /// The TUI uses `with_hooks_and_pause` to wire one up.
-    pub async fn with_hooks(config: &Config, hooks: HookRegistry) -> Result<Self> {
-        Self::with_hooks_and_pause(config, hooks, None).await
-    }
-
-    /// Construct an Agent with a caller-supplied hook registry and an optional
-    /// pause emitter. Built-ins (skills, safety) are registered into the
-    /// registry; if a pause emitter is provided, `SafetyHook` is wired up to
-    /// route blocks through it as `AgentPause::SafetyApproval`.
+    /// Build an Agent from a fully configured `AgentBuilder`.
     ///
     /// Async because it fetches the provider's model catalog at startup
     /// (YYC-64). Catalog-fetch failures are non-fatal — logged and continued
@@ -147,10 +169,11 @@ impl Agent {
     ///
     /// Returns `Err` for fatal init failures (missing API key, provider build
     /// failure, or model not found in catalog).
-    pub async fn with_hooks_and_pause(
+    async fn build_from_parts(
         config: &Config,
         mut hooks: HookRegistry,
         pause_tx: Option<PauseSender>,
+        max_iterations: Option<u32>,
     ) -> Result<Self> {
         // Local / self-hosted endpoints don't require auth; allow empty
         // string in that case (matches `switch_provider` semantics).
@@ -321,7 +344,7 @@ impl Agent {
             lsp_manager,
             last_saved_count: 0,
             tool_context,
-            max_iterations: config.provider.max_iterations,
+            max_iterations: max_iterations.unwrap_or(config.provider.max_iterations),
         })
     }
 
@@ -616,8 +639,8 @@ impl Agent {
     }
 
     /// Fires `session_start` on all hook handlers. Call once after construction
-    /// (Agent::new doesn't call it itself because hooks aren't always async-
-    /// available at construction time).
+    /// (`AgentBuilder::build` doesn't call it itself because hooks aren't
+    /// always async-available at construction time).
     pub async fn start_session(&self) {
         if let Err(e) = self
             .memory
@@ -1638,6 +1661,32 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn builder_accepts_hooks_pause_channel_and_max_iterations() {
+        let mut config = Config::default();
+        config.provider.base_url = "http://127.0.0.1:11434/v1".into();
+        config.provider.disable_catalog = true;
+        config.provider.max_iterations = 12;
+        let (pause_tx, _pause_rx) = crate::pause::channel(1);
+
+        let agent = Agent::builder(&config)
+            .with_hooks(HookRegistry::new())
+            .with_pause_channel(pause_tx)
+            .with_max_iterations(3)
+            .build()
+            .await
+            .unwrap();
+
+        assert_eq!(agent.max_iterations, 3);
+        assert!(
+            agent
+                .tools
+                .definitions()
+                .iter()
+                .any(|tool| tool.function.name == "ask_user")
+        );
+    }
+
+    #[tokio::test]
     async fn single_turn_text_response() {
         let (mut agent, mock) = agent_with_mock();
         mock.enqueue_text("Hello there");
@@ -1872,7 +1921,7 @@ mod tests {
             ..Default::default()
         };
 
-        let mut agent = Agent::new(&config).await.unwrap();
+        let mut agent = Agent::builder(&config).build().await.unwrap();
         let session_id = agent.session_id().to_string();
 
         assert_eq!(agent.active_model(), "model-a");
