@@ -53,11 +53,21 @@ pub struct AgentMap {
 
 pub(crate) struct LaneEntry {
     pub agent: Arc<Mutex<Agent>>,
-    #[allow(dead_code)] // Stored for observability + Task 9 rehydration.
     pub session_id: String,
-    #[allow(dead_code)] // Surfaced by GET /v1/lanes (Task 15).
+    #[allow(dead_code)] // Per-tool-call ring; not surfaced by /v1/lanes (Task 15).
     pub audit_buf: AuditBuffer,
     pub last_activity: Instant,
+}
+
+/// Per-lane summary returned by `AgentMap::snapshot` and surfaced through
+/// `GET /v1/lanes`. Owned strings + a relative timestamp so the JSON output
+/// is stable across calls (no `Instant` serialization gymnastics).
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct LaneSnapshot {
+    pub platform: String,
+    pub chat_id: String,
+    pub session_id: String,
+    pub last_activity_secs_ago: u64,
 }
 
 impl AgentMap {
@@ -161,6 +171,29 @@ impl AgentMap {
     /// tests.
     pub async fn active_lanes(&self) -> usize {
         self.inner.read().await.len()
+    }
+
+    /// Snapshot every active lane. Sorted ascending by
+    /// `last_activity_secs_ago` so the most-recently-touched lanes appear
+    /// first. Read-locked iteration over `inner`; returns an owned `Vec` so
+    /// the lock is dropped before serialization.
+    pub async fn snapshot(&self) -> Vec<LaneSnapshot> {
+        let map = self.inner.read().await;
+        let now = Instant::now();
+        let mut out: Vec<LaneSnapshot> = map
+            .iter()
+            .map(|(k, entry)| LaneSnapshot {
+                platform: k.platform.clone(),
+                chat_id: k.chat_id.clone(),
+                session_id: entry.session_id.clone(),
+                last_activity_secs_ago: now
+                    .saturating_duration_since(entry.last_activity)
+                    .as_secs(),
+            })
+            .collect();
+        // Most-recent first.
+        out.sort_by_key(|s| s.last_activity_secs_ago);
+        out
     }
 
     /// Internal accessor for tests + the future evictor (Task 9).
