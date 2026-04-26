@@ -3,7 +3,8 @@
 //! `AgentMap` keys live `Agent` instances by `LaneKey` so each chat (Slack
 //! thread, IRC channel, Matrix room, etc.) gets a long-lived agent with its
 //! own hook state. First touch on a lane spawns the Agent; subsequent calls
-//! reuse it. Eviction lands in Task 9 — for now, the map grows monotonically.
+//! reuse it. A background evictor (`spawn_evictor`) reaps lanes idle longer
+//! than `idle_ttl` so the map doesn't grow without bound.
 //!
 //! The double-checked spawn pattern in `get_or_spawn` matches the lane router
 //! in `lane.rs`: read-lock → write-lock → recheck → insert.
@@ -119,13 +120,13 @@ impl AgentMap {
     }
 
     /// Spawn a background task that periodically evicts lanes idle longer
-    /// than `self.idle_ttl`. The returned handle aborts the loop on drop or
-    /// on `.abort()`.
-    pub fn spawn_evictor(&self) -> JoinHandle<()> {
+    /// than `self.idle_ttl`. The returned `EvictorHandle` aborts the loop on
+    /// drop, so callers don't need to remember to call `.abort()` on shutdown.
+    pub fn spawn_evictor(&self) -> EvictorHandle {
         const SCAN_INTERVAL: Duration = Duration::from_secs(60);
         let inner = Arc::clone(&self.inner);
         let ttl = self.idle_ttl;
-        tokio::spawn(async move {
+        let handle = tokio::spawn(async move {
             let mut ticker = tokio::time::interval(SCAN_INTERVAL);
             // Skip the immediate first tick; the first eviction happens after
             // one full interval.
@@ -134,7 +135,8 @@ impl AgentMap {
                 ticker.tick().await;
                 evict_idle(&inner, ttl).await;
             }
-        })
+        });
+        EvictorHandle { handle }
     }
 
     #[cfg(test)]
@@ -195,12 +197,37 @@ pub(crate) async fn evict_idle(
         taken
     };
     for (lane, entry) in evicted {
-        let agent = entry.agent.lock().await;
-        agent.end_session().await;
-        tracing::info!(target: "gateway::agent_map",
-            platform = lane.platform.as_str(),
-            chat_id = lane.chat_id.as_str(),
-            "evicted idle lane");
+        // end_session calls LspManager::shutdown_all which can stall if a
+        // child server is wedged. Spawn each shutdown so the eviction loop
+        // returns to its ticker promptly.
+        tokio::spawn(async move {
+            let agent = entry.agent.lock().await;
+            agent.end_session().await;
+            tracing::info!(target: "gateway::agent_map",
+                platform = lane.platform.as_str(),
+                chat_id = lane.chat_id.as_str(),
+                "evicted idle lane");
+        });
+    }
+}
+
+/// Handle to the background evictor task. Aborts the loop on drop so callers
+/// don't have to remember to clean up on shutdown.
+pub struct EvictorHandle {
+    handle: JoinHandle<()>,
+}
+
+impl EvictorHandle {
+    /// Abort the evictor immediately. `Drop` does the same; this is for
+    /// callers that want to abort and then `await` clean exit.
+    pub fn abort(&self) {
+        self.handle.abort();
+    }
+}
+
+impl Drop for EvictorHandle {
+    fn drop(&mut self) {
+        self.handle.abort();
     }
 }
 
