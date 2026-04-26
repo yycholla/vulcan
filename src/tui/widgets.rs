@@ -519,7 +519,11 @@ pub fn tool_card(
     }
     let gap = inner_w.saturating_sub(left_chars + right_chars);
 
-    // Single-line header.
+    // Single-line header. Mid-row gets a faint paper-tint bg so the
+    // whole title bar reads as one shaded band — pills sit at the
+    // left/right edges, params float in the middle, gap pads to
+    // fill. Matches the design's title-bar treatment.
+    let header_bg = Palette::FAINT;
     let mut header: Vec<Span<'static>> = Vec::new();
     header.push(Span::styled("▎ ", Style::default().fg(accent)));
     header.push(Span::styled(
@@ -532,10 +536,15 @@ pub fn tool_card(
     if !params_text.is_empty() {
         header.push(Span::styled(
             params_text,
-            Style::default().fg(Palette::MUTED),
+            Style::default().fg(Palette::INK).bg(header_bg),
         ));
     }
-    header.push(Span::raw(" ".repeat(gap)));
+    if gap > 0 {
+        header.push(Span::styled(
+            " ".repeat(gap),
+            Style::default().bg(header_bg),
+        ));
+    }
     header.push(Span::styled(
         pill_body,
         Style::default()
@@ -546,22 +555,32 @@ pub fn tool_card(
 
     let mut out = vec![Line::from(header)];
 
-    // Body indent: same left accent bar + 4-col indent so meta + preview
-    // visually nest under the title.
+    // Body lines also pick up the faint bg so the card reads as one
+    // unified shaded block. Indent matches header pill alignment.
     let body_indent = "    ";
     let body_inner = inner_w.saturating_sub(body_indent.chars().count());
+    let pad_to_width = |line: &mut Vec<Span<'static>>, used: usize| {
+        let pad = inner_w.saturating_sub(used);
+        if pad > 0 {
+            line.push(Span::styled(" ".repeat(pad), Style::default().bg(header_bg)));
+        }
+    };
 
     if let Some(meta) = result_meta {
-        out.push(Line::from(vec![
+        let used = body_indent.chars().count() + meta.chars().count();
+        let mut spans = vec![
             Span::styled("▎ ", Style::default().fg(accent)),
-            Span::raw(body_indent.to_string()),
+            Span::styled(body_indent.to_string(), Style::default().bg(header_bg)),
             Span::styled(
                 meta.to_string(),
                 Style::default()
                     .fg(Palette::MUTED)
+                    .bg(header_bg)
                     .add_modifier(Modifier::BOLD),
             ),
-        ]));
+        ];
+        pad_to_width(&mut spans, used);
+        out.push(Line::from(spans));
     }
 
     if let Some(preview) = output_preview {
@@ -572,11 +591,14 @@ pub fn tool_card(
                 chars.push('…');
             }
             let body: String = chars.iter().collect();
-            out.push(Line::from(vec![
+            let used = body_indent.chars().count() + body.chars().count();
+            let mut spans = vec![
                 Span::styled("▎ ", Style::default().fg(accent)),
-                Span::raw(body_indent.to_string()),
-                Span::styled(body, Style::default().fg(Palette::INK)),
-            ]));
+                Span::styled(body_indent.to_string(), Style::default().bg(header_bg)),
+                Span::styled(body, Style::default().fg(Palette::INK).bg(header_bg)),
+            ];
+            pad_to_width(&mut spans, used);
+            out.push(Line::from(spans));
         }
     }
 
