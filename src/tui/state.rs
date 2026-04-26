@@ -1,4 +1,4 @@
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
 
 /// Format a u32 with comma thousands separators (YYC-60).
@@ -24,6 +24,43 @@ use crate::memory::SessionSummary;
 
 use super::theme::Palette;
 use super::views::{DiffKind, DiffLine, View};
+
+/// Diff render style (YYC-77). Toggled by `/diff-style`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum DiffStyle {
+    /// Classic `+ -` lines, single column. Default.
+    #[default]
+    Unified,
+    /// Before / after columns separated by `│`.
+    SideBySide,
+    /// Word-level highlight on the new line; useful for tiny edits.
+    Inline,
+}
+
+impl DiffStyle {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Unified => "unified",
+            Self::SideBySide => "side-by-side",
+            Self::Inline => "inline",
+        }
+    }
+    pub fn next(self) -> Self {
+        match self {
+            Self::Unified => Self::SideBySide,
+            Self::SideBySide => Self::Inline,
+            Self::Inline => Self::Unified,
+        }
+    }
+    pub fn parse(name: &str) -> Option<Self> {
+        match name.trim() {
+            "unified" | "u" => Some(Self::Unified),
+            "side-by-side" | "split" | "sbs" | "s" => Some(Self::SideBySide),
+            "inline" | "i" => Some(Self::Inline),
+            _ => None,
+        }
+    }
+}
 
 /// Prompt-row state machine (YYC-58). Drives the mode badge and the
 /// per-mode key dispatch + hint set. `Busy` is a transient state pinned
@@ -55,7 +92,7 @@ impl PromptMode {
     }
 }
 
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
 pub enum ChatRole {
     User,
     #[default]
@@ -117,6 +154,7 @@ pub struct ChatMessage {
     /// as they arrived. Populated for live streamed agent messages; empty
     /// for user/system messages and hydrated history.
     pub segments: Vec<MessageSegment>,
+    pub(crate) render_version: u64,
 }
 
 impl ChatMessage {
@@ -126,7 +164,21 @@ impl ChatMessage {
             content: content.into(),
             reasoning: String::new(),
             segments: Vec::new(),
+            render_version: 0,
         }
+    }
+
+    pub fn render_version(&self) -> u64 {
+        self.render_version
+    }
+
+    fn bump_render_version(&mut self) {
+        self.render_version = self.render_version.wrapping_add(1);
+    }
+
+    pub fn set_content(&mut self, content: impl Into<String>) {
+        self.content = content.into();
+        self.bump_render_version();
     }
 
     /// True if neither the live segment timeline nor the hydrated content
@@ -159,6 +211,7 @@ impl ChatMessage {
             Some(MessageSegment::Text(t)) => t.push_str(chunk),
             _ => self.segments.push(MessageSegment::Text(chunk.to_string())),
         }
+        self.bump_render_version();
     }
 
     /// Append a reasoning chunk to the segment timeline, coalescing with the
@@ -172,6 +225,7 @@ impl ChatMessage {
                 .segments
                 .push(MessageSegment::Reasoning(chunk.to_string())),
         }
+        self.bump_render_version();
     }
 
     pub fn push_tool_start(&mut self, name: impl Into<String>) {
@@ -194,6 +248,7 @@ impl ChatMessage {
             elided_lines: 0,
             elapsed_ms: None,
         });
+        self.bump_render_version();
     }
 
     /// Mark the most recent in-progress ToolCall with this name as done.
@@ -231,12 +286,12 @@ impl ChatMessage {
                     *rm = result_meta;
                     *el = elided_lines;
                     *em = elapsed_ms;
+                    self.bump_render_version();
                     return;
                 }
             }
         }
     }
-
 }
 
 #[derive(Clone, Debug)]
@@ -248,6 +303,7 @@ pub struct SessionState {
     pub last_active: i64,
     pub parent_session_id: Option<String>,
     pub lineage_label: Option<String>,
+    pub preview: Option<String>,
     pub status: SessionStatus,
     pub is_active: bool,
 }
@@ -393,6 +449,8 @@ pub struct AppState {
     /// Prompt-row mode (YYC-58). Drives the mode badge, the per-mode
     /// hint set, and which key bindings the dispatcher honors.
     pub prompt_mode: PromptMode,
+    /// Diff render style (YYC-77). Toggled via `/diff-style`.
+    pub diff_style: DiffStyle,
     /// Pending prompts submitted while the agent was busy (YYC-61).
     /// Drained one-at-a-time from the front when each turn completes.
     /// In-memory only — never persisted to sessions.db.
@@ -445,6 +503,14 @@ pub struct AppState {
     /// (YYC-60) uses for capacity coloring.
     pub prompt_tokens_last: u32,
     pub token_max: u32,
+    pub chat_render_store: RefCell<super::chat_render::ChatRenderStore>,
+
+    /// When true, overlays a session picker on top of the normal view.
+    /// Set by `ResumeTarget::Pick` at startup; cleared when the user
+    /// selects a session or dismisses with Esc.
+    pub show_session_picker: bool,
+    /// Index into `sessions` for the highlighted row in the picker.
+    pub session_picker_selection: usize,
 }
 
 impl AppState {
@@ -459,6 +525,7 @@ impl AppState {
             chat_max_scroll: Cell::new(0),
             slash_menu_selection: 0,
             prompt_mode: PromptMode::Insert,
+            diff_style: DiffStyle::default(),
             queue: VecDeque::new(),
             show_reasoning: true,
             session_label: "new session".into(),
@@ -483,6 +550,10 @@ impl AppState {
             completion_tokens_total: 0,
             prompt_tokens_last: 0,
             token_max,
+            chat_render_store: RefCell::new(super::chat_render::ChatRenderStore::default()),
+
+            show_session_picker: false,
+            session_picker_selection: 0,
         }
     }
 
@@ -543,11 +614,7 @@ impl AppState {
                 ("Esc", "cancel"),
             ],
             PromptMode::Ask => &[("y", "proceed"), ("n", "deny"), ("Esc", "cancel")],
-            PromptMode::Busy => &[
-                ("↵", "queue"),
-                ("⌃C", "cancel"),
-                ("⌃⌫", "drop last"),
-            ],
+            PromptMode::Busy => &[("↵", "queue"), ("⌃C", "cancel"), ("⌃⌫", "drop last")],
         }
     }
 
@@ -645,6 +712,7 @@ impl AppState {
                     last_active: s.last_active,
                     parent_session_id: s.parent_session_id.clone(),
                     lineage_label: s.lineage_label.clone(),
+                    preview: s.preview.clone(),
                     status: if is_active {
                         SessionStatus::Live
                     } else {
@@ -989,6 +1057,7 @@ mod tests {
                 message_count: 3,
                 parent_session_id: Some(parent_id.clone()),
                 lineage_label: Some("branched from auth cleanup".into()),
+                preview: None,
             }],
             &child_id,
         );
@@ -1054,6 +1123,33 @@ mod tests {
             MessageSegment::Reasoning(r) => assert_eq!(r, "after tool"),
             other => panic!("expected reasoning, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn chat_message_render_version_bumps_on_mutation() {
+        let mut m = ChatMessage::new(ChatRole::Agent, "");
+        let initial = m.render_version();
+
+        m.append_text("hello");
+        assert!(m.render_version() > initial);
+        let after_text = m.render_version();
+
+        m.append_reasoning("thinking");
+        assert!(m.render_version() > after_text);
+        let after_reasoning = m.render_version();
+
+        m.push_tool_start("bash");
+        assert!(m.render_version() > after_reasoning);
+        let after_tool_start = m.render_version();
+
+        m.finish_tool("bash", true);
+        assert!(m.render_version() > after_tool_start);
+    }
+
+    #[test]
+    fn chat_message_new_starts_at_zero_render_version() {
+        let m = ChatMessage::new(ChatRole::User, "hello");
+        assert_eq!(m.render_version(), 0);
     }
 
     #[test]
@@ -1197,9 +1293,9 @@ mod tests {
         let mut m = ChatMessage::new(ChatRole::Agent, "");
         m.push_tool_start_with("read_file", Some("src/foo.rs".into()));
         match &m.segments[0] {
-            MessageSegment::ToolCall {
-                params_summary, ..
-            } => assert_eq!(params_summary.as_deref(), Some("src/foo.rs")),
+            MessageSegment::ToolCall { params_summary, .. } => {
+                assert_eq!(params_summary.as_deref(), Some("src/foo.rs"))
+            }
             other => panic!("expected ToolCall, got {other:?}"),
         }
     }

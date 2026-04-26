@@ -91,6 +91,8 @@ pub struct SessionSummary {
     pub message_count: usize,
     pub parent_session_id: Option<String>,
     pub lineage_label: Option<String>,
+    /// First user-message content, truncated for the picker synopsis.
+    pub preview: Option<String>,
 }
 
 impl SessionStore {
@@ -190,6 +192,9 @@ impl SessionStore {
     /// upserted (`last_active` bumped); existing messages for the session are
     /// deleted and replaced with `messages` — full-snapshot semantics matching
     /// the per-prompt save the agent emits.
+    ///
+    /// Prefer `append_messages` when only new messages need saving — this
+    /// does a full DELETE + re-INSERT which is O(n) in the total message count.
     pub fn save_messages(&self, session_id: &str, messages: &[Message]) -> Result<()> {
         let now = Utc::now().timestamp();
 
@@ -233,6 +238,52 @@ impl SessionStore {
         Ok(())
     }
 
+    /// Append new messages to a session — no DELETE, no full-snapshot
+    /// overhead. Finds the current max position for the session and inserts
+    /// from there. Use this from the agent loop to avoid O(n) delete+reinsert
+    /// on every turn.
+    pub fn append_messages(&self, session_id: &str, messages: &[Message]) -> Result<()> {
+        let now = Utc::now().timestamp();
+        let mut conn = self
+            .conn
+            .lock()
+            .map_err(|_| anyhow::anyhow!("session DB poisoned"))?;
+        let tx = conn.transaction()?;
+
+        upsert_session_metadata(&tx, session_id, now, None, None)?;
+
+        let next_pos: i64 = tx
+            .query_row(
+                "SELECT COALESCE(MAX(position), -1) + 1 FROM messages WHERE session_id = ?1",
+                params![session_id],
+                |row| row.get(0),
+            )
+            .unwrap_or(0);
+
+        for (offset, msg) in messages.iter().enumerate() {
+            let (role, content, tool_call_id, tool_calls_json, reasoning_content) =
+                encode_message(msg)?;
+            tx.execute(
+                "INSERT INTO messages
+                 (session_id, position, role, content, tool_call_id, tool_calls_json, reasoning_content, created_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                params![
+                    session_id,
+                    next_pos + offset as i64,
+                    role,
+                    content,
+                    tool_call_id,
+                    tool_calls_json,
+                    reasoning_content,
+                    now,
+                ],
+            )?;
+        }
+
+        tx.commit()?;
+        Ok(())
+    }
+
     /// Persist session metadata even before any messages exist. Used to create
     /// truthful child sessions with lineage before the first turn lands.
     pub fn save_session_metadata(
@@ -259,7 +310,9 @@ impl SessionStore {
 
         let mut stmt = conn.prepare(
             "SELECT s.id, s.created_at, s.last_active, s.parent_session_id, s.lineage_label,
-                    (SELECT COUNT(*) FROM messages m WHERE m.session_id = s.id) AS msg_count
+                    (SELECT COUNT(*) FROM messages m WHERE m.session_id = s.id) AS msg_count,
+                    (SELECT content FROM messages m WHERE m.session_id = s.id AND m.role = 'user'
+                     ORDER BY m.position ASC LIMIT 1) AS preview
              FROM sessions s
              ORDER BY s.last_active DESC
              LIMIT ?1",
@@ -273,6 +326,9 @@ impl SessionStore {
                 parent_session_id: row.get(3)?,
                 lineage_label: row.get(4)?,
                 message_count: row.get::<_, i64>(5)? as usize,
+                preview: row.get::<_, Option<String>>(6)?.map(|s| {
+                    s.chars().take(60).collect::<String>().replace('\n', " ")
+                }),
             })
         })?;
 
@@ -318,8 +374,8 @@ impl SessionStore {
         Ok(hits)
     }
 
-    #[cfg(test)]
-    pub(crate) fn in_memory() -> Self {
+    #[cfg(any(test, feature = "bench-soak"))]
+    pub fn in_memory() -> Self {
         let conn = Connection::open_in_memory().expect("open in-memory session DB");
         initialize_conn(&conn).expect("initialize in-memory session DB");
         Self {

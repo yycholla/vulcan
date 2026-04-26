@@ -1,5 +1,9 @@
 /target
 
+# vulcan-soak (YYC-83) writes a dhat heap profile to CWD on Drop when built
+# with `--features bench-soak`. Generated artifact; never tracked.
+dhat-heap.json
+
 # Local config — may contain API keys; keep out of git
 config.toml
 

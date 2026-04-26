@@ -110,6 +110,11 @@ pub struct ProviderConfig {
     /// - "wire": also log request and raw response bodies
     #[serde(default)]
     pub debug: ProviderDebugMode,
+    /// Max agent loop iterations per prompt. 0 = unlimited (default).
+    /// When the agent hits this limit without a text-only response, the
+    /// turn ends with a "reached maximum iteration limit" message.
+    #[serde(default)]
+    pub max_iterations: u32,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -183,6 +188,7 @@ impl Default for ProviderConfig {
             catalog_cache_ttl_hours: default_catalog_cache_ttl_hours(),
             disable_catalog: false,
             debug: ProviderDebugMode::Off,
+            max_iterations: 0,
         }
     }
 }

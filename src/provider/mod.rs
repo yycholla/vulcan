@@ -1,7 +1,7 @@
 pub mod catalog;
 pub mod openai;
 
-#[cfg(test)]
+#[cfg(any(test, feature = "bench-soak"))]
 pub mod mock;
 
 use std::fmt;

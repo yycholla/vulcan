@@ -1,0 +1,86 @@
+name: bench
+
+on:
+  pull_request:
+    paths:
+      - 'src/**'
+      - 'benches/**'
+      - 'scripts/bench-diff.py'
+      - 'scripts/median-of-3.py'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - '.github/workflows/bench.yml'
+  schedule:
+    # Nightly 04:17 UTC. Refreshes the baseline artifact on `main`.
+    - cron: '17 4 * * *'
+  workflow_dispatch:
+
+jobs:
+  bench:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Pick turn count (PR subset vs full sweep)
+        id: turns
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            echo "value=100" >> "$GITHUB_OUTPUT"
+          else
+            echo "value=1000" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Run benches (median-of-3 at workflow level)
+        env:
+          BENCH_TURNS: ${{ steps.turns.outputs.value }}
+        run: |
+          set -euo pipefail
+          for run in 1 2 3; do
+            rm -f target/bench-results.json
+            cargo bench
+            cargo run --release --bin vulcan-soak --features bench-soak -- --turns "${BENCH_TURNS}"
+            cp target/bench-results.json "target/bench-results-${run}.json"
+          done
+          python3 scripts/median-of-3.py \
+            target/bench-results-1.json \
+            target/bench-results-2.json \
+            target/bench-results-3.json \
+            > target/bench-results.json
+
+      - name: Download baseline (PR only)
+        if: github.event_name == 'pull_request'
+        uses: dawidd6/action-download-artifact@v3
+        with:
+          workflow: bench.yml
+          branch: main
+          name: bench-baseline
+          path: .ci/baseline
+        continue-on-error: true
+
+      - name: Diff against baseline (PR only)
+        if: github.event_name == 'pull_request' && hashFiles('.ci/baseline/bench-results.json') != ''
+        run: |
+          python3 scripts/bench-diff.py \
+            target/bench-results.json \
+            .ci/baseline/bench-results.json
+
+      - name: Upload current as baseline (main / nightly only)
+        if: github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')
+        uses: actions/upload-artifact@v4
+        with:
+          name: bench-baseline
+          path: target/bench-results.json
+          retention-days: 14
+
+      - name: Upload current as run artifact (always)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bench-results-${{ github.run_id }}
+          path: target/bench-results.json
+          retention-days: 14

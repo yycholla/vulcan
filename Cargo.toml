@@ -7,6 +7,16 @@ authors = ["Colin Hanway"]
 license = "MIT"
 repository = "https://github.com/yycholla/vulcan"
 readme = "README.md"
+# benches/soak.rs is the vulcan-soak [[bin]]; disable auto-discovery so cargo
+# doesn't also register it as a bench target (which would conflict with the
+# explicit [[bin]] declaration).
+autobenches = false
+
+[features]
+# Enabled only when running the soak binary. Pulls in dhat-rs (heap
+# profiler that swaps the global allocator) and hdrhistogram (latency
+# percentiles) — both optional so production builds skip them entirely.
+bench-soak = ["dep:dhat", "dep:hdrhistogram"]
 
 [dependencies]
 # Async runtime
@@ -74,6 +84,15 @@ lsp-types = "0.97"
 # code-graph indexer so we don't index target/, node_modules/, etc.
 ignore = "0.4.25"
 
+# Heap profiler for the soak binary. Optional — only linked under `bench-soak`.
+dhat = { version = "0.3", optional = true }
+
+# HDR histogram for soak-binary latency percentiles. Optional — only linked
+# into the runtime crate under `bench-soak`. (Also listed in
+# `[dev-dependencies]` so divan benches running under `cargo test` /
+# `cargo bench` can use it without enabling the feature.)
+hdrhistogram = { version = "7", optional = true }
+
 [profile.release]
 opt-level = "z"    # optimize for size
 lto = true
@@ -82,3 +101,18 @@ strip = true
 
 [dev-dependencies]
 tempfile = "3.27.0"
+divan = "0.1"
+hdrhistogram = "7"
+
+[[bench]]
+name = "tui_render"
+harness = false
+
+[[bench]]
+name = "agent_core"
+harness = false
+
+[[bin]]
+name = "vulcan-soak"
+path = "benches/soak.rs"
+required-features = ["bench-soak"]

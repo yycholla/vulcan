@@ -6,8 +6,9 @@ use ratatui::{
     widgets::{Paragraph, Wrap},
 };
 
+use super::chat_render::{ChatRenderOptions, VisibleChatLines};
 use super::markdown::render_markdown;
-use super::state::{AppState, ChatRole, MessageSegment, SessionStatus};
+use super::state::{AppState, DiffStyle, SessionStatus};
 use super::theme::{Palette, body, faint_bg};
 use super::widgets::{fill, frame, message_header, section_header, ticker};
 
@@ -79,163 +80,97 @@ fn publish_chat_max_scroll(app: &AppState, line_count: usize, viewport_height: u
     app.chat_max_scroll.set(max);
 }
 
-/// Build flat lines for the primary chat — user/agent messages with markdown.
-/// `show_reasoning` toggles a stylized reasoning block before the first agent
-/// message (used by views that show a reasoning trace).
-fn build_chat_lines(
-    app: &AppState,
-    show_reasoning: bool,
-    dense: bool,
-) -> Vec<Line<'static>> {
-    // Default width when caller doesn't know the viewport. Renderers that
-    // do (single_stack, split_sessions, trading_floor) call
-    // `build_chat_lines_w` directly with the actual width.
-    build_chat_lines_w(app, show_reasoning, dense, 80)
-}
-
-fn build_chat_lines_w(
+fn build_chat_window(
     app: &AppState,
     show_reasoning: bool,
     dense: bool,
     width: u16,
-) -> Vec<Line<'static>> {
-    let mut out: Vec<Line<'static>> = Vec::new();
-    out.push(Line::from(Span::styled(
-        format!("── session · {} ──", app.session_label),
-        Style::default()
-            .fg(Palette::MUTED)
-            .add_modifier(Modifier::DIM),
-    )));
-    out.push(Line::from(""));
+    height: u16,
+) -> VisibleChatLines {
+    let window_start = usize::from(app.scroll);
+    let window_end = window_start.saturating_add(usize::from(height));
+    let mut total_lines = 0usize;
+    let mut lines = Vec::with_capacity(usize::from(height));
+
+    let prefix = build_chat_prefix_lines(app);
+    push_visible_fixed_lines(
+        &mut lines,
+        &prefix,
+        &mut total_lines,
+        window_start,
+        window_end,
+    );
+
+    if !app.messages.is_empty() {
+        let message_start = total_lines;
+        let options = ChatRenderOptions {
+            show_reasoning,
+            dense,
+            width,
+        };
+        let message_scroll = window_start.saturating_sub(message_start) as u16;
+        let remaining_height = height.saturating_sub(lines.len() as u16);
+        let message_window = app.chat_render_store.borrow_mut().visible_lines(
+            &app.messages,
+            options,
+            message_scroll,
+            remaining_height,
+            app.pending_pause.as_ref(),
+            app.queue.len(),
+        );
+        total_lines = total_lines.saturating_add(message_window.total_lines);
+        lines.extend(message_window.lines);
+        if dense {
+            push_visible_fixed_lines(
+                &mut lines,
+                &[Line::from("")],
+                &mut total_lines,
+                window_start,
+                window_end,
+            );
+        }
+    }
+
+    let suffix = build_chat_suffix_lines(app);
+    push_visible_fixed_lines(
+        &mut lines,
+        &suffix,
+        &mut total_lines,
+        window_start,
+        window_end,
+    );
+
+    VisibleChatLines { lines, total_lines }
+}
+
+fn build_chat_prefix_lines(app: &AppState) -> Vec<Line<'static>> {
+    let mut lines = vec![
+        Line::from(Span::styled(
+            format!("── session · {} ──", app.session_label),
+            Style::default()
+                .fg(Palette::MUTED)
+                .add_modifier(Modifier::DIM),
+        )),
+        Line::from(""),
+    ];
 
     if app.messages.is_empty() {
-        out.push(Line::from(Span::styled(
+        lines.push(Line::from(Span::styled(
             "Type a message below to start. Press Ctrl+1..5 to switch views.",
             Style::default().fg(Palette::MUTED),
         )));
-        return out;
     }
 
-    for (i, m) in app.messages.iter().enumerate() {
-        let (role_label, accent) = match m.role {
-            ChatRole::User => ("you", Palette::RED),
-            ChatRole::Agent => ("agent", Palette::INK),
-            ChatRole::System => ("system", Palette::YELLOW),
-        };
-        out.push(message_header(role_label, accent, None));
+    lines
+}
 
-        let is_agent = matches!(m.role, ChatRole::Agent);
+fn build_chat_suffix_lines(app: &AppState) -> Vec<Line<'static>> {
+    let mut lines = Vec::new();
 
-        if is_agent && !m.segments.is_empty() {
-            // Live timeline (YYC-71): render reasoning, tool calls, and text
-            // in arrival order. Reasoning fragments only emit when the
-            // toggle is on; tool calls always emit.
-            let mut text_emitted = false;
-            for seg in &m.segments {
-                match seg {
-                    MessageSegment::Reasoning(r) if show_reasoning && !r.is_empty() => {
-                        for l in super::widgets::reasoning_lines(r, false) {
-                            out.push(l);
-                        }
-                    }
-                    MessageSegment::Reasoning(_) => {}
-                    MessageSegment::ToolCall {
-                        name,
-                        status,
-                        params_summary,
-                        output_preview,
-                        result_meta,
-                        elided_lines,
-                        elapsed_ms,
-                    } => {
-                        // YYC-74: structured bordered tool-call card.
-                        // YYC-78: elided_lines drives the auto-collapse footer.
-                        for line in super::widgets::tool_card(
-                            name,
-                            *status,
-                            params_summary.as_deref(),
-                            output_preview.as_deref(),
-                            result_meta.as_deref(),
-                            *elided_lines,
-                            *elapsed_ms,
-                            accent,
-                            width,
-                        ) {
-                            out.push(line);
-                        }
-                    }
-                    MessageSegment::Text(t) if !t.is_empty() => {
-                        text_emitted = true;
-                        let rendered = render_markdown(t);
-                        for line in rendered {
-                            let mut spans =
-                                vec![Span::styled("▎ ", Style::default().fg(accent))];
-                            spans.extend(line.spans.into_iter());
-                            out.push(Line::from(spans));
-                        }
-                    }
-                    MessageSegment::Text(_) => {}
-                }
-            }
-            // Show waiting placeholder when only reasoning has streamed and
-            // no body text has appeared yet.
-            if !text_emitted {
-                let label = if m.has_reasoning() {
-                    "▎ Answering…"
-                } else {
-                    "▎ Thinking…"
-                };
-                out.push(Line::from(Span::styled(
-                    label,
-                    Style::default()
-                        .fg(Palette::MUTED)
-                        .add_modifier(Modifier::SLOW_BLINK),
-                )));
-            }
-        } else {
-            // Hydrated history (no segment timeline) — fall back to the
-            // legacy reasoning-then-content layout.
-            if show_reasoning && is_agent && !m.reasoning.is_empty() {
-                for l in super::widgets::reasoning_lines(&m.reasoning, false) {
-                    out.push(l);
-                }
-            }
-            if is_agent && m.content.is_empty() {
-                let label = if m.reasoning.is_empty() {
-                    "▎ Thinking…"
-                } else {
-                    "▎ Answering…"
-                };
-                out.push(Line::from(Span::styled(
-                    label,
-                    Style::default()
-                        .fg(Palette::MUTED)
-                        .add_modifier(Modifier::SLOW_BLINK),
-                )));
-            } else {
-                let rendered = render_markdown(&m.content);
-                for line in rendered {
-                    let mut spans = vec![Span::styled("▎ ", Style::default().fg(accent))];
-                    spans.extend(line.spans.into_iter());
-                    out.push(Line::from(spans));
-                }
-            }
-        }
-        if !dense || i + 1 == app.messages.len() {
-            out.push(Line::from(""));
-        }
-    }
-
-    // YYC-59: inline action pills for an active AgentPause. Rendered
-    // beneath the latest assistant message so the user sees what
-    // they're being asked to choose.
     if let Some(p) = app.pending_pause.as_ref() {
         if !p.options.is_empty() {
             let mut pill_spans: Vec<Span<'static>> = Vec::new();
-            pill_spans.push(Span::styled(
-                "▎ ",
-                Style::default().fg(Palette::INK),
-            ));
+            pill_spans.push(Span::styled("▎ ", Style::default().fg(Palette::INK)));
             for (i, opt) in p.options.iter().enumerate() {
                 if i > 0 {
                     pill_spans.push(Span::raw("  "));
@@ -249,16 +184,13 @@ fn build_chat_lines_w(
                 let label = format!("[{}] {}", opt.key, opt.label);
                 pill_spans.push(super::widgets::pill(&label, color, filled));
             }
-            out.push(Line::from(pill_spans));
-            out.push(Line::from(""));
+            lines.push(Line::from(pill_spans));
+            lines.push(Line::from(""));
         }
     }
 
-    // YYC-61: ghosted preview of pending queued submissions, rendered
-    // beneath the latest agent message so the user sees what's been
-    // staged behind the in-flight turn.
     if !app.queue.is_empty() {
-        out.push(Line::from(Span::styled(
+        lines.push(Line::from(Span::styled(
             format!("── queue · {} pending ──", app.queue.len()),
             Style::default()
                 .fg(Palette::MUTED)
@@ -266,7 +198,7 @@ fn build_chat_lines_w(
         )));
         for (idx, qmsg) in app.queue.iter().enumerate() {
             let preview: String = qmsg.chars().take(120).collect();
-            out.push(Line::from(vec![
+            lines.push(Line::from(vec![
                 Span::styled(
                     format!("▸ #{:<2} ", idx + 1),
                     Style::default()
@@ -281,9 +213,30 @@ fn build_chat_lines_w(
                 ),
             ]));
         }
-        out.push(Line::from(""));
+        lines.push(Line::from(""));
     }
-    out
+
+    lines
+}
+
+fn push_visible_fixed_lines(
+    out: &mut Vec<Line<'static>>,
+    segment: &[Line<'static>],
+    total_lines: &mut usize,
+    window_start: usize,
+    window_end: usize,
+) {
+    let segment_start = *total_lines;
+    let segment_end = segment_start.saturating_add(segment.len());
+    *total_lines = segment_end;
+
+    if segment_end <= window_start || segment_start >= window_end {
+        return;
+    }
+
+    let start = window_start.saturating_sub(segment_start);
+    let end = segment.len().min(window_end.saturating_sub(segment_start));
+    out.extend(segment[start..end].iter().cloned());
 }
 
 // ─── 01 SINGLE STACK ────────────────────────────────────────────────────
@@ -302,13 +255,12 @@ fn single_stack(f: &mut TuiFrame, area: Rect, app: &AppState) {
         None,
     );
     let chat_w = inner.width.saturating_sub(2);
-    let lines = build_chat_lines_w(app, app.show_reasoning, false, chat_w);
-    publish_chat_max_scroll(app, lines.len(), inner.height);
+    let window = build_chat_window(app, app.show_reasoning, false, chat_w, inner.height);
+    publish_chat_max_scroll(app, window.total_lines, inner.height);
     f.render_widget(
-        Paragraph::new(lines)
+        Paragraph::new(window.lines)
             .style(body())
-            .wrap(Wrap { trim: false })
-            .scroll((app.scroll, 0)),
+            .wrap(Wrap { trim: false }),
         Rect {
             x: inner.x + 1,
             y: inner.y,
@@ -410,17 +362,18 @@ fn split_sessions(f: &mut TuiFrame, area: Rect, app: &AppState) {
         width: main.width,
         height: main.height.saturating_sub(1),
     };
-    let lines = build_chat_lines(app, app.show_reasoning, false);
-    publish_chat_max_scroll(app, lines.len(), body_area.height.saturating_sub(1));
+    let chat_width = body_area.width.saturating_sub(2);
+    let chat_height = body_area.height;
+    let window = build_chat_window(app, app.show_reasoning, false, chat_width, chat_height);
+    publish_chat_max_scroll(app, window.total_lines, chat_height.saturating_sub(1));
     f.render_widget(
-        Paragraph::new(lines)
+        Paragraph::new(window.lines)
             .style(body())
-            .wrap(Wrap { trim: false })
-            .scroll((app.scroll, 0)),
+            .wrap(Wrap { trim: false }),
         Rect {
             x: body_area.x + 1,
             y: body_area.y,
-            width: body_area.width.saturating_sub(2),
+            width: chat_width,
             height: body_area.height,
         },
     );
@@ -777,18 +730,19 @@ fn trading_floor(f: &mut TuiFrame, area: Rect, app: &AppState) {
 
     // ── primary chat (top-left, red header)
     let primary_inner = section_header(f, top[0], "primary · auth-refactor", Some(Palette::RED));
-    let lines = build_chat_lines(app, app.show_reasoning, true);
-    publish_chat_max_scroll(app, lines.len(), primary_inner.height);
+    let chat_width = primary_inner.width.saturating_sub(2);
+    let chat_height = primary_inner.height;
+    let window = build_chat_window(app, app.show_reasoning, true, chat_width, chat_height);
+    publish_chat_max_scroll(app, window.total_lines, chat_height);
     f.render_widget(
-        Paragraph::new(lines)
+        Paragraph::new(window.lines)
             .style(body())
-            .wrap(Wrap { trim: false })
-            .scroll((app.scroll, 0)),
+            .wrap(Wrap { trim: false }),
         Rect {
             x: primary_inner.x + 1,
             y: primary_inner.y,
-            width: primary_inner.width.saturating_sub(2),
-            height: primary_inner.height,
+            width: chat_width,
+            height: chat_height,
         },
     );
     // visual divider on the right edge
@@ -919,32 +873,77 @@ fn trading_floor(f: &mut TuiFrame, area: Rect, app: &AppState) {
     // wired up (sink wired but empty → render an honest empty state).
     let live_diff = app.latest_diff();
     let diff_title: String = match (&live_diff, app.diff_sink.is_some()) {
-        (Some(d), _) => format!("diff · {}", d.path),
+        (Some(d), _) => format!("diff · {} · {}", d.path, app.diff_style.label()),
         (None, true) => "diff · no edits this session".into(),
         (None, false) => "diff · users/auth.rs".into(),
     };
     let diff_inner = section_header(f, bot[1], &diff_title, None);
     let mut lines: Vec<Line<'static>> = Vec::new();
     if let Some(d) = live_diff {
-        // Compact two-block render: prefix old lines with "-" in red,
-        // new lines with "+" in green. Header shows tool + timestamp.
         lines.push(Line::from(Span::styled(
             format!("@@ {} · {}", d.tool, d.at.format("%H:%M:%S")),
             Style::default()
                 .fg(Palette::MUTED)
                 .add_modifier(Modifier::DIM),
         )));
-        for line in d.before.lines() {
-            lines.push(Line::from(Span::styled(
-                format!("- {line}"),
-                Style::default().fg(Palette::RED),
-            )));
-        }
-        for line in d.after.lines() {
-            lines.push(Line::from(Span::styled(
-                format!("+ {line}"),
-                Style::default().fg(Palette::GREEN),
-            )));
+        match app.diff_style {
+            DiffStyle::Unified => {
+                for line in d.before.lines() {
+                    lines.push(Line::from(Span::styled(
+                        format!("- {line}"),
+                        Style::default().fg(Palette::RED),
+                    )));
+                }
+                for line in d.after.lines() {
+                    lines.push(Line::from(Span::styled(
+                        format!("+ {line}"),
+                        Style::default().fg(Palette::GREEN),
+                    )));
+                }
+            }
+            DiffStyle::SideBySide => {
+                let before_lines: Vec<&str> = d.before.lines().collect();
+                let after_lines: Vec<&str> = d.after.lines().collect();
+                let n = before_lines.len().max(after_lines.len());
+                let half = (diff_inner.width.saturating_sub(3) / 2) as usize;
+                for i in 0..n {
+                    let l = before_lines.get(i).copied().unwrap_or("");
+                    let r = after_lines.get(i).copied().unwrap_or("");
+                    let l_pad = format!("{l:<half$}", half = half)
+                        .chars()
+                        .take(half)
+                        .collect::<String>();
+                    let r_pad = format!("{r:<half$}", half = half)
+                        .chars()
+                        .take(half)
+                        .collect::<String>();
+                    lines.push(Line::from(vec![
+                        Span::styled(l_pad, Style::default().fg(Palette::RED)),
+                        Span::styled(" │ ", Style::default().fg(Palette::MUTED)),
+                        Span::styled(r_pad, Style::default().fg(Palette::GREEN)),
+                    ]));
+                }
+            }
+            DiffStyle::Inline => {
+                // Render the new line(s) with the old text highlighted
+                // in red strikethrough at the start, then the new text.
+                for line in d.before.lines() {
+                    lines.push(Line::from(vec![Span::styled(
+                        line.to_string(),
+                        Style::default()
+                            .fg(Palette::RED)
+                            .add_modifier(Modifier::CROSSED_OUT),
+                    )]));
+                }
+                for line in d.after.lines() {
+                    lines.push(Line::from(Span::styled(
+                        line.to_string(),
+                        Style::default()
+                            .fg(Palette::GREEN)
+                            .add_modifier(Modifier::BOLD),
+                    )));
+                }
+            }
         }
     } else if app.diff_sink.is_some() {
         // Sink wired but empty — be honest, no fake diff.
@@ -1157,6 +1156,28 @@ pub enum DiffKind {
     Added,
     Removed,
     Ctx,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tui::state::ChatRole;
+
+    #[test]
+    fn build_chat_window_uses_visible_height() {
+        let mut app = AppState::new("test-model".into(), 128_000);
+        for i in 0..100 {
+            app.messages.push(crate::tui::state::ChatMessage::new(
+                ChatRole::User,
+                format!("message {i}"),
+            ));
+        }
+
+        let window = build_chat_window(&app, true, false, 80, 5);
+
+        assert_eq!(window.lines.len(), 5);
+        assert!(window.total_lines > 5);
+    }
 }
 
 pub struct DiffLine {
