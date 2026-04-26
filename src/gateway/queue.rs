@@ -323,6 +323,17 @@ mod tests {
         assert!(q2.claim_due(chrono::Utc::now().timestamp()).await.unwrap().is_some());
     }
 
+    #[test]
+    fn backoff_schedule_values() {
+        assert_eq!(outbound_backoff_secs(1), 5);
+        assert_eq!(outbound_backoff_secs(2), 30);
+        assert_eq!(outbound_backoff_secs(3), 300);
+        assert_eq!(outbound_backoff_secs(4), 1800);
+        assert_eq!(outbound_backoff_secs(5), 7200);
+        assert_eq!(outbound_backoff_secs(99), 7200);
+        assert_eq!(outbound_backoff_secs(0), 5);
+    }
+
     #[tokio::test]
     async fn outbound_claim_due_skips_future_rows() {
         let conn = test_conn();
