@@ -41,4 +41,11 @@ pub enum Command {
         #[arg(long, default_value_t = 10)]
         limit: usize,
     },
+    /// Run the long-lived gateway daemon (axum server + platform connectors)
+    #[cfg(feature = "gateway")]
+    Gateway {
+        /// Override bind address from config (e.g. 127.0.0.1:7777)
+        #[arg(long)]
+        bind: Option<String>,
+    },
 }

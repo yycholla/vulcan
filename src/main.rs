@@ -90,6 +90,11 @@ async fn main() -> anyhow::Result<()> {
                 }
             }
         }
+        #[cfg(feature = "gateway")]
+        Some(Command::Gateway { bind }) => {
+            init_cli_logging();
+            vulcan::gateway::run(&config, bind).await?;
+        }
     }
 
     Ok(())

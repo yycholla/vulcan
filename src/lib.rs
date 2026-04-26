@@ -3,6 +3,8 @@ pub mod cli;
 pub mod code;
 pub mod config;
 pub mod context;
+#[cfg(feature = "gateway")]
+pub mod gateway;
 pub mod hooks;
 pub mod memory;
 pub mod pause;
