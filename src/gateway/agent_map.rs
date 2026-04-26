@@ -33,7 +33,7 @@ use std::future::Future;
 use std::pin::Pin;
 
 /// Test-only agent factory. `get_or_spawn` calls this in lieu of
-/// `Agent::with_hooks_and_pause` so tests can swap in a `MockProvider`-backed
+/// `AgentBuilder::build` so tests can swap in a `MockProvider`-backed
 /// Agent without an API key. Boxed-future return so the closure type can be
 /// erased behind `dyn Fn`.
 #[cfg(test)]
@@ -79,7 +79,7 @@ impl AgentMap {
     }
 
     /// Test-only constructor that uses `builder` to materialize Agents instead
-    /// of going through `Agent::with_hooks_and_pause`. Lets tests inject a
+    /// of going through `AgentBuilder::build`. Lets tests inject a
     /// MockProvider-backed Agent without needing an API key.
     #[cfg(test)]
     pub(crate) fn with_builder(
@@ -118,7 +118,7 @@ impl AgentMap {
         // cold spawn on one lane doesn't block first-touches on every other
         // lane. Acquire the write lock only briefly to insert.
         //
-        // ApprovalHook is registered inside `with_hooks_and_pause`; with
+        // ApprovalHook is registered inside `AgentBuilder::build`; with
         // `None` here it uses the explicit auto-deny constructor so gateway
         // agents never block waiting for a TUI approval consumer.
         let mut hook_reg = HookRegistry::new();
@@ -131,12 +131,18 @@ impl AgentMap {
                 if let Some(builder) = self.builder.as_ref() {
                     builder(hook_reg).await?
                 } else {
-                    Agent::with_hooks_and_pause(&self.config, hook_reg, None).await?
+                    Agent::builder(&self.config)
+                        .with_hooks(hook_reg)
+                        .build()
+                        .await?
                 }
             }
             #[cfg(not(test))]
             {
-                Agent::with_hooks_and_pause(&self.config, hook_reg, None).await?
+                Agent::builder(&self.config)
+                    .with_hooks(hook_reg)
+                    .build()
+                    .await?
             }
         };
         let agent = Arc::new(Mutex::new(agent));
@@ -389,7 +395,7 @@ mod tests {
     }
 
     /// Builder that returns a fresh `Agent::for_test` per lane, each backed by
-    /// its own `MockProvider`. Bypasses `Agent::with_hooks_and_pause` so the
+    /// its own `MockProvider`. Bypasses `AgentBuilder::build` so the
     /// tests don't need a real API key.
     fn mock_agent_builder() -> AgentBuilder {
         Arc::new(|hooks: HookRegistry| {

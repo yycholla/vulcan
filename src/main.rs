@@ -26,7 +26,7 @@ async fn main() -> anyhow::Result<()> {
         }
         Some(Command::Prompt { text }) => {
             init_cli_logging();
-            let mut agent = vulcan::agent::Agent::new(&config).await?;
+            let mut agent = vulcan::agent::Agent::builder(&config).build().await?;
             if cli.r#continue {
                 agent.continue_last_session()?;
             }
