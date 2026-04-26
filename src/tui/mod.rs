@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use ratatui::{
@@ -29,6 +30,35 @@ pub mod widgets;
 use state::{AppState, ChatMessage, ChatRole, SessionStatus};
 use theme::{Palette, body};
 use views::{View, render_view};
+
+const STREAM_FRAME_BUDGET: Duration = Duration::from_millis(16);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RenderWake {
+    Now,
+    Wait(Duration),
+}
+
+fn render_wake_for_stream_batch(
+    last_draw: Instant,
+    now: Instant,
+    is_terminal_event: bool,
+) -> RenderWake {
+    if is_terminal_event {
+        return RenderWake::Now;
+    }
+
+    let elapsed = now.saturating_duration_since(last_draw);
+    if elapsed >= STREAM_FRAME_BUDGET {
+        RenderWake::Now
+    } else {
+        RenderWake::Wait(STREAM_FRAME_BUDGET - elapsed)
+    }
+}
+
+fn stream_event_forces_redraw(ev: &StreamEvent) -> bool {
+    matches!(ev, StreamEvent::Done(_) | StreamEvent::Error(_))
+}
 
 /// What session, if any, the TUI should load on startup.
 #[derive(Debug, Clone)]
@@ -452,6 +482,7 @@ pub async fn run_tui(config: &Config, resume: ResumeTarget) -> Result<()> {
 
     let mut exit = false;
     let mut pending_quit = false;
+    let mut last_draw: Instant;
 
     while !exit {
         let palette = if app.input.starts_with('/') && app.input.len() > 1 {
@@ -514,6 +545,7 @@ pub async fn run_tui(config: &Config, resume: ResumeTarget) -> Result<()> {
                 draw_session_picker(f, area, &app);
             }
         })?;
+        last_draw = Instant::now();
 
         // ── Session picker mode: intercept all input until dismissed.
         if app.show_session_picker {
@@ -1087,9 +1119,18 @@ pub async fn run_tui(config: &Config, resume: ResumeTarget) -> Result<()> {
             ev = stream_rx.recv() => {
                 match ev {
                     Some(ev) => {
+                        let mut force_redraw = stream_event_forces_redraw(&ev);
                         handle_stream_event(&mut app, &agent, &stream_tx, ev).await;
                         while let Ok(ev) = stream_rx.try_recv() {
+                            force_redraw |= stream_event_forces_redraw(&ev);
                             handle_stream_event(&mut app, &agent, &stream_tx, ev).await;
+                        }
+                        if !force_redraw {
+                            if let RenderWake::Wait(delay) =
+                                render_wake_for_stream_batch(last_draw, Instant::now(), false)
+                            {
+                                tokio::time::sleep(delay).await;
+                            }
                         }
                     }
                     None => app.thinking = false,
@@ -1107,6 +1148,31 @@ pub async fn run_tui(config: &Config, resume: ResumeTarget) -> Result<()> {
 
     restore_terminal()?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn stream_batching_caps_stream_redraws_to_frame_budget() {
+        let start = Instant::now();
+
+        assert_eq!(
+            render_wake_for_stream_batch(start, start + Duration::from_millis(1), false),
+            RenderWake::Wait(Duration::from_millis(15))
+        );
+    }
+
+    #[test]
+    fn input_events_render_immediately() {
+        let start = Instant::now();
+
+        assert_eq!(
+            render_wake_for_stream_batch(start, start + Duration::from_millis(1), true),
+            RenderWake::Now
+        );
+    }
 }
 
 fn draw_palette(f: &mut ratatui::Frame, area: Rect, cmds: &[&SlashCommand], selected: usize) {
