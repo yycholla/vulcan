@@ -269,8 +269,14 @@ fn push_markdown_body(
     // YYC-104: pre-wrap each rendered markdown line so the `▎` accent
     // bar stays on every visual row. Letting Paragraph::wrap handle it
     // breaks the bar after the first row.
+    // Trim trailing whitespace/newlines so models that emit `\n\n`
+    // suffixes don't leave empty `▎` rails after the body.
+    let trimmed = text.trim_end_matches(|c: char| c == '\n' || c == '\r' || c == ' ' || c == '\t');
+    if trimmed.is_empty() {
+        return;
+    }
     let inner_width = width.saturating_sub(2).max(1) as usize;
-    for line in render_markdown(text, theme) {
+    for line in render_markdown(trimmed, theme) {
         for row in wrap_spans(line.spans, inner_width) {
             let mut spans = vec![Span::styled("▎ ", Style::default().fg(accent))];
             spans.extend(row.into_iter());
