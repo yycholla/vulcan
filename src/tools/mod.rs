@@ -74,6 +74,127 @@ pub trait Tool: Send + Sync {
     /// (or rely on `kill_on_drop` for child processes) and return
     /// `ToolResult::err("Cancelled")` on cancel.
     async fn call(&self, params: Value, cancel: CancellationToken) -> Result<ToolResult>;
+
+    /// YYC-107: per-session availability check. Default = always
+    /// register. Tools that only make sense in certain workspaces
+    /// (cargo_check needs Cargo.toml, etc.) override this.
+    fn is_relevant(&self, _ctx: &ToolContext) -> bool {
+        true
+    }
+
+    /// YYC-107: optional runtime-aware description. Returns
+    /// `Some(string)` to override the static description with
+    /// workspace-derived context (e.g. discovered bin targets).
+    fn dynamic_description(&self, _ctx: &ToolContext) -> Option<String> {
+        None
+    }
+}
+
+/// Workspace context surfaced to tools at session start (YYC-107).
+/// Built once by `Agent::with_hooks_and_pause` and passed into
+/// `is_relevant` / `dynamic_description` so tools can reflect what's
+/// actually in the cwd.
+#[derive(Debug, Clone)]
+pub struct ToolContext {
+    pub cwd: std::path::PathBuf,
+    /// First Cargo.toml found within `MAX_CONTEXT_DEPTH` of cwd.
+    pub cargo_manifest: Option<std::path::PathBuf>,
+    /// Parsed package name from the discovered Cargo.toml, when readable.
+    pub cargo_package_name: Option<String>,
+    /// Parsed `[[bin]]` target names from the discovered Cargo.toml.
+    pub cargo_bin_targets: Vec<String>,
+    /// True when the cwd is inside a git working tree.
+    pub git_present: bool,
+}
+
+const MAX_CONTEXT_DEPTH: usize = 4;
+
+impl ToolContext {
+    /// Build the context by probing the filesystem rooted at `cwd`.
+    pub fn probe(cwd: std::path::PathBuf) -> Self {
+        let cargo_manifest = find_cargo_manifest(&cwd, MAX_CONTEXT_DEPTH);
+        let (cargo_package_name, cargo_bin_targets) = match &cargo_manifest {
+            Some(path) => parse_cargo_manifest(path),
+            None => (None, Vec::new()),
+        };
+        let git_present = is_git_workspace(&cwd);
+        Self {
+            cwd,
+            cargo_manifest,
+            cargo_package_name,
+            cargo_bin_targets,
+            git_present,
+        }
+    }
+}
+
+fn find_cargo_manifest(start: &std::path::Path, max_depth: usize) -> Option<std::path::PathBuf> {
+    fn walk(dir: &std::path::Path, depth_left: usize) -> Option<std::path::PathBuf> {
+        let candidate = dir.join("Cargo.toml");
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+        if depth_left == 0 {
+            return None;
+        }
+        let entries = std::fs::read_dir(dir).ok()?;
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !path.is_dir() {
+                continue;
+            }
+            // Skip hidden and target/ to keep the probe fast.
+            let name = path
+                .file_name()
+                .and_then(|s| s.to_str())
+                .unwrap_or_default();
+            if name.starts_with('.') || name == "target" || name == "node_modules" {
+                continue;
+            }
+            if let Some(found) = walk(&path, depth_left - 1) {
+                return Some(found);
+            }
+        }
+        None
+    }
+    walk(start, max_depth)
+}
+
+fn parse_cargo_manifest(path: &std::path::Path) -> (Option<String>, Vec<String>) {
+    let raw = match std::fs::read_to_string(path) {
+        Ok(s) => s,
+        Err(_) => return (None, Vec::new()),
+    };
+    let parsed: toml::Value = match toml::from_str(&raw) {
+        Ok(v) => v,
+        Err(_) => return (None, Vec::new()),
+    };
+    let pkg_name = parsed
+        .get("package")
+        .and_then(|p| p.get("name"))
+        .and_then(|n| n.as_str())
+        .map(|s| s.to_string());
+    let bins: Vec<String> = parsed
+        .get("bin")
+        .and_then(|b| b.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|b| b.get("name").and_then(|n| n.as_str()).map(|s| s.to_string()))
+                .collect()
+        })
+        .unwrap_or_default();
+    (pkg_name, bins)
+}
+
+fn is_git_workspace(start: &std::path::Path) -> bool {
+    let mut cur = Some(start);
+    while let Some(p) = cur {
+        if p.join(".git").exists() {
+            return true;
+        }
+        cur = p.parent();
+    }
+    false
 }
 
 pub mod ask_user;
@@ -213,17 +334,48 @@ impl ToolRegistry {
         self.tools.insert(tool.name().to_string(), tool);
     }
 
-    /// Get all tool definitions for the LLM
+    /// YYC-107: drop tools whose `is_relevant(ctx)` returns false.
+    /// Called once at session start by `Agent::with_hooks_and_pause`
+    /// after the registry is fully populated.
+    pub fn filter_for_context(&mut self, ctx: &ToolContext) {
+        let drop_keys: Vec<String> = self
+            .tools
+            .iter()
+            .filter_map(|(name, tool)| {
+                if tool.is_relevant(ctx) {
+                    None
+                } else {
+                    Some(name.clone())
+                }
+            })
+            .collect();
+        for k in drop_keys {
+            self.tools.remove(&k);
+        }
+    }
+
+    /// Get all tool definitions for the LLM. Tools that override
+    /// `dynamic_description` get their runtime description; the rest
+    /// fall back to the static one.
     pub fn definitions(&self) -> Vec<ToolDefinition> {
+        self.definitions_with_context(None)
+    }
+
+    pub fn definitions_with_context(&self, ctx: Option<&ToolContext>) -> Vec<ToolDefinition> {
         self.tools
             .values()
-            .map(|t| ToolDefinition {
-                tool_type: "function".into(),
-                function: crate::provider::ToolFunction {
-                    name: t.name().to_string(),
-                    description: t.description().to_string(),
-                    parameters: t.schema(),
-                },
+            .map(|t| {
+                let description = ctx
+                    .and_then(|c| t.dynamic_description(c))
+                    .unwrap_or_else(|| t.description().to_string());
+                ToolDefinition {
+                    tool_type: "function".into(),
+                    function: crate::provider::ToolFunction {
+                        name: t.name().to_string(),
+                        description,
+                        parameters: t.schema(),
+                    },
+                }
             })
             .collect()
     }
@@ -316,7 +468,94 @@ fn validate_tool_params(
 mod tests {
     use super::*;
     use serde_json::json;
+    use tempfile::tempdir;
     use tokio_util::sync::CancellationToken;
+
+    #[test]
+    fn tool_context_finds_cargo_manifest_at_root_and_nested() {
+        let dir = tempdir().unwrap();
+        // Empty dir → no manifest.
+        let ctx = ToolContext::probe(dir.path().to_path_buf());
+        assert!(ctx.cargo_manifest.is_none());
+
+        // Cargo.toml at root.
+        std::fs::write(
+            dir.path().join("Cargo.toml"),
+            "[package]\nname = \"demo\"\nversion = \"0.1.0\"\n",
+        )
+        .unwrap();
+        let ctx = ToolContext::probe(dir.path().to_path_buf());
+        assert!(ctx.cargo_manifest.is_some());
+        assert_eq!(ctx.cargo_package_name.as_deref(), Some("demo"));
+
+        // Nested Cargo.toml is found within depth.
+        let nested_dir = tempdir().unwrap();
+        let sub = nested_dir.path().join("crate").join("nested");
+        std::fs::create_dir_all(&sub).unwrap();
+        std::fs::write(
+            sub.join("Cargo.toml"),
+            "[package]\nname = \"deep\"\nversion = \"0.1.0\"\n",
+        )
+        .unwrap();
+        let ctx = ToolContext::probe(nested_dir.path().to_path_buf());
+        assert_eq!(ctx.cargo_package_name.as_deref(), Some("deep"));
+    }
+
+    #[test]
+    fn tool_context_parses_bin_targets() {
+        let dir = tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("Cargo.toml"),
+            r#"
+[package]
+name = "demo"
+version = "0.1.0"
+
+[[bin]]
+name = "alpha"
+path = "src/alpha.rs"
+
+[[bin]]
+name = "beta"
+path = "src/beta.rs"
+"#,
+        )
+        .unwrap();
+        let ctx = ToolContext::probe(dir.path().to_path_buf());
+        let mut bins = ctx.cargo_bin_targets.clone();
+        bins.sort();
+        assert_eq!(bins, vec!["alpha".to_string(), "beta".to_string()]);
+    }
+
+    #[test]
+    fn cargo_check_is_filtered_when_no_manifest() {
+        // Probe an empty dir → no manifest → CargoCheckTool::is_relevant false.
+        let dir = tempdir().unwrap();
+        let ctx = ToolContext::probe(dir.path().to_path_buf());
+        assert!(!cargo::CargoCheckTool.is_relevant(&ctx));
+    }
+
+    #[test]
+    fn cargo_check_dynamic_description_lists_targets() {
+        let dir = tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("Cargo.toml"),
+            r#"
+[package]
+name = "demo"
+version = "0.1.0"
+
+[[bin]]
+name = "primary"
+path = "src/primary.rs"
+"#,
+        )
+        .unwrap();
+        let ctx = ToolContext::probe(dir.path().to_path_buf());
+        let dyn_desc = cargo::CargoCheckTool.dynamic_description(&ctx).unwrap();
+        assert!(dyn_desc.contains("`demo`"));
+        assert!(dyn_desc.contains("primary"));
+    }
 
     #[tokio::test]
     async fn missing_required_field_yields_clear_error() {
