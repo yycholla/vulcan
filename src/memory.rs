@@ -135,7 +135,7 @@ pub struct SessionSummary {
 impl SessionStore {
     /// Open (or create) the session store at `~/.vulcan/sessions.db`. Panics
     /// on fatal DB initialization errors — matches the existing pattern in
-    /// `Agent::new` (api key, provider).
+    /// `AgentBuilder::build` (api key, provider).
     pub fn new() -> Self {
         let dir = crate::config::vulcan_home();
         std::fs::create_dir_all(&dir).ok();
