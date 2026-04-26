@@ -41,9 +41,8 @@ struct RenderedMessageBlock {
 #[derive(Default)]
 pub struct ChatRenderStore {
     blocks: HashMap<MessageRenderKey, RenderedMessageBlock>,
-    render_count_for_tests: usize,
-    #[cfg(test)]
-    materialized_line_count_for_tests: usize,
+    render_count: usize,
+    materialized_line_count: usize,
 }
 
 impl ChatRenderStore {
@@ -56,17 +55,23 @@ impl ChatRenderStore {
         _pending_pause: Option<&crate::pause::AgentPause>,
         _queue_len: usize,
     ) -> VisibleChatLines {
-        #[cfg(test)]
-        {
-            self.materialized_line_count_for_tests = 0;
-        }
+        self.visible_lines_at(messages, options, usize::from(scroll), usize::from(height))
+    }
 
-        let window_start = usize::from(scroll);
-        let window_len = usize::from(height);
+    pub fn visible_lines_at(
+        &mut self,
+        messages: &[ChatMessage],
+        options: ChatRenderOptions,
+        scroll: usize,
+        height: usize,
+    ) -> VisibleChatLines {
+        self.materialized_line_count = 0;
+
+        let window_start = scroll;
+        let window_len = height;
         let window_end = window_start.saturating_add(window_len);
         let mut total_lines = 0usize;
         let mut visible = Vec::with_capacity(window_len);
-        #[cfg(test)]
         let mut materialized_line_count = 0usize;
 
         for (index, message) in messages.iter().enumerate() {
@@ -89,17 +94,11 @@ impl ChatRenderStore {
                     break;
                 }
                 visible.push(line.clone());
-                #[cfg(test)]
-                {
-                    materialized_line_count = materialized_line_count.saturating_add(1);
-                }
+                materialized_line_count = materialized_line_count.saturating_add(1);
             }
         }
 
-        #[cfg(test)]
-        {
-            self.materialized_line_count_for_tests = materialized_line_count;
-        }
+        self.materialized_line_count = materialized_line_count;
 
         VisibleChatLines {
             lines: visible,
@@ -125,7 +124,7 @@ impl ChatRenderStore {
         };
 
         if !self.blocks.contains_key(&key) {
-            self.render_count_for_tests = self.render_count_for_tests.saturating_add(1);
+            self.render_count = self.render_count.saturating_add(1);
             let block = self.build_message_block(index, message, options);
             self.blocks.insert(key, block);
         }
@@ -209,14 +208,22 @@ impl ChatRenderStore {
         RenderedMessageBlock { lines }
     }
 
+    pub fn render_count(&self) -> usize {
+        self.render_count
+    }
+
+    pub fn materialized_line_count(&self) -> usize {
+        self.materialized_line_count
+    }
+
     #[cfg(test)]
     pub fn render_count_for_tests(&self) -> usize {
-        self.render_count_for_tests
+        self.render_count()
     }
 
     #[cfg(test)]
     pub fn materialized_line_count_for_tests(&self) -> usize {
-        self.materialized_line_count_for_tests
+        self.materialized_line_count()
     }
 }
 
@@ -320,6 +327,38 @@ mod tests {
 
         assert_eq!(window.lines.len(), 20);
         assert!(window.total_lines > 5_000);
+        assert!(store.materialized_line_count_for_tests() <= 20);
+    }
+
+    #[test]
+    fn visible_lines_at_supports_large_scroll_offsets() {
+        let mut store = ChatRenderStore::default();
+        let messages = (0..50_000)
+            .map(|i| ChatMessage::new(ChatRole::User, format!("message {i}")))
+            .collect::<Vec<_>>();
+        let options = ChatRenderOptions {
+            show_reasoning: true,
+            dense: false,
+            width: 100,
+        };
+        let first = store.visible_lines_at(&messages, options, 0, 20);
+        let tail_scroll = first.total_lines.saturating_sub(20);
+
+        let window = store.visible_lines_at(&messages, options, tail_scroll, 20);
+        let text = window
+            .lines
+            .iter()
+            .map(|line| {
+                line.spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert_eq!(window.lines.len(), 20);
+        assert!(text.contains("message 49999"));
         assert!(store.materialized_line_count_for_tests() <= 20);
     }
 
