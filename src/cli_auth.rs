@@ -285,14 +285,72 @@ fn prompt_api_key(
 }
 
 /// Heuristic for "local" endpoints — used to default-skip the API key
-/// prompt and the catalog fetch. Matches the loopback hosts and `.local`.
+/// prompt and the catalog fetch. Matches loopback, link-local, mDNS
+/// `.local`, and the RFC1918 private IPv4 ranges (10/8, 172.16/12,
+/// 192.168/16). Hostnames that resolve to private IPs but aren't
+/// literally addresses won't be caught — that needs DNS, which is too
+/// slow for an interactive prompt.
 fn is_local_endpoint(base_url: &str) -> bool {
-    let lower = base_url.to_ascii_lowercase();
-    lower.contains("localhost")
-        || lower.contains("127.0.0.1")
-        || lower.contains("0.0.0.0")
-        || lower.contains("[::1]")
-        || lower.contains(".local")
+    let host = extract_host(base_url);
+    if host.is_empty() {
+        return false;
+    }
+    if host == "localhost" || host.ends_with(".local") {
+        return true;
+    }
+    // Loopback / unspecified.
+    if host == "127.0.0.1" || host == "0.0.0.0" || host == "::1" {
+        return true;
+    }
+    // RFC1918 + link-local IPv4.
+    if let Some(octets) = parse_ipv4(host) {
+        let [a, b, _, _] = octets;
+        if a == 10 || (a == 192 && b == 168) || (a == 172 && (16..=31).contains(&b)) {
+            return true;
+        }
+        if a == 169 && b == 254 {
+            return true; // 169.254/16 link-local
+        }
+        if a == 127 {
+            return true; // entire 127/8 loopback
+        }
+    }
+    false
+}
+
+/// Pull the bare host (no scheme, no port, no path) out of `base_url`.
+/// Lowercased. IPv6 brackets stripped. Returns "" on malformed input.
+fn extract_host(base_url: &str) -> &str {
+    let s = base_url.trim();
+    let after_scheme = s
+        .split_once("://")
+        .map(|(_, rest)| rest)
+        .unwrap_or(s);
+    // Strip path/query: everything before the first '/' (or '?').
+    let host_port = after_scheme
+        .split(|c| c == '/' || c == '?')
+        .next()
+        .unwrap_or("");
+    // IPv6 in brackets: [::1]:8080.
+    if let Some(rest) = host_port.strip_prefix('[') {
+        if let Some(end) = rest.find(']') {
+            return &rest[..end];
+        }
+    }
+    // Strip :port for IPv4 / hostname.
+    host_port.split(':').next().unwrap_or("")
+}
+
+fn parse_ipv4(host: &str) -> Option<[u8; 4]> {
+    let parts: Vec<&str> = host.split('.').collect();
+    if parts.len() != 4 {
+        return None;
+    }
+    let mut octets = [0u8; 4];
+    for (i, part) in parts.iter().enumerate() {
+        octets[i] = part.parse().ok()?;
+    }
+    Some(octets)
 }
 
 /// Fetch the provider's `/models` catalog and present a fuzzy picker;
@@ -354,6 +412,51 @@ async fn pick_or_input_model(
         .default(default_idx)
         .interact()?;
     Ok(models[pick].id.clone())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn local_endpoint_detection_matches_rfc1918_and_loopback() {
+        let positives = [
+            "http://localhost:11434/v1",
+            "http://127.0.0.1/v1",
+            "http://10.0.5.7/v1",
+            "https://10.255.255.255",
+            "http://192.168.1.20:8080/v1",
+            "http://172.16.4.4/v1",
+            "http://172.31.0.1/v1",
+            "http://169.254.169.254",
+            "http://my-host.local/v1",
+            "http://[::1]:8000/v1",
+        ];
+        for u in positives {
+            assert!(is_local_endpoint(u), "{u} should be local");
+        }
+
+        let negatives = [
+            "https://api.openai.com/v1",
+            "https://openrouter.ai/api/v1",
+            "https://172.32.0.1/v1", // outside 172.16-31
+            "https://192.169.1.1/v1",
+            "https://8.8.8.8/v1",
+            "https://example.com/v1",
+        ];
+        for u in negatives {
+            assert!(!is_local_endpoint(u), "{u} should NOT be local");
+        }
+    }
+
+    #[test]
+    fn extract_host_strips_scheme_port_and_path() {
+        assert_eq!(extract_host("https://api.example.com/v1"), "api.example.com");
+        assert_eq!(extract_host("http://localhost:11434/v1"), "localhost");
+        assert_eq!(extract_host("http://[::1]:8080/x"), "::1");
+        assert_eq!(extract_host("https://10.0.0.5"), "10.0.0.5");
+        assert_eq!(extract_host(""), "");
+    }
 }
 
 async fn fetch_models_with_timeout(
