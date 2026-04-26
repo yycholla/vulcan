@@ -1,5 +1,6 @@
 pub mod agent;
 pub mod cli;
+pub mod cli_provider;
 pub mod code;
 pub mod config;
 pub mod context;

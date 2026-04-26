@@ -11,6 +11,10 @@ readme = "README.md"
 # doesn't also register it as a bench target (which would conflict with the
 # explicit [[bin]] declaration).
 autobenches = false
+# `cargo run` (no args) defaults to the main `vulcan` binary so quick
+# iteration doesn't require `--bin vulcan`. The bench/soak targets stay
+# explicit.
+default-run = "vulcan"
 
 [features]
 default = []
