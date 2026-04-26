@@ -1,0 +1,161 @@
+//! `cargo_check` tool (YYC-80).
+//!
+//! Runs `cargo check --message-format=json` in the workspace and emits
+//! a structured array of compiler diagnostics. Complements the LSP
+//! `diagnostics` tool (YYC-46): LSP needs rust-analyzer running; this
+//! works cold on any Rust project. Pairs naturally with the YYC-51
+//! auto-diagnostics hook for a "did my edit compile?" Rust path that
+//! doesn't depend on tooling state.
+
+use crate::tools::{Tool, ToolResult};
+use anyhow::Result;
+use async_trait::async_trait;
+use serde_json::{Value, json};
+use tokio::process::Command;
+use tokio_util::sync::CancellationToken;
+
+const MAX_DIAGS: usize = 50;
+
+pub struct CargoCheckTool;
+
+#[async_trait]
+impl Tool for CargoCheckTool {
+    fn name(&self) -> &str {
+        "cargo_check"
+    }
+    fn description(&self) -> &str {
+        "Run `cargo check --message-format=json` in the cwd and return the parsed compiler diagnostics. Works without rust-analyzer indexed; complements the LSP `diagnostics` tool."
+    }
+    fn schema(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "package": {
+                    "type": "string",
+                    "description": "Limit to a specific workspace member (defaults to --workspace)"
+                },
+                "all_targets": {
+                    "type": "boolean",
+                    "description": "Include tests + examples (default true)",
+                    "default": true
+                }
+            }
+        })
+    }
+    async fn call(&self, params: Value, cancel: CancellationToken) -> Result<ToolResult> {
+        let package = params.get("package").and_then(|v| v.as_str());
+        let all_targets = params
+            .get("all_targets")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(true);
+
+        let mut cmd = Command::new("cargo");
+        cmd.arg("check");
+        cmd.arg("--message-format=json");
+        if let Some(p) = package {
+            cmd.arg("-p").arg(p);
+        } else {
+            cmd.arg("--workspace");
+        }
+        if all_targets {
+            cmd.arg("--all-targets");
+        }
+        cmd.kill_on_drop(true);
+
+        let output = tokio::select! {
+            biased;
+            _ = cancel.cancelled() => return Ok(ToolResult::err("Cancelled")),
+            r = cmd.output() => r?,
+        };
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+
+        let mut diagnostics: Vec<Value> = Vec::new();
+        for line in stdout.lines() {
+            if line.is_empty() {
+                continue;
+            }
+            let raw: Value = match serde_json::from_str(line) {
+                Ok(v) => v,
+                Err(_) => continue,
+            };
+            if raw.get("reason").and_then(|r| r.as_str()) != Some("compiler-message") {
+                continue;
+            }
+            let msg = match raw.get("message") {
+                Some(m) => m,
+                None => continue,
+            };
+            let level = msg
+                .get("level")
+                .and_then(|v| v.as_str())
+                .unwrap_or("note");
+            // Skip purely informational rustc notes (`level=note` only),
+            // keep error/warning/help so the agent sees actionable output.
+            if level == "note" {
+                continue;
+            }
+            let span = msg
+                .get("spans")
+                .and_then(|v| v.as_array())
+                .and_then(|a| a.iter().find(|s| s.get("is_primary") == Some(&json!(true))))
+                .or_else(|| msg.get("spans").and_then(|v| v.as_array()).and_then(|a| a.first()));
+            let (file, line, col) = match span {
+                Some(s) => (
+                    s.get("file_name").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                    s.get("line_start").and_then(|v| v.as_u64()).unwrap_or(0),
+                    s.get("column_start").and_then(|v| v.as_u64()).unwrap_or(0),
+                ),
+                None => (String::new(), 0, 0),
+            };
+            let code = msg
+                .get("code")
+                .and_then(|c| c.get("code"))
+                .and_then(|c| c.as_str())
+                .unwrap_or("")
+                .to_string();
+            let message = msg
+                .get("message")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            diagnostics.push(json!({
+                "file": file,
+                "line": line,
+                "col": col,
+                "level": level,
+                "code": code,
+                "message": message,
+            }));
+            if diagnostics.len() >= MAX_DIAGS {
+                break;
+            }
+        }
+
+        // Sort by severity (error first), then file/line.
+        diagnostics.sort_by_key(|d| {
+            let sev = match d["level"].as_str().unwrap_or("") {
+                "error" => 0,
+                "warning" => 1,
+                _ => 2,
+            };
+            (sev, d["line"].as_u64().unwrap_or(0))
+        });
+
+        let payload = json!({
+            "ok": output.status.success(),
+            "exit_code": output.status.code().unwrap_or(-1),
+            "count": diagnostics.len(),
+            "diagnostics": diagnostics,
+            // Fall back stderr only on non-success so noisy compile
+            // summaries don't pad the response on success.
+            "stderr": if output.status.success() {
+                Value::Null
+            } else {
+                Value::String(stderr.to_string())
+            },
+        });
+        Ok(ToolResult::ok(serde_json::to_string_pretty(&payload)?))
+    }
+}
