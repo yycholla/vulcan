@@ -6,7 +6,17 @@ use ratatui::{
     widgets::{Block, BorderType, Borders, Paragraph, Wrap},
 };
 
-use super::theme::{Palette, body, inverse};
+use super::theme::{Palette, Theme, inverse};
+
+// YYC-52 (Task 9): widgets.rs hosts the structural Bauhaus shell of the
+// TUI — frames, section headers, the prompt row, the ticker, and the
+// tool-call card. Most "structural" styles (the inverse INK/PAPER title
+// bars, the SLATE tool-card header, the RED ticker pill, the mode pill
+// inverse) intentionally remain on `Palette::*` per the design canvas:
+// these elements are the brutalist chrome and don't follow the active
+// chat theme. Chat-role styles (border edges, body fill, muted hint
+// text, capacity-warning fg) are now read from the active `Theme` via
+// the `theme: &Theme` parameter threaded into each public widget.
 
 /// Bauhaus framed window: thick double-line border, title bar with `▓▓` mark
 /// + uppercase title on left, status pill on right. Matches the design's
@@ -19,21 +29,24 @@ pub fn frame(
     title: &str,
     status: Option<&str>,
     accent: Option<Color>,
+    theme: &Theme,
 ) -> Rect {
     if area.width < 4 || area.height < 3 {
         return area;
     }
 
-    // Outer block — paint paper background and a heavy border.
+    // Outer block — paint themed background and the themed border edge.
     let block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Thick)
-        .border_style(Style::default().fg(Palette::INK).bg(Palette::PAPER))
-        .style(body());
+        .border_style(theme.border)
+        .style(Style::default().fg(theme.body_fg).bg(theme.body_bg));
     let inner = block.inner(area);
     f.render_widget(block, area);
 
-    // Title bar = first line inside the border.
+    // Title bar = first line inside the border. The title bar itself is
+    // structural inverse (INK on PAPER) — the design's brutalist chrome
+    // doesn't recolor with the active theme.
     if inner.height == 0 {
         return inner;
     }
@@ -85,6 +98,11 @@ pub fn frame(
 }
 
 /// Render a child "section" header inside a pane (one ink line, paper text).
+///
+/// Section headers are structural inverse chrome (INK/PAPER) per the
+/// Bauhaus design canvas — the bar itself doesn't recolor with the
+/// active theme. The optional `accent` arg lets callers stamp a
+/// theme-derived emphasis color (e.g. `theme.accent.fg`).
 pub fn section_header(f: &mut TuiFrame, area: Rect, label: &str, accent: Option<Color>) -> Rect {
     if area.height == 0 {
         return area;
@@ -118,6 +136,12 @@ pub fn section_header(f: &mut TuiFrame, area: Rect, label: &str, accent: Option<
 }
 
 /// A status pill rendered inline as a Span (uppercase, padded).
+///
+/// Pills are structural design elements: when `filled` the foreground
+/// is the inverse PAPER (per the Bauhaus chrome), and the caller-
+/// supplied `color` is the background. The hollow variant uses the
+/// caller color as the foreground. Theme integration happens at the
+/// call site by passing e.g. `theme.error.fg.unwrap_or(Palette::RED)`.
 pub fn pill(text: &str, color: Color, filled: bool) -> Span<'static> {
     let body = format!(" {} ", text.to_uppercase());
     let style = if filled {
@@ -192,13 +216,16 @@ pub enum ToolStatus {
 }
 
 /// Reasoning trace block — italicized, hatched bg.
-pub fn reasoning_lines(text: &str, hidden: bool) -> Vec<Line<'static>> {
+///
+/// The hidden-trace placeholder text uses the active theme's `muted`
+/// role. The visible reasoning rows sit on the structural FAINT
+/// backdrop (a Bauhaus tint that's always lighter than PAPER) — the
+/// inset-card affordance is design-locked, not themed.
+pub fn reasoning_lines(text: &str, hidden: bool, theme: &Theme) -> Vec<Line<'static>> {
     if hidden {
         return vec![Line::from(Span::styled(
             "░░░ reasoning trace hidden · Ctrl-R to show ░░░",
-            Style::default()
-                .fg(Palette::MUTED)
-                .add_modifier(Modifier::DIM),
+            theme.muted.add_modifier(Modifier::DIM),
         ))];
     }
     let mut lines = vec![Line::from(Span::styled(
@@ -221,7 +248,11 @@ pub fn reasoning_lines(text: &str, hidden: bool) -> Vec<Line<'static>> {
 }
 
 /// Message header: ▆ ROLE · tag
-pub fn message_header(role: &str, accent: Color, tag: Option<&str>) -> Line<'static> {
+///
+/// `accent` is the role color (caller resolves from `theme.user`,
+/// `theme.assistant`, etc.). `theme.body_fg` is used for the role
+/// label so it follows the active theme's foreground.
+pub fn message_header(role: &str, accent: Color, tag: Option<&str>, theme: &Theme) -> Line<'static> {
     let mut spans = vec![
         Span::styled(
             "▆ ",
@@ -230,7 +261,7 @@ pub fn message_header(role: &str, accent: Color, tag: Option<&str>) -> Line<'sta
         Span::styled(
             role.to_uppercase(),
             Style::default()
-                .fg(Palette::INK)
+                .fg(theme.body_fg)
                 .add_modifier(Modifier::BOLD),
         ),
     ];
@@ -242,10 +273,17 @@ pub fn message_header(role: &str, accent: Color, tag: Option<&str>) -> Line<'sta
 }
 
 /// Render a paragraph with a left accent bar — used for chat message bodies.
-pub fn render_message_body(f: &mut TuiFrame, area: Rect, accent: Color, lines: Vec<Line<'static>>) {
+pub fn render_message_body(
+    f: &mut TuiFrame,
+    area: Rect,
+    accent: Color,
+    lines: Vec<Line<'static>>,
+    theme: &Theme,
+) {
     if area.width < 3 || area.height == 0 {
         return;
     }
+    let body_style = Style::default().fg(theme.body_fg).bg(theme.body_bg);
     let bar = Rect {
         x: area.x,
         y: area.y,
@@ -258,7 +296,7 @@ pub fn render_message_body(f: &mut TuiFrame, area: Rect, accent: Color, lines: V
                 .take(area.height as usize)
                 .collect::<Vec<_>>(),
         )
-        .style(body()),
+        .style(body_style),
         bar,
     );
     let body_area = Rect {
@@ -269,7 +307,7 @@ pub fn render_message_body(f: &mut TuiFrame, area: Rect, accent: Color, lines: V
     };
     f.render_widget(
         Paragraph::new(lines)
-            .style(body())
+            .style(body_style)
             .wrap(Wrap { trim: false }),
         body_area,
     );
@@ -279,6 +317,12 @@ pub fn render_message_body(f: &mut TuiFrame, area: Rect, accent: Color, lines: V
 /// dashed key-hint line, and right-aligned model + token gauge.
 ///
 /// Returns the (x, y) where the OS cursor should be placed.
+///
+/// YYC-52: divider, input fill, hint text, and capacity-ok status fg
+/// follow the active theme. The mode pill (inverse PAPER-on-INK) and
+/// the caret (RED) stay structural — they're chrome, not chat content.
+/// Capacity-warning fg colors (yellow/red) stay on the design's warn
+/// palette so the urgency cue is identical across themes.
 pub fn prompt_row(
     f: &mut TuiFrame,
     area: Rect,
@@ -287,14 +331,16 @@ pub fn prompt_row(
     hints: &[(&str, &str)],
     model_status: &str,
     // capacity_ratio (YYC-60): current context / max. Drives the
-    // model_status fg color: ≤70% ink, 70-90% yellow, >90% red.
+    // model_status fg color: ≤70% body_fg, 70-90% yellow, >90% red.
     capacity_ratio: f32,
     thinking: bool,
+    theme: &Theme,
 ) -> (u16, u16) {
     if area.height < 2 {
         return (area.x, area.y);
     }
-    // Top divider
+    let body_style = Style::default().fg(theme.body_fg).bg(theme.body_bg);
+    // Top divider — themed border edge across the prompt row.
     let layout = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -306,12 +352,10 @@ pub fn prompt_row(
 
     // Divider row
     let div = "─".repeat(area.width as usize);
-    f.render_widget(
-        Paragraph::new(div).style(Style::default().fg(Palette::INK).bg(Palette::PAPER)),
-        layout[0],
-    );
+    f.render_widget(Paragraph::new(div).style(theme.border), layout[0]);
 
-    // Mode pill + caret + input
+    // Mode pill is structural inverse (PAPER on INK) — design-locked
+    // so the active mode badge stays unmistakable across themes.
     let mode_pill = Span::styled(
         format!(" {} ", mode),
         Style::default()
@@ -319,30 +363,25 @@ pub fn prompt_row(
             .bg(Palette::INK)
             .add_modifier(Modifier::BOLD),
     );
+    // Caret is structural RED — always the "send" cue, regardless of theme.
     let caret = Span::styled(
         " ❯ ",
         Style::default()
             .fg(Palette::RED)
-            .bg(Palette::PAPER)
+            .bg(theme.body_bg)
             .add_modifier(Modifier::BOLD),
     );
-    let input_span = Span::styled(
-        input.to_string(),
-        Style::default().fg(Palette::INK).bg(Palette::PAPER),
-    );
+    let input_span = Span::styled(input.to_string(), body_style);
     let cursor_block = Span::styled(
         if thinking { "▒" } else { "█" },
-        Style::default()
-            .fg(Palette::INK)
-            .bg(Palette::PAPER)
-            .add_modifier(if thinking {
-                Modifier::SLOW_BLINK
-            } else {
-                Modifier::empty()
-            }),
+        body_style.add_modifier(if thinking {
+            Modifier::SLOW_BLINK
+        } else {
+            Modifier::empty()
+        }),
     );
     let line = Line::from(vec![mode_pill, caret, input_span, cursor_block]);
-    f.render_widget(Paragraph::new(line).style(body()), layout[1]);
+    f.render_widget(Paragraph::new(line).style(body_style), layout[1]);
 
     // Cursor position: after mode pill (mode width + 2 spaces) + caret (3) + input chars
     let mode_width = mode.chars().count() as u16 + 2;
@@ -350,14 +389,14 @@ pub fn prompt_row(
     let cursor_y = layout[1].y;
 
     // Hints row
+    let muted_style = theme.muted;
     let mut hint_spans: Vec<Span<'static>> = Vec::new();
     for (i, (key, label)) in hints.iter().enumerate() {
         if i > 0 {
-            hint_spans.push(Span::styled(
-                "  ",
-                Style::default().fg(Palette::MUTED).bg(Palette::PAPER),
-            ));
+            hint_spans.push(Span::styled("  ", muted_style));
         }
+        // Hint key chip — structural inverse (PAPER-on-INK) so the
+        // keybinding chip is visually consistent across themes.
         hint_spans.push(Span::styled(
             format!(" {key} "),
             Style::default()
@@ -365,10 +404,7 @@ pub fn prompt_row(
                 .bg(Palette::INK)
                 .add_modifier(Modifier::BOLD),
         ));
-        hint_spans.push(Span::styled(
-            format!(" {label}"),
-            Style::default().fg(Palette::MUTED).bg(Palette::PAPER),
-        ));
+        hint_spans.push(Span::styled(format!(" {label}"), muted_style));
     }
     let hint_text_len: u16 = hint_spans
         .iter()
@@ -377,28 +413,27 @@ pub fn prompt_row(
     let model_len = model_status.chars().count() as u16;
     if hint_text_len + model_len + 2 < area.width {
         let pad = " ".repeat((area.width - hint_text_len - model_len - 1) as usize);
-        hint_spans.push(Span::styled(
-            pad,
-            Style::default().fg(Palette::MUTED).bg(Palette::PAPER),
-        ));
+        hint_spans.push(Span::styled(pad, muted_style));
         // YYC-60: color the model_status span by context capacity ratio.
+        // ≤70% follows the active theme's body fg; 70-90% / >90% use the
+        // structural warn palette so the urgency cue is theme-agnostic.
         let status_fg = if capacity_ratio > 0.90 {
             Palette::RED
         } else if capacity_ratio > 0.70 {
             Palette::YELLOW
         } else {
-            Palette::INK
+            theme.body_fg
         };
         hint_spans.push(Span::styled(
             format!(" {model_status}"),
             Style::default()
                 .fg(status_fg)
-                .bg(Palette::PAPER)
+                .bg(theme.body_bg)
                 .add_modifier(Modifier::BOLD),
         ));
     }
     f.render_widget(
-        Paragraph::new(Line::from(hint_spans)).style(body()),
+        Paragraph::new(Line::from(hint_spans)).style(body_style),
         layout[2],
     );
 
@@ -407,6 +442,10 @@ pub fn prompt_row(
 
 /// Bottom ticker strip — used in trading floor view. Scrolling text of recent
 /// sub-agent activity.
+///
+/// The ticker is structural inverse chrome (PAPER on INK) with a RED
+/// "TICKER" pill — the design canvas treats it as a fixed brutalist
+/// element, so it intentionally does not follow the active theme.
 pub fn ticker(f: &mut TuiFrame, area: Rect, cells: &[(String, String, Color)]) {
     if area.height == 0 {
         return;
@@ -466,6 +505,13 @@ pub fn ticker(f: &mut TuiFrame, area: Rect, cells: &[(String, String, Color)]) {
 /// ▎   output_preview line 1
 /// ▎   output_preview line 2
 /// ```
+///
+/// YYC-52: this card is **structural** per the YYC-74 design canvas —
+/// the SLATE header bg, the FAINT body bg, the inverse name pill, and
+/// the GREEN/YELLOW/RED status pills are design-locked. They do not
+/// follow the active theme. Diff coloring inside the body preview also
+/// stays on the structural diff palette so `+` / `-` lines remain
+/// instantly recognizable across themes.
 pub fn tool_card(
     name: &str,
     status: super::state::ToolStatus,
