@@ -53,6 +53,10 @@ toml_edit = "0.23"
 
 # CLI + TUI
 clap = { version = "4", features = ["derive"] }
+# Interactive prompts for `vulcan auth` (YYC-100). Fuzzy select +
+# password input + confirm modals. Optional dep — only the auth flow
+# uses it, but cheap enough to leave in default deps.
+dialoguer = { version = "0.12", features = ["fuzzy-select", "password"] }
 ratatui = "0.30"
 crossterm = "0.29"
 
