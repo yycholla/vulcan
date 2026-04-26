@@ -1,8 +1,16 @@
 use std::collections::HashMap;
 
-use ratatui::text::Line;
+use ratatui::{
+    style::{Modifier, Style},
+    text::{Line, Span},
+};
 
-use super::state::{ChatMessage, ChatRole};
+use super::{
+    markdown::render_markdown,
+    state::{ChatMessage, ChatRole, MessageSegment},
+    theme::Palette,
+    widgets::{message_header, reasoning_lines, tool_card},
+};
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct ChatRenderOptions {
@@ -46,7 +54,7 @@ impl ChatRenderStore {
         _pending_pause: Option<&crate::pause::AgentPause>,
         _queue_len: usize,
     ) -> VisibleChatLines {
-        let all = self.render_all_for_now(messages, options);
+        let all = self.all_lines(messages, options);
         let total_lines = all.len();
         let start = usize::from(scroll).min(total_lines);
         let end = start.saturating_add(usize::from(height)).min(total_lines);
@@ -57,7 +65,7 @@ impl ChatRenderStore {
         }
     }
 
-    fn render_all_for_now(
+    pub(crate) fn all_lines(
         &mut self,
         messages: &[ChatMessage],
         options: ChatRenderOptions,
@@ -87,18 +95,117 @@ impl ChatRenderStore {
             options,
         };
 
-        self.blocks.entry(key).or_insert_with(|| {
+        if !self.blocks.contains_key(&key) {
             self.render_count_for_tests = self.render_count_for_tests.saturating_add(1);
-            RenderedMessageBlock {
-                lines: vec![Line::from(message.content.clone())],
+            let block = self.build_message_block(index, message, options);
+            self.blocks.insert(key, block);
+        }
+
+        self.blocks
+            .get(&key)
+            .expect("message block was inserted before lookup")
+    }
+
+    fn build_message_block(
+        &self,
+        _index: usize,
+        message: &ChatMessage,
+        options: ChatRenderOptions,
+    ) -> RenderedMessageBlock {
+        let (role_label, accent) = match message.role {
+            ChatRole::User => ("you", Palette::RED),
+            ChatRole::Agent => ("agent", Palette::INK),
+            ChatRole::System => ("system", Palette::YELLOW),
+        };
+        let is_agent = matches!(message.role, ChatRole::Agent);
+        let mut lines = vec![message_header(role_label, accent, None)];
+
+        if is_agent && !message.segments.is_empty() {
+            let mut text_emitted = false;
+            for segment in &message.segments {
+                match segment {
+                    MessageSegment::Reasoning(reasoning)
+                        if options.show_reasoning && !reasoning.is_empty() =>
+                    {
+                        lines.extend(reasoning_lines(reasoning, false));
+                    }
+                    MessageSegment::Reasoning(_) => {}
+                    MessageSegment::ToolCall {
+                        name,
+                        status,
+                        params_summary,
+                        output_preview,
+                        result_meta,
+                        elided_lines,
+                        elapsed_ms,
+                    } => {
+                        lines.extend(tool_card(
+                            name,
+                            *status,
+                            params_summary.as_deref(),
+                            output_preview.as_deref(),
+                            result_meta.as_deref(),
+                            *elided_lines,
+                            *elapsed_ms,
+                            accent,
+                            options.width,
+                        ));
+                    }
+                    MessageSegment::Text(text) if !text.is_empty() => {
+                        text_emitted = true;
+                        push_markdown_body(&mut lines, text, accent);
+                    }
+                    MessageSegment::Text(_) => {}
+                }
             }
-        })
+
+            if !text_emitted {
+                lines.push(agent_placeholder(message.has_reasoning()));
+            }
+        } else {
+            if options.show_reasoning && is_agent && !message.reasoning.is_empty() {
+                lines.extend(reasoning_lines(&message.reasoning, false));
+            }
+            if is_agent && message.content.is_empty() {
+                lines.push(agent_placeholder(!message.reasoning.is_empty()));
+            } else {
+                push_markdown_body(&mut lines, &message.content, accent);
+            }
+        }
+
+        if !options.dense {
+            lines.push(Line::from(""));
+        }
+
+        RenderedMessageBlock { lines }
     }
 
     #[cfg(test)]
     pub fn render_count_for_tests(&self) -> usize {
         self.render_count_for_tests
     }
+}
+
+fn push_markdown_body(lines: &mut Vec<Line<'static>>, text: &str, accent: ratatui::style::Color) {
+    for line in render_markdown(text) {
+        let mut spans = vec![Span::styled("▎ ", Style::default().fg(accent))];
+        spans.extend(line.spans.into_iter());
+        lines.push(Line::from(spans));
+    }
+}
+
+fn agent_placeholder(has_reasoning: bool) -> Line<'static> {
+    let label = if has_reasoning {
+        "▎ Answering…"
+    } else {
+        "▎ Thinking…"
+    };
+    Line::from(Span::styled(
+        label,
+        Style::default()
+            .fg(Palette::MUTED)
+            .add_modifier(Modifier::SLOW_BLINK),
+    ))
 }
 
 #[cfg(test)]
@@ -142,5 +249,84 @@ mod tests {
         assert_eq!(store.render_count_for_tests(), renders_after_wide);
         let _ = store.visible_lines(&messages, narrow, 0, 10, None, 0);
         assert!(store.render_count_for_tests() > renders_after_wide);
+    }
+
+    #[test]
+    fn render_user_message_block_includes_header_and_body() {
+        let mut store = ChatRenderStore::default();
+        let message = ChatMessage::new(ChatRole::User, "hello **there**");
+        let options = ChatRenderOptions {
+            show_reasoning: true,
+            dense: true,
+            width: 80,
+        };
+
+        let block = store.render_message_block(0, &message, options);
+        let rendered = block
+            .lines
+            .iter()
+            .map(|line| {
+                line.spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>();
+
+        assert!(rendered.iter().any(|line| line.contains("YOU")));
+        assert!(rendered.iter().any(|line| line.contains("hello")));
+        assert!(rendered.iter().any(|line| line.starts_with("▎ ")));
+    }
+
+    #[test]
+    fn render_agent_segment_block_preserves_tool_and_text_order() {
+        let mut store = ChatRenderStore::default();
+        let mut message = ChatMessage::new(ChatRole::Agent, "");
+        message.append_reasoning("checking files");
+        message.push_tool_start_with("read_file", Some("src/main.rs".to_string()));
+        message.finish_tool_with(
+            "read_file",
+            true,
+            Some("fn main() {}".to_string()),
+            Some("1 line".to_string()),
+            0,
+            Some(12),
+        );
+        message.append_text("The file is small.");
+
+        let options = ChatRenderOptions {
+            show_reasoning: true,
+            dense: true,
+            width: 80,
+        };
+
+        let block = store.render_message_block(0, &message, options);
+        let rendered = block
+            .lines
+            .iter()
+            .map(|line| {
+                line.spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>();
+
+        let reasoning = rendered
+            .iter()
+            .position(|line| line.contains("checking files"))
+            .expect("reasoning should render");
+        let tool = rendered
+            .iter()
+            .position(|line| line.contains("read_file"))
+            .expect("tool should render");
+        let text = rendered
+            .iter()
+            .position(|line| line.contains("The file is small."))
+            .expect("text should render");
+
+        assert!(reasoning < tool);
+        assert!(tool < text);
+        assert!(rendered.iter().any(|line| line.contains("OK")));
     }
 }

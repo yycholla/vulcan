@@ -521,6 +521,7 @@ pub struct AppState {
     /// whenever a message is added, mutated, or the view is cleared.
     pub chat_lines_dirty: Cell<bool>,
     pub chat_lines_cache: RefCell<Option<ChatLinesCache>>,
+    pub chat_render_store: RefCell<super::chat_render::ChatRenderStore>,
 
     /// When true, overlays a session picker on top of the normal view.
     /// Set by `ResumeTarget::Pick` at startup; cleared when the user
@@ -569,6 +570,7 @@ impl AppState {
             token_max,
             chat_lines_dirty: Cell::new(true),
             chat_lines_cache: RefCell::new(None),
+            chat_render_store: RefCell::new(super::chat_render::ChatRenderStore::default()),
 
             show_session_picker: false,
             session_picker_selection: 0,

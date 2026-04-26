@@ -6,10 +6,9 @@ use ratatui::{
     widgets::{Paragraph, Wrap},
 };
 
+use super::chat_render::ChatRenderOptions;
 use super::markdown::render_markdown;
-use super::state::{
-    AppState, ChatLinesCache, ChatLinesCacheKey, ChatRole, DiffStyle, MessageSegment, SessionStatus,
-};
+use super::state::{AppState, ChatLinesCache, ChatLinesCacheKey, DiffStyle, SessionStatus};
 use super::theme::{Palette, body, faint_bg};
 use super::widgets::{fill, frame, message_header, section_header, ticker};
 
@@ -132,114 +131,18 @@ fn build_chat_lines_w(
             Style::default().fg(Palette::MUTED),
         )));
     } else {
-        for (i, m) in app.messages.iter().enumerate() {
-            let (role_label, accent) = match m.role {
-                ChatRole::User => ("you", Palette::RED),
-                ChatRole::Agent => ("agent", Palette::INK),
-                ChatRole::System => ("system", Palette::YELLOW),
-            };
-            out.push(message_header(role_label, accent, None));
-
-            let is_agent = matches!(m.role, ChatRole::Agent);
-
-            if is_agent && !m.segments.is_empty() {
-                // Live timeline (YYC-71): render reasoning, tool calls, and text
-                // in arrival order. Reasoning fragments only emit when the
-                // toggle is on; tool calls always emit.
-                let mut text_emitted = false;
-                for seg in &m.segments {
-                    match seg {
-                        MessageSegment::Reasoning(r) if show_reasoning && !r.is_empty() => {
-                            for l in super::widgets::reasoning_lines(r, false) {
-                                out.push(l);
-                            }
-                        }
-                        MessageSegment::Reasoning(_) => {}
-                        MessageSegment::ToolCall {
-                            name,
-                            status,
-                            params_summary,
-                            output_preview,
-                            result_meta,
-                            elided_lines,
-                            elapsed_ms,
-                        } => {
-                            // YYC-74: structured bordered tool-call card.
-                            // YYC-78: elided_lines drives the auto-collapse footer.
-                            for line in super::widgets::tool_card(
-                                name,
-                                *status,
-                                params_summary.as_deref(),
-                                output_preview.as_deref(),
-                                result_meta.as_deref(),
-                                *elided_lines,
-                                *elapsed_ms,
-                                accent,
-                                width,
-                            ) {
-                                out.push(line);
-                            }
-                        }
-                        MessageSegment::Text(t) if !t.is_empty() => {
-                            text_emitted = true;
-                            let rendered = render_markdown(t);
-                            for line in rendered {
-                                let mut spans =
-                                    vec![Span::styled("▎ ", Style::default().fg(accent))];
-                                spans.extend(line.spans.into_iter());
-                                out.push(Line::from(spans));
-                            }
-                        }
-                        MessageSegment::Text(_) => {}
-                    }
-                }
-                // Show waiting placeholder when only reasoning has streamed and
-                // no body text has appeared yet.
-                if !text_emitted {
-                    let label = if m.has_reasoning() {
-                        "▎ Answering…"
-                    } else {
-                        "▎ Thinking…"
-                    };
-                    out.push(Line::from(Span::styled(
-                        label,
-                        Style::default()
-                            .fg(Palette::MUTED)
-                            .add_modifier(Modifier::SLOW_BLINK),
-                    )));
-                }
-            } else {
-                // Hydrated history (no segment timeline) — fall back to the
-                // legacy reasoning-then-content layout.
-                if show_reasoning && is_agent && !m.reasoning.is_empty() {
-                    for l in super::widgets::reasoning_lines(&m.reasoning, false) {
-                        out.push(l);
-                    }
-                }
-                if is_agent && m.content.is_empty() {
-                    let label = if m.reasoning.is_empty() {
-                        "▎ Thinking…"
-                    } else {
-                        "▎ Answering…"
-                    };
-                    out.push(Line::from(Span::styled(
-                        label,
-                        Style::default()
-                            .fg(Palette::MUTED)
-                            .add_modifier(Modifier::SLOW_BLINK),
-                    )));
-                } else {
-                    let rendered = render_markdown(&m.content);
-                    for line in rendered {
-                        let mut spans = vec![Span::styled("▎ ", Style::default().fg(accent))];
-                        spans.extend(line.spans.into_iter());
-                        out.push(Line::from(spans));
-                    }
-                }
-            }
-            if !dense || i + 1 == app.messages.len() {
-                out.push(Line::from(""));
-            }
+        let options = ChatRenderOptions {
+            show_reasoning,
+            dense,
+            width,
+        };
+        out.extend(
+            app.chat_render_store
+                .borrow_mut()
+                .all_lines(&app.messages, options),
+        );
+        if dense {
+            out.push(Line::from(""));
         }
     }
 
