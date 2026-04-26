@@ -342,11 +342,30 @@ pub enum StreamEvent {
     /// before `dispatch_tool` runs, so the TUI can render `🔧 name…` while
     /// the tool executes (otherwise the chat would stay stuck on "Thinking…"
     /// for the duration of the tool run). See YYC-57.
-    ToolCallStart { id: String, name: String },
+    /// `args_summary` is a short one-line projection of the tool's args
+    /// (path/command/query/etc) so the YYC-74 card has something to show
+    /// without the TUI having to know each tool's schema.
+    ToolCallStart {
+        id: String,
+        name: String,
+        args_summary: Option<String>,
+    },
     /// A tool call has finished. `ok` reflects `ToolResult::is_error`
-    /// (false on error/block/cancel). The TUI flips the corresponding
-    /// in-flight marker from `🔧 name…` to `🔧 name ✓` / `✗`.
-    ToolCallEnd { id: String, name: String, ok: bool },
+    /// (false on error/block/cancel). `output_preview` is a truncated
+    /// snapshot of the tool result (~6 lines / 400 chars) for the
+    /// YYC-74 card preview block. `elapsed_ms` is the wall-clock dispatch
+    /// time so the card can show timing notes ("0.34s").
+    ToolCallEnd {
+        id: String,
+        name: String,
+        ok: bool,
+        output_preview: Option<String>,
+        /// One-line metadata derived from the tool result (e.g.
+        /// "847 lines · 26.8 KB", "5 matches", "+142 -3"). Rendered as
+        /// a dimmed sub-header in the YYC-74 card.
+        result_meta: Option<String>,
+        elapsed_ms: u64,
+    },
     /// The stream is complete (with optional final ChatResponse)
     Done(ChatResponse),
     /// The stream hit an error

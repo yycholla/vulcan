@@ -79,7 +79,24 @@ pub enum ToolStatus {
 pub enum MessageSegment {
     Reasoning(String),
     Text(String),
-    ToolCall { name: String, status: ToolStatus },
+    /// One tool invocation rendered as a structured card (YYC-74).
+    /// `params_summary` is the one-line projection from the agent's
+    /// `summarize_tool_args` (e.g. path for file ops, query for
+    /// search). `output_preview` is a truncated tail of the tool
+    /// result. `elapsed_ms` is wall-clock dispatch time for the
+    /// timing note. All optional — older streams that don't populate
+    /// them still render a minimal card.
+    ToolCall {
+        name: String,
+        status: ToolStatus,
+        params_summary: Option<String>,
+        output_preview: Option<String>,
+        /// One-line metadata derived from tool result (e.g. "847 lines",
+        /// "5 matches", "+12 -3"). Renders as a dimmed sub-header in
+        /// the YYC-74 card.
+        result_meta: Option<String>,
+        elapsed_ms: Option<u64>,
+    },
 }
 
 #[derive(Clone, Debug, Default)]
@@ -155,9 +172,23 @@ impl ChatMessage {
     }
 
     pub fn push_tool_start(&mut self, name: impl Into<String>) {
+        self.push_tool_start_with(name, None);
+    }
+
+    /// Push a tool-call segment with the params summary the YYC-74
+    /// card needs.
+    pub fn push_tool_start_with(
+        &mut self,
+        name: impl Into<String>,
+        params_summary: Option<String>,
+    ) {
         self.segments.push(MessageSegment::ToolCall {
             name: name.into(),
             status: ToolStatus::InProgress,
+            params_summary,
+            output_preview: None,
+            result_meta: None,
+            elapsed_ms: None,
         });
     }
 
@@ -165,19 +196,40 @@ impl ChatMessage {
     /// Walks segments in reverse so concurrent dispatch (YYC-34) still
     /// pairs each end with its own start as the matching tail.
     pub fn finish_tool(&mut self, name: &str, ok: bool) {
+        self.finish_tool_with(name, ok, None, None, None);
+    }
+
+    /// Same as `finish_tool` but also stamps the result preview, meta
+    /// summary, and timing for the YYC-74 card.
+    pub fn finish_tool_with(
+        &mut self,
+        name: &str,
+        ok: bool,
+        output_preview: Option<String>,
+        result_meta: Option<String>,
+        elapsed_ms: Option<u64>,
+    ) {
         for seg in self.segments.iter_mut().rev() {
             if let MessageSegment::ToolCall {
                 name: n,
-                status: status @ ToolStatus::InProgress,
+                status,
+                output_preview: op,
+                result_meta: rm,
+                elapsed_ms: em,
+                ..
             } = seg
             {
-                if n == name {
+                if n == name && matches!(status, ToolStatus::InProgress) {
                     *status = ToolStatus::Done(ok);
+                    *op = output_preview;
+                    *rm = result_meta;
+                    *em = elapsed_ms;
                     return;
                 }
             }
         }
     }
+
 }
 
 #[derive(Clone, Debug)]
@@ -1131,5 +1183,43 @@ mod tests {
             statuses,
             vec![ToolStatus::InProgress, ToolStatus::Done(true)]
         );
+    }
+
+    #[test]
+    fn push_tool_start_with_carries_params_summary() {
+        let mut m = ChatMessage::new(ChatRole::Agent, "");
+        m.push_tool_start_with("read_file", Some("src/foo.rs".into()));
+        match &m.segments[0] {
+            MessageSegment::ToolCall {
+                params_summary, ..
+            } => assert_eq!(params_summary.as_deref(), Some("src/foo.rs")),
+            other => panic!("expected ToolCall, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn finish_tool_with_stamps_preview_and_timing() {
+        let mut m = ChatMessage::new(ChatRole::Agent, "");
+        m.push_tool_start("read_file");
+        m.finish_tool_with(
+            "read_file",
+            true,
+            Some("hello\nworld".into()),
+            Some("2 lines".into()),
+            Some(345),
+        );
+        match &m.segments[0] {
+            MessageSegment::ToolCall {
+                output_preview,
+                elapsed_ms,
+                status,
+                ..
+            } => {
+                assert!(matches!(status, ToolStatus::Done(true)));
+                assert_eq!(output_preview.as_deref(), Some("hello\nworld"));
+                assert_eq!(*elapsed_ms, Some(345));
+            }
+            other => panic!("expected ToolCall, got {other:?}"),
+        }
     }
 }

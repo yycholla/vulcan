@@ -7,7 +7,7 @@ use ratatui::{
 };
 
 use super::markdown::render_markdown;
-use super::state::{AppState, ChatRole, MessageSegment, SessionStatus, ToolStatus};
+use super::state::{AppState, ChatRole, MessageSegment, SessionStatus};
 use super::theme::{Palette, body, faint_bg};
 use super::widgets::{fill, frame, message_header, section_header, ticker};
 
@@ -82,7 +82,23 @@ fn publish_chat_max_scroll(app: &AppState, line_count: usize, viewport_height: u
 /// Build flat lines for the primary chat — user/agent messages with markdown.
 /// `show_reasoning` toggles a stylized reasoning block before the first agent
 /// message (used by views that show a reasoning trace).
-fn build_chat_lines(app: &AppState, show_reasoning: bool, dense: bool) -> Vec<Line<'static>> {
+fn build_chat_lines(
+    app: &AppState,
+    show_reasoning: bool,
+    dense: bool,
+) -> Vec<Line<'static>> {
+    // Default width when caller doesn't know the viewport. Renderers that
+    // do (single_stack, split_sessions, trading_floor) call
+    // `build_chat_lines_w` directly with the actual width.
+    build_chat_lines_w(app, show_reasoning, dense, 80)
+}
+
+fn build_chat_lines_w(
+    app: &AppState,
+    show_reasoning: bool,
+    dense: bool,
+    width: u16,
+) -> Vec<Line<'static>> {
     let mut out: Vec<Line<'static>> = Vec::new();
     out.push(Line::from(Span::styled(
         format!("── session · {} ──", app.session_label),
@@ -123,18 +139,26 @@ fn build_chat_lines(app: &AppState, show_reasoning: bool, dense: bool) -> Vec<Li
                         }
                     }
                     MessageSegment::Reasoning(_) => {}
-                    MessageSegment::ToolCall { name, status } => {
-                        let body = match status {
-                            ToolStatus::InProgress => format!("_[🔧 {name}…]_"),
-                            ToolStatus::Done(true) => format!("_[🔧 {name} ✓]_"),
-                            ToolStatus::Done(false) => format!("_[🔧 {name} ✗]_"),
-                        };
-                        let rendered = render_markdown(&body);
-                        for line in rendered {
-                            let mut spans =
-                                vec![Span::styled("▎ ", Style::default().fg(accent))];
-                            spans.extend(line.spans.into_iter());
-                            out.push(Line::from(spans));
+                    MessageSegment::ToolCall {
+                        name,
+                        status,
+                        params_summary,
+                        output_preview,
+                        result_meta,
+                        elapsed_ms,
+                    } => {
+                        // YYC-74: structured bordered tool-call card.
+                        for line in super::widgets::tool_card(
+                            name,
+                            *status,
+                            params_summary.as_deref(),
+                            output_preview.as_deref(),
+                            result_meta.as_deref(),
+                            *elapsed_ms,
+                            accent,
+                            width,
+                        ) {
+                            out.push(line);
                         }
                     }
                     MessageSegment::Text(t) if !t.is_empty() => {
@@ -274,7 +298,8 @@ fn single_stack(f: &mut TuiFrame, area: Rect, app: &AppState) {
         Some("ses 1/1 · ●live"),
         None,
     );
-    let lines = build_chat_lines(app, app.show_reasoning, false);
+    let chat_w = inner.width.saturating_sub(2);
+    let lines = build_chat_lines_w(app, app.show_reasoning, false, chat_w);
     publish_chat_max_scroll(app, lines.len(), inner.height);
     f.render_widget(
         Paragraph::new(lines)
@@ -284,7 +309,7 @@ fn single_stack(f: &mut TuiFrame, area: Rect, app: &AppState) {
         Rect {
             x: inner.x + 1,
             y: inner.y,
-            width: inner.width.saturating_sub(2),
+            width: chat_w,
             height: inner.height,
         },
     );

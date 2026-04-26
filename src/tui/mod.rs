@@ -859,24 +859,41 @@ pub async fn run_tui(config: &Config, resume: ResumeTarget) -> Result<()> {
                         app.provider_errors_total = app.provider_errors_total.saturating_add(1);
                         app.note_error(&e);
                     }
-                    Some(StreamEvent::ToolCallStart { name, .. }) => {
-                        // Push a tool-call segment into the timeline. The
-                        // renderer interleaves it between Reasoning/Text
-                        // segments in arrival order (YYC-71). The legacy
-                        // `content` string is left alone — its embedded
-                        // `_[🔧 …]_` markers are gone since the renderer now
-                        // gets tool calls from `segments`.
+                    Some(StreamEvent::ToolCallStart {
+                        name,
+                        args_summary,
+                        ..
+                    }) => {
+                        // YYC-71: push the tool-call segment into the
+                        // timeline (interleaved with reasoning/text).
+                        // YYC-74: carry the args summary so the card has
+                        // structured context.
                         if let Some(last) = app.messages.last_mut() {
                             if matches!(last.role, ChatRole::Agent) {
-                                last.push_tool_start(name.clone());
+                                last.push_tool_start_with(name.clone(), args_summary);
                             }
                         }
                         app.note_tool_start(&name);
                     }
-                    Some(StreamEvent::ToolCallEnd { name, ok, .. }) => {
+                    Some(StreamEvent::ToolCallEnd {
+                        name,
+                        ok,
+                        output_preview,
+                        result_meta,
+                        elapsed_ms,
+                        ..
+                    }) => {
                         if let Some(last) = app.messages.last_mut() {
                             if matches!(last.role, ChatRole::Agent) {
-                                last.finish_tool(&name, ok);
+                                // YYC-74: stamp preview + meta + timing
+                                // onto the matching segment for the card.
+                                last.finish_tool_with(
+                                    &name,
+                                    ok,
+                                    output_preview,
+                                    result_meta,
+                                    Some(elapsed_ms),
+                                );
                             }
                         }
                         // YYC-67: tool call telemetry.

@@ -454,6 +454,189 @@ pub fn ticker(f: &mut TuiFrame, area: Rect, cells: &[(String, String, Color)]) {
     f.render_widget(Paragraph::new(Line::from(spans)).style(inverse()), area);
 }
 
+/// Render a structured tool-call card per the design canvas (YYC-74).
+/// Single-line title bar (no surrounding box) — name pill on the
+/// left, status pill on the right, body indented underneath with the
+/// chat surface's left accent bar.
+///
+/// Layout (matches `Private/.../tools.jsx` T01–T14 title bars):
+/// ```text
+/// ▎ × tool_name · params_summary               ✓ OK · 0.34s
+/// ▎   N lines · 4.1 KB
+/// ▎   output_preview line 1
+/// ▎   output_preview line 2
+/// ```
+pub fn tool_card(
+    name: &str,
+    status: super::state::ToolStatus,
+    params_summary: Option<&str>,
+    output_preview: Option<&str>,
+    result_meta: Option<&str>,
+    elapsed_ms: Option<u64>,
+    _accent: Color,
+    width: u16,
+) -> Vec<Line<'static>> {
+    use super::state::ToolStatus;
+    let (glyph, label, color) = match status {
+        ToolStatus::InProgress => ("▶", "RUNNING", Palette::YELLOW),
+        ToolStatus::Done(true) => ("✓", "OK", Palette::GREEN),
+        ToolStatus::Done(false) => ("✗", "ERR", Palette::RED),
+    };
+
+    // Card has a 1-col border on left + right (`│`).
+    let inner_w = width.saturating_sub(2) as usize;
+
+    // Left half of header: name pill + " · params"
+    let name_pill_text = format!(" × {name} ");
+    let mut left_chars = name_pill_text.chars().count();
+    let mut params_text = String::new();
+    if let Some(p) = params_summary {
+        params_text = format!("  {p}");
+        left_chars += params_text.chars().count();
+    }
+
+    // Right half: status pill " ✓ OK 0.34s "
+    let pill_body = match (status, elapsed_ms) {
+        (ToolStatus::InProgress, _) => format!(" {glyph} {label} "),
+        (_, Some(ms)) => format!(" {glyph} {label} {} ", format_elapsed(ms)),
+        (_, None) => format!(" {glyph} {label} "),
+    };
+    let right_chars = pill_body.chars().count();
+
+    // Truncate params if pill + name + minimum gap don't fit.
+    let min_gap = 2;
+    if left_chars + right_chars + min_gap > inner_w && !params_text.is_empty() {
+        let max_params = inner_w
+            .saturating_sub(name_pill_text.chars().count() + right_chars + min_gap);
+        if max_params >= 4 {
+            let chars: Vec<char> = params_text.chars().collect();
+            let kept: String = chars.iter().take(max_params - 1).collect();
+            params_text = format!("{kept}…");
+        } else {
+            params_text.clear();
+        }
+        left_chars = name_pill_text.chars().count() + params_text.chars().count();
+    }
+    let gap = inner_w.saturating_sub(left_chars + right_chars);
+
+    // Continuous border around the whole card. Header rows sit on
+    // SLATE (including the top border row's bg); body rows sit on
+    // FAINT (which is darker than the TUI's PAPER but lighter than
+    // SLATE) so the title visually separates without ever breaking
+    // the outer rectangle.
+    let header_bg = Palette::SLATE;
+    let body_bg = Palette::FAINT;
+    let header_border = Style::default().fg(Palette::MUTED).bg(header_bg);
+    let body_border = Style::default().fg(Palette::MUTED).bg(body_bg);
+
+    // ── Top border: ┌──...──┐ on SLATE so it merges with the header.
+    let mut out = vec![Line::from(vec![
+        Span::styled("┌", header_border),
+        Span::styled("─".repeat(inner_w), header_border),
+        Span::styled("┐", header_border),
+    ])];
+
+    // ── Header content: │ pill params  ...  status_pill │ on SLATE.
+    let mut header: Vec<Span<'static>> = Vec::new();
+    header.push(Span::styled("│", header_border));
+    header.push(Span::styled(
+        name_pill_text,
+        Style::default()
+            .fg(Palette::PAPER)
+            .bg(Palette::INK)
+            .add_modifier(Modifier::BOLD),
+    ));
+    if !params_text.is_empty() {
+        header.push(Span::styled(
+            params_text,
+            Style::default().fg(Palette::INK).bg(header_bg),
+        ));
+    }
+    if gap > 0 {
+        header.push(Span::styled(
+            " ".repeat(gap),
+            Style::default().bg(header_bg),
+        ));
+    }
+    header.push(Span::styled(
+        pill_body,
+        Style::default()
+            .fg(Palette::PAPER)
+            .bg(color)
+            .add_modifier(Modifier::BOLD),
+    ));
+    header.push(Span::styled("│", header_border));
+    out.push(Line::from(header));
+
+    // ── Body rows: │  text...padding  │ on FAINT.
+    let body_indent = "  ";
+    let body_inner = inner_w.saturating_sub(body_indent.chars().count());
+
+    let render_body = |spans: &mut Vec<Span<'static>>, used: usize| {
+        let pad = inner_w.saturating_sub(used);
+        if pad > 0 {
+            spans.push(Span::styled(" ".repeat(pad), Style::default().bg(body_bg)));
+        }
+        spans.push(Span::styled("│", body_border));
+    };
+
+    if let Some(meta) = result_meta {
+        let used = body_indent.chars().count() + meta.chars().count();
+        let mut spans = vec![
+            Span::styled("│", body_border),
+            Span::styled(body_indent.to_string(), Style::default().bg(body_bg)),
+            Span::styled(
+                meta.to_string(),
+                Style::default()
+                    .fg(Palette::MUTED)
+                    .bg(body_bg)
+                    .add_modifier(Modifier::BOLD),
+            ),
+        ];
+        render_body(&mut spans, used);
+        out.push(Line::from(spans));
+    }
+
+    if let Some(preview) = output_preview {
+        for raw in preview.lines() {
+            let mut chars: Vec<char> = raw.chars().collect();
+            if chars.len() > body_inner {
+                chars.truncate(body_inner.saturating_sub(1));
+                chars.push('…');
+            }
+            let body: String = chars.iter().collect();
+            let used = body_indent.chars().count() + body.chars().count();
+            let mut spans = vec![
+                Span::styled("│", body_border),
+                Span::styled(body_indent.to_string(), Style::default().bg(body_bg)),
+                Span::styled(body, Style::default().fg(Palette::INK).bg(body_bg)),
+            ];
+            render_body(&mut spans, used);
+            out.push(Line::from(spans));
+        }
+    }
+
+    // ── Bottom border on FAINT, closing the rectangle.
+    out.push(Line::from(vec![
+        Span::styled("└", body_border),
+        Span::styled("─".repeat(inner_w), body_border),
+        Span::styled("┘", body_border),
+    ]));
+
+    out
+}
+
+fn format_elapsed(ms: u64) -> String {
+    if ms < 1000 {
+        format!("{ms}ms")
+    } else if ms < 60_000 {
+        format!("{:.2}s", (ms as f64) / 1000.0)
+    } else {
+        let secs = ms / 1000;
+        format!("{}m{:02}s", secs / 60, secs % 60)
+    }
+}
+
 /// Fill a rect with a solid background color (paper by default).
 pub fn fill(f: &mut TuiFrame, area: Rect, style: Style) {
     if area.height == 0 || area.width == 0 {
