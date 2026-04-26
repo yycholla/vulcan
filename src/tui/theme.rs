@@ -38,3 +38,35 @@ pub fn muted() -> Style {
 pub fn faint_bg() -> Style {
     Style::default().fg(Palette::INK).bg(Palette::FAINT)
 }
+
+#[cfg(test)]
+mod theme_tests {
+    use super::*;
+
+    #[test]
+    fn from_name_system_returns_reset_bg() {
+        let t = Theme::from_name("system");
+        // system theme inherits terminal: body bg should be Reset.
+        assert_eq!(t.body_bg, Color::Reset);
+    }
+
+    #[test]
+    fn from_name_default_light_returns_paper_bg() {
+        let t = Theme::from_name("default-light");
+        // default-light formalizes today's Bauhaus palette.
+        assert_eq!(t.body_bg, Palette::PAPER);
+    }
+
+    #[test]
+    fn from_name_dracula_returns_dracula_bg() {
+        let t = Theme::from_name("dracula");
+        assert_eq!(t.body_bg, Color::Rgb(0x28, 0x2a, 0x36));
+    }
+
+    #[test]
+    fn from_name_unknown_falls_back_to_system() {
+        let unknown = Theme::from_name("nonexistent-theme");
+        let system = Theme::from_name("system");
+        assert_eq!(unknown.body_bg, system.body_bg);
+    }
+}
