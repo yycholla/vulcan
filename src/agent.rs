@@ -631,13 +631,16 @@ impl Agent {
                         let result = this.dispatch_tool(&name, &args, cancel).await;
                         let elapsed_ms = started.elapsed().as_millis() as u64;
                         let ok = !result.is_error;
-                        // YYC-74: truncated output preview for the card body.
+                        // YYC-74: truncated output preview + meta line
+                        // for the card body.
                         let output_preview = preview_output(&result.output);
+                        let result_meta = summarize_tool_result(&name, &result.output);
                         let _ = ui_tx.send(StreamEvent::ToolCallEnd {
                             id: id.clone(),
                             name: name.clone(),
                             ok,
                             output_preview,
+                            result_meta,
                             elapsed_ms,
                         });
                         (id, result)
@@ -943,6 +946,110 @@ fn summarize_tool_args(name: &str, raw_args: &str) -> Option<String> {
         }
     };
     summary.filter(|s| !s.is_empty())
+}
+
+/// One-line metadata about a tool result for the YYC-74 card sub-header
+/// (e.g. "847 lines · 26.8 KB", "5 matches", "+12 -3"). Per-tool when
+/// the output has structure; falls back to a generic line/char count.
+fn summarize_tool_result(name: &str, output: &str) -> Option<String> {
+    let text = output.trim();
+    if text.is_empty() {
+        return None;
+    }
+    let lines = text.lines().count();
+    let bytes = text.len();
+    let format_size = |b: usize| -> String {
+        if b < 1024 {
+            format!("{b} B")
+        } else if b < 1024 * 1024 {
+            format!("{:.1} KB", (b as f64) / 1024.0)
+        } else {
+            format!("{:.1} MB", (b as f64) / (1024.0 * 1024.0))
+        }
+    };
+    match name {
+        "write_file" => {
+            // "Wrote N bytes to PATH"
+            let bytes_n = text
+                .split_whitespace()
+                .nth(1)
+                .and_then(|s| s.parse::<usize>().ok());
+            bytes_n.map(|n| format!("{} written", format_size(n)))
+        }
+        "edit_file" => {
+            // "Replaced N occurrence(s) in PATH"
+            let n = text
+                .split_whitespace()
+                .nth(1)
+                .and_then(|s| s.parse::<usize>().ok())?;
+            Some(format!("{n} occurrence{}", if n == 1 { "" } else { "s" }))
+        }
+        "read_file" | "list_files" => {
+            Some(format!("{lines} lines · {}", format_size(bytes)))
+        }
+        "search_files" => {
+            // ripgrep output: each non-empty line is a hit
+            let hits = text.lines().filter(|l| !l.is_empty()).count();
+            Some(format!("{hits} match{}", if hits == 1 { "" } else { "es" }))
+        }
+        "git_log" => {
+            let n = text.lines().filter(|l| !l.is_empty()).count();
+            Some(format!("{n} commit{}", if n == 1 { "" } else { "s" }))
+        }
+        "git_diff" => {
+            let plus = text.lines().filter(|l| l.starts_with('+') && !l.starts_with("+++")).count();
+            let minus = text.lines().filter(|l| l.starts_with('-') && !l.starts_with("---")).count();
+            if plus == 0 && minus == 0 {
+                None
+            } else {
+                Some(format!("+{plus} -{minus}"))
+            }
+        }
+        "git_status" => {
+            // First line is "## branch...origin/branch [ahead N]"; rest are file changes.
+            let changes = text.lines().filter(|l| !l.starts_with("##") && !l.is_empty()).count();
+            if changes == 0 {
+                Some("clean".to_string())
+            } else {
+                Some(format!("{changes} change{}", if changes == 1 { "" } else { "s" }))
+            }
+        }
+        "code_outline" | "find_symbol" => {
+            // JSON payloads — peek at the symbol/match counts.
+            serde_json::from_str::<serde_json::Value>(text)
+                .ok()
+                .and_then(|v| {
+                    let arr = v.get("symbols").or_else(|| v.get("matches"))?.as_array()?;
+                    Some(format!(
+                        "{} symbol{}",
+                        arr.len(),
+                        if arr.len() == 1 { "" } else { "s" }
+                    ))
+                })
+        }
+        "code_search_semantic" => serde_json::from_str::<serde_json::Value>(text)
+            .ok()
+            .and_then(|v| v.get("matches")?.as_array().map(|a| a.len()))
+            .map(|n| format!("{n} hit{}", if n == 1 { "" } else { "s" })),
+        "web_search" | "web_fetch" => {
+            Some(format!("{lines} lines · {}", format_size(bytes)))
+        }
+        "bash" | "run_command" => {
+            Some(format!("{lines} lines · {}", format_size(bytes)))
+        }
+        "diagnostics" => serde_json::from_str::<serde_json::Value>(text)
+            .ok()
+            .and_then(|v| v.get("count")?.as_u64())
+            .map(|n| format!("{n} diagnostic{}", if n == 1 { "" } else { "s" })),
+        // Generic fallback so even an unknown tool gets *something*.
+        _ => {
+            if lines == 1 {
+                Some(format_size(bytes))
+            } else {
+                Some(format!("{lines} lines · {}", format_size(bytes)))
+            }
+        }
+    }
 }
 
 /// Truncated tool result for the YYC-74 card preview block — caps at
@@ -1285,5 +1392,32 @@ mod tests {
     fn preview_output_returns_none_for_empty() {
         assert!(preview_output("").is_none());
         assert!(preview_output("   \n  ").is_none());
+    }
+
+    #[test]
+    fn summarize_tool_result_per_tool_meta() {
+        // YYC-74: meta sub-header in the card.
+        assert_eq!(
+            summarize_tool_result("write_file", "Wrote 4321 bytes to /tmp/x").as_deref(),
+            Some("4.2 KB written")
+        );
+        assert_eq!(
+            summarize_tool_result("edit_file", "Replaced 3 occurrence(s) in /tmp/x").as_deref(),
+            Some("3 occurrences")
+        );
+        assert_eq!(
+            summarize_tool_result("git_status", "## main\n M src/foo.rs\n?? new.rs").as_deref(),
+            Some("2 changes")
+        );
+        assert_eq!(summarize_tool_result("git_status", "## main").as_deref(), Some("clean"));
+        assert_eq!(
+            summarize_tool_result("git_diff", "+++ a\n+ added\n--- b\n- removed\n- removed2")
+                .as_deref(),
+            Some("+1 -2")
+        );
+        // Generic fallback (unknown tool) gets line/byte count.
+        let s =
+            summarize_tool_result("unknown_tool", "line one\nline two\nline three").unwrap();
+        assert!(s.starts_with("3 lines"), "got {s}");
     }
 }

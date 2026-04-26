@@ -91,6 +91,10 @@ pub enum MessageSegment {
         status: ToolStatus,
         params_summary: Option<String>,
         output_preview: Option<String>,
+        /// One-line metadata derived from tool result (e.g. "847 lines",
+        /// "5 matches", "+12 -3"). Renders as a dimmed sub-header in
+        /// the YYC-74 card.
+        result_meta: Option<String>,
         elapsed_ms: Option<u64>,
     },
 }
@@ -183,6 +187,7 @@ impl ChatMessage {
             status: ToolStatus::InProgress,
             params_summary,
             output_preview: None,
+            result_meta: None,
             elapsed_ms: None,
         });
     }
@@ -191,16 +196,17 @@ impl ChatMessage {
     /// Walks segments in reverse so concurrent dispatch (YYC-34) still
     /// pairs each end with its own start as the matching tail.
     pub fn finish_tool(&mut self, name: &str, ok: bool) {
-        self.finish_tool_with(name, ok, None, None);
+        self.finish_tool_with(name, ok, None, None, None);
     }
 
-    /// Same as `finish_tool` but also stamps the result preview + timing
-    /// for the YYC-74 card.
+    /// Same as `finish_tool` but also stamps the result preview, meta
+    /// summary, and timing for the YYC-74 card.
     pub fn finish_tool_with(
         &mut self,
         name: &str,
         ok: bool,
         output_preview: Option<String>,
+        result_meta: Option<String>,
         elapsed_ms: Option<u64>,
     ) {
         for seg in self.segments.iter_mut().rev() {
@@ -208,6 +214,7 @@ impl ChatMessage {
                 name: n,
                 status,
                 output_preview: op,
+                result_meta: rm,
                 elapsed_ms: em,
                 ..
             } = seg
@@ -215,6 +222,7 @@ impl ChatMessage {
                 if n == name && matches!(status, ToolStatus::InProgress) {
                     *status = ToolStatus::Done(ok);
                     *op = output_preview;
+                    *rm = result_meta;
                     *em = elapsed_ms;
                     return;
                 }
@@ -1193,7 +1201,13 @@ mod tests {
     fn finish_tool_with_stamps_preview_and_timing() {
         let mut m = ChatMessage::new(ChatRole::Agent, "");
         m.push_tool_start("read_file");
-        m.finish_tool_with("read_file", true, Some("hello\nworld".into()), Some(345));
+        m.finish_tool_with(
+            "read_file",
+            true,
+            Some("hello\nworld".into()),
+            Some("2 lines".into()),
+            Some(345),
+        );
         match &m.segments[0] {
             MessageSegment::ToolCall {
                 output_preview,

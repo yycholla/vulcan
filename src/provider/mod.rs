@@ -360,6 +360,10 @@ pub enum StreamEvent {
         name: String,
         ok: bool,
         output_preview: Option<String>,
+        /// One-line metadata derived from the tool result (e.g.
+        /// "847 lines · 26.8 KB", "5 matches", "+142 -3"). Rendered as
+        /// a dimmed sub-header in the YYC-74 card.
+        result_meta: Option<String>,
         elapsed_ms: u64,
     },
     /// The stream is complete (with optional final ChatResponse)
