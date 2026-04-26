@@ -42,6 +42,8 @@ struct RenderedMessageBlock {
 pub struct ChatRenderStore {
     blocks: HashMap<MessageRenderKey, RenderedMessageBlock>,
     render_count_for_tests: usize,
+    #[cfg(test)]
+    materialized_line_count_for_tests: usize,
 }
 
 impl ChatRenderStore {
@@ -54,13 +56,53 @@ impl ChatRenderStore {
         _pending_pause: Option<&crate::pause::AgentPause>,
         _queue_len: usize,
     ) -> VisibleChatLines {
-        let all = self.all_lines(messages, options);
-        let total_lines = all.len();
-        let start = usize::from(scroll).min(total_lines);
-        let end = start.saturating_add(usize::from(height)).min(total_lines);
+        #[cfg(test)]
+        {
+            self.materialized_line_count_for_tests = 0;
+        }
+
+        let window_start = usize::from(scroll);
+        let window_len = usize::from(height);
+        let window_end = window_start.saturating_add(window_len);
+        let mut total_lines = 0usize;
+        let mut visible = Vec::with_capacity(window_len);
+        #[cfg(test)]
+        let mut materialized_line_count = 0usize;
+
+        for (index, message) in messages.iter().enumerate() {
+            let block = self.render_message_block(index, message, options);
+            let block_start = total_lines;
+            let block_end = block_start.saturating_add(block.lines.len());
+            total_lines = block_end;
+
+            if window_len == 0 || block_end <= window_start || block_start >= window_end {
+                continue;
+            }
+
+            let start_in_block = window_start.saturating_sub(block_start);
+            let end_in_block = block
+                .lines
+                .len()
+                .min(window_end.saturating_sub(block_start));
+            for line in &block.lines[start_in_block..end_in_block] {
+                if visible.len() >= window_len {
+                    break;
+                }
+                visible.push(line.clone());
+                #[cfg(test)]
+                {
+                    materialized_line_count = materialized_line_count.saturating_add(1);
+                }
+            }
+        }
+
+        #[cfg(test)]
+        {
+            self.materialized_line_count_for_tests = materialized_line_count;
+        }
 
         VisibleChatLines {
-            lines: all[start..end].to_vec(),
+            lines: visible,
             total_lines,
         }
     }
@@ -184,6 +226,11 @@ impl ChatRenderStore {
     pub fn render_count_for_tests(&self) -> usize {
         self.render_count_for_tests
     }
+
+    #[cfg(test)]
+    pub fn materialized_line_count_for_tests(&self) -> usize {
+        self.materialized_line_count_for_tests
+    }
 }
 
 fn push_markdown_body(lines: &mut Vec<Line<'static>>, text: &str, accent: ratatui::style::Color) {
@@ -249,6 +296,25 @@ mod tests {
         assert_eq!(store.render_count_for_tests(), renders_after_wide);
         let _ = store.visible_lines(&messages, narrow, 0, 10, None, 0);
         assert!(store.render_count_for_tests() > renders_after_wide);
+    }
+
+    #[test]
+    fn visible_lines_does_not_clone_offscreen_message_lines() {
+        let mut store = ChatRenderStore::default();
+        let messages = (0..100)
+            .map(|i| ChatMessage::new(ChatRole::User, format!("message {i}")))
+            .collect::<Vec<_>>();
+        let options = ChatRenderOptions {
+            show_reasoning: true,
+            dense: false,
+            width: 80,
+        };
+
+        let window = store.visible_lines(&messages, options, 90, 3, None, 0);
+
+        assert_eq!(window.lines.len(), 3);
+        assert!(window.total_lines > window.lines.len());
+        assert!(store.materialized_line_count_for_tests() <= 3);
     }
 
     #[test]
