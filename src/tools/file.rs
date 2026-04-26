@@ -1,7 +1,12 @@
+use crate::pause::{
+    AgentPause, AgentResume, DiffScrubHunk, PauseKind, PauseSender,
+};
 use crate::tools::{Tool, ToolResult};
 use anyhow::Result;
 use async_trait::async_trait;
 use serde_json::{Value, json};
+use std::time::Duration;
+use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
 
 pub struct ReadFile;
@@ -332,11 +337,30 @@ impl Tool for SearchFiles {
 
 pub struct PatchFile {
     diff_sink: Option<crate::tools::EditDiffSink>,
+    /// Pause channel used to drive the diff scrubber overlay (YYC-75).
+    /// When `Some`, `edit_file` calls that match more than one site
+    /// route through the scrubber; the user accepts/rejects each hunk
+    /// before any bytes hit disk. `None` falls back to the legacy
+    /// "replace every match" behavior.
+    pause_tx: Option<PauseSender>,
 }
 
 impl PatchFile {
     pub fn new(diff_sink: Option<crate::tools::EditDiffSink>) -> Self {
-        Self { diff_sink }
+        Self {
+            diff_sink,
+            pause_tx: None,
+        }
+    }
+
+    pub fn with_pause(
+        diff_sink: Option<crate::tools::EditDiffSink>,
+        pause_tx: Option<PauseSender>,
+    ) -> Self {
+        Self {
+            diff_sink,
+            pause_tx,
+        }
     }
 }
 
@@ -388,10 +412,30 @@ impl Tool for PatchFile {
             return Err(anyhow::anyhow!("old_string not found in {path}.\n{hint}"));
         }
 
-        let new_content = content.replace(old, new);
-        tokio::fs::write(path, &new_content).await?;
+        // YYC-75: when more than one occurrence and we have a pause
+        // channel, send the user through the diff scrubber so they can
+        // accept/reject each site individually.
+        let occurrences = collect_match_offsets(&content, old);
+        let total = occurrences.len();
+        let accepted_offsets: Vec<usize> = if let Some(tx) = &self.pause_tx {
+            if total > 1 {
+                run_diff_scrubber(tx, path, old, new, &content, &occurrences).await?
+            } else {
+                occurrences
+            }
+        } else {
+            occurrences
+        };
 
-        let replaces = content.matches(old).count();
+        if accepted_offsets.is_empty() {
+            return Ok(ToolResult::ok(format!(
+                "No hunks accepted — {path} left unchanged."
+            )));
+        }
+
+        let new_content = apply_accepted_hunks(&content, old, new, &accepted_offsets);
+        tokio::fs::write(path, &new_content).await?;
+        let replaces = accepted_offsets.len();
 
         // YYC-66: capture the before/after snippets so the TUI diff pane
         // shows actual edited text rather than demo data.
@@ -408,11 +452,119 @@ impl Tool for PatchFile {
 
         // YYC-bonus: render a Claude Code-style diff in the card.
         let display = diff_preview(old, new, &format!("EDITED · {path}"));
-        Ok(ToolResult::ok(format!(
-            "Replaced {replaces} occurrence(s) in {path}"
-        ))
-        .with_display_preview(display))
+        let msg = if total == replaces {
+            format!("Replaced {replaces} occurrence(s) in {path}")
+        } else {
+            format!(
+                "Applied {replaces} of {total} hunk(s) in {path} (others rejected)."
+            )
+        };
+        Ok(ToolResult::ok(msg).with_display_preview(display))
     }
+}
+
+/// Byte offsets of every (non-overlapping) occurrence of `needle` in
+/// `haystack`. Used by both the legacy replace-all path and the
+/// YYC-75 diff scrubber.
+fn collect_match_offsets(haystack: &str, needle: &str) -> Vec<usize> {
+    if needle.is_empty() {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    let mut start = 0;
+    while let Some(rel) = haystack[start..].find(needle) {
+        let abs = start + rel;
+        out.push(abs);
+        start = abs + needle.len();
+    }
+    out
+}
+
+fn apply_accepted_hunks(
+    content: &str,
+    old: &str,
+    new: &str,
+    accepted_offsets: &[usize],
+) -> String {
+    if accepted_offsets.is_empty() {
+        return content.to_string();
+    }
+    let mut out = String::with_capacity(content.len());
+    let mut cursor = 0usize;
+    let mut sorted = accepted_offsets.to_vec();
+    sorted.sort_unstable();
+    for offset in sorted {
+        if offset < cursor {
+            continue;
+        }
+        out.push_str(&content[cursor..offset]);
+        out.push_str(new);
+        cursor = offset + old.len();
+    }
+    out.push_str(&content[cursor..]);
+    out
+}
+
+async fn run_diff_scrubber(
+    tx: &PauseSender,
+    path: &str,
+    old: &str,
+    new: &str,
+    content: &str,
+    occurrences: &[usize],
+) -> Result<Vec<usize>> {
+    let hunks: Vec<DiffScrubHunk> = occurrences
+        .iter()
+        .map(|&offset| DiffScrubHunk {
+            offset,
+            line_no: line_no_at(content, offset),
+            before_lines: split_lines(old),
+            after_lines: split_lines(new),
+        })
+        .collect();
+    let (reply_tx, reply_rx) = oneshot::channel();
+    let pause = AgentPause {
+        kind: PauseKind::DiffScrub {
+            path: path.to_string(),
+            hunks,
+        },
+        reply: reply_tx,
+        options: Vec::new(),
+    };
+    if tx.send(pause).await.is_err() {
+        // No consumer — fall back to applying every site.
+        return Ok(occurrences.to_vec());
+    }
+    let resume = match tokio::time::timeout(Duration::from_secs(600), reply_rx).await {
+        Err(_) => anyhow::bail!("diff scrubber timed out after 10 minutes"),
+        Ok(Err(_)) => anyhow::bail!("diff scrubber channel closed"),
+        Ok(Ok(r)) => r,
+    };
+    match resume {
+        AgentResume::AcceptHunks(indices) => {
+            let mut out: Vec<usize> = indices
+                .into_iter()
+                .filter_map(|i| occurrences.get(i).copied())
+                .collect();
+            out.sort_unstable();
+            Ok(out)
+        }
+        AgentResume::Allow | AgentResume::AllowAndRemember => Ok(occurrences.to_vec()),
+        AgentResume::Deny | AgentResume::DenyWithReason(_) => Ok(Vec::new()),
+        AgentResume::Custom(_) => Ok(Vec::new()),
+    }
+}
+
+fn line_no_at(content: &str, offset: usize) -> usize {
+    let bound = offset.min(content.len());
+    1 + content[..bound].bytes().filter(|b| *b == b'\n').count()
+}
+
+fn split_lines(s: &str) -> Vec<String> {
+    if s.is_empty() {
+        return vec![String::new()];
+    }
+    s.split('\n').map(|l| l.to_string()).collect()
 }
 
 #[cfg(test)]
@@ -496,5 +648,130 @@ mod tests {
         assert_eq!(diff.tool, "edit_file");
         assert_eq!(diff.before, "1");
         assert_eq!(diff.after, "42");
+    }
+
+    #[test]
+    fn collect_match_offsets_finds_every_non_overlapping_site() {
+        let content = "alpha beta alpha gamma alpha";
+        let offsets = collect_match_offsets(content, "alpha");
+        assert_eq!(offsets.len(), 3);
+        assert_eq!(offsets[0], 0);
+        assert_eq!(&content[offsets[1]..offsets[1] + 5], "alpha");
+    }
+
+    #[test]
+    fn apply_accepted_hunks_skips_rejected_offsets() {
+        let content = "x x x";
+        // Only accept the first and third site.
+        let offsets = collect_match_offsets(content, "x");
+        let accepted = vec![offsets[0], offsets[2]];
+        let out = apply_accepted_hunks(content, "x", "Y", &accepted);
+        assert_eq!(out, "Y x Y");
+    }
+
+    #[test]
+    fn apply_accepted_hunks_empty_returns_original() {
+        let content = "hello world";
+        let out = apply_accepted_hunks(content, "hello", "hi", &[]);
+        assert_eq!(out, "hello world");
+    }
+
+    #[test]
+    fn line_no_at_counts_newlines_before_offset() {
+        let content = "line1\nline2\nline3";
+        assert_eq!(line_no_at(content, 0), 1);
+        assert_eq!(line_no_at(content, 6), 2);
+        assert_eq!(line_no_at(content, 12), 3);
+    }
+
+    #[tokio::test]
+    async fn patch_file_without_pause_replaces_every_occurrence() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("multi.txt");
+        let path_str = path.to_string_lossy().to_string();
+        std::fs::write(&path, "x x x\n").unwrap();
+
+        let tool = PatchFile::new(None);
+        let result = tool
+            .call(
+                json!({
+                    "path": path_str,
+                    "old_string": "x",
+                    "new_string": "Y",
+                }),
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+        assert!(!result.is_error);
+        let written = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(written, "Y Y Y\n");
+    }
+
+    #[tokio::test]
+    async fn patch_file_with_pause_routes_through_scrubber_and_applies_subset() {
+        use crate::pause;
+
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("multi.txt");
+        let path_str = path.to_string_lossy().to_string();
+        std::fs::write(&path, "x x x\n").unwrap();
+
+        let (tx, mut rx) = pause::channel(2);
+        // Simulate a TUI: accept only hunks 0 and 2.
+        tokio::spawn(async move {
+            if let Some(p) = rx.recv().await {
+                let _ = p.reply.send(AgentResume::AcceptHunks(vec![0, 2]));
+            }
+        });
+
+        let tool = PatchFile::with_pause(None, Some(tx));
+        let result = tool
+            .call(
+                json!({
+                    "path": path_str,
+                    "old_string": "x",
+                    "new_string": "Y",
+                }),
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+        assert!(!result.is_error);
+        let written = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(written, "Y x Y\n");
+    }
+
+    #[tokio::test]
+    async fn patch_file_with_pause_reject_all_leaves_file_unchanged() {
+        use crate::pause;
+
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("multi.txt");
+        let path_str = path.to_string_lossy().to_string();
+        std::fs::write(&path, "x x x\n").unwrap();
+
+        let (tx, mut rx) = pause::channel(2);
+        tokio::spawn(async move {
+            if let Some(p) = rx.recv().await {
+                let _ = p.reply.send(AgentResume::AcceptHunks(Vec::new()));
+            }
+        });
+
+        let tool = PatchFile::with_pause(None, Some(tx));
+        let result = tool
+            .call(
+                json!({
+                    "path": path_str,
+                    "old_string": "x",
+                    "new_string": "Y",
+                }),
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+        assert!(!result.is_error);
+        let written = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(written, "x x x\n");
     }
 }

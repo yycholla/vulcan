@@ -176,6 +176,10 @@ impl HookHandler for SafetyHook {
                 Ok(AgentResume::Custom(_)) => HookOutcome::Block {
                     reason: format!("{reason} (custom response on safety prompt — denying)"),
                 },
+                // YYC-75: AcceptHunks is meaningless here; treat as deny.
+                Ok(AgentResume::AcceptHunks(_)) => HookOutcome::Block {
+                    reason: format!("{reason} (hunk-accept on safety prompt — denying)"),
+                },
                 Err(_) => HookOutcome::Block {
                     reason: format!("{reason} (approval channel closed)"),
                 },

@@ -52,6 +52,24 @@ pub struct AgentPause {
     pub options: Vec<PauseOption>,
 }
 
+/// One occurrence of an `edit_file` substitution rendered in the diff
+/// scrubber (YYC-75). The scrubber lets the user accept or reject each
+/// hunk individually before any bytes hit disk.
+#[derive(Debug, Clone)]
+pub struct DiffScrubHunk {
+    /// Byte offset in the original file where this occurrence starts.
+    /// Carried so the tool can apply only the accepted hunks back to
+    /// the file in stable order.
+    pub offset: usize,
+    /// 1-indexed source line where the hunk begins (rendering hint).
+    pub line_no: usize,
+    /// `old_string` content as it appears at this site (one slice per
+    /// line, no trailing newline).
+    pub before_lines: Vec<String>,
+    /// Replacement content (one slice per line).
+    pub after_lines: Vec<String>,
+}
+
 /// What the agent is asking the user.
 #[derive(Debug)]
 pub enum PauseKind {
@@ -77,6 +95,13 @@ pub enum PauseKind {
     /// Agent-initiated multiple-choice prompt (YYC-81). Each option's
     /// chosen value comes back as `AgentResume::Custom(value)`.
     UserChoice { question: String },
+    /// Per-hunk accept/reject scrubber for `edit_file` (YYC-75). The TUI
+    /// renders an overlay with j/k navigation and y/n toggles; on
+    /// Enter the accepted indices come back as `AcceptHunks`.
+    DiffScrub {
+        path: String,
+        hunks: Vec<DiffScrubHunk>,
+    },
 }
 
 /// The user's decision.
@@ -96,6 +121,10 @@ pub enum AgentResume {
     /// `ask_user`). Hooks that receive this will typically pass the
     /// inner string through to the tool result as-is.
     Custom(String),
+    /// Indices of accepted hunks in a `DiffScrub` pause (YYC-75). An
+    /// empty vec means "reject all" — the tool short-circuits with no
+    /// write.
+    AcceptHunks(Vec<usize>),
 }
 
 pub type PauseSender = tokio::sync::mpsc::Sender<AgentPause>;

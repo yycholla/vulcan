@@ -170,6 +170,11 @@ impl HookHandler for ApprovalHook {
             Ok(AgentResume::Custom(_)) => Ok(HookOutcome::Block {
                 reason: "approval prompt got a custom response — denying".into(),
             }),
+            // YYC-75: AcceptHunks is for the diff scrubber; meaningless
+            // on an approval prompt. Treat as deny.
+            Ok(AgentResume::AcceptHunks(_)) => Ok(HookOutcome::Block {
+                reason: "approval prompt got hunk-accept — denying".into(),
+            }),
             Err(_) => Ok(HookOutcome::Block {
                 reason: "approval channel closed".into(),
             }),

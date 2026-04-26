@@ -673,8 +673,118 @@ pub async fn run_tui(config: &Config, resume: ResumeTarget) -> Result<()> {
             if app.show_provider_picker {
                 draw_provider_picker(f, area, &app);
             }
+            // YYC-75: diff scrubber overlay.
+            if app.show_diff_scrubber {
+                draw_diff_scrubber(f, area, &app);
+            }
         })?;
         last_draw = Instant::now();
+
+        // ── Diff scrubber overlay (YYC-75): intercept input until resolved.
+        if app.show_diff_scrubber {
+            tokio::select! {
+                ev = key_rx.recv() => {
+                    match ev {
+                        Some(KeyEv::Press(event)) => {
+                            if let Event::Key(key) = event {
+                                if key.kind == KeyEventKind::Press {
+                                    let total = app.scrubber_hunks.len();
+                                    match key.code {
+                                        KeyCode::Up | KeyCode::Char('k') => {
+                                            app.scrubber_selection = app.scrubber_selection.saturating_sub(1);
+                                        }
+                                        KeyCode::Down | KeyCode::Char('j') => {
+                                            app.scrubber_selection = app.scrubber_selection.saturating_add(1).min(total.saturating_sub(1));
+                                        }
+                                        KeyCode::Char('y') => {
+                                            if let Some(slot) = app.scrubber_accepted.get_mut(app.scrubber_selection) {
+                                                *slot = !*slot;
+                                            }
+                                        }
+                                        KeyCode::Char('Y') => {
+                                            for slot in &mut app.scrubber_accepted {
+                                                *slot = true;
+                                            }
+                                        }
+                                        KeyCode::Char('n') => {
+                                            if let Some(slot) = app.scrubber_accepted.get_mut(app.scrubber_selection) {
+                                                *slot = false;
+                                            }
+                                        }
+                                        KeyCode::Char('N') => {
+                                            for slot in &mut app.scrubber_accepted {
+                                                *slot = false;
+                                            }
+                                        }
+                                        KeyCode::Enter => {
+                                            let indices: Vec<usize> = app
+                                                .scrubber_accepted
+                                                .iter()
+                                                .enumerate()
+                                                .filter_map(|(i, ok)| if *ok { Some(i) } else { None })
+                                                .collect();
+                                            if let Some(p) = app.scrubber_pause.take() {
+                                                let _ = p.reply.send(AgentResume::AcceptHunks(indices.clone()));
+                                            }
+                                            let label = if indices.is_empty() {
+                                                "no hunks accepted — file unchanged"
+                                            } else if indices.len() == total {
+                                                "all hunks accepted"
+                                            } else {
+                                                "subset of hunks accepted"
+                                            };
+                                            app.messages.push(ChatMessage {
+                                                role: ChatRole::System,
+                                                content: format!(
+                                                    "▶  edit_file resumed — {} ({}/{})",
+                                                    label, indices.len(), total
+                                                ),
+                                                ..Default::default()
+                                            });
+                                            app.show_diff_scrubber = false;
+                                            app.scrubber_hunks.clear();
+                                            app.scrubber_accepted.clear();
+                                            app.scrubber_path.clear();
+                                            app.scrubber_selection = 0;
+                                        }
+                                        KeyCode::Esc => {
+                                            if let Some(p) = app.scrubber_pause.take() {
+                                                let _ = p.reply.send(AgentResume::AcceptHunks(Vec::new()));
+                                            }
+                                            app.messages.push(ChatMessage {
+                                                role: ChatRole::System,
+                                                content: "▶  edit_file cancelled — file unchanged".into(),
+                                                ..Default::default()
+                                            });
+                                            app.show_diff_scrubber = false;
+                                            app.scrubber_hunks.clear();
+                                            app.scrubber_accepted.clear();
+                                            app.scrubber_path.clear();
+                                            app.scrubber_selection = 0;
+                                        }
+                                        _ => {}
+                                    }
+                                }
+                            }
+                        }
+                        Some(KeyEv::Error(e)) => {
+                            tracing::error!("Terminal input error (diff scrubber): {e}");
+                            if let Some(p) = app.scrubber_pause.take() {
+                                let _ = p.reply.send(AgentResume::AcceptHunks(Vec::new()));
+                            }
+                            app.show_diff_scrubber = false;
+                        }
+                        None => {
+                            if let Some(p) = app.scrubber_pause.take() {
+                                let _ = p.reply.send(AgentResume::AcceptHunks(Vec::new()));
+                            }
+                            app.show_diff_scrubber = false;
+                        }
+                    }
+                }
+            }
+            continue;
+        }
 
         // ── Model picker overlay (YYC-97): intercept input until dismissed.
         if app.show_model_picker {
@@ -943,6 +1053,18 @@ pub async fn run_tui(config: &Config, resume: ResumeTarget) -> Result<()> {
                 if let Some(p) = pause {
                     // YYC-59: pause now carries inline pill options, so the
                     // bracket-list hint is redundant when options is present.
+                    // YYC-75: DiffScrub takes the picker route, not the
+                    // pill prompt route. Capture state and let the
+                    // dedicated overlay drive the response.
+                    if let PauseKind::DiffScrub { path, hunks } = &p.kind {
+                        app.scrubber_path = path.clone();
+                        app.scrubber_hunks = hunks.clone();
+                        app.scrubber_accepted = vec![true; hunks.len()];
+                        app.scrubber_selection = 0;
+                        app.show_diff_scrubber = true;
+                        app.scrubber_pause = Some(p);
+                        continue;
+                    }
                     let summary = match (&p.kind, p.options.is_empty()) {
                         (PauseKind::SafetyApproval { command, reason, .. }, false) => {
                             format!("Safety: {reason}\n  $ {command}")
@@ -967,6 +1089,8 @@ pub async fn run_tui(config: &Config, resume: ResumeTarget) -> Result<()> {
                         (PauseKind::SkillSave { suggested_name, .. }, true) => {
                             format!("Save this as a skill named '{suggested_name}'?\n  [a]llow once, [d]eny")
                         }
+                        // DiffScrub handled above; arm kept for exhaustiveness.
+                        (PauseKind::DiffScrub { .. }, _) => unreachable!(),
                     };
                     app.messages.push(ChatMessage {
                         role: ChatRole::System,
@@ -1022,6 +1146,7 @@ pub async fn run_tui(config: &Config, resume: ResumeTarget) -> Result<()> {
                                                 AgentResume::Deny => "denied",
                                                 AgentResume::DenyWithReason(_) => "denied",
                                                 AgentResume::Custom(_) => "responded",
+                                                AgentResume::AcceptHunks(_) => "applied",
                                             };
                                             let _ = p.reply.send(r);
                                             app.messages.push(ChatMessage {
@@ -2096,6 +2221,89 @@ fn draw_provider_picker(f: &mut ratatui::Frame, area: Rect, app: &AppState) {
 
     let hint = "  ↑↓ navigate · Enter select · Esc cancel  ";
     lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(hint, theme.muted)));
+
+    f.render_widget(Paragraph::new(lines), list_area);
+    draw_picker_border(f, box_area, theme);
+}
+
+fn draw_diff_scrubber(f: &mut ratatui::Frame, area: Rect, app: &AppState) {
+    let theme = &app.theme;
+    let width = area.width.min(96);
+    let total = app.scrubber_hunks.len() as u16;
+    let height = (total * 4 + 8).min(area.height.saturating_sub(2));
+    let x = area.x + (area.width.saturating_sub(width)) / 2;
+    let y = area.y + (area.height.saturating_sub(height)) / 2;
+    let box_area = Rect { x, y, width, height };
+    if box_area.height < 6 {
+        return;
+    }
+
+    let bar = Rect {
+        x: box_area.x,
+        y: box_area.y,
+        width: box_area.width,
+        height: 1,
+    };
+    let title = format!(
+        "  Edit Scrubber — {} ({} hunks)  ",
+        app.scrubber_path, total
+    );
+    f.render_widget(
+        Paragraph::new(title).style(theme.accent.add_modifier(Modifier::BOLD)),
+        bar,
+    );
+
+    let list_area = Rect {
+        x: box_area.x,
+        y: box_area.y + 1,
+        width: box_area.width,
+        height: box_area.height.saturating_sub(2),
+    };
+
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    let active = app
+        .scrubber_selection
+        .min(app.scrubber_hunks.len().saturating_sub(1));
+    for (i, hunk) in app.scrubber_hunks.iter().enumerate() {
+        let is_active = i == active;
+        let accepted = app
+            .scrubber_accepted
+            .get(i)
+            .copied()
+            .unwrap_or(true);
+        let marker = if is_active { "▸ " } else { "  " };
+        let state = if accepted { "[✓]" } else { "[ ]" };
+        let header = format!(
+            "{marker}{state} hunk {} of {} · line {}",
+            i + 1,
+            total,
+            hunk.line_no
+        );
+        let header_style = Style::default()
+            .fg(theme.body_fg)
+            .add_modifier(if is_active {
+                Modifier::BOLD
+            } else {
+                Modifier::empty()
+            });
+        lines.push(Line::from(Span::styled(header, header_style)));
+        for before in &hunk.before_lines {
+            lines.push(Line::from(vec![
+                Span::styled("    - ", Style::default().fg(crate::tui::theme::Palette::RED)),
+                Span::styled(before.clone(), Style::default().fg(crate::tui::theme::Palette::RED)),
+            ]));
+        }
+        for after in &hunk.after_lines {
+            lines.push(Line::from(vec![
+                Span::styled("    + ", Style::default().fg(crate::tui::theme::Palette::GREEN)),
+                Span::styled(after.clone(), Style::default().fg(crate::tui::theme::Palette::GREEN)),
+            ]));
+        }
+        lines.push(Line::from(""));
+    }
+
+    let hint = "  ↑↓ navigate · y/n toggle · Y all · N none · Enter apply · Esc cancel  ";
     lines.push(Line::from(Span::styled(hint, theme.muted)));
 
     f.render_widget(Paragraph::new(lines), list_area);
