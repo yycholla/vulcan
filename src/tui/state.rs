@@ -139,6 +139,18 @@ pub enum MessageSegment {
     },
 }
 
+impl MessageSegment {
+    /// Stable kind tag used by the renderer to detect transitions between
+    /// segment types and insert a blank-line separator (YYC-91).
+    pub fn kind_label(&self) -> &'static str {
+        match self {
+            MessageSegment::Reasoning(_) => "reasoning",
+            MessageSegment::Text(_) => "text",
+            MessageSegment::ToolCall { .. } => "tool",
+        }
+    }
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct ChatMessage {
     pub role: ChatRole,
