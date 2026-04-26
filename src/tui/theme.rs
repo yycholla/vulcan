@@ -110,9 +110,9 @@ impl Theme {
             tool_result: Style::default().fg(Color::Green),
             error: Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
             success: Style::default().fg(Color::Green),
-            muted: Style::default().add_modifier(Modifier::DIM),
+            muted: Style::default().fg(Color::DarkGray),
             accent: Style::default().fg(Color::Magenta),
-            border: plain,
+            border: Style::default().fg(Color::DarkGray),
 
             heading_1: bold,
             heading_2: bold,
@@ -120,7 +120,7 @@ impl Theme {
             heading_4: bold,
             heading_5: bold,
             heading_6: bold,
-            code_block: Style::default().fg(Color::White),
+            code_block: Style::default(),
             inline_code: Style::default().fg(Color::Cyan),
             link: Style::default().fg(Color::Blue).add_modifier(Modifier::UNDERLINED),
             blockquote: italic,
@@ -132,8 +132,9 @@ impl Theme {
         }
     }
 
-    /// Bauhaus / brutalist foreground palette. Backgrounds inherit from the
-    /// terminal so copy-paste behaves naturally and OS theming wins.
+    /// Bauhaus / brutalist palette — ink text + colored accents on the
+    /// terminal's native background. Backgrounds always inherit so
+    /// copy-paste behaves naturally.
     pub fn default_light() -> Self {
         let body = Style::default().fg(Palette::INK);
         let bold = body.add_modifier(Modifier::BOLD);
@@ -148,7 +149,7 @@ impl Theme {
             success: Style::default().fg(Palette::GREEN),
             muted: Style::default().fg(Palette::MUTED),
             accent: Style::default().fg(Palette::RED),
-            border: Style::default().fg(Palette::INK),
+            border: Style::default().fg(Palette::MUTED),
 
             heading_1: bold,
             heading_2: bold,
@@ -156,7 +157,7 @@ impl Theme {
             heading_4: bold,
             heading_5: bold,
             heading_6: bold,
-            code_block: Style::default().fg(Palette::INK),
+            code_block: body,
             inline_code: Style::default().fg(Palette::RED),
             link: Style::default().fg(Palette::BLUE).add_modifier(Modifier::UNDERLINED),
             blockquote: italic,
@@ -168,8 +169,9 @@ impl Theme {
         }
     }
 
-    /// Canonical Dracula foreground palette — https://draculatheme.com/contribute
-    /// Backgrounds inherit from the terminal so copy-paste behaves naturally.
+    /// Canonical Dracula foreground palette on the terminal's native
+    /// background. Backgrounds always inherit so copy-paste behaves
+    /// naturally.
     pub fn dracula() -> Self {
         const FG: Color = Color::Rgb(0xf8, 0xf8, 0xf2);
         const COMMENT: Color = Color::Rgb(0x62, 0x72, 0xa4);
@@ -201,7 +203,7 @@ impl Theme {
             heading_4: bold_pink,
             heading_5: bold_pink,
             heading_6: bold_pink,
-            code_block: Style::default().fg(FG),
+            code_block: body,
             inline_code: Style::default().fg(ORANGE),
             link: Style::default().fg(CYAN).add_modifier(Modifier::UNDERLINED),
             blockquote: Style::default().fg(COMMENT).add_modifier(Modifier::ITALIC),
@@ -249,22 +251,33 @@ mod theme_tests {
 mod theme_swap_tests {
     use super::*;
 
-    // Pin the property that dracula and default-light differ on roles where
-    // a swap should be visible. If a future palette change accidentally
-    // aligns them, this test forces the change-author to acknowledge it.
+    // All themes share terminal-native body roles (assistant/user/code).
+    // What differentiates them is their semantic accent palette — pin
+    // those differences so a future palette change doesn't accidentally
+    // collapse the themes onto identical accents.
 
     #[test]
-    fn dracula_assistant_differs_from_default_light() {
+    fn dracula_accent_differs_from_default_light() {
         let light = Theme::default_light();
         let drac = Theme::dracula();
-        assert_ne!(light.assistant, drac.assistant);
+        assert_ne!(light.accent, drac.accent);
     }
 
     #[test]
-    fn dracula_code_block_differs_from_default_light() {
+    fn dracula_inline_code_differs_from_default_light() {
         let light = Theme::default_light();
         let drac = Theme::dracula();
-        assert_ne!(light.code_block, drac.code_block);
+        assert_ne!(light.inline_code, drac.inline_code);
+    }
+
+    #[test]
+    fn system_alone_inherits_terminal_body_fg() {
+        let system = Theme::from_name("system");
+        assert_eq!(system.body_fg, Color::Reset);
+        assert_eq!(system.assistant.fg, None);
+        // Painted themes intentionally stamp their own body fg.
+        assert_eq!(Theme::from_name("default-light").body_fg, Palette::INK);
+        assert_ne!(Theme::from_name("dracula").body_fg, Color::Reset);
     }
 
     #[test]

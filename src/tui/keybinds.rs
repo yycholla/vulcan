@@ -21,30 +21,32 @@ impl KeyBinding {
         ev.code == self.code && ev.modifiers == self.mods
     }
 
-    /// Caret-prefixed label suited for prompt-row footer (e.g. `⌃K`, `F2`,
-    /// `Esc`). Stable regardless of how the user spelled it in config.
+    /// ASCII-safe label suited for the prompt-row footer (e.g. `Ctrl+K`,
+    /// `Alt+T`, `F2`, `Esc`). Stable regardless of how the user spelled it
+    /// in config; avoids glyphs that fall back to tofu in many terminal
+    /// fonts.
     pub fn label(&self) -> String {
         let mut out = String::new();
         if self.mods.contains(KeyModifiers::CONTROL) {
-            out.push('⌃');
+            out.push_str("Ctrl+");
         }
         if self.mods.contains(KeyModifiers::ALT) {
-            out.push('⌥');
+            out.push_str("Alt+");
         }
         if self.mods.contains(KeyModifiers::SHIFT) {
-            out.push('⇧');
+            out.push_str("Shift+");
         }
         match self.code {
             KeyCode::Char(c) => out.push(c.to_ascii_uppercase()),
             KeyCode::F(n) => out.push_str(&format!("F{n}")),
             KeyCode::Esc => out.push_str("Esc"),
-            KeyCode::Enter => out.push('↵'),
+            KeyCode::Enter => out.push_str("Enter"),
             KeyCode::Tab => out.push_str("Tab"),
-            KeyCode::Backspace => out.push('⌫'),
-            KeyCode::Up => out.push('↑'),
-            KeyCode::Down => out.push('↓'),
-            KeyCode::Left => out.push('←'),
-            KeyCode::Right => out.push('→'),
+            KeyCode::Backspace => out.push_str("Bksp"),
+            KeyCode::Up => out.push_str("Up"),
+            KeyCode::Down => out.push_str("Down"),
+            KeyCode::Left => out.push_str("Left"),
+            KeyCode::Right => out.push_str("Right"),
             other => out.push_str(&format!("{other:?}")),
         }
         out
@@ -289,12 +291,12 @@ mod tests {
     }
 
     #[test]
-    fn label_uses_caret_for_ctrl_letters() {
+    fn label_uses_ascii_for_ctrl_letters() {
         let b = KeyBinding {
             code: KeyCode::Char('k'),
             mods: KeyModifiers::CONTROL,
         };
-        assert_eq!(b.label(), "⌃K");
+        assert_eq!(b.label(), "Ctrl+K");
     }
 
     #[test]
