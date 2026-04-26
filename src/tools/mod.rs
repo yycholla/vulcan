@@ -63,6 +63,7 @@ pub trait Tool: Send + Sync {
     async fn call(&self, params: Value, cancel: CancellationToken) -> Result<ToolResult>;
 }
 
+pub mod cargo;
 pub mod code;
 pub mod code_edit;
 pub mod code_graph;
@@ -145,6 +146,8 @@ impl ToolRegistry {
         registry.register(Arc::new(file::PatchFile::new(sink)));
         // YYC-79: native tree listing.
         registry.register(Arc::new(file::ListFiles));
+        // YYC-80: structured Rust compile diagnostics.
+        registry.register(Arc::new(cargo::CargoCheckTool));
         registry.register(Arc::new(web::WebSearch));
         registry.register(Arc::new(web::WebFetch));
         // YYC-45: tree-sitter structural code tools. One parser cache
