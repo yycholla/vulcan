@@ -259,6 +259,18 @@ pub fn render_message_body(
 /// the caret (RED) stay structural — they're chrome, not chat content.
 /// Capacity-warning fg colors (yellow/red) stay on the design's warn
 /// palette so the urgency cue is identical across themes.
+/// Compute total prompt-row height for a given input width + mode label.
+/// Caller layouts use this to reserve enough vertical space for wrap.
+/// Returns at least 3 (1 divider + 1 input + 1 hints).
+pub fn prompt_row_height(input: &str, width: u16, mode: &str) -> u16 {
+    let prefix = mode.chars().count() as u16 + 2 + 3 + 1; // [MODE] + space + ❯ + cursor
+    let avail = width.saturating_sub(prefix).max(1) as usize;
+    let chars = input.chars().count();
+    let input_lines = ((chars + 1).max(1) + avail - 1) / avail; // +1 for cursor block
+    let input_lines = input_lines.max(1) as u16;
+    1 + input_lines + 1
+}
+
 pub fn prompt_row(
     f: &mut TuiFrame,
     area: Rect,
@@ -276,11 +288,14 @@ pub fn prompt_row(
         return (area.x, area.y);
     }
     let body_style = Style::default().fg(theme.body_fg);
+    // YYC-104: input row height grows with wrap so long prompts stay
+    // visible instead of scrolling off the right edge.
+    let input_height = area.height.saturating_sub(2).max(1);
     let layout = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(1),
-            Constraint::Length(1),
+            Constraint::Length(input_height),
             Constraint::Length(1),
         ])
         .split(area);
@@ -308,11 +323,21 @@ pub fn prompt_row(
         }),
     );
     let line = Line::from(vec![mode_pill, caret, input_span, cursor_block]);
-    f.render_widget(Paragraph::new(line), layout[1]);
+    f.render_widget(
+        Paragraph::new(line).wrap(Wrap { trim: false }),
+        layout[1],
+    );
 
-    let mode_width = mode.chars().count() as u16 + 2;
-    let cursor_x = layout[1].x + mode_width + 3 + input.chars().count() as u16;
-    let cursor_y = layout[1].y;
+    // Compute cursor (x, y) accounting for wrap. The prefix is
+    // [MODE] + " ❯ " before the input.
+    let prefix_chars = mode.chars().count() as u16 + 2 + 3;
+    let cell_width = layout[1].width.max(1);
+    let typed = input.chars().count() as u16;
+    let total_offset = prefix_chars + typed;
+    let cursor_y_offset = total_offset / cell_width;
+    let cursor_x_offset = total_offset % cell_width;
+    let cursor_x = layout[1].x + cursor_x_offset;
+    let cursor_y = layout[1].y + cursor_y_offset;
 
     let muted_style = theme.muted;
     let mut hint_spans: Vec<Span<'static>> = Vec::new();
