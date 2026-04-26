@@ -543,7 +543,7 @@ pub async fn run_tui(config: &Config, resume: ResumeTarget) -> Result<()> {
             }
 
             if let (Some(pal), Some(area)) = (palette.as_ref(), palette_area) {
-                draw_palette(f, area, pal, app.slash_menu_selection);
+                draw_palette(f, area, pal, app.slash_menu_selection, &app.theme);
             }
 
             // YYC-86: session picker overlay (--resume flag).
@@ -1187,7 +1187,13 @@ mod tests {
     }
 }
 
-fn draw_palette(f: &mut ratatui::Frame, area: Rect, cmds: &[&SlashCommand], selected: usize) {
+fn draw_palette(
+    f: &mut ratatui::Frame,
+    area: Rect,
+    cmds: &[&SlashCommand],
+    selected: usize,
+    theme: &Theme,
+) {
     if area.height == 0 {
         return;
     }
@@ -1203,12 +1209,7 @@ fn draw_palette(f: &mut ratatui::Frame, area: Rect, cmds: &[&SlashCommand], sele
         header_text.push_str(&" ".repeat(bar.width as usize - header_text.chars().count()));
     }
     f.render_widget(
-        Paragraph::new(header_text).style(
-            Style::default()
-                .fg(Palette::PAPER)
-                .bg(Palette::INK)
-                .add_modifier(Modifier::BOLD),
-        ),
+        Paragraph::new(header_text).style(theme.accent.add_modifier(Modifier::BOLD)),
         bar,
     );
     let inner = Rect {
@@ -1221,29 +1222,28 @@ fn draw_palette(f: &mut ratatui::Frame, area: Rect, cmds: &[&SlashCommand], sele
     if cmds.is_empty() {
         lines.push(Line::from(Span::styled(
             "  No matching commands",
-            Style::default().fg(Palette::MUTED),
+            theme.muted,
         )));
     } else {
         let active = selected.min(cmds.len().saturating_sub(1));
         for (i, cmd) in cmds.iter().enumerate() {
             let is_active = i == active;
-            // YYC-70: highlight the active row with inverted accent.
+            // YYC-70: highlight the active row by swapping fg/bg of accent
+            // (gives a visible selection bar regardless of active theme).
             let (prefix, name_style, desc_style) = if is_active {
+                let active_fg = theme.accent.bg.unwrap_or(theme.body_bg);
+                let active_bg = theme.accent.fg.unwrap_or(theme.body_fg);
+                let active_style = Style::default().fg(active_fg).bg(active_bg);
                 (
                     "▸ ",
-                    Style::default()
-                        .fg(Palette::PAPER)
-                        .bg(Palette::RED)
-                        .add_modifier(Modifier::BOLD),
-                    Style::default().fg(Palette::PAPER).bg(Palette::RED),
+                    active_style.add_modifier(Modifier::BOLD),
+                    active_style,
                 )
             } else {
                 (
                     "  ",
-                    Style::default()
-                        .fg(Palette::RED)
-                        .add_modifier(Modifier::BOLD),
-                    Style::default().fg(Palette::INK),
+                    theme.accent.add_modifier(Modifier::BOLD),
+                    theme.assistant,
                 )
             };
             lines.push(Line::from(vec![
@@ -1256,6 +1256,7 @@ fn draw_palette(f: &mut ratatui::Frame, area: Rect, cmds: &[&SlashCommand], sele
 }
 
 fn draw_session_picker(f: &mut ratatui::Frame, area: Rect, app: &AppState) {
+    let theme = &app.theme;
     let width = area.width.min(56);
     let height = (app.sessions.len() as u16 + 6).min(area.height.saturating_sub(2));
     let x = area.x + (area.width.saturating_sub(width)) / 2;
@@ -1271,10 +1272,10 @@ fn draw_session_picker(f: &mut ratatui::Frame, area: Rect, app: &AppState) {
         return;
     }
 
-    // Fill the box with solid paper background to obscure the view behind.
+    // Fill the box with solid theme-bg to obscure the view behind.
     let fill_bg = rect_with_border(box_area, 0);
     f.render_widget(
-        Paragraph::new(Line::from("")).style(Style::default().bg(Palette::PAPER)),
+        Paragraph::new(Line::from("")).style(Style::default().bg(theme.body_bg)),
         fill_bg,
     );
 
@@ -1296,12 +1297,7 @@ fn draw_session_picker(f: &mut ratatui::Frame, area: Rect, app: &AppState) {
         );
     }
     f.render_widget(
-        Paragraph::new(title).style(
-            Style::default()
-                .fg(Palette::PAPER)
-                .bg(Palette::INK)
-                .add_modifier(Modifier::BOLD),
-        ),
+        Paragraph::new(title).style(theme.accent.add_modifier(Modifier::BOLD)),
         bar,
     );
 
@@ -1317,11 +1313,11 @@ fn draw_session_picker(f: &mut ratatui::Frame, area: Rect, app: &AppState) {
     if app.sessions.is_empty() {
         lines.push(Line::from(Span::styled(
             "  No saved sessions found.",
-            Style::default().fg(Palette::MUTED),
+            theme.muted,
         )));
         lines.push(Line::from(Span::styled(
             "  Start a conversation and sessions will appear here.",
-            Style::default().fg(Palette::FAINT),
+            theme.muted,
         )));
     } else {
         let active = app
@@ -1329,15 +1325,17 @@ fn draw_session_picker(f: &mut ratatui::Frame, area: Rect, app: &AppState) {
             .min(app.sessions.len().saturating_sub(1));
         for (i, s) in app.sessions.iter().enumerate() {
             let is_active = i == active;
+            // YYC-52: active rows get a subtle highlight bg via FAINT;
+            // inactive rows sit on the theme body bg.
             let bg = if is_active {
                 Palette::FAINT
             } else {
-                Palette::PAPER
+                theme.body_bg
             };
             let marker = if is_active { "▸ " } else { "  " };
-            let status_color = match s.status {
-                SessionStatus::Live => Palette::GREEN,
-                SessionStatus::Saved => Palette::BLUE,
+            let status_style = match s.status {
+                SessionStatus::Live => theme.success,
+                SessionStatus::Saved => theme.system,
             };
             let status_label = match s.status {
                 SessionStatus::Live => "LIVE",
@@ -1354,46 +1352,42 @@ fn draw_session_picker(f: &mut ratatui::Frame, area: Rect, app: &AppState) {
                 .unwrap_or_default();
 
             let name_style = Style::default()
-                .fg(Palette::INK)
+                .fg(theme.body_fg)
                 .bg(bg)
                 .add_modifier(if is_active {
                     Modifier::BOLD
                 } else {
                     Modifier::empty()
                 });
-            let meta_style = Style::default().fg(Palette::MUTED).bg(bg);
+            let meta_style = theme.muted.bg(bg);
 
             lines.push(Line::from(vec![
                 Span::styled(marker, name_style.add_modifier(Modifier::BOLD)),
-                Span::styled("█ ", Style::default().fg(status_color).bg(bg)),
+                Span::styled("█ ", status_style.bg(bg)),
                 Span::styled(format!("{:<12}", short_id(&s.id)), name_style.clone()),
                 Span::styled(format!("{:>4}m", s.message_count), meta_style),
                 Span::styled(
                     format!("  {} ", dt),
-                    Style::default().fg(Palette::FAINT).bg(bg),
+                    theme.muted.bg(bg),
                 ),
                 Span::styled(
                     status_label,
-                    Style::default()
-                        .fg(status_color)
-                        .bg(bg)
-                        .add_modifier(Modifier::BOLD),
+                    status_style.bg(bg).add_modifier(Modifier::BOLD),
                 ),
             ]));
 
             // Preview synopsis from first user message, if available.
             if let Some(preview) = &s.preview {
                 lines.push(Line::from(vec![
+                    // Invisible spacer — fg=bg so the marker column stays
+                    // blank but the row keeps its background fill.
                     Span::styled(
                         if is_active { "▸ " } else { "  " },
                         Style::default().fg(bg).bg(bg),
                     ),
                     Span::styled(
                         format!("  {}", preview),
-                        Style::default()
-                            .fg(Palette::MUTED)
-                            .bg(bg)
-                            .add_modifier(Modifier::DIM),
+                        theme.muted.bg(bg).add_modifier(Modifier::DIM),
                     ),
                 ]));
             }
@@ -1403,18 +1397,15 @@ fn draw_session_picker(f: &mut ratatui::Frame, area: Rect, app: &AppState) {
     // Footer hint
     let hint = "  ↑↓ navigate · Enter select · Esc cancel  ";
     lines.push(Line::from(""));
-    lines.push(Line::from(Span::styled(
-        hint,
-        Style::default().fg(Palette::MUTED),
-    )));
+    lines.push(Line::from(Span::styled(hint, theme.muted)));
 
     f.render_widget(
-        Paragraph::new(lines).style(Style::default().bg(Palette::PAPER)),
+        Paragraph::new(lines).style(Style::default().bg(theme.body_bg)),
         list_area,
     );
 
     // Draw a border around the whole thing
-    draw_picker_border(f, box_area);
+    draw_picker_border(f, box_area, theme);
 }
 
 /// Fill the interior of a bordered rect. `border_w` pixels from each edge.
@@ -1428,8 +1419,8 @@ fn rect_with_border(r: Rect, border_w: u16) -> Rect {
 }
 
 /// Simple border drawn with box-drawing characters.
-fn draw_picker_border(f: &mut ratatui::Frame, r: Rect) {
-    let style = Style::default().fg(Palette::INK).bg(Palette::PAPER);
+fn draw_picker_border(f: &mut ratatui::Frame, r: Rect, theme: &Theme) {
+    let style = theme.border;
     // Top
     if r.height > 0 {
         let top = "─".repeat(r.width as usize);
