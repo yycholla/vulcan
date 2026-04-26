@@ -205,7 +205,7 @@ fn print_presets() {
     println!("Add via:  vulcan provider add <name> --preset <key>");
 }
 
-fn add(args: AddArgs, dir: &Path) -> Result<()> {
+pub fn add(args: AddArgs, dir: &Path) -> Result<()> {
     if args.name.eq_ignore_ascii_case("default") {
         bail!("'default' is reserved for the legacy [provider] block in config.toml.");
     }

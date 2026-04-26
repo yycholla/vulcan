@@ -1,5 +1,6 @@
 use clap::{Parser, Subcommand};
 
+use crate::cli_auth::AuthArgs;
 use crate::cli_provider::ProviderCommand;
 
 /// vulcan — a Rust AI agent. Forged at the forge, tested by fire.
@@ -62,4 +63,7 @@ pub enum Command {
         #[command(subcommand)]
         cmd: ProviderCommand,
     },
+    /// Guided interactive provider setup (YYC-100). Picker + prompts for
+    /// name, API key, and default model; writes to providers.toml.
+    Auth(AuthArgs),
 }
