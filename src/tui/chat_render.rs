@@ -305,6 +305,47 @@ mod tests {
     }
 
     #[test]
+    fn large_transcript_visible_window_stays_small() {
+        let mut store = ChatRenderStore::default();
+        let messages = (0..5_000)
+            .map(|i| ChatMessage::new(ChatRole::User, format!("message {i}")))
+            .collect::<Vec<_>>();
+        let options = ChatRenderOptions {
+            show_reasoning: true,
+            dense: false,
+            width: 100,
+        };
+
+        let window = store.visible_lines(&messages, options, 4_900, 20, None, 0);
+
+        assert_eq!(window.lines.len(), 20);
+        assert!(window.total_lines > 5_000);
+        assert!(store.materialized_line_count_for_tests() <= 20);
+    }
+
+    #[test]
+    fn mutating_one_message_only_rerenders_that_block() {
+        let mut store = ChatRenderStore::default();
+        let mut messages = vec![
+            ChatMessage::new(ChatRole::User, "one"),
+            ChatMessage::new(ChatRole::Agent, ""),
+        ];
+        let options = ChatRenderOptions {
+            show_reasoning: true,
+            dense: false,
+            width: 80,
+        };
+
+        let _ = store.visible_lines(&messages, options, 0, 20, None, 0);
+        let first_count = store.render_count_for_tests();
+
+        messages[1].append_text("hello");
+        let _ = store.visible_lines(&messages, options, 0, 20, None, 0);
+
+        assert_eq!(store.render_count_for_tests(), first_count + 1);
+    }
+
+    #[test]
     fn render_user_message_block_includes_header_and_body() {
         let mut store = ChatRenderStore::default();
         let message = ChatMessage::new(ChatRole::User, "hello **there**");
