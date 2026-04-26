@@ -3,6 +3,7 @@ use std::time::{Duration, Instant};
 use vulcan::tui::{
     chat_render::{ChatRenderOptions, ChatRenderStore},
     state::{ChatMessage, ChatRole},
+    theme::Theme,
 };
 
 const MESSAGE_COUNT: usize = 50_000;
@@ -99,7 +100,7 @@ fn measure_once(
 ) -> SingleRun {
     let before = store.render_count();
     let start = Instant::now();
-    let window = store.visible_lines_at(messages, options, scroll, usize::from(height));
+    let window = store.visible_lines_at(messages, options, &Theme::system(), scroll, usize::from(height));
     let elapsed = start.elapsed();
 
     SingleRun {
