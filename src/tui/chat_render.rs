@@ -165,7 +165,9 @@ impl ChatRenderStore {
 
         if is_agent && !message.segments.is_empty() {
             let mut text_emitted = false;
+            let mut prev_emitted_kind: Option<&'static str> = None;
             for segment in &message.segments {
+                let segment_lines_before = lines.len();
                 match segment {
                     MessageSegment::Reasoning(reasoning)
                         if options.show_reasoning && !reasoning.is_empty() =>
@@ -199,6 +201,15 @@ impl ChatRenderStore {
                         push_markdown_body(&mut lines, text, accent, theme);
                     }
                     MessageSegment::Text(_) => {}
+                }
+                if lines.len() > segment_lines_before {
+                    let kind = segment.kind_label();
+                    if let Some(prev) = prev_emitted_kind {
+                        if prev != kind {
+                            lines.insert(segment_lines_before, Line::from(""));
+                        }
+                    }
+                    prev_emitted_kind = Some(kind);
                 }
             }
 
@@ -276,7 +287,136 @@ fn agent_placeholder(has_reasoning: bool, muted: Style) -> Line<'static> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tui::state::{ChatMessage, ChatRole};
+    use crate::tui::state::{ChatMessage, ChatRole, MessageSegment, ToolStatus};
+
+    fn line_text(line: &Line<'static>) -> String {
+        line.spans
+            .iter()
+            .map(|s| s.content.as_ref())
+            .collect::<String>()
+    }
+
+    #[test]
+    fn agent_message_inserts_blank_line_between_segment_kinds() {
+        let mut store = ChatRenderStore::default();
+        let mut msg = ChatMessage::new(ChatRole::Agent, "");
+        msg.segments
+            .push(MessageSegment::Reasoning("thinking through".into()));
+        msg.segments
+            .push(MessageSegment::Text("here is the answer".into()));
+        msg.segments.push(MessageSegment::ToolCall {
+            name: "read_file".into(),
+            status: ToolStatus::Done(true),
+            params_summary: Some("src/lib.rs".into()),
+            output_preview: None,
+            result_meta: None,
+            elided_lines: 0,
+            elapsed_ms: None,
+        });
+
+        let options = ChatRenderOptions {
+            show_reasoning: true,
+            dense: true,
+            width: 80,
+            muted_style: Style::default(),
+        };
+        let theme = Theme::system();
+        let window =
+            store.visible_lines_at(std::slice::from_ref(&msg), options, &theme, 0, 200);
+        let lines: Vec<String> = window.lines.iter().map(line_text).collect();
+
+        let reasoning_idx = lines
+            .iter()
+            .position(|l| l.contains("thinking through"))
+            .expect("reasoning present");
+        let text_idx = lines
+            .iter()
+            .position(|l| l.contains("here is the answer"))
+            .expect("text present");
+        let tool_idx = lines
+            .iter()
+            .position(|l| l.contains("read_file"))
+            .expect("tool card present");
+
+        assert!(text_idx > reasoning_idx, "text after reasoning");
+        assert!(tool_idx > text_idx, "tool after text");
+
+        let between_reasoning_text: Vec<&String> = lines[reasoning_idx + 1..text_idx].iter().collect();
+        assert!(
+            between_reasoning_text.iter().any(|l| l.trim().is_empty()),
+            "blank line missing between reasoning and text, got {between_reasoning_text:?}"
+        );
+
+        let between_text_tool: Vec<&String> = lines[text_idx + 1..tool_idx].iter().collect();
+        assert!(
+            between_text_tool.iter().any(|l| l.trim().is_empty()),
+            "blank line missing between text and tool, got {between_text_tool:?}"
+        );
+    }
+
+    #[test]
+    fn agent_message_no_blank_between_same_kind_segments() {
+        let mut store = ChatRenderStore::default();
+        let mut msg = ChatMessage::new(ChatRole::Agent, "");
+        msg.segments.push(MessageSegment::Text("first".into()));
+        msg.segments.push(MessageSegment::Text("second".into()));
+
+        let options = ChatRenderOptions {
+            show_reasoning: true,
+            dense: true,
+            width: 80,
+            muted_style: Style::default(),
+        };
+        let theme = Theme::system();
+        let window =
+            store.visible_lines_at(std::slice::from_ref(&msg), options, &theme, 0, 200);
+        let lines: Vec<String> = window.lines.iter().map(line_text).collect();
+
+        let first_idx = lines
+            .iter()
+            .position(|l| l.contains("first"))
+            .expect("first present");
+        let second_idx = lines
+            .iter()
+            .position(|l| l.contains("second"))
+            .expect("second present");
+        assert!(second_idx > first_idx);
+        let between: Vec<&String> = lines[first_idx + 1..second_idx].iter().collect();
+        assert!(
+            !between.iter().any(|l| l.trim().is_empty()),
+            "no blank should appear between same-kind segments, got {between:?}"
+        );
+    }
+
+    #[test]
+    fn agent_message_no_blank_when_reasoning_hidden() {
+        let mut store = ChatRenderStore::default();
+        let mut msg = ChatMessage::new(ChatRole::Agent, "");
+        msg.segments
+            .push(MessageSegment::Reasoning("hidden".into()));
+        msg.segments.push(MessageSegment::Text("visible".into()));
+
+        let options = ChatRenderOptions {
+            show_reasoning: false,
+            dense: true,
+            width: 80,
+            muted_style: Style::default(),
+        };
+        let theme = Theme::system();
+        let window =
+            store.visible_lines_at(std::slice::from_ref(&msg), options, &theme, 0, 200);
+        let lines: Vec<String> = window.lines.iter().map(line_text).collect();
+
+        let text_idx = lines
+            .iter()
+            .position(|l| l.contains("visible"))
+            .expect("text present");
+        let preceding: Vec<&String> = lines[..text_idx].iter().collect();
+        assert!(
+            !preceding.iter().any(|l| l.trim().is_empty()),
+            "no blank should appear when reasoning was filtered out, got {preceding:?}"
+        );
+    }
 
     #[test]
     fn render_store_returns_only_visible_window() {
