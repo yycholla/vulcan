@@ -1,7 +1,17 @@
 use anyhow::{Context, Result};
 use serde::Deserialize;
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+
+/// Outcome of a `Config::migrate(dir, force)` run (YYC-99). Booleans
+/// flag which fragment files the run produced so the CLI can print a
+/// honest summary.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct MigrationReport {
+    pub keybinds_written: bool,
+    pub providers_written: bool,
+    pub main_rewritten: bool,
+}
 
 /// Path to the Vulcan config directory (~/.vulcan/)
 pub fn vulcan_home() -> PathBuf {
@@ -422,33 +432,184 @@ fn default_reserved_tokens() -> usize {
 }
 
 impl Config {
-    /// Load config from ~/.vulcan/config.toml, then checks project dir as fallback.
+    /// Load config from `~/.vulcan/`, falling back to project-dir
+    /// `./config.toml` for in-repo dev runs.
+    ///
+    /// YYC-99: the config now lives across three files in the dir:
+    /// `config.toml` (main), `keybinds.toml`, `providers.toml`.
+    /// Missing files are fine; legacy monolithic `config.toml` blocks
+    /// still work and are surfaced via a deprecation log.
     pub fn load() -> Result<Self> {
-        let primary = vulcan_home().join("config.toml");
+        let home = vulcan_home();
+        if home.join("config.toml").exists()
+            || home.join("keybinds.toml").exists()
+            || home.join("providers.toml").exists()
+        {
+            return Self::load_from_dir(&home);
+        }
 
-        // Check multiple locations in order of precedence
-        let candidates = [
-            ("~/.vulcan/config.toml", primary.clone()),
-            ("./config.toml", PathBuf::from("config.toml")),
-        ];
-
-        for (label, path) in &candidates {
-            if path.exists() {
-                let content = std::fs::read_to_string(path).with_context(|| {
-                    format!("Failed to read config at {label} ({})", path.display())
-                })?;
-                let config: Config =
-                    toml::from_str(&content).context("Failed to parse config.toml")?;
-                tracing::info!("Loaded config from {}", path.display());
-                return Ok(config);
+        // Repo-relative fallback for cargo-run dev workflows.
+        let proj = std::env::current_dir().ok();
+        if let Some(dir) = proj {
+            if dir.join("config.toml").exists() {
+                return Self::load_from_dir(&dir);
             }
         }
 
         tracing::info!(
-            "No config found at ~/.vulcan/config.toml or ./config.toml, using defaults. \
+            "No config found at ~/.vulcan/ or ./config.toml — using defaults. \
              Copy config.example.toml to ~/.vulcan/config.toml and set your API key."
         );
         Ok(Config::default())
+    }
+
+    /// Load every config fragment under `dir` (`config.toml` +
+    /// `keybinds.toml` + `providers.toml`) and merge into a single
+    /// `Config`. Each file is optional. Explicit fragment files take
+    /// precedence over the same blocks inlined in the legacy
+    /// `config.toml`.
+    pub fn load_from_dir(dir: &Path) -> Result<Self> {
+        let main_path = dir.join("config.toml");
+        let mut config = if main_path.exists() {
+            let raw = std::fs::read_to_string(&main_path)
+                .with_context(|| format!("Failed to read {}", main_path.display()))?;
+            let parsed: Config = toml::from_str(&raw).with_context(|| {
+                format!("Failed to parse {}", main_path.display())
+            })?;
+            tracing::info!("Loaded main config from {}", main_path.display());
+            parsed
+        } else {
+            Config::default()
+        };
+
+        let keybinds_path = dir.join("keybinds.toml");
+        if keybinds_path.exists() {
+            let raw = std::fs::read_to_string(&keybinds_path)
+                .with_context(|| format!("Failed to read {}", keybinds_path.display()))?;
+            let kb: KeybindsConfig = toml::from_str(&raw).with_context(|| {
+                format!("Failed to parse {}", keybinds_path.display())
+            })?;
+            config.keybinds = kb;
+            tracing::info!("Loaded keybinds from {}", keybinds_path.display());
+        }
+
+        let providers_path = dir.join("providers.toml");
+        if providers_path.exists() {
+            let raw = std::fs::read_to_string(&providers_path)
+                .with_context(|| format!("Failed to read {}", providers_path.display()))?;
+            let parsed: HashMap<String, ProviderConfig> = toml::from_str(&raw)
+                .with_context(|| format!("Failed to parse {}", providers_path.display()))?;
+            // Merge: explicit providers.toml takes precedence; entries
+            // also present in `config.toml`'s `[providers.*]` survive
+            // unless the same name appears in providers.toml.
+            for (name, profile) in parsed {
+                config.providers.insert(name, profile);
+            }
+            tracing::info!("Loaded providers from {}", providers_path.display());
+        }
+
+        if main_path.exists() {
+            let raw = std::fs::read_to_string(&main_path).unwrap_or_default();
+            if raw.contains("[keybinds]") && !keybinds_path.exists() {
+                tracing::warn!(
+                    "config.toml still contains [keybinds]; consider running \
+                     `vulcan migrate-config` to split it into keybinds.toml (YYC-99)."
+                );
+            }
+            if raw.contains("[providers.") && !providers_path.exists() {
+                tracing::warn!(
+                    "config.toml still contains [providers.<name>] blocks; consider running \
+                     `vulcan migrate-config` to split them into providers.toml (YYC-99)."
+                );
+            }
+        }
+
+        Ok(config)
+    }
+
+    /// Load a single legacy `config.toml` from a specific path. Used by
+    /// `vulcan provider` which writes into a per-fragment file —
+    /// callers that just need to read the *main* config block.
+    pub fn load_from(path: &Path) -> Result<Self> {
+        if !path.exists() {
+            return Ok(Config::default());
+        }
+        let raw = std::fs::read_to_string(path)
+            .with_context(|| format!("Failed to read {}", path.display()))?;
+        toml::from_str(&raw).with_context(|| format!("Failed to parse {}", path.display()))
+    }
+
+    /// One-shot migration for users still on the monolithic
+    /// `config.toml`: extract `[keybinds]` into `keybinds.toml` and
+    /// every `[providers.<name>]` into `providers.toml`. Existing
+    /// fragment files are not overwritten unless `force` is true.
+    /// Idempotent — safe to run repeatedly.
+    pub fn migrate(dir: &Path, force: bool) -> Result<MigrationReport> {
+        let main_path = dir.join("config.toml");
+        let mut report = MigrationReport::default();
+        if !main_path.exists() {
+            return Ok(report);
+        }
+        let raw = std::fs::read_to_string(&main_path)
+            .with_context(|| format!("Failed to read {}", main_path.display()))?;
+        let mut doc: toml_edit::DocumentMut = raw
+            .parse()
+            .with_context(|| format!("Failed to parse {}", main_path.display()))?;
+
+        // ── Keybinds.
+        let keybinds_path = dir.join("keybinds.toml");
+        if let Some(item) = doc.remove("keybinds") {
+            if keybinds_path.exists() && !force {
+                tracing::warn!(
+                    "keybinds.toml already exists; leaving [keybinds] in config.toml. \
+                     Use --force to overwrite."
+                );
+                doc.insert("keybinds", item);
+            } else {
+                let table = match item.as_table() {
+                    Some(t) => t.clone(),
+                    None => anyhow::bail!("[keybinds] in config.toml is not a table"),
+                };
+                let mut out = toml_edit::DocumentMut::new();
+                for (k, v) in table.iter() {
+                    out.insert(k, v.clone());
+                }
+                std::fs::write(&keybinds_path, out.to_string())
+                    .with_context(|| format!("Failed to write {}", keybinds_path.display()))?;
+                report.keybinds_written = true;
+            }
+        }
+
+        // ── Providers.
+        let providers_path = dir.join("providers.toml");
+        if let Some(item) = doc.remove("providers") {
+            if providers_path.exists() && !force {
+                tracing::warn!(
+                    "providers.toml already exists; leaving [providers.*] in config.toml. \
+                     Use --force to overwrite."
+                );
+                doc.insert("providers", item);
+            } else {
+                let table = match item.as_table() {
+                    Some(t) => t.clone(),
+                    None => anyhow::bail!("[providers] in config.toml is not a table"),
+                };
+                let mut out = toml_edit::DocumentMut::new();
+                for (name, sub) in table.iter() {
+                    out.insert(name, sub.clone());
+                }
+                std::fs::write(&providers_path, out.to_string())
+                    .with_context(|| format!("Failed to write {}", providers_path.display()))?;
+                report.providers_written = true;
+            }
+        }
+
+        if report.keybinds_written || report.providers_written {
+            std::fs::write(&main_path, doc.to_string())
+                .with_context(|| format!("Failed to write {}", main_path.display()))?;
+            report.main_rewritten = true;
+        }
+        Ok(report)
     }
 
     /// Resolve the API key: env var > config > compile-time warning
@@ -595,5 +756,106 @@ toggle_tools = "F2"
             Some("ollama-key")
         );
         assert!(cfg.providers["local"].disable_catalog);
+    }
+
+    #[test]
+    fn load_from_dir_handles_missing_files_with_defaults() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = Config::load_from_dir(dir.path()).expect("empty dir → defaults");
+        assert!(cfg.providers.is_empty());
+        assert_eq!(cfg.keybinds.toggle_tools, "Ctrl+T");
+    }
+
+    #[test]
+    fn load_from_dir_merges_three_files() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("config.toml"),
+            r#"
+[provider]
+type = "openai-compat"
+base_url = "https://main.example/v1"
+model = "main-1"
+"#,
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join("keybinds.toml"),
+            r#"
+toggle_tools = "F2"
+toggle_sessions = "Ctrl+P"
+"#,
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join("providers.toml"),
+            r#"
+[local]
+type = "openai-compat"
+base_url = "http://localhost:11434/v1"
+model = "qwen2.5-coder:latest"
+disable_catalog = true
+"#,
+        )
+        .unwrap();
+
+        let cfg = Config::load_from_dir(dir.path()).unwrap();
+        assert_eq!(cfg.provider.base_url, "https://main.example/v1");
+        assert_eq!(cfg.keybinds.toggle_tools, "F2");
+        assert_eq!(cfg.keybinds.toggle_sessions, "Ctrl+P");
+        assert_eq!(cfg.providers["local"].model, "qwen2.5-coder:latest");
+        assert!(cfg.providers["local"].disable_catalog);
+    }
+
+    #[test]
+    fn migrate_extracts_keybinds_and_providers() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("config.toml"),
+            r#"# top comment
+[provider]
+type = "openai-compat"
+base_url = "https://x.example/v1"
+model = "x-1"
+
+[keybinds]
+toggle_tools = "F4"
+
+[providers.local]
+type = "openai-compat"
+base_url = "http://localhost:11434/v1"
+model = "qwen2.5"
+"#,
+        )
+        .unwrap();
+
+        let report = Config::migrate(dir.path(), false).unwrap();
+        assert!(report.keybinds_written);
+        assert!(report.providers_written);
+        assert!(report.main_rewritten);
+
+        // After split: original config.toml should no longer contain
+        // [keybinds] or [providers.*], the fragment files should.
+        let main_after = std::fs::read_to_string(dir.path().join("config.toml")).unwrap();
+        assert!(!main_after.contains("[keybinds]"));
+        assert!(!main_after.contains("[providers"));
+
+        let keybinds_raw = std::fs::read_to_string(dir.path().join("keybinds.toml")).unwrap();
+        assert!(keybinds_raw.contains("toggle_tools = \"F4\""));
+
+        let providers_raw =
+            std::fs::read_to_string(dir.path().join("providers.toml")).unwrap();
+        assert!(providers_raw.contains("[local]"));
+
+        // Re-run is a no-op (idempotent).
+        let report2 = Config::migrate(dir.path(), false).unwrap();
+        assert!(!report2.keybinds_written);
+        assert!(!report2.providers_written);
+
+        // Round-trip: load the migrated layout and assert behavior matches
+        // pre-migration.
+        let cfg = Config::load_from_dir(dir.path()).unwrap();
+        assert_eq!(cfg.keybinds.toggle_tools, "F4");
+        assert_eq!(cfg.providers["local"].model, "qwen2.5");
     }
 }

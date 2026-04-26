@@ -48,4 +48,11 @@ pub enum Command {
         #[arg(long)]
         bind: Option<String>,
     },
+    /// Split monolithic ~/.vulcan/config.toml into config + keybinds +
+    /// providers fragment files (YYC-99). Idempotent. Existing fragment
+    /// files are preserved unless `--force` is passed.
+    MigrateConfig {
+        #[arg(long)]
+        force: bool,
+    },
 }

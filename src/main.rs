@@ -95,6 +95,22 @@ async fn main() -> anyhow::Result<()> {
             init_cli_logging();
             vulcan::gateway::run(&config, bind).await?;
         }
+        Some(Command::MigrateConfig { force }) => {
+            init_cli_logging();
+            let dir = vulcan::config::vulcan_home();
+            let report = vulcan::config::Config::migrate(&dir, force)?;
+            if !report.main_rewritten {
+                println!("Nothing to migrate — config.toml already split (or absent).");
+            } else {
+                if report.keybinds_written {
+                    println!("Wrote {}/keybinds.toml", dir.display());
+                }
+                if report.providers_written {
+                    println!("Wrote {}/providers.toml", dir.display());
+                }
+                println!("Updated {}/config.toml (sections removed).", dir.display());
+            }
+        }
     }
 
     Ok(())
