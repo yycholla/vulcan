@@ -654,9 +654,16 @@ impl Agent {
                         // YYC-74: truncated output preview + meta line.
                         // YYC-78: elided line count for the auto-collapse
                         // "N more lines" indicator.
-                        let output_preview = preview_output(&result.output);
+                        // Tools like write_file/edit_file populate
+                        // `display_preview` with a real diff; prefer it
+                        // over the LLM-facing terse `output`.
+                        let preview_source = result
+                            .display_preview
+                            .as_deref()
+                            .unwrap_or(&result.output);
+                        let output_preview = preview_output(preview_source);
                         let result_meta = summarize_tool_result(&name, &result.output);
-                        let elided = elided_lines(&result.output, output_preview.as_deref());
+                        let elided = elided_lines(preview_source, output_preview.as_deref());
                         let _ = ui_tx.send(StreamEvent::ToolCallEnd {
                             id: id.clone(),
                             name: name.clone(),
