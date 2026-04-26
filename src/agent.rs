@@ -657,6 +657,10 @@ impl Agent {
             content: input.to_string(),
         });
 
+        // YYC-106: persist the user message immediately (mirrors the streaming
+        // path) so a non-terminal exit doesn't leave the turn unrecorded.
+        self.save_messages(&messages)?;
+
         let max_iter = if self.max_iterations > 0 {
             self.max_iterations as usize
         } else {
@@ -730,6 +734,13 @@ impl Agent {
                         content: flatten_for_message(result),
                     });
                 }
+                // YYC-106: persist the assistant turn + tool results before
+                // the next iteration. Without this, an early loop exit
+                // (cancel, max_iter, model returning empty without matching
+                // the terminal branch) loses everything since the start of
+                // the turn — next prompt resumes with stale history and
+                // the agent appears to "forget".
+                self.save_messages(&messages)?;
             } else {
                 let text = response.content.unwrap_or_default();
                 let reasoning = response.reasoning_content.clone();
@@ -800,6 +811,12 @@ impl Agent {
         messages.push(Message::User {
             content: input.to_string(),
         });
+
+        // YYC-106: persist the user message immediately so a later cancel,
+        // tool-loop early exit, or process kill doesn't strand the prompt.
+        // save_messages tracks last_saved_count and appends only the new tail,
+        // so this is cheap.
+        self.save_messages(&messages)?;
 
         let mut full_response = String::new();
 
@@ -1026,6 +1043,13 @@ impl Agent {
                         content: flatten_for_message(result),
                     });
                 }
+                // YYC-106: persist the assistant turn + tool results before
+                // the next iteration. Without this, an early loop exit
+                // (cancel, max_iter, model returning empty without matching
+                // the terminal branch) loses everything since the start of
+                // the turn — next prompt resumes with stale history and
+                // the agent appears to "forget".
+                self.save_messages(&messages)?;
             } else {
                 let reasoning = response.reasoning_content.clone();
 
