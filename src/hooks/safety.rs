@@ -195,45 +195,320 @@ impl HookHandler for SafetyHook {
 
 /// Returns the human-readable block reason for known-dangerous shell patterns,
 /// or `None` if the command looks fine.
+///
+/// YYC-114: tokenizes the command (handling quotes + sudo/doas/env prefixes)
+/// and applies structured rules instead of literal substring matching, so
+/// `rm --recursive --force /`, `rm -rf "/"`, and `sudo rm -rf $HOME` are all
+/// caught.
 fn match_dangerous(command: &str) -> Option<&'static str> {
-    let c = command;
-
-    if c.contains("rm -rf /")
-        || c.contains("rm -rf ~")
-        || c.contains("rm -rf $HOME")
-        || c.contains("rm -rf ${HOME}")
-    {
-        return Some("destructive recursive remove of root or home directory");
+    let raw_tokens = shell_tokenize(command);
+    if raw_tokens.is_empty() {
+        // Fallback to substring-only rules for single-quoted oddities.
+        return generic_substring_rules(command);
     }
 
-    if c.contains("dd if=") {
-        return Some("low-level disk operation (dd)");
+    for segment in command_segments(&raw_tokens) {
+        let tokens = strip_command_prefixes(segment);
+        if let Some(reason) = match_dangerous_tokens(&tokens) {
+            return Some(reason);
+        }
     }
 
-    if c.contains("mkfs") {
-        return Some("filesystem format command (mkfs)");
-    }
-
-    if c.contains("chmod -R 777") || c.contains("chmod 777 /") {
-        return Some("overly permissive recursive chmod 777");
-    }
-
-    if c.contains(":(){") {
+    // Cross-cutting rules that don't depend on the head verb.
+    if command.contains(":(){") {
         return Some("possible fork bomb pattern");
     }
 
-    if (c.contains("git push --force") || c.contains("git push -f ") || c.ends_with("git push -f"))
-        && !c.contains("--force-with-lease")
-    {
-        return Some("force push (consider --force-with-lease)");
-    }
-
-    if (c.contains("curl ") || c.contains("wget "))
-        && (c.contains("| bash") || c.contains("| sh") || c.contains("|bash") || c.contains("|sh"))
-    {
+    if (command.contains("curl") || command.contains("wget")) && pipes_to_shell(command) {
         return Some("pipe-to-shell from network (curl|bash / wget|sh)");
     }
 
+    None
+}
+
+fn match_dangerous_tokens(tokens: &[String]) -> Option<&'static str> {
+    if tokens.is_empty() {
+        return None;
+    }
+    let head = tokens[0].as_str();
+
+    match head {
+        "rm" => {
+            let recursive = has_short_or_long(&tokens, &['r', 'R'], &["--recursive"]);
+            let force = has_short_or_long(&tokens, &['f'], &["--force"]);
+            if recursive && force && has_dangerous_rm_target(&tokens) {
+                return Some("destructive recursive remove of root or home directory");
+            }
+        }
+        "dd" => return Some("low-level disk operation (dd)"),
+        h if h == "mkfs" || h.starts_with("mkfs.") => {
+            return Some("filesystem format command (mkfs)");
+        }
+        "chmod" => {
+            let recursive = has_short_or_long(&tokens, &['R'], &["--recursive"]);
+            let permissive = tokens.iter().any(|t| t == "777");
+            let on_root = tokens
+                .iter()
+                .skip(2)
+                .any(|t| t == "/" || t == "/*" || t == "/etc" || t == "/usr");
+            if permissive && (recursive || on_root) {
+                return Some("overly permissive recursive chmod 777");
+            }
+        }
+        "git" => {
+            // Match `git push` (with optional flags before `push`).
+            if tokens.iter().skip(1).any(|t| t == "push") {
+                let has_force = tokens.iter().any(|t| {
+                    t == "--force"
+                        || t == "-f"
+                        || (t.starts_with('-') && !t.starts_with("--") && t.contains('f'))
+                });
+                let has_lease = tokens
+                    .iter()
+                    .any(|t| t == "--force-with-lease" || t.starts_with("--force-with-lease="));
+                if has_force && !has_lease {
+                    return Some("force push (consider --force-with-lease)");
+                }
+            }
+        }
+        _ => {}
+    }
+
+    None
+}
+
+/// Minimal shell tokenizer — handles single + double quotes, backslash escapes,
+/// and whitespace splitting. Drops quote characters from token output.
+fn shell_tokenize(input: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut current = String::new();
+    let mut chars = input.chars().peekable();
+    let mut in_single = false;
+    let mut in_double = false;
+    while let Some(ch) = chars.next() {
+        if !in_single && ch == '\\' {
+            if let Some(next) = chars.next() {
+                current.push(next);
+            }
+            continue;
+        }
+        if !in_double && ch == '\'' {
+            in_single = !in_single;
+            continue;
+        }
+        if !in_single && ch == '"' {
+            in_double = !in_double;
+            continue;
+        }
+        if !in_single && !in_double && ch.is_whitespace() {
+            if !current.is_empty() {
+                out.push(std::mem::take(&mut current));
+            }
+            continue;
+        }
+        if !in_single && !in_double {
+            match ch {
+                ';' => {
+                    if !current.is_empty() {
+                        out.push(std::mem::take(&mut current));
+                    }
+                    out.push(";".to_string());
+                    continue;
+                }
+                '&' if chars.peek() == Some(&'&') => {
+                    chars.next();
+                    if !current.is_empty() {
+                        out.push(std::mem::take(&mut current));
+                    }
+                    out.push("&&".to_string());
+                    continue;
+                }
+                '|' if chars.peek() == Some(&'|') => {
+                    chars.next();
+                    if !current.is_empty() {
+                        out.push(std::mem::take(&mut current));
+                    }
+                    out.push("||".to_string());
+                    continue;
+                }
+                '|' => {
+                    if !current.is_empty() {
+                        out.push(std::mem::take(&mut current));
+                    }
+                    out.push("|".to_string());
+                    continue;
+                }
+                _ => {}
+            }
+        }
+        current.push(ch);
+    }
+    if !current.is_empty() {
+        out.push(current);
+    }
+    out
+}
+
+fn command_segments(tokens: &[String]) -> Vec<Vec<String>> {
+    let mut segments = Vec::new();
+    let mut current = Vec::new();
+    for token in tokens {
+        if matches!(token.as_str(), ";" | "&&" | "||" | "|") {
+            if !current.is_empty() {
+                segments.push(std::mem::take(&mut current));
+            }
+            continue;
+        }
+        current.push(token.clone());
+    }
+    if !current.is_empty() {
+        segments.push(current);
+    }
+    segments
+}
+
+/// Strip leading `sudo`, `doas`, `env`, `command`, and `KEY=VAL` prefix tokens.
+fn strip_command_prefixes(mut tokens: Vec<String>) -> Vec<String> {
+    while let Some(first) = tokens.first() {
+        match first.as_str() {
+            "sudo" | "doas" => {
+                tokens.remove(0);
+                strip_wrapper_options(&mut tokens);
+            }
+            "env" => {
+                tokens.remove(0);
+                strip_wrapper_options(&mut tokens);
+                while tokens
+                    .first()
+                    .map(|t| is_env_assignment(t))
+                    .unwrap_or(false)
+                {
+                    tokens.remove(0);
+                }
+            }
+            "command" => {
+                tokens.remove(0);
+            }
+            "--" => {
+                tokens.remove(0);
+            }
+            _ if is_env_assignment(first) => {
+                tokens.remove(0);
+            }
+            _ => break,
+        }
+    }
+    tokens
+}
+
+fn strip_wrapper_options(tokens: &mut Vec<String>) {
+    while let Some(first) = tokens.first() {
+        if first == "--" {
+            tokens.remove(0);
+            break;
+        }
+        if !first.starts_with('-') || first == "-" {
+            break;
+        }
+        let takes_value = matches!(
+            first.as_str(),
+            "-u" | "--user"
+                | "-g"
+                | "--group"
+                | "-h"
+                | "--host"
+                | "-C"
+                | "--chdir"
+                | "-S"
+                | "--split-string"
+        );
+        tokens.remove(0);
+        if takes_value && tokens.first().is_some_and(|t| !t.starts_with('-')) {
+            tokens.remove(0);
+        }
+    }
+}
+
+fn is_env_assignment(token: &str) -> bool {
+    token.contains('=')
+        && !token.starts_with('-')
+        && token
+            .chars()
+            .next()
+            .map(|c| c.is_ascii_alphabetic() || c == '_')
+            .unwrap_or(false)
+}
+
+/// True if any token is a long flag in `longs` or a short-flag bundle
+/// containing one of `shorts`.
+fn has_short_or_long(tokens: &[String], shorts: &[char], longs: &[&str]) -> bool {
+    tokens.iter().any(|t| {
+        if longs.iter().any(|l| t == l) {
+            return true;
+        }
+        if t.starts_with("--") {
+            return false;
+        }
+        if t.starts_with('-') && t.len() > 1 {
+            return t.chars().skip(1).any(|c| shorts.contains(&c));
+        }
+        false
+    })
+}
+
+/// True if any non-flag arg after `rm` resolves to root, $HOME, or `~`.
+fn has_dangerous_rm_target(tokens: &[String]) -> bool {
+    let home = std::env::var("HOME").ok();
+    tokens.iter().skip(1).any(|t| {
+        if t.starts_with('-') {
+            return false;
+        }
+        let trimmed = t.as_str();
+        if trimmed == "/"
+            || trimmed == "/*"
+            || trimmed == "$HOME"
+            || trimmed == "${HOME}"
+            || trimmed == "~"
+        {
+            return true;
+        }
+        if let Some(rest) = trimmed.strip_prefix("~/") {
+            // ~/foo is fine unless it's empty (meaning ~), already handled.
+            let _ = rest;
+            return false;
+        }
+        if trimmed.starts_with("/home")
+            || trimmed.starts_with("/usr")
+            || trimmed.starts_with("/etc")
+        {
+            return true;
+        }
+        if let Some(h) = &home {
+            if trimmed == h || trimmed.starts_with(&format!("{h}/")) {
+                return false; // home subdir = ok
+            }
+        }
+        false
+    })
+}
+
+fn pipes_to_shell(command: &str) -> bool {
+    // Crude: looks for `| bash` / `| sh` / `|bash` / `|sh` in the raw
+    // command. Pipe-aware tokenization is overkill; the shell metas we
+    // care about don't survive quoting.
+    command.contains("| bash")
+        || command.contains("|bash")
+        || command.contains("| sh")
+        || command.contains("|sh ")
+        || command.ends_with("|sh")
+}
+
+/// Rules that don't need tokenization. Hit when the tokenizer returns an
+/// empty list (e.g. only quoted whitespace).
+fn generic_substring_rules(command: &str) -> Option<&'static str> {
+    if command.contains(":(){") {
+        return Some("possible fork bomb pattern");
+    }
     None
 }
 
@@ -260,6 +535,100 @@ mod tests {
         assert!(match_dangerous("git push origin main").is_none());
         assert!(match_dangerous("git push --force-with-lease").is_none());
         assert!(match_dangerous("cargo build").is_none());
+    }
+
+    // ── YYC-114 bypass coverage ─────────────────────────────────────────
+
+    #[test]
+    fn rm_long_form_flags_blocked() {
+        assert!(match_dangerous("rm --recursive --force /").is_some());
+        assert!(match_dangerous("rm --force --recursive /").is_some());
+    }
+
+    #[test]
+    fn rm_quoted_root_blocked() {
+        assert!(match_dangerous("rm -rf \"/\"").is_some());
+        assert!(match_dangerous("rm -rf '/'").is_some());
+    }
+
+    #[test]
+    fn rm_quoted_home_blocked() {
+        assert!(match_dangerous("rm -rf \"$HOME\"").is_some());
+        assert!(match_dangerous("rm -rf '${HOME}'").is_some());
+    }
+
+    #[test]
+    fn rm_with_sudo_prefix_blocked() {
+        assert!(match_dangerous("sudo rm -rf /").is_some());
+        assert!(match_dangerous("sudo  rm  -rf  ~").is_some());
+        assert!(match_dangerous("doas rm -rf /etc").is_some());
+    }
+
+    #[test]
+    fn rm_with_env_prefix_blocked() {
+        assert!(match_dangerous("HOME=/tmp rm -rf /").is_some());
+        assert!(match_dangerous("env FOO=bar rm -rf /").is_some());
+    }
+
+    #[test]
+    fn rm_with_privilege_or_env_prefix_flags_blocked() {
+        assert!(match_dangerous("sudo -n rm -rf /").is_some());
+        assert!(match_dangerous("sudo -- rm -rf /").is_some());
+        assert!(match_dangerous("env -i HOME=/tmp rm -rf /").is_some());
+    }
+
+    #[test]
+    fn dangerous_command_in_shell_sequence_blocked() {
+        assert!(match_dangerous("cd /tmp && rm -rf /").is_some());
+        assert!(match_dangerous("echo ok; sudo rm -rf /etc").is_some());
+    }
+
+    #[test]
+    fn rm_split_short_flags_blocked() {
+        assert!(match_dangerous("rm -r -f /").is_some());
+        assert!(match_dangerous("rm -fr /").is_some());
+    }
+
+    #[test]
+    fn rm_safe_subdir_passes() {
+        assert!(match_dangerous("rm -rf ./node_modules").is_none());
+        assert!(match_dangerous("rm -rf ~/scratch").is_none());
+        assert!(match_dangerous("sudo rm -rf /tmp/build-cache").is_none());
+    }
+
+    #[test]
+    fn dd_quoted_paths_blocked() {
+        assert!(match_dangerous("dd if=\"/dev/zero\" of=\"/dev/sda\"").is_some());
+    }
+
+    #[test]
+    fn mkfs_variants_blocked() {
+        assert!(match_dangerous("mkfs.ext4 /dev/sda1").is_some());
+        assert!(match_dangerous("mkfs.btrfs /dev/sdb1").is_some());
+        assert!(match_dangerous("sudo mkfs.xfs /dev/sdc").is_some());
+    }
+
+    #[test]
+    fn chmod_777_recursive_blocked() {
+        assert!(match_dangerous("chmod -R 777 /").is_some());
+        assert!(match_dangerous("chmod --recursive 777 /var").is_some());
+    }
+
+    #[test]
+    fn chmod_777_root_blocked() {
+        assert!(match_dangerous("chmod 777 /").is_some());
+    }
+
+    #[test]
+    fn git_force_short_flag_blocked() {
+        assert!(match_dangerous("git push -f origin main").is_some());
+        assert!(match_dangerous("git push --force origin main").is_some());
+    }
+
+    #[test]
+    fn git_force_with_lease_passes() {
+        assert!(match_dangerous("git push --force-with-lease").is_none());
+        assert!(match_dangerous("git push --force-with-lease=origin/main").is_none());
     }
 
     #[tokio::test]
@@ -316,14 +685,18 @@ mod tests {
         let pause = rx.recv().await.expect("pause should arrive");
         let keys: Vec<char> = pause.options.iter().map(|o| o.key).collect();
         assert_eq!(keys, vec!['y', 'r', 'n']);
-        assert!(pause
-            .options
-            .iter()
-            .any(|o| o.key == 'y' && matches!(o.kind, OptionKind::Primary)));
-        assert!(pause
-            .options
-            .iter()
-            .any(|o| o.key == 'n' && matches!(o.kind, OptionKind::Destructive)));
+        assert!(
+            pause
+                .options
+                .iter()
+                .any(|o| o.key == 'y' && matches!(o.kind, OptionKind::Primary))
+        );
+        assert!(
+            pause
+                .options
+                .iter()
+                .any(|o| o.key == 'n' && matches!(o.kind, OptionKind::Destructive))
+        );
 
         // Drain the task with a deny so the spawned future doesn't leak.
         pause.reply.send(AgentResume::Deny).ok();
