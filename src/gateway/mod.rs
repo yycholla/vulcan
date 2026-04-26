@@ -7,6 +7,8 @@ pub mod loopback;
 pub mod outbound;
 pub mod queue;
 pub mod registry;
+pub mod routes;
+pub mod server;
 pub mod worker;
 
 pub async fn run(_config: &Config, _bind_override: Option<String>) -> Result<()> {
