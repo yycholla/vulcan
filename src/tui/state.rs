@@ -219,13 +219,26 @@ impl ChatMessage {
     }
 
     /// Append a text chunk to the segment timeline, coalescing with the
-    /// trailing segment if it's also text.
+    /// trailing segment if it's also text. Leading whitespace on a fresh
+    /// text segment (start of message, or after a tool/reasoning break)
+    /// is stripped so models that emit `\n\n` preambles don't render
+    /// gaps before the visible body.
     pub fn append_text(&mut self, chunk: &str) {
         match self.segments.last_mut() {
-            Some(MessageSegment::Text(t)) => t.push_str(chunk),
-            _ => self.segments.push(MessageSegment::Text(chunk.to_string())),
+            Some(MessageSegment::Text(t)) => {
+                t.push_str(chunk);
+                self.bump_render_version();
+            }
+            _ => {
+                let trimmed = chunk.trim_start_matches(|c: char| c == '\n' || c == '\r');
+                if trimmed.is_empty() {
+                    return;
+                }
+                self.segments
+                    .push(MessageSegment::Text(trimmed.to_string()));
+                self.bump_render_version();
+            }
         }
-        self.bump_render_version();
     }
 
     /// Append a reasoning chunk to the segment timeline, coalescing with the

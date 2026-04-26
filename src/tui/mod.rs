@@ -364,7 +364,15 @@ async fn handle_stream_event(
                     // ordered renderer) and the legacy `content` field
                     // (kept so other code that peeks at .content keeps working).
                     last.append_text(&chunk);
-                    last.content.push_str(&chunk);
+                    // Strip leading whitespace so models that emit `\n\n`
+                    // preambles don't render gaps before the visible body
+                    // when the renderer falls back to `content`.
+                    if last.content.is_empty() {
+                        let trimmed = chunk.trim_start_matches(|c: char| c == '\n' || c == '\r' || c == ' ' || c == '\t');
+                        last.content.push_str(trimmed);
+                    } else {
+                        last.content.push_str(&chunk);
+                    }
                 }
             }
         }
