@@ -187,7 +187,6 @@ fn submit_prompt(
     });
     app.thinking = true;
     app.at_bottom = true;
-    app.chat_lines_dirty.set(true);
     app.note_prompt_submitted(&msg);
 
     let tx = stream_tx.clone();
@@ -224,7 +223,6 @@ async fn handle_stream_event(
                     // (kept so other code that peeks at .content keeps working).
                     last.append_text(&chunk);
                     last.content.push_str(&chunk);
-                    app.chat_lines_dirty.set(true);
                 }
             }
         }
@@ -237,14 +235,12 @@ async fn handle_stream_event(
                 if matches!(last.role, ChatRole::Agent) {
                     last.append_reasoning(&chunk);
                     last.reasoning.push_str(&chunk);
-                    app.chat_lines_dirty.set(true);
                 }
             }
             app.note_reasoning();
         }
         StreamEvent::Done(resp) => {
             app.thinking = false;
-            app.chat_lines_dirty.set(true);
             if let Some(usage) = resp.usage {
                 // YYC-60: track lifetime totals for cost (YYC-67) and the
                 // latest prompt size for the in-status capacity bar.
@@ -268,7 +264,6 @@ async fn handle_stream_event(
             if let Some(last) = app.messages.last_mut() {
                 if last.content.is_empty() {
                     last.set_content(format!("⚠ Error: {e}"));
-                    app.chat_lines_dirty.set(true);
                 }
             }
             app.thinking = false;
@@ -285,7 +280,6 @@ async fn handle_stream_event(
             if let Some(last) = app.messages.last_mut() {
                 if matches!(last.role, ChatRole::Agent) {
                     last.push_tool_start_with(name.clone(), args_summary);
-                    app.chat_lines_dirty.set(true);
                 }
             }
             app.note_tool_start(&name);
@@ -312,7 +306,6 @@ async fn handle_stream_event(
                         elided_lines,
                         Some(elapsed_ms),
                     );
-                    app.chat_lines_dirty.set(true);
                 }
             }
             // YYC-67: tool call telemetry.
@@ -454,7 +447,6 @@ pub async fn run_tui(config: &Config, resume: ResumeTarget) -> Result<()> {
                     Message::Tool { .. } => {} // skip — audit log shows tool activity
                 }
             }
-            app.chat_lines_dirty.set(true);
         }
     }
 
@@ -591,7 +583,6 @@ pub async fn run_tui(config: &Config, resume: ResumeTarget) -> Result<()> {
                                                                 Message::Tool { .. } => {}
                                                             }
                                                         }
-                                                        app.chat_lines_dirty.set(true);
                                                     }
                                                 }
                                                 refresh_sessions(&agent, &mut app).await;
@@ -604,7 +595,6 @@ pub async fn run_tui(config: &Config, resume: ResumeTarget) -> Result<()> {
                                                 content: "Starting a new session — use /search to find past conversations.".into(),
                                                 ..Default::default()
                                             });
-                                            app.chat_lines_dirty.set(true);
                                         }
                                         _ => {}
                                     }
@@ -673,7 +663,6 @@ pub async fn run_tui(config: &Config, resume: ResumeTarget) -> Result<()> {
                             segments: Vec::new(),
                         render_version: 0,
                     });
-                    app.chat_lines_dirty.set(true);
                     app.note_pause(&summary);
                     app.pending_pause = Some(p);
                 }
@@ -730,7 +719,6 @@ pub async fn run_tui(config: &Config, resume: ResumeTarget) -> Result<()> {
                             segments: Vec::new(),
                                                 render_version: 0,
                                             });
-                                            app.chat_lines_dirty.set(true);
                                             app.note_resume(label);
                                         }
                                         continue;
@@ -756,7 +744,6 @@ pub async fn run_tui(config: &Config, resume: ResumeTarget) -> Result<()> {
                                             } else {
                                                 app.queue.pop_back();
                                             }
-                                            app.chat_lines_dirty.set(true);
                                             continue;
                                         }
                                         // YYC-70: Ctrl+J / Ctrl+K navigate the
@@ -798,7 +785,6 @@ pub async fn run_tui(config: &Config, resume: ResumeTarget) -> Result<()> {
                             segments: Vec::new(),
                                                     render_version: 0,
                                                 });
-                                                app.chat_lines_dirty.set(true);
                                                 pending_quit = true;
                                             } else {
                                                 pending_quit = true;
@@ -809,7 +795,6 @@ pub async fn run_tui(config: &Config, resume: ResumeTarget) -> Result<()> {
                             segments: Vec::new(),
                                                     render_version: 0,
                                                 });
-                                                app.chat_lines_dirty.set(true);
                                                 continue;
                                             }
                                         }
@@ -860,7 +845,6 @@ pub async fn run_tui(config: &Config, resume: ResumeTarget) -> Result<()> {
                                                 ),
                                                 ..Default::default()
                                             });
-                                            app.chat_lines_dirty.set(true);
                                             continue;
                                         }
                                         // YYC-61: plain text during busy → queue.
@@ -871,7 +855,6 @@ pub async fn run_tui(config: &Config, resume: ResumeTarget) -> Result<()> {
                                             let msg = app.input.trim().to_string();
                                             if !msg.is_empty() {
                                                 app.queue.push_back(msg);
-                                                app.chat_lines_dirty.set(true);
                                             }
                                             app.input.clear();
                                             app.slash_menu_selection = 0;
@@ -898,12 +881,11 @@ pub async fn run_tui(config: &Config, resume: ResumeTarget) -> Result<()> {
                                                         }
                                                         help.push_str("\n\nKeys:\n  Ctrl+1..5  switch view (1=stack 2=split 3=tiled 4=tree 5=floor)\n  Ctrl+R     toggle reasoning trace\n  Tab        complete slash command");
                                                         app.messages.push(ChatMessage { role: ChatRole::System, content: help, ..Default::default() });
-                                                        app.chat_lines_dirty.set(true);
                                                         continue;
                                                     }
                                                     "clear" => {
                                                         app.messages.clear();
-                                                        app.chat_lines_dirty.set(true);
+                                                        app.chat_render_store.borrow_mut().clear();
                                                         continue;
                                                     }
                                                     "reasoning" => {
@@ -915,7 +897,6 @@ pub async fn run_tui(config: &Config, resume: ResumeTarget) -> Result<()> {
                             segments: Vec::new(),
                                                             render_version: 0,
                                                         });
-                                                        app.chat_lines_dirty.set(true);
                                                         continue;
                                                     }
                                                     "view" => {
@@ -944,7 +925,6 @@ pub async fn run_tui(config: &Config, resume: ResumeTarget) -> Result<()> {
                                                                         ),
                                                                         ..Default::default()
                                                                     });
-                                                                    app.chat_lines_dirty.set(true);
                                                                     continue;
                                                                 }
                                                             }
@@ -957,7 +937,6 @@ pub async fn run_tui(config: &Config, resume: ResumeTarget) -> Result<()> {
                                                             ),
                                                             ..Default::default()
                                                         });
-                                                        app.chat_lines_dirty.set(true);
                                                         continue;
                                                     }
                                                     s if s.starts_with("view ") => {
@@ -978,7 +957,6 @@ pub async fn run_tui(config: &Config, resume: ResumeTarget) -> Result<()> {
                             segments: Vec::new(),
                                                                 render_version: 0,
                                                             });
-                                                            app.chat_lines_dirty.set(true);
                                                             continue;
                                                         }
                                                         let hits = {
@@ -1009,7 +987,6 @@ pub async fn run_tui(config: &Config, resume: ResumeTarget) -> Result<()> {
                             segments: Vec::new(),
                                                             render_version: 0,
                                                         });
-                                                        app.chat_lines_dirty.set(true);
                                                         continue;
                                                     }
                                                     _ => {
@@ -1020,7 +997,6 @@ pub async fn run_tui(config: &Config, resume: ResumeTarget) -> Result<()> {
                             segments: Vec::new(),
                                                             render_version: 0,
                                                         });
-                                                        app.chat_lines_dirty.set(true);
                                                         continue;
                                                     }
                                                 }

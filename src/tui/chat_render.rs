@@ -107,21 +107,8 @@ impl ChatRenderStore {
         }
     }
 
-    pub(crate) fn all_lines(
-        &mut self,
-        messages: &[ChatMessage],
-        options: ChatRenderOptions,
-    ) -> Vec<Line<'static>> {
-        let mut lines = Vec::new();
-        for (index, message) in messages.iter().enumerate() {
-            lines.extend(
-                self.render_message_block(index, message, options)
-                    .lines
-                    .iter()
-                    .cloned(),
-            );
-        }
-        lines
+    pub fn clear(&mut self) {
+        self.blocks.clear();
     }
 
     fn render_message_block(
