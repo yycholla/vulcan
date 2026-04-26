@@ -67,3 +67,10 @@ enabled = false
 # api_key = "sk-..."
 model = "text-embedding-3-small"
 dim = 1536
+
+[tui]
+# Theme name. Built-ins:
+#   system          — inherit terminal palette (default)
+#   default-light   — Bauhaus cream/ink, the formalized current look
+#   dracula         — canonical dark palette
+theme = "system"

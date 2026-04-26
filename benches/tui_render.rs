@@ -22,6 +22,7 @@ use divan::{AllocProfiler, Bencher};
 use vulcan::tui::{
     chat_render::{ChatRenderOptions, ChatRenderStore},
     state::{ChatMessage, ChatRole},
+    theme::Theme,
 };
 
 use common::results::{Measurement, append};
@@ -79,12 +80,13 @@ fn visible_lines_first_render(b: Bencher, n: usize) {
         show_reasoning: true,
         dense: false,
         width: WIDTH,
+        muted_style: ratatui::style::Style::default(),
     };
     // Cold store per iter: each iter measures the no-cache path. `with_inputs`
     // builds the store outside the timed region.
     b.with_inputs(ChatRenderStore::default)
         .bench_refs(|store| {
-            store.visible_lines_at(&messages, options, 0, usize::from(WINDOW_HEIGHT))
+            store.visible_lines_at(&messages, options, &Theme::system(), 0, usize::from(WINDOW_HEIGHT))
         });
 }
 
@@ -95,15 +97,16 @@ fn visible_lines_cached_tail(b: Bencher, n: usize) {
         show_reasoning: true,
         dense: false,
         width: WIDTH,
+        muted_style: ratatui::style::Style::default(),
     };
     let mut store = ChatRenderStore::default();
     // Prime cache with one full render so subsequent iters hit warm paths.
-    let first = store.visible_lines_at(&messages, options, 0, usize::from(WINDOW_HEIGHT));
+    let first = store.visible_lines_at(&messages, options, &Theme::system(), 0, usize::from(WINDOW_HEIGHT));
     let scroll = first.total_lines.saturating_sub(usize::from(WINDOW_HEIGHT));
     // `bench_local` accepts `FnMut`, which lets us keep the warm cache alive
     // across iters without paying a `Sync` tax (and without per-iter cloning).
     b.bench_local(move || {
-        store.visible_lines_at(&messages, options, scroll, usize::from(WINDOW_HEIGHT))
+        store.visible_lines_at(&messages, options, &Theme::system(), scroll, usize::from(WINDOW_HEIGHT))
     });
 }
 
@@ -125,13 +128,14 @@ fn main() {
             show_reasoning: true,
             dense: false,
             width: WIDTH,
+            muted_style: ratatui::style::Style::default(),
         };
 
         // first render — cold store per iter.
         let start = std::time::Instant::now();
         for _ in 0..ITERS {
             let mut store = ChatRenderStore::default();
-            let _ = store.visible_lines_at(&messages, options, 0, usize::from(WINDOW_HEIGHT));
+            let _ = store.visible_lines_at(&messages, options, &Theme::system(), 0, usize::from(WINDOW_HEIGHT));
         }
         let ns = (start.elapsed().as_nanos() as f64) / f64::from(ITERS);
         groups
@@ -145,11 +149,11 @@ fn main() {
 
         // cached tail — store kept warm across iters.
         let mut store = ChatRenderStore::default();
-        let first = store.visible_lines_at(&messages, options, 0, usize::from(WINDOW_HEIGHT));
+        let first = store.visible_lines_at(&messages, options, &Theme::system(), 0, usize::from(WINDOW_HEIGHT));
         let scroll = first.total_lines.saturating_sub(usize::from(WINDOW_HEIGHT));
         let start = std::time::Instant::now();
         for _ in 0..ITERS {
-            let _ = store.visible_lines_at(&messages, options, scroll, usize::from(WINDOW_HEIGHT));
+            let _ = store.visible_lines_at(&messages, options, &Theme::system(), scroll, usize::from(WINDOW_HEIGHT));
         }
         let ns = (start.elapsed().as_nanos() as f64) / f64::from(ITERS);
         groups
