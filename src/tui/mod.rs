@@ -797,23 +797,24 @@ pub async fn run_tui(config: &Config, resume: ResumeTarget) -> Result<()> {
                         Some(KeyEv::Press(event)) => {
                             if let Event::Key(key) = event {
                                 if key.kind == KeyEventKind::Press {
-                                    let mut commit_id: Option<String> = None;
+                                    let mut commit: Option<(Option<String>, String)> = None;
                                     let mut close = false;
-                                    let provider_label = {
-                                        let a = agent.lock().await;
-                                        a.active_profile()
-                                            .map(str::to_string)
-                                            .unwrap_or_else(|| "default".into())
-                                    };
                                     let mut state = miller_columns::MillerState {
                                         path: app.model_picker_path.clone(),
                                         focus: app.model_picker_focus,
                                     };
-                                    let source = model_picker::ModelPickerSource::new(
-                                        &app.model_picker_tree,
-                                        &app.model_picker_items,
-                                        format!("~ {provider_label}"),
-                                    );
+                                    let source = model_picker::UnifiedPickerSource {
+                                        provider_labels: &app.picker_provider_labels,
+                                        provider_keys: &app.picker_provider_keys,
+                                        items_by_key: &app.picker_items_by_key,
+                                        trees_by_key: &app.picker_trees_by_key,
+                                    };
+                                    let resolve_leaf = |path: &[usize]| -> Option<(Option<String>, String)> {
+                                        source.leaf_at(path).map(|(k, id)| {
+                                            let key = if k == "default" { None } else { Some(k) };
+                                            (key, id)
+                                        })
+                                    };
                                     match key.code {
                                         KeyCode::Up | KeyCode::Char('k') => {
                                             miller_columns::move_cursor(&mut state, &source, -1);
@@ -828,49 +829,42 @@ pub async fn run_tui(config: &Config, resume: ResumeTarget) -> Result<()> {
                                         }
                                         KeyCode::Right | KeyCode::Char('l') => {
                                             if !miller_columns::drill(&mut state, &source) {
-                                                // Leaf — commit.
-                                                commit_id = source.leaf_at(&state.path)
-                                                    .and_then(|i| app.model_picker_items.get(i))
-                                                    .map(|m| m.id.clone());
+                                                commit = resolve_leaf(&state.path);
                                             }
                                         }
                                         KeyCode::Char('L') => {
-                                            // mini.files L: drill, and if the
-                                            // child is a leaf, commit.
-                                            if !miller_columns::drill(&mut state, &source) {
-                                                commit_id = source.leaf_at(&state.path)
-                                                    .and_then(|i| app.model_picker_items.get(i))
-                                                    .map(|m| m.id.clone());
-                                            } else {
-                                                commit_id = source.leaf_at(&state.path)
-                                                    .and_then(|i| app.model_picker_items.get(i))
-                                                    .map(|m| m.id.clone());
-                                            }
+                                            miller_columns::drill(&mut state, &source);
+                                            commit = resolve_leaf(&state.path);
                                         }
                                         KeyCode::Char('H') => {
-                                            // mini.files H: ascend AND trim
-                                            // rightward — already implicit in
-                                            // ascend() since deeper path is
-                                            // dropped.
                                             if !miller_columns::ascend(&mut state) {
                                                 close = true;
                                             }
                                         }
                                         KeyCode::Enter => {
-                                            commit_id = source
-                                                .leaf_at(&state.path)
-                                                .and_then(|i| app.model_picker_items.get(i))
-                                                .map(|m| m.id.clone());
+                                            commit = resolve_leaf(&state.path);
                                         }
                                         KeyCode::Esc | KeyCode::Char('q') => close = true,
                                         _ => {}
                                     }
                                     app.model_picker_path = state.path;
                                     app.model_picker_focus = state.focus;
-                                    if let Some(id) = commit_id {
+                                    if let Some((profile, id)) = commit {
                                         let result = {
                                             let mut a = agent.lock().await;
-                                            a.switch_model(&id).await
+                                            // Switch provider first when the
+                                            // picked profile differs from the
+                                            // active one.
+                                            let active = a.active_profile().map(str::to_string);
+                                            if active != profile {
+                                                if let Err(e) = a.switch_provider(profile.as_deref(), config).await {
+                                                    Err(e)
+                                                } else {
+                                                    a.switch_model(&id).await
+                                                }
+                                            } else {
+                                                a.switch_model(&id).await
+                                            }
                                         };
                                         match result {
                                             Ok(selection) => {
@@ -879,10 +873,14 @@ pub async fn run_tui(config: &Config, resume: ResumeTarget) -> Result<()> {
                                                 app.token_max =
                                                     selection.max_context as u32;
                                                 app.pricing = selection.pricing;
+                                                app.provider_label = profile.clone();
+                                                let label = profile
+                                                    .as_deref()
+                                                    .unwrap_or("default");
                                                 app.messages.push(ChatMessage {
                                                     role: ChatRole::System,
                                                     content: format!(
-                                                        "Model switched to {} · context {}",
+                                                        "Switched to {label} · {} · context {}",
                                                         app.model_label,
                                                         crate::tui::state::format_thousands(
                                                             app.token_max
@@ -1596,31 +1594,15 @@ pub async fn run_tui(config: &Config, resume: ResumeTarget) -> Result<()> {
                                                                         ..Default::default()
                                                                     });
                                                                 }
-                                                                Ok(models) => {
-                                                                    let provider_label = {
-                                                                        let a = agent.lock().await;
-                                                                        a.active_profile()
-                                                                            .map(str::to_string)
-                                                                            .unwrap_or_else(|| "default".into())
-                                                                    };
-                                                                    let tree =
-                                                                        crate::tui::model_picker::build_model_tree(
-                                                                            &provider_label,
-                                                                            &models,
-                                                                        );
-                                                                    app.model_picker_path =
-                                                                        initial_path_for_active_model(
-                                                                            &tree,
-                                                                            &active,
-                                                                            &models,
-                                                                        );
-                                                                    app.model_picker_focus = app
-                                                                        .model_picker_path
-                                                                        .len()
-                                                                        .saturating_sub(1);
-                                                                    app.model_picker_tree = tree;
-                                                                    app.model_picker_items = models;
-                                                                    app.show_model_picker = true;
+                                                                Ok(active_models) => {
+                                                                    open_unified_picker(
+                                                                        &mut app,
+                                                                        config,
+                                                                        &agent,
+                                                                        &active,
+                                                                        active_models,
+                                                                    )
+                                                                    .await;
                                                                 }
                                                                 Err(e) => {
                                                                     app.messages.push(ChatMessage {
@@ -2125,15 +2107,13 @@ fn draw_session_picker(f: &mut ratatui::Frame, area: Rect, app: &AppState) {
 fn draw_model_picker(f: &mut ratatui::Frame, area: Rect, app: &AppState) {
     // YYC-102: render via the universal miller_columns widget. The
     // overlay anchors top-left and grows rightward as the user drills.
-    let provider_label = app
-        .provider_label
-        .clone()
-        .unwrap_or_else(|| "default".into());
-    let source = model_picker::ModelPickerSource::new(
-        &app.model_picker_tree,
-        &app.model_picker_items,
-        format!("~ {provider_label}"),
-    );
+    // Column 0 = configured providers; columns 1+ = lab/series/version.
+    let source = model_picker::UnifiedPickerSource {
+        provider_labels: &app.picker_provider_labels,
+        provider_keys: &app.picker_provider_keys,
+        items_by_key: &app.picker_items_by_key,
+        trees_by_key: &app.picker_trees_by_key,
+    };
     let state = miller_columns::MillerState {
         path: app.model_picker_path.clone(),
         focus: app.model_picker_focus,
@@ -2158,6 +2138,133 @@ fn draw_model_picker(f: &mut ratatui::Frame, area: Rect, app: &AppState) {
         Paragraph::new(Line::from(Span::styled(hint, app.theme.muted))),
         footer,
     );
+}
+
+async fn open_unified_picker(
+    app: &mut AppState,
+    config: &Config,
+    agent: &Arc<Mutex<Agent>>,
+    active_model_id: &str,
+    active_provider_models: Vec<crate::provider::catalog::ModelInfo>,
+) {
+    use std::collections::HashMap;
+
+    // Build the column-0 list: [default + named profiles, sorted].
+    let mut labels: Vec<String> = Vec::new();
+    let mut keys: Vec<Option<String>> = Vec::new();
+    labels.push("default".to_string());
+    keys.push(None);
+    let mut named: Vec<&String> = config.providers.keys().collect();
+    named.sort();
+    for n in named {
+        labels.push(n.clone());
+        keys.push(Some(n.clone()));
+    }
+
+    // Determine active provider key.
+    let active_profile = {
+        let a = agent.lock().await;
+        a.active_profile().map(str::to_string)
+    };
+    let active_key: String = active_profile.clone().unwrap_or_else(|| "default".into());
+
+    // Seed the catalog cache with the already-loaded active provider.
+    let mut items_by_key: HashMap<String, Vec<crate::provider::catalog::ModelInfo>> =
+        HashMap::new();
+    items_by_key.insert(active_key.clone(), active_provider_models);
+
+    // Fetch catalogs for the other providers in parallel. Disable_catalog
+    // entries (e.g. Ollama) are skipped — they get an empty tree and a
+    // "type the model id with /model <id>" hint via the empty list.
+    let mut handles: Vec<(String, tokio::task::JoinHandle<_>)> = Vec::new();
+    for (key_opt, _label) in keys.iter().zip(labels.iter()) {
+        let cache_key = key_opt.clone().unwrap_or_else(|| "default".into());
+        if items_by_key.contains_key(&cache_key) {
+            continue;
+        }
+        let provider_cfg = match key_opt {
+            Some(name) => config.providers.get(name).cloned(),
+            None => Some(config.provider.clone()),
+        };
+        let Some(provider_cfg) = provider_cfg else {
+            continue;
+        };
+        if provider_cfg.disable_catalog {
+            items_by_key.insert(cache_key, Vec::new());
+            continue;
+        }
+        let api_key = config.api_key_for(&provider_cfg).unwrap_or_default();
+        let handle = tokio::spawn(async move {
+            use std::time::Duration;
+            let client = match reqwest::Client::builder()
+                .timeout(Duration::from_secs(5))
+                .build()
+            {
+                Ok(c) => c,
+                Err(_) => return Vec::new(),
+            };
+            let cat = crate::provider::catalog::for_base_url(
+                client,
+                &provider_cfg.base_url,
+                &api_key,
+                Duration::from_secs(0),
+            );
+            cat.list_models().await.unwrap_or_default()
+        });
+        handles.push((cache_key, handle));
+    }
+    for (cache_key, handle) in handles {
+        match handle.await {
+            Ok(models) => {
+                items_by_key.insert(cache_key, models);
+            }
+            Err(_) => {
+                items_by_key.insert(cache_key, Vec::new());
+            }
+        }
+    }
+
+    // Build trees for every provider.
+    let mut trees_by_key: HashMap<String, crate::tui::model_picker::ModelTree> = HashMap::new();
+    for (key_opt, label) in keys.iter().zip(labels.iter()) {
+        let cache_key = key_opt.clone().unwrap_or_else(|| "default".into());
+        let models = items_by_key
+            .get(&cache_key)
+            .cloned()
+            .unwrap_or_default();
+        let tree =
+            crate::tui::model_picker::build_model_tree(label, &models);
+        trees_by_key.insert(cache_key, tree);
+    }
+
+    // Initial path: active provider in column 0, then drill into the
+    // active model if we can match it.
+    let active_idx = keys
+        .iter()
+        .position(|k| match (k, &active_profile) {
+            (None, None) => true,
+            (Some(a), Some(b)) => a == b,
+            _ => false,
+        })
+        .unwrap_or(0);
+
+    let active_provider_tree = trees_by_key.get(&active_key).cloned().unwrap_or_default();
+    let active_provider_items = items_by_key.get(&active_key).cloned().unwrap_or_default();
+    let inner_path = initial_path_for_active_model(
+        &active_provider_tree,
+        active_model_id,
+        &active_provider_items,
+    );
+    let mut path = vec![active_idx];
+    path.extend(inner_path);
+
+    app.picker_provider_labels = labels;
+    app.picker_provider_keys = keys;
+    app.picker_items_by_key = items_by_key;
+    app.picker_trees_by_key = trees_by_key;
+    app.model_picker_focus = path.len().saturating_sub(1);
+    app.model_picker_path = path;
+    app.show_model_picker = true;
 }
 
 fn initial_path_for_active_model(

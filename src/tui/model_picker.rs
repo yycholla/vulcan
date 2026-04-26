@@ -193,6 +193,196 @@ fn build_series_node(series: &str, leaves: &[(usize, Vec<String>)]) -> TreeNode 
     node
 }
 
+/// `MillerSource` adapter for the unified picker (YYC-102 follow-up).
+/// Column 0 = configured providers; columns 1+ = the highlighted
+/// provider's lab/series/version tree. Catalogs are passed in keyed by
+/// stable cache keys (`"default"` for the legacy `[provider]` block,
+/// the profile name for `[providers.<name>]` blocks).
+pub struct UnifiedPickerSource<'a> {
+    /// Display labels for column 0, parallel to `provider_keys`.
+    pub provider_labels: &'a [String],
+    /// Cache keys per column-0 row. `None` ↔ legacy `[provider]`.
+    pub provider_keys: &'a [Option<String>],
+    /// Per-provider catalog (already fetched).
+    pub items_by_key: &'a std::collections::HashMap<String, Vec<ModelInfo>>,
+    /// Per-provider model tree built from the catalog.
+    pub trees_by_key: &'a std::collections::HashMap<String, ModelTree>,
+}
+
+impl<'a> UnifiedPickerSource<'a> {
+    pub fn key_for(&self, provider_idx: usize) -> &str {
+        match self.provider_keys.get(provider_idx) {
+            Some(Some(name)) => name.as_str(),
+            _ => "default",
+        }
+    }
+
+    fn tree_for(&self, provider_idx: usize) -> Option<&'a ModelTree> {
+        self.trees_by_key.get(self.key_for(provider_idx))
+    }
+
+    fn items_for(&self, provider_idx: usize) -> Option<&'a [ModelInfo]> {
+        self.items_by_key
+            .get(self.key_for(provider_idx))
+            .map(|v| v.as_slice())
+    }
+
+    fn nodes_at(&self, path: &[usize]) -> Option<&'a [TreeNode]> {
+        let provider_idx = *path.first()?;
+        let tree = self.tree_for(provider_idx)?;
+        let inner = &path[1..];
+        Some(tree.column_at(inner.len(), inner))
+    }
+
+    pub fn leaf_at(&self, path: &[usize]) -> Option<(String, String)> {
+        let provider_idx = *path.first()?;
+        let tree = self.tree_for(provider_idx)?;
+        let items = self.items_for(provider_idx)?;
+        let inner = &path[1..];
+        let mut current: &[TreeNode] = &tree.labs;
+        let mut leaf: Option<usize> = None;
+        for &idx in inner {
+            let node = current.get(idx)?;
+            if node.children.is_empty() {
+                leaf = node.model_index;
+                break;
+            }
+            leaf = node.model_index;
+            current = &node.children;
+        }
+        let id = items.get(leaf?)?.id.clone();
+        let provider_key = match self.provider_keys.get(provider_idx)? {
+            Some(name) => name.clone(),
+            None => "default".to_string(),
+        };
+        Some((provider_key, id))
+    }
+}
+
+impl<'a> MillerSource for UnifiedPickerSource<'a> {
+    fn header(&self, path: &[usize]) -> String {
+        if path.is_empty() {
+            return "~ providers".to_string();
+        }
+        let provider_idx = path[0];
+        let label = self
+            .provider_labels
+            .get(provider_idx)
+            .cloned()
+            .unwrap_or_else(|| "?".into());
+        if path.len() == 1 {
+            return label;
+        }
+        let Some(tree) = self.tree_for(provider_idx) else {
+            return label;
+        };
+        let inner = &path[1..];
+        let mut current: &[TreeNode] = &tree.labs;
+        let mut last = label;
+        for &idx in inner {
+            let Some(node) = current.get(idx) else {
+                return last;
+            };
+            last = node.label.clone();
+            if node.children.is_empty() {
+                return last;
+            }
+            current = &node.children;
+        }
+        last
+    }
+
+    fn entries(&self, path: &[usize]) -> Vec<MillerEntry> {
+        if path.is_empty() {
+            return self
+                .provider_labels
+                .iter()
+                .enumerate()
+                .map(|(i, label)| MillerEntry {
+                    label: label.clone(),
+                    icon: "▸".into(),
+                    has_children: self.tree_for(i).map(|t| !t.labs.is_empty()).unwrap_or(false),
+                })
+                .collect();
+        }
+        let Some(nodes) = self.nodes_at(path) else {
+            return Vec::new();
+        };
+        nodes
+            .iter()
+            .map(|node| MillerEntry {
+                label: node.label.clone(),
+                icon: if node.children.is_empty() { "·" } else { "▸" }.to_string(),
+                has_children: !node.children.is_empty(),
+            })
+            .collect()
+    }
+
+    fn preview(&self, path: &[usize]) -> Option<MillerPreview> {
+        if path.len() < 2 {
+            return None;
+        }
+        let provider_idx = *path.first()?;
+        let items = self.items_for(provider_idx)?;
+        let tree = self.tree_for(provider_idx)?;
+        let inner = &path[1..];
+        let mut current: &[TreeNode] = &tree.labs;
+        let mut leaf: Option<usize> = None;
+        for &idx in inner {
+            let node = current.get(idx)?;
+            if node.children.is_empty() {
+                leaf = node.model_index;
+                break;
+            }
+            leaf = node.model_index;
+            current = &node.children;
+        }
+        let model = items.get(leaf?)?;
+        let mut lines: Vec<Line<'static>> = Vec::new();
+        lines.push(Line::from(Span::styled(
+            model.id.clone(),
+            Style::default().add_modifier(Modifier::BOLD),
+        )));
+        lines.push(Line::from(""));
+        if model.context_length > 0 {
+            lines.push(Line::from(format!(
+                "context  : {}",
+                crate::tui::state::format_thousands(model.context_length as u32)
+            )));
+        }
+        let mut feats = Vec::new();
+        if model.features.tools {
+            feats.push("tools");
+        }
+        if model.features.reasoning {
+            feats.push("reasoning");
+        }
+        if model.features.vision {
+            feats.push("vision");
+        }
+        if model.features.json_mode {
+            feats.push("json");
+        }
+        if !feats.is_empty() {
+            lines.push(Line::from(format!("features : {}", feats.join(", "))));
+        }
+        if let Some(p) = &model.pricing {
+            lines.push(Line::from(format!(
+                "pricing  : ${:.4}/1k in · ${:.4}/1k out",
+                p.input_per_token * 1000.0,
+                p.output_per_token * 1000.0,
+            )));
+        }
+        if let Some(top) = &model.top_provider {
+            lines.push(Line::from(format!("upstream : {top}")));
+        }
+        Some(MillerPreview {
+            title: model.id.clone(),
+            lines,
+        })
+    }
+}
+
 /// `MillerSource` adapter that drives the universal miller-columns
 /// widget from a `ModelTree` + the source catalog (YYC-102).
 pub struct ModelPickerSource<'a> {

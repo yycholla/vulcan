@@ -540,15 +540,20 @@ pub struct AppState {
     /// Index into `sessions` for the highlighted row in the picker.
     pub session_picker_selection: usize,
 
-    /// Model picker overlay (YYC-97 → YYC-101 hierarchical). Opened by
-    /// `/model` with no args; items are populated from the active
-    /// provider's catalog at open time. Tree columns drill
-    /// lab → series → version. `Enter` triggers `Agent::switch_model`.
+    /// Unified model picker overlay (YYC-97 → YYC-101 → YYC-102). Opened
+    /// by `/model` with no args. Column 0 lists configured providers;
+    /// columns 1+ drill the highlighted provider's catalog
+    /// lab → series → version. `Enter` switches both provider and model.
     pub show_model_picker: bool,
-    /// Source catalog for the picker; rebuilt each open.
-    pub model_picker_items: Vec<crate::provider::catalog::ModelInfo>,
-    /// Hierarchical tree built from `model_picker_items`.
-    pub model_picker_tree: super::model_picker::ModelTree,
+    /// Display labels for column 0, parallel to `picker_provider_keys`.
+    pub picker_provider_labels: Vec<String>,
+    /// Cache keys per column-0 row. `None` = legacy `[provider]` block.
+    pub picker_provider_keys: Vec<Option<String>>,
+    /// Catalog cache keyed by provider key (`"default"` for legacy).
+    pub picker_items_by_key:
+        std::collections::HashMap<String, Vec<crate::provider::catalog::ModelInfo>>,
+    /// Tree cache keyed by provider key.
+    pub picker_trees_by_key: std::collections::HashMap<String, super::model_picker::ModelTree>,
     /// Selection index per drilled column.
     pub model_picker_path: Vec<usize>,
     /// Which column currently has focus (0 = column 0, etc.).
@@ -670,8 +675,10 @@ impl AppState {
             session_picker_selection: 0,
 
             show_model_picker: false,
-            model_picker_items: Vec::new(),
-            model_picker_tree: super::model_picker::ModelTree::default(),
+            picker_provider_labels: Vec::new(),
+            picker_provider_keys: Vec::new(),
+            picker_items_by_key: std::collections::HashMap::new(),
+            picker_trees_by_key: std::collections::HashMap::new(),
             model_picker_path: Vec::new(),
             model_picker_focus: 0,
 
