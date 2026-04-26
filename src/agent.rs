@@ -568,14 +568,10 @@ impl Agent {
         })
     }
 
-    /// Test/bench-only constructor that takes a fully-built provider and an
-    /// empty (or test-curated) registry. Bypasses the env-derived config
-    /// path so tests don't need a real API key. Memory points at an in-memory or
-    /// temporary store via the caller — this constructor leaves the real
-    /// `SessionStore::new()` path which writes to ~/.vulcan; tests should
-    /// override `Agent::memory` if they care about isolation, or pass a
-    /// custom session_id and accept that ~/.vulcan/sessions.db gets touched.
-    #[cfg(any(test, feature = "bench-soak"))]
+    /// Test/bench constructor that takes a fully-built provider and registry.
+    /// Bypasses env-derived config so tests don't need a real API key and uses
+    /// an in-memory session store.
+    #[doc(hidden)]
     pub fn for_test(
         provider: Box<dyn LLMProvider>,
         tools: ToolRegistry,
@@ -670,6 +666,7 @@ impl Agent {
                 messages.push(msg);
             }
         }
+        self.last_saved_count = messages.len();
 
         messages.push(Message::User {
             content: input.to_string(),
@@ -777,6 +774,11 @@ impl Agent {
                     continue;
                 }
 
+                messages.push(Message::Assistant {
+                    content: Some(text.clone()),
+                    tool_calls: None,
+                    reasoning_content: reasoning,
+                });
                 self.save_messages(&messages)?;
                 self.turns = self.turns.saturating_add(1);
                 if iteration >= 5 {
@@ -996,6 +998,7 @@ impl Agent {
                 messages.push(msg);
             }
         }
+        self.last_saved_count = messages.len();
 
         messages.push(Message::User {
             content: input.to_string(),
