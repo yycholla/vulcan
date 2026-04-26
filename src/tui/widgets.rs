@@ -164,7 +164,12 @@ pub enum ToolStatus {
 /// role. The visible reasoning rows sit on the structural FAINT
 /// backdrop (a Bauhaus tint that's always lighter than PAPER) — the
 /// inset-card affordance is design-locked, not themed.
-pub fn reasoning_lines(text: &str, hidden: bool, theme: &Theme) -> Vec<Line<'static>> {
+pub fn reasoning_lines(
+    text: &str,
+    hidden: bool,
+    theme: &Theme,
+    width: u16,
+) -> Vec<Line<'static>> {
     if hidden {
         return vec![Line::from(Span::styled(
             "░░░ reasoning trace hidden · Ctrl-R to show ░░░",
@@ -175,11 +180,28 @@ pub fn reasoning_lines(text: &str, hidden: bool, theme: &Theme) -> Vec<Line<'sta
         " ▒ THINKING",
         theme.muted.add_modifier(Modifier::BOLD),
     ))];
+    // YYC-104 follow-up: pre-wrap each source line so the `▒` rail
+    // repeats on every visual row instead of breaking after the first
+    // when Paragraph::wrap takes over.
+    let prefix = " ▒ ";
+    let inner_width = width.saturating_sub(prefix.chars().count() as u16).max(1) as usize;
+    let body_style = theme.muted.add_modifier(Modifier::ITALIC);
     for raw in text.lines() {
-        lines.push(Line::from(Span::styled(
-            format!(" ▒ {}", raw),
-            theme.muted.add_modifier(Modifier::ITALIC),
-        )));
+        let chars: Vec<char> = raw.chars().collect();
+        if chars.is_empty() {
+            lines.push(Line::from(Span::styled(prefix.to_string(), body_style)));
+            continue;
+        }
+        let mut idx = 0usize;
+        while idx < chars.len() {
+            let end = (idx + inner_width).min(chars.len());
+            let chunk: String = chars[idx..end].iter().collect();
+            lines.push(Line::from(Span::styled(
+                format!("{prefix}{chunk}"),
+                body_style,
+            )));
+            idx = end;
+        }
     }
     lines
 }

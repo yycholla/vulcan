@@ -517,7 +517,7 @@ fn tiled_mesh(f: &mut TuiFrame, area: Rect, app: &AppState) {
         if i == 0 && app.show_reasoning {
             lines.push(Line::from(""));
             if let Some(reasoning) = app.latest_reasoning() {
-                for l in super::widgets::reasoning_lines(reasoning, false, &app.theme) {
+                for l in super::widgets::reasoning_lines(reasoning, false, &app.theme, area.width) {
                     lines.push(l);
                 }
             } else {
@@ -630,7 +630,7 @@ fn tree_of_thought(f: &mut TuiFrame, area: Rect, app: &AppState) {
     if app.show_reasoning {
         if let Some(reasoning) = app.latest_reasoning() {
             lines.push(Line::from(""));
-            for l in super::widgets::reasoning_lines(reasoning, false, &app.theme) {
+            for l in super::widgets::reasoning_lines(reasoning, false, &app.theme, area.width) {
                 lines.push(l);
             }
         }
