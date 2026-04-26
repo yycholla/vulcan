@@ -28,7 +28,7 @@ pub mod views;
 pub mod widgets;
 
 use state::{AppState, ChatMessage, ChatRole, SessionStatus};
-use theme::{Palette, body};
+use theme::{Palette, Theme, body};
 use views::{View, render_view};
 
 const STREAM_FRAME_BUDGET: Duration = Duration::from_millis(16);
@@ -425,7 +425,8 @@ pub async fn run_tui(config: &Config, resume: ResumeTarget) -> Result<()> {
     let mut app = AppState::new(
         config.provider.model.clone(),
         config.provider.max_context as u32,
-    );
+    )
+    .with_theme(Theme::from_name(&config.tui.theme));
     app.audit_log = Some(audit_buf);
     // YYC-66: clone the agent's diff sink so the TUI can render real edits.
     // YYC-67: pull catalog pricing for the cost estimate.

@@ -22,7 +22,7 @@ use ratatui::style::Color;
 use crate::hooks::audit::{AuditBuffer, AuditKind};
 use crate::memory::SessionSummary;
 
-use super::theme::Palette;
+use super::theme::{Palette, Theme};
 use super::views::{DiffKind, DiffLine, View};
 
 /// Diff render style (YYC-77). Toggled by `/diff-style`.
@@ -511,6 +511,12 @@ pub struct AppState {
     pub show_session_picker: bool,
     /// Index into `sessions` for the highlighted row in the picker.
     pub session_picker_selection: usize,
+
+    /// Active TUI theme — render code reads role styles via `state.theme.<role>`.
+    /// Defaults to `Theme::system()` in `AppState::new` so unconfigured/test
+    /// callers inherit terminal palette; production wires the real config-derived
+    /// theme via `.with_theme(...)` post-construction.
+    pub theme: Theme,
 }
 
 impl AppState {
@@ -554,7 +560,16 @@ impl AppState {
 
             show_session_picker: false,
             session_picker_selection: 0,
+
+            theme: Theme::system(),
         }
+    }
+
+    /// Replace the active theme. Used by the TUI entrypoint to swap the
+    /// default `Theme::system()` for the user's configured theme.
+    pub fn with_theme(mut self, theme: Theme) -> Self {
+        self.theme = theme;
+        self
     }
 
     /// Snapshot the most recent N rows of the audit buffer for the
