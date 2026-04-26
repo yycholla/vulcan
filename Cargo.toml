@@ -18,7 +18,7 @@ default = []
 # profiler that swaps the global allocator) and hdrhistogram (latency
 # percentiles) — both optional so production builds skip them entirely.
 bench-soak = ["dep:dhat", "dep:hdrhistogram"]
-gateway = ["dep:axum", "dep:tower", "dep:tower-http"]
+gateway = ["dep:axum", "dep:tower", "dep:tower-http", "dep:subtle"]
 
 [dependencies]
 # Async runtime
@@ -90,6 +90,7 @@ ignore = "0.4.25"
 axum = { version = "0.8.9", optional = true }
 tower = { version = "0.5.3", features = ["util"], optional = true }
 tower-http = { version = "0.6.8", features = ["trace", "cors"], optional = true }
+subtle = { version = "2.6.1", optional = true }
 
 # Heap profiler for the soak binary. Optional — only linked under `bench-soak`.
 dhat = { version = "0.3", optional = true }

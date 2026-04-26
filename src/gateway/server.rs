@@ -59,7 +59,15 @@ async fn bearer_auth(
     let Some(provided) = header.and_then(|h| h.strip_prefix("Bearer ")) else {
         return Err(StatusCode::UNAUTHORIZED);
     };
-    if provided != state.api_token.as_str() {
+    // Constant-time compare: avoids leaking the prefix length of the
+    // configured token via early-out on byte mismatch.
+    use subtle::ConstantTimeEq;
+    if provided
+        .as_bytes()
+        .ct_eq(state.api_token.as_bytes())
+        .unwrap_u8()
+        == 0
+    {
         return Err(StatusCode::UNAUTHORIZED);
     }
     Ok(next.run(req).await)
