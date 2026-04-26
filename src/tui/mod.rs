@@ -163,6 +163,7 @@ fn short_id(id: &str) -> String {
     id.chars().take(8).collect()
 }
 
+#[allow(dead_code)] // retained for tests and potential `--help`-style printers.
 fn format_model_list(active_model: &str, models: &[crate::provider::catalog::ModelInfo]) -> String {
     let mut out = format!("Models from active provider ({} total):", models.len());
     for model in models.iter().take(30) {
@@ -199,6 +200,28 @@ fn format_model_list(active_model: &str, models: &[crate::provider::catalog::Mod
     out
 }
 
+fn build_provider_picker_entries(config: &Config) -> Vec<crate::tui::state::ProviderPickerEntry> {
+    use crate::tui::state::ProviderPickerEntry;
+    let mut out = Vec::with_capacity(config.providers.len() + 1);
+    out.push(ProviderPickerEntry {
+        name: None,
+        model: config.provider.model.clone(),
+        base_url: config.provider.base_url.clone(),
+    });
+    let mut names: Vec<&String> = config.providers.keys().collect();
+    names.sort();
+    for name in names {
+        let cfg = &config.providers[name];
+        out.push(ProviderPickerEntry {
+            name: Some(name.clone()),
+            model: cfg.model.clone(),
+            base_url: cfg.base_url.clone(),
+        });
+    }
+    out
+}
+
+#[allow(dead_code)] // retained for tests and potential `--help`-style printers.
 fn format_provider_list(config: &Config, active: Option<&str>) -> String {
     let mut out = String::from("Provider profiles:");
     let default_marker = if active.is_none() { "*" } else { " " };
@@ -643,8 +666,154 @@ pub async fn run_tui(config: &Config, resume: ResumeTarget) -> Result<()> {
             if app.show_session_picker {
                 draw_session_picker(f, area, &app);
             }
+            // YYC-97: model / provider picker overlays.
+            if app.show_model_picker {
+                draw_model_picker(f, area, &app);
+            }
+            if app.show_provider_picker {
+                draw_provider_picker(f, area, &app);
+            }
         })?;
         last_draw = Instant::now();
+
+        // ── Model picker overlay (YYC-97): intercept input until dismissed.
+        if app.show_model_picker {
+            tokio::select! {
+                ev = key_rx.recv() => {
+                    match ev {
+                        Some(KeyEv::Press(event)) => {
+                            if let Event::Key(key) = event {
+                                if key.kind == KeyEventKind::Press {
+                                    match key.code {
+                                        KeyCode::Up | KeyCode::Char('k') => {
+                                            app.model_picker_selection = app.model_picker_selection.saturating_sub(1);
+                                        }
+                                        KeyCode::Down | KeyCode::Char('j') => {
+                                            let max = app.model_picker_items.len().saturating_sub(1);
+                                            app.model_picker_selection = app.model_picker_selection.saturating_add(1).min(max);
+                                        }
+                                        KeyCode::Enter => {
+                                            let idx = app.model_picker_selection.min(app.model_picker_items.len().saturating_sub(1));
+                                            if let Some(picked) = app.model_picker_items.get(idx).cloned() {
+                                                let result = {
+                                                    let mut a = agent.lock().await;
+                                                    a.switch_model(&picked.id).await
+                                                };
+                                                match result {
+                                                    Ok(selection) => {
+                                                        app.model_label = selection.model.id.clone();
+                                                        app.token_max = selection.max_context as u32;
+                                                        app.pricing = selection.pricing;
+                                                        app.messages.push(ChatMessage {
+                                                            role: ChatRole::System,
+                                                            content: format!(
+                                                                "Model switched to {} · context {}",
+                                                                app.model_label,
+                                                                crate::tui::state::format_thousands(app.token_max),
+                                                            ),
+                                                            ..Default::default()
+                                                        });
+                                                    }
+                                                    Err(e) => {
+                                                        app.messages.push(ChatMessage {
+                                                            role: ChatRole::System,
+                                                            content: format!("Model switch failed: {e}"),
+                                                            ..Default::default()
+                                                        });
+                                                    }
+                                                }
+                                            }
+                                            app.show_model_picker = false;
+                                        }
+                                        KeyCode::Esc => {
+                                            app.show_model_picker = false;
+                                        }
+                                        _ => {}
+                                    }
+                                }
+                            }
+                        }
+                        Some(KeyEv::Error(e)) => {
+                            tracing::error!("Terminal input error (model picker): {e}");
+                            app.show_model_picker = false;
+                        }
+                        None => app.show_model_picker = false,
+                    }
+                }
+            }
+            continue;
+        }
+
+        // ── Provider picker overlay (YYC-97): intercept input until dismissed.
+        if app.show_provider_picker {
+            tokio::select! {
+                ev = key_rx.recv() => {
+                    match ev {
+                        Some(KeyEv::Press(event)) => {
+                            if let Event::Key(key) = event {
+                                if key.kind == KeyEventKind::Press {
+                                    match key.code {
+                                        KeyCode::Up | KeyCode::Char('k') => {
+                                            app.provider_picker_selection = app.provider_picker_selection.saturating_sub(1);
+                                        }
+                                        KeyCode::Down | KeyCode::Char('j') => {
+                                            let max = app.provider_picker_items.len().saturating_sub(1);
+                                            app.provider_picker_selection = app.provider_picker_selection.saturating_add(1).min(max);
+                                        }
+                                        KeyCode::Enter => {
+                                            let idx = app.provider_picker_selection.min(app.provider_picker_items.len().saturating_sub(1));
+                                            if let Some(picked) = app.provider_picker_items.get(idx).cloned() {
+                                                let target: Option<&str> = picked.name.as_deref();
+                                                let result = {
+                                                    let mut a = agent.lock().await;
+                                                    a.switch_provider(target, config).await
+                                                };
+                                                match result {
+                                                    Ok(selection) => {
+                                                        app.model_label = selection.model.id.clone();
+                                                        app.token_max = selection.max_context as u32;
+                                                        app.pricing = selection.pricing;
+                                                        app.provider_label = target.map(str::to_string);
+                                                        let label = target.unwrap_or("default");
+                                                        app.messages.push(ChatMessage {
+                                                            role: ChatRole::System,
+                                                            content: format!(
+                                                                "Provider switched to {label} · {} · context {}",
+                                                                app.model_label,
+                                                                crate::tui::state::format_thousands(app.token_max),
+                                                            ),
+                                                            ..Default::default()
+                                                        });
+                                                    }
+                                                    Err(e) => {
+                                                        app.messages.push(ChatMessage {
+                                                            role: ChatRole::System,
+                                                            content: format!("Provider switch failed: {e}"),
+                                                            ..Default::default()
+                                                        });
+                                                    }
+                                                }
+                                            }
+                                            app.show_provider_picker = false;
+                                        }
+                                        KeyCode::Esc => {
+                                            app.show_provider_picker = false;
+                                        }
+                                        _ => {}
+                                    }
+                                }
+                            }
+                        }
+                        Some(KeyEv::Error(e)) => {
+                            tracing::error!("Terminal input error (provider picker): {e}");
+                            app.show_provider_picker = false;
+                        }
+                        None => app.show_provider_picker = false,
+                    }
+                }
+            }
+            continue;
+        }
 
         // ── Session picker mode: intercept all input until dismissed.
         if app.show_session_picker {
@@ -1164,15 +1333,20 @@ pub async fn run_tui(config: &Config, resume: ResumeTarget) -> Result<()> {
                                                     s if s == "provider" || s.starts_with("provider ") => {
                                                         let arg = s["provider".len()..].trim();
                                                         if arg.is_empty() {
-                                                            let report = {
+                                                            // YYC-97: arrow-key picker overlay.
+                                                            let active = {
                                                                 let a = agent.lock().await;
-                                                                format_provider_list(config, a.active_profile())
+                                                                a.active_profile().map(str::to_string)
                                                             };
-                                                            app.messages.push(ChatMessage {
-                                                                role: ChatRole::System,
-                                                                content: report,
-                                                                ..Default::default()
-                                                            });
+                                                            app.provider_picker_items =
+                                                                build_provider_picker_entries(config);
+                                                            let active_idx = app
+                                                                .provider_picker_items
+                                                                .iter()
+                                                                .position(|e| e.name == active)
+                                                                .unwrap_or(0);
+                                                            app.provider_picker_selection = active_idx;
+                                                            app.show_provider_picker = true;
                                                             continue;
                                                         }
 
@@ -1215,24 +1389,39 @@ pub async fn run_tui(config: &Config, resume: ResumeTarget) -> Result<()> {
                                                     s if s == "model" || s.starts_with("model ") => {
                                                         let arg = s["model".len()..].trim();
                                                         if arg.is_empty() {
-                                                            let report = {
+                                                            // YYC-97: arrow-key picker overlay.
+                                                            let (models_result, active) = {
                                                                 let a = agent.lock().await;
-                                                                match a.available_models().await {
-                                                                    Ok(models) if models.is_empty() => {
-                                                                        "Provider catalog returned no models.".to_string()
-                                                                    }
-                                                                    Ok(models) => format_model_list(
-                                                                        a.active_model(),
-                                                                        &models,
-                                                                    ),
-                                                                    Err(e) => format!("Model catalog fetch failed: {e}"),
-                                                                }
+                                                                (
+                                                                    a.available_models().await,
+                                                                    a.active_model().to_string(),
+                                                                )
                                                             };
-                                                            app.messages.push(ChatMessage {
-                                                                role: ChatRole::System,
-                                                                content: report,
-                                                                ..Default::default()
-                                                            });
+                                                            match models_result {
+                                                                Ok(models) if models.is_empty() => {
+                                                                    app.messages.push(ChatMessage {
+                                                                        role: ChatRole::System,
+                                                                        content: "Provider catalog returned no models.".into(),
+                                                                        ..Default::default()
+                                                                    });
+                                                                }
+                                                                Ok(models) => {
+                                                                    let active_idx = models
+                                                                        .iter()
+                                                                        .position(|m| m.id == active)
+                                                                        .unwrap_or(0);
+                                                                    app.model_picker_items = models;
+                                                                    app.model_picker_selection = active_idx;
+                                                                    app.show_model_picker = true;
+                                                                }
+                                                                Err(e) => {
+                                                                    app.messages.push(ChatMessage {
+                                                                        role: ChatRole::System,
+                                                                        content: format!("Model catalog fetch failed: {e}"),
+                                                                        ..Default::default()
+                                                                    });
+                                                                }
+                                                            }
                                                             continue;
                                                         }
 
@@ -1427,6 +1616,34 @@ mod tests {
 
         assert!(!command.mid_turn_safe);
         assert_eq!(filter_commands("mod")[0].name, "model");
+    }
+
+    #[test]
+    fn build_provider_picker_entries_lists_default_first_then_named_sorted() {
+        use crate::config::{Config, ProviderConfig};
+        use std::collections::HashMap;
+
+        let mut providers = HashMap::new();
+        let mut local = ProviderConfig::default();
+        local.base_url = "http://localhost:11434/v1".into();
+        local.model = "qwen2.5".into();
+        providers.insert("local".into(), local);
+        let mut alpha = ProviderConfig::default();
+        alpha.base_url = "https://alpha.example".into();
+        alpha.model = "alpha-1".into();
+        providers.insert("alpha".into(), alpha);
+
+        let mut config = Config::default();
+        config.provider.base_url = "https://openrouter.ai/api/v1".into();
+        config.provider.model = "deepseek/v4".into();
+        config.providers = providers;
+
+        let entries = build_provider_picker_entries(&config);
+        assert_eq!(entries.len(), 3);
+        assert!(entries[0].name.is_none());
+        assert_eq!(entries[0].model, "deepseek/v4");
+        assert_eq!(entries[1].name.as_deref(), Some("alpha"));
+        assert_eq!(entries[2].name.as_deref(), Some("local"));
     }
 
     #[test]
@@ -1694,6 +1911,194 @@ fn draw_session_picker(f: &mut ratatui::Frame, area: Rect, app: &AppState) {
     );
 
     // Draw a border around the whole thing
+    draw_picker_border(f, box_area, theme);
+}
+
+fn draw_model_picker(f: &mut ratatui::Frame, area: Rect, app: &AppState) {
+    let theme = &app.theme;
+    let width = area.width.min(72);
+    let rows = (app.model_picker_items.len() as u16).min(20);
+    let height = (rows + 5).min(area.height.saturating_sub(2));
+    let x = area.x + (area.width.saturating_sub(width)) / 2;
+    let y = area.y + (area.height.saturating_sub(height)) / 2;
+    let box_area = Rect { x, y, width, height };
+    if box_area.height < 4 {
+        return;
+    }
+
+    let bar = Rect {
+        x: box_area.x,
+        y: box_area.y,
+        width: box_area.width,
+        height: 1,
+    };
+    let mut title = "  Switch Model  ".to_string();
+    if (title.chars().count() as u16) < bar.width {
+        let pad = bar.width as usize - title.chars().count();
+        title = format!(
+            "{}{}{}",
+            " ".repeat(pad / 2),
+            title.trim(),
+            " ".repeat(pad - pad / 2)
+        );
+    }
+    f.render_widget(
+        Paragraph::new(title).style(theme.accent.add_modifier(Modifier::BOLD)),
+        bar,
+    );
+
+    let list_area = Rect {
+        x: box_area.x,
+        y: box_area.y + 1,
+        width: box_area.width,
+        height: box_area.height.saturating_sub(2),
+    };
+
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    if app.model_picker_items.is_empty() {
+        lines.push(Line::from(Span::styled(
+            "  No models in provider catalog.",
+            theme.muted,
+        )));
+    } else {
+        let visible = list_area.height.saturating_sub(2) as usize;
+        let active = app
+            .model_picker_selection
+            .min(app.model_picker_items.len().saturating_sub(1));
+        let start = active.saturating_sub(visible.saturating_sub(1) / 2);
+        let end = (start + visible).min(app.model_picker_items.len());
+        for (i, m) in app.model_picker_items.iter().enumerate().take(end).skip(start) {
+            let is_active = i == active;
+            let marker = if is_active { "▸ " } else { "  " };
+            let context = if m.context_length > 0 {
+                crate::tui::state::format_thousands(m.context_length as u32)
+            } else {
+                "?".into()
+            };
+            let mut flags = Vec::new();
+            if m.features.tools {
+                flags.push("tools");
+            }
+            if m.features.reasoning {
+                flags.push("reasoning");
+            }
+            if m.features.vision {
+                flags.push("vision");
+            }
+            if m.features.json_mode {
+                flags.push("json");
+            }
+            let flag_str = if flags.is_empty() {
+                String::new()
+            } else {
+                format!(" · {}", flags.join(","))
+            };
+            let row_style = Style::default()
+                .fg(theme.body_fg)
+                .add_modifier(if is_active {
+                    Modifier::BOLD
+                } else {
+                    Modifier::empty()
+                });
+            lines.push(Line::from(vec![
+                Span::styled(marker, row_style.add_modifier(Modifier::BOLD)),
+                Span::styled(m.id.clone(), row_style),
+                Span::styled(format!("  ctx {context}{flag_str}"), theme.muted),
+            ]));
+        }
+        if start > 0 || end < app.model_picker_items.len() {
+            lines.push(Line::from(Span::styled(
+                format!(
+                    "  …showing {}–{} of {}",
+                    start + 1,
+                    end,
+                    app.model_picker_items.len()
+                ),
+                theme.muted.add_modifier(Modifier::DIM),
+            )));
+        }
+    }
+
+    let hint = "  ↑↓ navigate · Enter select · Esc cancel  ";
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(hint, theme.muted)));
+
+    f.render_widget(Paragraph::new(lines), list_area);
+    draw_picker_border(f, box_area, theme);
+}
+
+fn draw_provider_picker(f: &mut ratatui::Frame, area: Rect, app: &AppState) {
+    let theme = &app.theme;
+    let width = area.width.min(72);
+    let rows = (app.provider_picker_items.len() as u16).min(12);
+    let height = (rows + 5).min(area.height.saturating_sub(2));
+    let x = area.x + (area.width.saturating_sub(width)) / 2;
+    let y = area.y + (area.height.saturating_sub(height)) / 2;
+    let box_area = Rect { x, y, width, height };
+    if box_area.height < 4 {
+        return;
+    }
+
+    let bar = Rect {
+        x: box_area.x,
+        y: box_area.y,
+        width: box_area.width,
+        height: 1,
+    };
+    let mut title = "  Switch Provider  ".to_string();
+    if (title.chars().count() as u16) < bar.width {
+        let pad = bar.width as usize - title.chars().count();
+        title = format!(
+            "{}{}{}",
+            " ".repeat(pad / 2),
+            title.trim(),
+            " ".repeat(pad - pad / 2)
+        );
+    }
+    f.render_widget(
+        Paragraph::new(title).style(theme.accent.add_modifier(Modifier::BOLD)),
+        bar,
+    );
+
+    let list_area = Rect {
+        x: box_area.x,
+        y: box_area.y + 1,
+        width: box_area.width,
+        height: box_area.height.saturating_sub(2),
+    };
+
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    if app.provider_picker_items.is_empty() {
+        lines.push(Line::from(Span::styled("  (no providers)", theme.muted)));
+    } else {
+        let active = app
+            .provider_picker_selection
+            .min(app.provider_picker_items.len().saturating_sub(1));
+        for (i, e) in app.provider_picker_items.iter().enumerate() {
+            let is_active = i == active;
+            let marker = if is_active { "▸ " } else { "  " };
+            let label = e.name.clone().unwrap_or_else(|| "default".into());
+            let row_style = Style::default()
+                .fg(theme.body_fg)
+                .add_modifier(if is_active {
+                    Modifier::BOLD
+                } else {
+                    Modifier::empty()
+                });
+            lines.push(Line::from(vec![
+                Span::styled(marker, row_style.add_modifier(Modifier::BOLD)),
+                Span::styled(format!("{label:<12}"), row_style),
+                Span::styled(format!(" {}", e.model), theme.muted),
+                Span::styled(format!("  ({})", e.base_url), theme.muted),
+            ]));
+        }
+    }
+
+    let hint = "  ↑↓ navigate · Enter select · Esc cancel  ";
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(hint, theme.muted)));
+
+    f.render_widget(Paragraph::new(lines), list_area);
     draw_picker_border(f, box_area, theme);
 }
 
