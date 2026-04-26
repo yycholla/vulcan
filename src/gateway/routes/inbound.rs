@@ -20,6 +20,8 @@ pub async fn handle(
 ) -> Result<(StatusCode, Json<serde_json::Value>), (StatusCode, Json<serde_json::Value>)> {
     // Reject unknown platforms early so unsuited messages don't pollute the queue.
     if state.registry.get(&body.platform).is_none() {
+        tracing::warn!(target: "gateway::inbound",
+            platform = %body.platform, "unknown platform rejected");
         return Err((
             StatusCode::BAD_REQUEST,
             Json(

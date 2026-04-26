@@ -25,6 +25,11 @@ pub struct AppState {
 /// Topology: `/health` is unauthenticated; everything under `/v1/*` is wrapped
 /// in a bearer-auth middleware. The middleware lives on the nested `/v1`
 /// router (not the outer one) so the public `/health` endpoint isn't affected.
+/// Maximum body size for `/v1/*` JSON requests. Keeps a single oversized
+/// payload from filling the SQLite queue. Webhook routes (Task 16) may
+/// override this per-platform if a connector publishes large payloads.
+const V1_BODY_LIMIT_BYTES: usize = 64 * 1024;
+
 pub fn build_router(state: AppState) -> Router {
     let v1 = Router::new()
         .route(
@@ -35,6 +40,7 @@ pub fn build_router(state: AppState) -> Router {
             "/inbound",
             axum::routing::post(crate::gateway::routes::inbound::handle),
         )
+        .layer(axum::extract::DefaultBodyLimit::max(V1_BODY_LIMIT_BYTES))
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             bearer_auth,
