@@ -431,7 +431,7 @@ fn initialize_conn(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "gateway"))]
 pub(crate) fn initialize_test_conn(conn: &Connection) -> Result<()> {
     initialize_conn(conn)
 }
