@@ -1,7 +1,7 @@
 use ratatui::{
     Frame as TuiFrame,
     layout::{Constraint, Direction, Layout, Rect},
-    style::{Modifier, Style},
+    style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{Paragraph, Wrap},
 };
@@ -107,12 +107,14 @@ fn build_chat_window(
             show_reasoning,
             dense,
             width,
+            muted_style: app.theme.muted,
         };
         let message_scroll = window_start.saturating_sub(message_start) as u16;
         let remaining_height = height.saturating_sub(lines.len() as u16);
         let message_window = app.chat_render_store.borrow_mut().visible_lines(
             &app.messages,
             options,
+            &app.theme,
             message_scroll,
             remaining_height,
             app.pending_pause.as_ref(),
@@ -147,9 +149,7 @@ fn build_chat_prefix_lines(app: &AppState) -> Vec<Line<'static>> {
     let mut lines = vec![
         Line::from(Span::styled(
             format!("── session · {} ──", app.session_label),
-            Style::default()
-                .fg(Palette::MUTED)
-                .add_modifier(Modifier::DIM),
+            app.theme.muted.add_modifier(Modifier::DIM),
         )),
         Line::from(""),
     ];
@@ -157,7 +157,7 @@ fn build_chat_prefix_lines(app: &AppState) -> Vec<Line<'static>> {
     if app.messages.is_empty() {
         lines.push(Line::from(Span::styled(
             "Type a message below to start. Press Ctrl+1..5 to switch views.",
-            Style::default().fg(Palette::MUTED),
+            app.theme.muted,
         )));
     }
 
@@ -170,7 +170,7 @@ fn build_chat_suffix_lines(app: &AppState) -> Vec<Line<'static>> {
     if let Some(p) = app.pending_pause.as_ref() {
         if !p.options.is_empty() {
             let mut pill_spans: Vec<Span<'static>> = Vec::new();
-            pill_spans.push(Span::styled("▎ ", Style::default().fg(Palette::INK)));
+            pill_spans.push(Span::styled("▎ ", app.theme.user));
             for (i, opt) in p.options.iter().enumerate() {
                 if i > 0 {
                     pill_spans.push(Span::raw("  "));
@@ -192,25 +192,16 @@ fn build_chat_suffix_lines(app: &AppState) -> Vec<Line<'static>> {
     if !app.queue.is_empty() {
         lines.push(Line::from(Span::styled(
             format!("── queue · {} pending ──", app.queue.len()),
-            Style::default()
-                .fg(Palette::MUTED)
-                .add_modifier(Modifier::DIM),
+            app.theme.muted.add_modifier(Modifier::DIM),
         )));
         for (idx, qmsg) in app.queue.iter().enumerate() {
             let preview: String = qmsg.chars().take(120).collect();
             lines.push(Line::from(vec![
                 Span::styled(
                     format!("▸ #{:<2} ", idx + 1),
-                    Style::default()
-                        .fg(Palette::MUTED)
-                        .add_modifier(Modifier::DIM),
+                    app.theme.muted.add_modifier(Modifier::DIM),
                 ),
-                Span::styled(
-                    preview,
-                    Style::default()
-                        .fg(Palette::MUTED)
-                        .add_modifier(Modifier::DIM),
-                ),
+                Span::styled(preview, app.theme.muted.add_modifier(Modifier::DIM)),
             ]));
         }
         lines.push(Line::from(""));
@@ -253,6 +244,7 @@ fn single_stack(f: &mut TuiFrame, area: Rect, app: &AppState) {
         app.view.title(),
         Some("ses 1/1 · ●live"),
         None,
+        &app.theme,
     );
     let chat_w = inner.width.saturating_sub(2);
     let window = build_chat_window(app, app.show_reasoning, false, chat_w, inner.height);
@@ -278,6 +270,7 @@ fn single_stack(f: &mut TuiFrame, area: Rect, app: &AppState) {
         &app.model_status(),
         app.context_ratio(),
         app.thinking,
+        &app.theme,
     );
     app.cursor_set(cx, cy);
 }
@@ -285,7 +278,7 @@ fn single_stack(f: &mut TuiFrame, area: Rect, app: &AppState) {
 // ─── 02 SPLIT SESSIONS ──────────────────────────────────────────────────
 
 fn split_sessions(f: &mut TuiFrame, area: Rect, app: &AppState) {
-    let outer = frame(f, area, app.view.title(), Some("5 sess · 2 live"), None);
+    let outer = frame(f, area, app.view.title(), Some("5 sess · 2 live"), None, &app.theme);
     let v = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Min(5), Constraint::Length(3)])
@@ -328,12 +321,12 @@ fn split_sessions(f: &mut TuiFrame, area: Rect, app: &AppState) {
         .map(|s| s.message_count)
         .unwrap_or(app.messages.len());
     let header_text = format!(" {active_name}   · {lineage} · {turn_count} msgs",);
+    let accent_bar = Style::default()
+        .fg(app.theme.body_bg)
+        .bg(app.theme.accent.fg.unwrap_or(Color::Reset));
     let mut spans = vec![Span::styled(
         header_text,
-        Style::default()
-            .fg(Palette::PAPER)
-            .bg(Palette::RED)
-            .add_modifier(Modifier::BOLD),
+        accent_bar.add_modifier(Modifier::BOLD),
     )];
     let used = spans
         .iter()
@@ -342,16 +335,10 @@ fn split_sessions(f: &mut TuiFrame, area: Rect, app: &AppState) {
     let live_label = " ● LIVE ";
     if used + live_label.len() as u16 + 1 < main.width {
         let pad = " ".repeat((main.width - used - live_label.len() as u16) as usize);
-        spans.push(Span::styled(
-            pad,
-            Style::default().fg(Palette::PAPER).bg(Palette::RED),
-        ));
+        spans.push(Span::styled(pad, accent_bar));
         spans.push(Span::styled(
             live_label.to_string(),
-            Style::default()
-                .fg(Palette::PAPER)
-                .bg(Palette::RED)
-                .add_modifier(Modifier::BOLD),
+            accent_bar.add_modifier(Modifier::BOLD),
         ));
     }
     f.render_widget(Paragraph::new(Line::from(spans)), header);
@@ -387,6 +374,7 @@ fn split_sessions(f: &mut TuiFrame, area: Rect, app: &AppState) {
         &app.model_status(),
         app.context_ratio(),
         app.thinking,
+        &app.theme,
     );
     app.cursor_set(cx, cy);
 }
@@ -399,30 +387,28 @@ fn render_session_rail(f: &mut TuiFrame, area: Rect, app: &AppState) {
     if app.sessions.is_empty() {
         lines.push(Line::from(Span::styled(
             " No saved sessions yet.",
-            Style::default().fg(Palette::MUTED),
+            app.theme.muted,
         )));
         lines.push(Line::from(Span::styled(
             " The active session will appear after hydration.",
-            Style::default().fg(Palette::FAINT),
+            app.theme.muted.add_modifier(Modifier::DIM),
         )));
     }
+    let accent_fg = app.theme.accent.fg.unwrap_or(Color::Reset);
+    let muted_fg = app.theme.muted.fg.unwrap_or(Color::Reset);
     for s in &app.sessions {
-        let status_color = match s.status {
-            SessionStatus::Live => Palette::GREEN,
-            SessionStatus::Saved => Palette::BLUE,
+        let status_style = match s.status {
+            SessionStatus::Live => app.theme.success,
+            SessionStatus::Saved => app.theme.accent,
         };
         let bar = if s.is_active { "▌" } else { " " };
-        let bar_color = if s.is_active {
-            Palette::RED
-        } else {
-            Palette::FAINT
-        };
+        let bar_color = if s.is_active { accent_fg } else { muted_fg };
         let bg = if s.is_active {
             Palette::PAPER
         } else {
             Palette::FAINT
         };
-        let style = Style::default().fg(Palette::INK).bg(bg);
+        let row_style = app.theme.assistant.bg(bg);
         lines.push(Line::from(vec![
             Span::styled(
                 bar,
@@ -431,8 +417,8 @@ fn render_session_rail(f: &mut TuiFrame, area: Rect, app: &AppState) {
                     .bg(bg)
                     .add_modifier(Modifier::BOLD),
             ),
-            Span::styled(" █ ", Style::default().fg(status_color).bg(bg)),
-            Span::styled(s.label.clone(), style.add_modifier(Modifier::BOLD)),
+            Span::styled(" █ ", status_style.bg(bg)),
+            Span::styled(s.label.clone(), row_style.add_modifier(Modifier::BOLD)),
         ]));
         lines.push(Line::from(vec![
             Span::styled(bar, Style::default().fg(bar_color).bg(bg)),
@@ -442,7 +428,7 @@ fn render_session_rail(f: &mut TuiFrame, area: Rect, app: &AppState) {
                     s.status.label().to_uppercase(),
                     s.message_count
                 ),
-                Style::default().fg(Palette::MUTED).bg(bg),
+                app.theme.muted.bg(bg),
             ),
         ]));
         if let Some(lineage) = &s.lineage_label {
@@ -450,7 +436,7 @@ fn render_session_rail(f: &mut TuiFrame, area: Rect, app: &AppState) {
                 Span::styled(bar, Style::default().fg(bar_color).bg(bg)),
                 Span::styled(
                     format!(" {}", lineage),
-                    Style::default().fg(Palette::FAINT).bg(bg),
+                    app.theme.muted.bg(bg).add_modifier(Modifier::DIM),
                 ),
             ]));
         }
@@ -458,9 +444,7 @@ fn render_session_rail(f: &mut TuiFrame, area: Rect, app: &AppState) {
     lines.push(Line::from(""));
     lines.push(Line::from(Span::styled(
         " + NEW SESSION",
-        Style::default()
-            .fg(Palette::INK)
-            .add_modifier(Modifier::BOLD),
+        app.theme.assistant.add_modifier(Modifier::BOLD),
     )));
     f.render_widget(Paragraph::new(lines).style(faint_bg()), area);
 }
@@ -472,7 +456,7 @@ fn tiled_mesh(f: &mut TuiFrame, area: Rect, app: &AppState) {
         "1 orchestrator · {} delegated",
         app.delegated_worker_count()
     );
-    let outer = frame(f, area, app.view.title(), Some(&status), None);
+    let outer = frame(f, area, app.view.title(), Some(&status), None, &app.theme);
     let v = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Min(5), Constraint::Length(3)])
@@ -506,39 +490,29 @@ fn tiled_mesh(f: &mut TuiFrame, area: Rect, app: &AppState) {
         );
         let mut lines: Vec<Line<'static>> = Vec::new();
         lines.push(Line::from(vec![
-            Span::styled(
-                "STATE ",
-                Style::default()
-                    .fg(Palette::MUTED)
-                    .add_modifier(Modifier::DIM),
-            ),
+            Span::styled("STATE ", app.theme.muted.add_modifier(Modifier::DIM)),
             Span::styled(
                 tile.state.to_uppercase(),
-                Style::default()
-                    .fg(Palette::INK)
-                    .add_modifier(Modifier::BOLD),
+                app.theme.assistant.add_modifier(Modifier::BOLD),
             ),
         ]));
         lines.push(Line::from(""));
         for (n, l) in tile.log.iter().enumerate() {
             lines.push(Line::from(vec![
-                Span::styled(
-                    format!("{:>02} ", n + 1),
-                    Style::default().fg(Palette::MUTED),
-                ),
-                Span::styled(l.clone(), Style::default().fg(Palette::INK)),
+                Span::styled(format!("{:>02} ", n + 1), app.theme.muted),
+                Span::styled(l.clone(), app.theme.assistant),
             ]));
         }
         if i == 0 && app.show_reasoning {
             lines.push(Line::from(""));
             if let Some(reasoning) = app.latest_reasoning() {
-                for l in super::widgets::reasoning_lines(reasoning, false) {
+                for l in super::widgets::reasoning_lines(reasoning, false, &app.theme) {
                     lines.push(l);
                 }
             } else {
                 lines.push(Line::from(Span::styled(
                     "No live reasoning trace yet.",
-                    Style::default().fg(Palette::MUTED),
+                    app.theme.muted,
                 )));
             }
         }
@@ -564,6 +538,7 @@ fn tiled_mesh(f: &mut TuiFrame, area: Rect, app: &AppState) {
         &app.model_status(),
         app.context_ratio(),
         app.thinking,
+        &app.theme,
     );
     app.cursor_set(cx, cy);
 }
@@ -573,7 +548,7 @@ fn tiled_mesh(f: &mut TuiFrame, area: Rect, app: &AppState) {
 fn tree_of_thought(f: &mut TuiFrame, area: Rect, app: &AppState) {
     let tree_nodes = app.tree_nodes();
     let summary = format!("{} branch runtime slots", app.branch_count());
-    let outer = frame(f, area, app.view.title(), Some(&summary), None);
+    let outer = frame(f, area, app.view.title(), Some(&summary), None, &app.theme);
     let v = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Min(5), Constraint::Length(3)])
@@ -587,6 +562,8 @@ fn tree_of_thought(f: &mut TuiFrame, area: Rect, app: &AppState) {
     fill(f, h[0], faint_bg());
     let inner = section_header(f, h[0], "decision tree", None);
     let mut lines: Vec<Line<'static>> = Vec::new();
+    let tree_accent_fg = app.theme.accent.fg.unwrap_or(Color::Reset);
+    let tree_muted_fg = app.theme.muted.fg.unwrap_or(Color::Reset);
     for n in &tree_nodes {
         let bg = if n.active {
             Palette::PAPER
@@ -595,9 +572,9 @@ fn tree_of_thought(f: &mut TuiFrame, area: Rect, app: &AppState) {
         };
         let bar = if n.active { "▌" } else { " " };
         let bar_color = if n.active {
-            Palette::RED
+            tree_accent_fg
         } else {
-            Palette::FAINT
+            tree_muted_fg
         };
         lines.push(Line::from(vec![
             Span::styled(
@@ -616,54 +593,51 @@ fn tree_of_thought(f: &mut TuiFrame, area: Rect, app: &AppState) {
             ),
             Span::styled(
                 n.label.clone(),
-                Style::default()
-                    .fg(Palette::INK)
-                    .bg(bg)
-                    .add_modifier(if n.depth == 0 {
-                        Modifier::BOLD
-                    } else {
-                        Modifier::empty()
-                    }),
+                app.theme.assistant.bg(bg).add_modifier(if n.depth == 0 {
+                    Modifier::BOLD
+                } else {
+                    Modifier::empty()
+                }),
             ),
         ]));
     }
     lines.push(Line::from(""));
     lines.push(Line::from(Span::styled(
         " Delegated branch runtime not enabled yet.",
-        Style::default().fg(Palette::MUTED).bg(Palette::FAINT),
+        app.theme.muted.bg(Palette::FAINT),
     )));
     lines.push(Line::from(Span::styled(
         " This pane currently shows the root orchestrator state only.",
-        Style::default().fg(Palette::MUTED).bg(Palette::FAINT),
+        app.theme.muted.bg(Palette::FAINT),
     )));
     f.render_widget(Paragraph::new(lines).style(faint_bg()), inner);
 
     // Right: focused stream
     let focus_inner = section_header(f, h[1], "focused stream", Some(Palette::YELLOW));
     let mut lines = Vec::new();
-    lines.push(message_header("orchestrator", Palette::RED, Some("root")));
+    lines.push(message_header("orchestrator", tree_accent_fg, Some("root"), &app.theme));
     lines.push(Line::from(Span::styled(
         format!("▎ {}", app.orchestration.active_task),
-        Style::default().fg(Palette::INK),
+        app.theme.assistant,
     )));
     if app.show_reasoning {
         if let Some(reasoning) = app.latest_reasoning() {
             lines.push(Line::from(""));
-            for l in super::widgets::reasoning_lines(reasoning, false) {
+            for l in super::widgets::reasoning_lines(reasoning, false, &app.theme) {
                 lines.push(l);
             }
         }
     }
     if let Some(content) = app.latest_agent_content() {
         lines.push(Line::from(""));
-        for line in render_markdown(content) {
+        for line in render_markdown(content, &app.theme) {
             lines.push(Line::from(line.spans));
         }
     } else {
         lines.push(Line::from(""));
         lines.push(Line::from(Span::styled(
             "No focused branch output yet.",
-            Style::default().fg(Palette::MUTED),
+            app.theme.muted,
         )));
     }
     f.render_widget(
@@ -682,6 +656,7 @@ fn tree_of_thought(f: &mut TuiFrame, area: Rect, app: &AppState) {
         &app.model_status(),
         app.context_ratio(),
         app.thinking,
+        &app.theme,
     );
     app.cursor_set(cx, cy);
 }
@@ -695,7 +670,7 @@ fn trading_floor(f: &mut TuiFrame, area: Rect, app: &AppState) {
         app.sessions.len(),
         subagents.len()
     );
-    let outer = frame(f, area, app.view.title(), Some(&status), None);
+    let outer = frame(f, area, app.view.title(), Some(&status), None, &app.theme);
 
     let v = Layout::default()
         .direction(Direction::Vertical)
@@ -771,25 +746,17 @@ fn trading_floor(f: &mut TuiFrame, area: Rect, app: &AppState) {
             ),
             Span::styled(
                 tile.name.clone(),
-                Style::default()
-                    .fg(Palette::INK)
-                    .add_modifier(Modifier::BOLD),
+                app.theme.assistant.add_modifier(Modifier::BOLD),
             ),
-            Span::styled(
-                format!(" · {}", tile.role),
-                Style::default().fg(Palette::MUTED),
-            ),
+            Span::styled(format!(" · {}", tile.role), app.theme.muted),
         ]));
         for (n, l) in tile.log.iter().enumerate() {
-            let color = if n + 1 == tile.log.len() {
-                Palette::INK
+            let style = if n + 1 == tile.log.len() {
+                app.theme.assistant
             } else {
-                Palette::MUTED
+                app.theme.muted
             };
-            lines.push(Line::from(Span::styled(
-                format!("  {}", l),
-                Style::default().fg(color),
-            )));
+            lines.push(Line::from(Span::styled(format!("  {}", l), style)));
         }
         f.render_widget(
             Paragraph::new(lines)
@@ -811,9 +778,10 @@ fn trading_floor(f: &mut TuiFrame, area: Rect, app: &AppState) {
     if app.sessions.is_empty() {
         lines.push(Line::from(Span::styled(
             " No saved sessions yet.",
-            Style::default().fg(Palette::MUTED),
+            app.theme.muted,
         )));
     }
+    let floor_accent_fg = app.theme.accent.fg.unwrap_or(Color::Reset);
     for s in &app.sessions {
         let bg = if s.is_active {
             Palette::FAINT
@@ -821,27 +789,21 @@ fn trading_floor(f: &mut TuiFrame, area: Rect, app: &AppState) {
             Palette::PAPER
         };
         let bar = if s.is_active { "▌" } else { " " };
-        let accent = match s.status {
-            SessionStatus::Live => Palette::GREEN,
-            SessionStatus::Saved => Palette::BLUE,
+        let status_style = match s.status {
+            SessionStatus::Live => app.theme.success,
+            SessionStatus::Saved => app.theme.accent,
         };
         lines.push(Line::from(vec![
             Span::styled(
                 bar,
                 Style::default()
-                    .fg(Palette::RED)
+                    .fg(floor_accent_fg)
                     .bg(bg)
                     .add_modifier(Modifier::BOLD),
             ),
-            Span::styled(" █ ", Style::default().fg(accent).bg(bg)),
-            Span::styled(
-                format!("{:<14}", s.label),
-                Style::default().fg(Palette::INK).bg(bg),
-            ),
-            Span::styled(
-                format!(" {}m", s.message_count),
-                Style::default().fg(Palette::MUTED).bg(bg),
-            ),
+            Span::styled(" █ ", status_style.bg(bg)),
+            Span::styled(format!("{:<14}", s.label), app.theme.assistant.bg(bg)),
+            Span::styled(format!(" {}m", s.message_count), app.theme.muted.bg(bg)),
         ]));
     }
     f.render_widget(Paragraph::new(lines).style(body()), ses_inner);
@@ -853,16 +815,18 @@ fn trading_floor(f: &mut TuiFrame, area: Rect, app: &AppState) {
     let row_count = log_rows.len();
     for (i, row) in log_rows.iter().enumerate() {
         let last = i + 1 == row_count;
-        let color = if last { Palette::INK } else { Palette::MUTED };
+        let row_style = if last {
+            app.theme.assistant
+        } else {
+            app.theme.muted
+        };
         lines.push(Line::from(vec![
-            Span::styled(format!("{:>8} ", row.time), Style::default().fg(color)),
+            Span::styled(format!("{:>8} ", row.time), row_style),
             Span::styled(
                 format!("{:<5} ", row.actor),
-                Style::default()
-                    .fg(Palette::INK)
-                    .add_modifier(Modifier::BOLD),
+                app.theme.assistant.add_modifier(Modifier::BOLD),
             ),
-            Span::styled(row.msg.clone(), Style::default().fg(color)),
+            Span::styled(row.msg.clone(), row_style),
         ]));
     }
     f.render_widget(Paragraph::new(lines).style(body()), tl_inner);
@@ -1091,6 +1055,7 @@ fn trading_floor(f: &mut TuiFrame, area: Rect, app: &AppState) {
         &app.model_status(),
         app.context_ratio(),
         app.thinking,
+        &app.theme,
     );
     app.cursor_set(cx, cy);
 }
