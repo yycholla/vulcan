@@ -170,7 +170,7 @@ impl ChatRenderStore {
                 let segment_lines_before = lines.len();
                 match segment {
                     MessageSegment::Reasoning(reasoning)
-                        if options.show_reasoning && !reasoning.is_empty() =>
+                        if options.show_reasoning && !reasoning.trim().is_empty() =>
                     {
                         lines.extend(reasoning_lines(reasoning, false, theme));
                     }

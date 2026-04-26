@@ -232,7 +232,15 @@ impl ChatMessage {
     /// trailing segment if it's also reasoning. New tool calls or text break
     /// the run, so subsequent reasoning starts a fresh segment — that's the
     /// whole point of YYC-71.
+    ///
+    /// Whitespace-only chunks are dropped so empty `<think></think>` blocks
+    /// from local providers (YYC-103) don't create empty reasoning segments
+    /// that the renderer would later show as a stub THINKING header
+    /// between adjacent text deltas.
     pub fn append_reasoning(&mut self, chunk: &str) {
+        if chunk.trim().is_empty() {
+            return;
+        }
         match self.segments.last_mut() {
             Some(MessageSegment::Reasoning(r)) => r.push_str(chunk),
             _ => self

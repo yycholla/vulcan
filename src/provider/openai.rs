@@ -653,7 +653,10 @@ impl LLMProvider for OpenAIProvider {
                 }
                 let mut combined_reasoning = native_reasoning_delta;
                 combined_reasoning.push_str(&sanitized.reasoning);
-                if !combined_reasoning.is_empty() {
+                // YYC-103: empty `<think></think>` blocks stream `\n` or
+                // whitespace; suppress those so a stub THINKING header
+                // doesn't get inserted between text segments.
+                if !combined_reasoning.trim().is_empty() {
                     let _ = tx.send(StreamEvent::Reasoning(combined_reasoning));
                 }
             }
@@ -664,7 +667,7 @@ impl LLMProvider for OpenAIProvider {
             content.push_str(&leftover.text);
             let _ = tx.send(StreamEvent::Text(leftover.text));
         }
-        if !leftover.reasoning.is_empty() {
+        if !leftover.reasoning.trim().is_empty() {
             reasoning.push_str(&leftover.reasoning);
             let _ = tx.send(StreamEvent::Reasoning(leftover.reasoning));
         }
