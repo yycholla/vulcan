@@ -200,6 +200,26 @@ pub struct ToolsConfig {
     /// without prompting (matches pre-YYC-76 behavior).
     #[serde(default)]
     pub approval: ApprovalConfig,
+    /// How aggressively to redirect bash invocations to native-tool
+    /// equivalents (YYC-84 / YYC-89). The `PreferNativeTools` hook
+    /// reads this to decide whether to block, warn, or stay out of the
+    /// way entirely.
+    #[serde(default)]
+    pub native_enforcement: NativeEnforcement,
+}
+
+/// Native-tool redirect aggressiveness.
+///
+/// * `Off`   — hook disabled.
+/// * `Warn`  — log + count via the audit hook (YYC-88), but pass through.
+/// * `Block` — return `HookOutcome::Block` with a redirect message (default).
+#[derive(Debug, Deserialize, Clone, Copy, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum NativeEnforcement {
+    Off,
+    Warn,
+    #[default]
+    Block,
 }
 
 /// Per-tool approval gate (YYC-76).
@@ -270,6 +290,7 @@ impl Default for ToolsConfig {
         Self {
             yolo_mode: false,
             approval: ApprovalConfig::default(),
+            native_enforcement: NativeEnforcement::default(),
         }
     }
 }
@@ -409,6 +430,27 @@ debug = "wire"
         .expect("config should parse");
 
         assert!(matches!(config.provider.debug, ProviderDebugMode::Wire));
+    }
+
+    #[test]
+    fn native_enforcement_round_trips_each_mode() {
+        for (raw, expected) in [
+            ("off", NativeEnforcement::Off),
+            ("warn", NativeEnforcement::Warn),
+            ("block", NativeEnforcement::Block),
+        ] {
+            let toml = format!("[tools]\nnative_enforcement = \"{raw}\"\n");
+            let cfg: Config = toml::from_str(&toml).expect("should parse");
+            assert_eq!(cfg.tools.native_enforcement, expected);
+        }
+    }
+
+    #[test]
+    fn native_enforcement_defaults_to_block_when_missing() {
+        let cfg: Config = toml::from_str("").expect("empty parses");
+        assert_eq!(cfg.tools.native_enforcement, NativeEnforcement::Block);
+        let cfg: Config = toml::from_str("[tools]\n").expect("empty tools parses");
+        assert_eq!(cfg.tools.native_enforcement, NativeEnforcement::Block);
     }
 
     #[test]

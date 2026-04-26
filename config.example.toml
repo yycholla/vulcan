@@ -45,6 +45,13 @@ catalog_cache_ttl_hours = 24
 # Enable dangerous tools (file overwrite, shell exec) without confirmation
 yolo_mode = false
 
+# How aggressively to redirect bash invocations to native-tool equivalents
+# (YYC-84 / YYC-89). The PreferNativeTools hook reads this:
+#   off   — hook disabled, no redirects.
+#   warn  — log + count via the audit hook (YYC-88), pass through.
+#   block — return Block with a redirect message (default).
+native_enforcement = "block"
+
 # Per-tool approval gate (YYC-76). Default is "always" (no prompts) so
 # the gate is opt-in. Set entries to "ask" or "session" for per-tool
 # granularity — TUI will pause on the gate and render inline pills.
