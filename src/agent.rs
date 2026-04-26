@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use crate::config::Config;
 use crate::context::ContextManager;
+use crate::hooks::approval::ApprovalHook;
 use crate::hooks::diagnostics::DiagnosticsHook;
 use crate::hooks::safety::SafetyHook;
 use crate::hooks::skills::SkillsHook;
@@ -209,6 +210,16 @@ impl Agent {
             lsp_manager.clone(),
             diff_sink.clone(),
         )));
+
+        // Built-in hook (YYC-76): per-tool approval gate. Default mode
+        // is Always (no prompts) so the gate is opt-in via
+        // [tools.approval]. yolo_mode=true is the legacy escape
+        // hatch — it leaves the default at Always.
+        let mut approval_cfg = config.tools.approval.clone();
+        if config.tools.yolo_mode {
+            approval_cfg.default = crate::config::ApprovalMode::Always;
+        }
+        hooks.register(Arc::new(ApprovalHook::new(approval_cfg, pause_tx.clone())));
 
         // Built-in hook: block dangerous shell invocations unless yolo_mode is on.
         // Skipped entirely (not even registered as observe-only) when yolo_mode

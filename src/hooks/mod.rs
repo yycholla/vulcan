@@ -34,6 +34,7 @@ pub enum InjectPosition {
     Append,
 }
 
+pub mod approval;
 pub mod diagnostics;
 
 /// What a handler returns. Each event honors a subset; unsupported variants
