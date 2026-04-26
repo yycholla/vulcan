@@ -9,6 +9,10 @@ impl Palette {
     pub const INK: Color = Color::Rgb(0x15, 0x13, 0x0F);
     pub const MUTED: Color = Color::Rgb(0x8A, 0x84, 0x78);
     pub const FAINT: Color = Color::Rgb(0xE2, 0xDC, 0xCD);
+    /// Slate header bg for tool-card title bars (YYC-74). Dark enough
+    /// to clearly separate from the FAINT body band but lighter than
+    /// INK so the pills (which use INK + paper) still pop.
+    pub const SLATE: Color = Color::Rgb(0x4A, 0x44, 0x38);
     pub const RED: Color = Color::Rgb(0xD6, 0x3B, 0x2F);
     pub const YELLOW: Color = Color::Rgb(0xE8, 0xB4, 0x3C);
     pub const BLUE: Color = Color::Rgb(0x2B, 0x4F, 0xA8);
