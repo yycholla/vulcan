@@ -157,7 +157,7 @@ impl ChatRenderStore {
     ) -> RenderedMessageBlock {
         let (role_label, accent) = match message.role {
             ChatRole::User => ("you", Palette::RED),
-            ChatRole::Agent => ("agent", Palette::INK),
+            ChatRole::Agent => ("agent", theme.body_fg),
             ChatRole::System => ("system", Palette::YELLOW),
         };
         let is_agent = matches!(message.role, ChatRole::Agent);

@@ -177,7 +177,7 @@ fn build_chat_suffix_lines(app: &AppState) -> Vec<Line<'static>> {
                 }
                 let color = match opt.kind {
                     crate::pause::OptionKind::Primary => Palette::BLUE,
-                    crate::pause::OptionKind::Neutral => Palette::INK,
+                    crate::pause::OptionKind::Neutral => app.theme.body_fg,
                     crate::pause::OptionKind::Destructive => Palette::RED,
                 };
                 let filled = matches!(opt.kind, crate::pause::OptionKind::Primary);
@@ -322,12 +322,9 @@ fn split_sessions(f: &mut TuiFrame, area: Rect, app: &AppState) {
         .unwrap_or(app.messages.len());
     let header_text = format!(" {active_name}   · {lineage} · {turn_count} msgs",);
     let accent_bar = Style::default()
-        .fg(app.theme.body_bg)
-        .bg(app.theme.accent.fg.unwrap_or(Color::Reset));
-    let mut spans = vec![Span::styled(
-        header_text,
-        accent_bar.add_modifier(Modifier::BOLD),
-    )];
+        .fg(app.theme.accent.fg.unwrap_or(Color::Reset))
+        .add_modifier(Modifier::BOLD);
+    let mut spans = vec![Span::styled(header_text, accent_bar)];
     let used = spans
         .iter()
         .map(|s| s.content.chars().count() as u16)
@@ -335,11 +332,8 @@ fn split_sessions(f: &mut TuiFrame, area: Rect, app: &AppState) {
     let live_label = " ● LIVE ";
     if used + live_label.len() as u16 + 1 < main.width {
         let pad = " ".repeat((main.width - used - live_label.len() as u16) as usize);
-        spans.push(Span::styled(pad, accent_bar));
-        spans.push(Span::styled(
-            live_label.to_string(),
-            accent_bar.add_modifier(Modifier::BOLD),
-        ));
+        spans.push(Span::raw(pad));
+        spans.push(Span::styled(live_label.to_string(), accent_bar));
     }
     f.render_widget(Paragraph::new(Line::from(spans)), header);
 
@@ -403,40 +397,36 @@ fn render_session_rail(f: &mut TuiFrame, area: Rect, app: &AppState) {
         };
         let bar = if s.is_active { "▌" } else { " " };
         let bar_color = if s.is_active { accent_fg } else { muted_fg };
-        let bg = if s.is_active {
-            Palette::PAPER
+        let row_style = if s.is_active {
+            app.theme.assistant.add_modifier(Modifier::BOLD)
         } else {
-            Palette::FAINT
+            app.theme.assistant
         };
-        let row_style = app.theme.assistant.bg(bg);
         lines.push(Line::from(vec![
             Span::styled(
                 bar,
-                Style::default()
-                    .fg(bar_color)
-                    .bg(bg)
-                    .add_modifier(Modifier::BOLD),
+                Style::default().fg(bar_color).add_modifier(Modifier::BOLD),
             ),
-            Span::styled(" █ ", status_style.bg(bg)),
+            Span::styled(" █ ", status_style),
             Span::styled(s.label.clone(), row_style.add_modifier(Modifier::BOLD)),
         ]));
         lines.push(Line::from(vec![
-            Span::styled(bar, Style::default().fg(bar_color).bg(bg)),
+            Span::styled(bar, Style::default().fg(bar_color)),
             Span::styled(
                 format!(
                     " {:<6}    {:>4}m",
                     s.status.label().to_uppercase(),
                     s.message_count
                 ),
-                app.theme.muted.bg(bg),
+                app.theme.muted,
             ),
         ]));
         if let Some(lineage) = &s.lineage_label {
             lines.push(Line::from(vec![
-                Span::styled(bar, Style::default().fg(bar_color).bg(bg)),
+                Span::styled(bar, Style::default().fg(bar_color)),
                 Span::styled(
                     format!(" {}", lineage),
-                    app.theme.muted.bg(bg).add_modifier(Modifier::DIM),
+                    app.theme.muted.add_modifier(Modifier::DIM),
                 ),
             ]));
         }
@@ -565,11 +555,6 @@ fn tree_of_thought(f: &mut TuiFrame, area: Rect, app: &AppState) {
     let tree_accent_fg = app.theme.accent.fg.unwrap_or(Color::Reset);
     let tree_muted_fg = app.theme.muted.fg.unwrap_or(Color::Reset);
     for n in &tree_nodes {
-        let bg = if n.active {
-            Palette::PAPER
-        } else {
-            Palette::FAINT
-        };
         let bar = if n.active { "▌" } else { " " };
         let bar_color = if n.active {
             tree_accent_fg
@@ -579,21 +564,15 @@ fn tree_of_thought(f: &mut TuiFrame, area: Rect, app: &AppState) {
         lines.push(Line::from(vec![
             Span::styled(
                 bar,
-                Style::default()
-                    .fg(bar_color)
-                    .bg(bg)
-                    .add_modifier(Modifier::BOLD),
+                Style::default().fg(bar_color).add_modifier(Modifier::BOLD),
             ),
             Span::styled(
                 format!(" {} ", n.state),
-                Style::default()
-                    .fg(n.color)
-                    .bg(bg)
-                    .add_modifier(Modifier::BOLD),
+                Style::default().fg(n.color).add_modifier(Modifier::BOLD),
             ),
             Span::styled(
                 n.label.clone(),
-                app.theme.assistant.bg(bg).add_modifier(if n.depth == 0 {
+                app.theme.assistant.add_modifier(if n.depth == 0 {
                     Modifier::BOLD
                 } else {
                     Modifier::empty()
@@ -604,13 +583,13 @@ fn tree_of_thought(f: &mut TuiFrame, area: Rect, app: &AppState) {
     lines.push(Line::from(""));
     lines.push(Line::from(Span::styled(
         " Delegated branch runtime not enabled yet.",
-        app.theme.muted.bg(Palette::FAINT),
+        app.theme.muted,
     )));
     lines.push(Line::from(Span::styled(
         " This pane currently shows the root orchestrator state only.",
-        app.theme.muted.bg(Palette::FAINT),
+        app.theme.muted,
     )));
-    f.render_widget(Paragraph::new(lines).style(faint_bg()), inner);
+    f.render_widget(Paragraph::new(lines), inner);
 
     // Right: focused stream
     let focus_inner = section_header(f, h[1], "focused stream", Some(Palette::YELLOW));
@@ -783,11 +762,6 @@ fn trading_floor(f: &mut TuiFrame, area: Rect, app: &AppState) {
     }
     let floor_accent_fg = app.theme.accent.fg.unwrap_or(Color::Reset);
     for s in &app.sessions {
-        let bg = if s.is_active {
-            Palette::FAINT
-        } else {
-            Palette::PAPER
-        };
         let bar = if s.is_active { "▌" } else { " " };
         let status_style = match s.status {
             SessionStatus::Live => app.theme.success,
@@ -796,17 +770,14 @@ fn trading_floor(f: &mut TuiFrame, area: Rect, app: &AppState) {
         lines.push(Line::from(vec![
             Span::styled(
                 bar,
-                Style::default()
-                    .fg(floor_accent_fg)
-                    .bg(bg)
-                    .add_modifier(Modifier::BOLD),
+                Style::default().fg(floor_accent_fg).add_modifier(Modifier::BOLD),
             ),
-            Span::styled(" █ ", status_style.bg(bg)),
-            Span::styled(format!("{:<14}", s.label), app.theme.assistant.bg(bg)),
-            Span::styled(format!(" {}m", s.message_count), app.theme.muted.bg(bg)),
+            Span::styled(" █ ", status_style),
+            Span::styled(format!("{:<14}", s.label), app.theme.assistant),
+            Span::styled(format!(" {}m", s.message_count), app.theme.muted),
         ]));
     }
-    f.render_widget(Paragraph::new(lines).style(body()), ses_inner);
+    f.render_widget(Paragraph::new(lines), ses_inner);
 
     // ── tool log (bot-left) — live audit data when available
     let tl_inner = section_header(f, bot[0], "tool log", None);
@@ -925,7 +896,7 @@ fn trading_floor(f: &mut TuiFrame, area: Rect, app: &AppState) {
                     .add_modifier(Modifier::DIM),
                 DiffKind::Added => Style::default().fg(Palette::GREEN),
                 DiffKind::Removed => Style::default().fg(Palette::RED),
-                DiffKind::Ctx => Style::default().fg(Palette::INK),
+                DiffKind::Ctx => Style::default(),
             };
             lines.push(Line::from(Span::styled(ln.text.clone(), style)));
         }
@@ -966,12 +937,12 @@ fn trading_floor(f: &mut TuiFrame, area: Rect, app: &AppState) {
         (
             "input",
             super::state::format_thousands(app.prompt_tokens_total),
-            Palette::INK,
+            app.theme.body_fg,
         ),
         (
             "output",
             super::state::format_thousands(app.completion_tokens_total),
-            Palette::INK,
+            app.theme.body_fg,
         ),
         (
             "tools",
@@ -1008,7 +979,7 @@ fn trading_floor(f: &mut TuiFrame, area: Rect, app: &AppState) {
         };
         lines.push(Line::from(vec![
             Span::styled(format!(" {k}"), Style::default().fg(Palette::MUTED)),
-            Span::styled(middle, Style::default().fg(Palette::PAPER)),
+            Span::raw(middle),
             Span::styled(v, Style::default().fg(color).add_modifier(Modifier::BOLD)),
         ]));
     }
@@ -1027,7 +998,7 @@ fn trading_floor(f: &mut TuiFrame, area: Rect, app: &AppState) {
         let div_y = rows[0].y + rows[0].height - 1;
         let div = "─".repeat(v[0].width as usize);
         f.render_widget(
-            Paragraph::new(div).style(Style::default().fg(Palette::INK).bg(Palette::PAPER)),
+            Paragraph::new(div).style(app.theme.border),
             Rect {
                 x: v[0].x,
                 y: div_y,
@@ -1070,7 +1041,7 @@ fn render_empty_activity_tile(f: &mut TuiFrame, area: Rect, label: &str, msg: &s
                 .add_modifier(Modifier::BOLD),
         )),
         Line::from(""),
-        Line::from(Span::styled(msg, Style::default().fg(Palette::INK))),
+        Line::from(Span::raw(msg.to_string())),
         Line::from(Span::styled(
             "Delegation/runtime wiring has not been enabled yet.",
             Style::default().fg(Palette::MUTED),
@@ -1095,12 +1066,7 @@ fn draw_v_divider(f: &mut TuiFrame, area: Rect) {
     }
     let x = area.x + area.width - 1;
     let lines: Vec<Line<'static>> = (0..area.height)
-        .map(|_| {
-            Line::from(Span::styled(
-                "│",
-                Style::default().fg(Palette::INK).bg(Palette::PAPER),
-            ))
-        })
+        .map(|_| Line::from(Span::raw("│")))
         .collect();
     f.render_widget(
         Paragraph::new(lines),

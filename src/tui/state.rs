@@ -553,14 +553,14 @@ impl PromptHintsCache {
     fn build(kb: &Keybinds) -> Self {
         Self {
             insert: vec![
-                ("↵".into(), "send".into()),
+                ("Enter".into(), "send".into()),
                 (kb.toggle_tools.label(), "tools".into()),
                 (kb.toggle_sessions.label(), "sessions".into()),
                 ("/".into(), "cmds".into()),
             ],
             command: vec![
-                ("↵".into(), "run".into()),
-                ("↑↓".into(), "select".into()),
+                ("Enter".into(), "run".into()),
+                ("Up/Dn".into(), "select".into()),
                 ("Tab".into(), "complete".into()),
                 ("Esc".into(), "cancel".into()),
             ],
@@ -570,7 +570,7 @@ impl PromptHintsCache {
                 ("Esc".into(), "cancel".into()),
             ],
             busy: vec![
-                ("↵".into(), "queue".into()),
+                ("Enter".into(), "queue".into()),
                 (kb.cancel.label(), "cancel".into()),
                 (kb.queue_drop.label(), "drop last".into()),
             ],
@@ -1267,19 +1267,19 @@ mod tests {
     }
 
     #[test]
-    fn prompt_hints_default_keybinds_match_legacy_labels() {
-        // Default Keybinds should produce the exact static labels the
-        // pre-config code shipped: ⌃T for tools, ⌃K for sessions, etc.
+    fn prompt_hints_default_keybinds_match_ascii_labels() {
+        // Default Keybinds should produce ASCII-safe labels (Ctrl+T,
+        // Ctrl+K) so prompt-row chips render in any terminal font.
         let app = AppState::new("test".into(), 100);
         let hints = app.prompt_hints();
         let pairs: Vec<(String, String)> = hints.iter().cloned().collect();
         assert!(
-            pairs.contains(&("⌃T".into(), "tools".into())),
-            "expected ⌃T tools in {pairs:?}"
+            pairs.contains(&("Ctrl+T".into(), "tools".into())),
+            "expected Ctrl+T tools in {pairs:?}"
         );
         assert!(
-            pairs.contains(&("⌃K".into(), "sessions".into())),
-            "expected ⌃K sessions in {pairs:?}"
+            pairs.contains(&("Ctrl+K".into(), "sessions".into())),
+            "expected Ctrl+K sessions in {pairs:?}"
         );
     }
 
@@ -1299,8 +1299,8 @@ mod tests {
             "expected F2 tools in {pairs:?}"
         );
         assert!(
-            !pairs.iter().any(|(k, _)| k == "⌃T"),
-            "stale ⌃T label leaked into {pairs:?}"
+            !pairs.iter().any(|(k, _)| k == "Ctrl+T"),
+            "stale Ctrl+T label leaked into {pairs:?}"
         );
     }
 

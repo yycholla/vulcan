@@ -6,23 +6,18 @@ use ratatui::{
     widgets::{Block, BorderType, Borders, Paragraph, Wrap},
 };
 
-use super::theme::{Palette, Theme, inverse};
+use super::theme::{Palette, Theme};
 
-// YYC-52 (Task 9): widgets.rs hosts the structural Bauhaus shell of the
-// TUI — frames, section headers, the prompt row, the ticker, and the
-// tool-call card. Most "structural" styles (the inverse INK/PAPER title
-// bars, the SLATE tool-card header, the RED ticker pill, the mode pill
-// inverse) intentionally remain on `Palette::*` per the design canvas:
-// these elements are the brutalist chrome and don't follow the active
-// chat theme. Chat-role styles (border edges, body fill, muted hint
-// text, capacity-warning fg) are now read from the active `Theme` via
-// the `theme: &Theme` parameter threaded into each public widget.
+// widgets.rs hosts the structural shell of the TUI — frames, section
+// headers, the prompt row, the ticker, the tool-call card. Backgrounds
+// are deliberately omitted everywhere so the active terminal theme
+// shows through and copy-paste captures plain text. Emphasis is carried
+// by foreground color, bold, brackets, and box-drawing borders.
 
-/// Bauhaus framed window: thick double-line border, title bar with `▓▓` mark
-/// + uppercase title on left, status pill on right. Matches the design's
-/// `Frame` component (boxShadow handled with paper bg fill).
+/// Framed window: thick border, title bar with `▓▓` mark + uppercase
+/// title on left, status pill on right.
 ///
-/// `accent` overrides the title-bar background; default is ink black.
+/// `accent` recolors the title-bar foreground; default is `theme.border`.
 pub fn frame(
     f: &mut TuiFrame,
     area: Rect,
@@ -35,18 +30,13 @@ pub fn frame(
         return area;
     }
 
-    // Outer block — paint themed background and the themed border edge.
     let block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Thick)
-        .border_style(theme.border)
-        .style(Style::default().fg(theme.body_fg).bg(theme.body_bg));
+        .border_style(theme.border);
     let inner = block.inner(area);
     f.render_widget(block, area);
 
-    // Title bar = first line inside the border. The title bar itself is
-    // structural inverse (INK on PAPER) — the design's brutalist chrome
-    // doesn't recolor with the active theme.
     if inner.height == 0 {
         return inner;
     }
@@ -56,16 +46,8 @@ pub fn frame(
         width: inner.width,
         height: 1,
     };
-    let bar_bg = accent.unwrap_or(Palette::INK);
-    let bar_fg = if accent.is_some() {
-        Palette::INK
-    } else {
-        Palette::PAPER
-    };
-    let bar_style = Style::default()
-        .fg(bar_fg)
-        .bg(bar_bg)
-        .add_modifier(Modifier::BOLD);
+    let bar_fg = accent.unwrap_or_else(|| theme.body_fg);
+    let bar_style = Style::default().fg(bar_fg).add_modifier(Modifier::BOLD);
 
     let mut spans = vec![
         Span::styled(" ▓▓ ", bar_style),
@@ -76,19 +58,12 @@ pub fn frame(
         let used: u16 = (4 + title.chars().count() + status_text.chars().count()) as u16;
         if used < bar.width {
             let pad = " ".repeat((bar.width - used) as usize);
-            spans.push(Span::styled(pad, bar_style));
+            spans.push(Span::raw(pad));
         }
         spans.push(Span::styled(status_text, bar_style));
-    } else {
-        let used: u16 = (4 + title.chars().count()) as u16;
-        if used < bar.width {
-            let pad = " ".repeat((bar.width - used) as usize);
-            spans.push(Span::styled(pad, bar_style));
-        }
     }
-    f.render_widget(Paragraph::new(Line::from(spans)).style(bar_style), bar);
+    f.render_widget(Paragraph::new(Line::from(spans)), bar);
 
-    // Body region = everything below the title bar.
     Rect {
         x: inner.x,
         y: inner.y + 1,
@@ -97,23 +72,14 @@ pub fn frame(
     }
 }
 
-/// Render a child "section" header inside a pane (one ink line, paper text).
-///
-/// Section headers are structural inverse chrome (INK/PAPER) per the
-/// Bauhaus design canvas — the bar itself doesn't recolor with the
-/// active theme. The optional `accent` arg lets callers stamp a
-/// theme-derived emphasis color (e.g. `theme.accent.fg`).
+/// Render a section header inside a pane: `▣ LABEL` plus an underline,
+/// foreground emphasis only so the terminal background shows through.
 pub fn section_header(f: &mut TuiFrame, area: Rect, label: &str, accent: Option<Color>) -> Rect {
     if area.height == 0 {
         return area;
     }
-    let bg = accent.unwrap_or(Palette::INK);
-    let fg = if accent.is_some() {
-        Palette::INK
-    } else {
-        Palette::PAPER
-    };
-    let style = Style::default().fg(fg).bg(bg).add_modifier(Modifier::BOLD);
+    let fg = accent.unwrap_or(Color::Reset);
+    let style = Style::default().fg(fg).add_modifier(Modifier::BOLD);
     let bar = Rect {
         x: area.x,
         y: area.y,
@@ -121,12 +87,7 @@ pub fn section_header(f: &mut TuiFrame, area: Rect, label: &str, accent: Option<
         height: 1,
     };
     let text = format!(" ▣ {} ", label.to_uppercase());
-    let pad_total = area.width as usize;
-    let mut display = text.clone();
-    if display.chars().count() < pad_total {
-        display.push_str(&" ".repeat(pad_total - display.chars().count()));
-    }
-    f.render_widget(Paragraph::new(display).style(style), bar);
+    f.render_widget(Paragraph::new(text).style(style), bar);
     Rect {
         x: area.x,
         y: area.y + 1,
@@ -135,24 +96,18 @@ pub fn section_header(f: &mut TuiFrame, area: Rect, label: &str, accent: Option<
     }
 }
 
-/// A status pill rendered inline as a Span (uppercase, padded).
-///
-/// Pills are structural design elements: when `filled` the foreground
-/// is the inverse PAPER (per the Bauhaus chrome), and the caller-
-/// supplied `color` is the background. The hollow variant uses the
-/// caller color as the foreground. Theme integration happens at the
-/// call site by passing e.g. `theme.error.fg.unwrap_or(Palette::RED)`.
+/// Status pill rendered inline. Foreground-only — bracketed when
+/// `filled` to keep emphasis without painting a background.
 pub fn pill(text: &str, color: Color, filled: bool) -> Span<'static> {
-    let body = format!(" {} ", text.to_uppercase());
-    let style = if filled {
-        Style::default()
-            .fg(Palette::PAPER)
-            .bg(color)
-            .add_modifier(Modifier::BOLD)
+    let body = if filled {
+        format!("[{}]", text.to_uppercase())
     } else {
-        Style::default().fg(color).add_modifier(Modifier::BOLD)
+        format!(" {} ", text.to_uppercase())
     };
-    Span::styled(body, style)
+    Span::styled(
+        body,
+        Style::default().fg(color).add_modifier(Modifier::BOLD),
+    )
 }
 
 /// Sparkline characters — 1 char per value.
@@ -185,26 +140,14 @@ pub fn tool_call_lines(
     let header = format!(" ┏ {name:<28}{label:>14} ");
     lines.push(Line::from(Span::styled(
         header,
-        Style::default()
-            .fg(color)
-            .bg(Palette::FAINT)
-            .add_modifier(Modifier::BOLD),
+        Style::default().fg(color).add_modifier(Modifier::BOLD),
     )));
     lines.push(Line::from(Span::styled(
         format!(" ┃ {}", args),
-        Style::default().fg(Palette::MUTED).bg(Palette::PAPER),
+        Style::default().fg(Palette::MUTED),
     )));
-    if let Some(r) = result {
-        lines.push(Line::from(Span::styled(
-            format!(" ┗ {}", r),
-            Style::default().fg(Palette::INK).bg(Palette::PAPER),
-        )));
-    } else {
-        lines.push(Line::from(Span::styled(
-            " ┗".to_string(),
-            Style::default().fg(Palette::INK).bg(Palette::PAPER),
-        )));
-    }
+    let tail = result.map(|r| format!(" ┗ {}", r)).unwrap_or_else(|| " ┗".to_string());
+    lines.push(Line::from(Span::raw(tail)));
     lines
 }
 
@@ -230,18 +173,12 @@ pub fn reasoning_lines(text: &str, hidden: bool, theme: &Theme) -> Vec<Line<'sta
     }
     let mut lines = vec![Line::from(Span::styled(
         " ▒ THINKING",
-        Style::default()
-            .fg(Palette::INK)
-            .bg(Palette::FAINT)
-            .add_modifier(Modifier::BOLD),
+        theme.muted.add_modifier(Modifier::BOLD),
     ))];
     for raw in text.lines() {
         lines.push(Line::from(Span::styled(
             format!(" ▒ {}", raw),
-            Style::default()
-                .fg(Palette::INK)
-                .bg(Palette::FAINT)
-                .add_modifier(Modifier::ITALIC),
+            theme.muted.add_modifier(Modifier::ITALIC),
         )));
     }
     lines
@@ -283,7 +220,7 @@ pub fn render_message_body(
     if area.width < 3 || area.height == 0 {
         return;
     }
-    let body_style = Style::default().fg(theme.body_fg).bg(theme.body_bg);
+    let body_style = Style::default().fg(theme.body_fg);
     let bar = Rect {
         x: area.x,
         y: area.y,
@@ -295,8 +232,7 @@ pub fn render_message_body(
             std::iter::repeat_with(|| Line::from(Span::styled("▎", Style::default().fg(accent))))
                 .take(area.height as usize)
                 .collect::<Vec<_>>(),
-        )
-        .style(body_style),
+        ),
         bar,
     );
     let body_area = Rect {
@@ -339,8 +275,7 @@ pub fn prompt_row(
     if area.height < 2 {
         return (area.x, area.y);
     }
-    let body_style = Style::default().fg(theme.body_fg).bg(theme.body_bg);
-    // Top divider — themed border edge across the prompt row.
+    let body_style = Style::default().fg(theme.body_fg);
     let layout = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -350,26 +285,18 @@ pub fn prompt_row(
         ])
         .split(area);
 
-    // Divider row
     let div = "─".repeat(area.width as usize);
     f.render_widget(Paragraph::new(div).style(theme.border), layout[0]);
 
-    // Mode pill is structural inverse (PAPER on INK) — design-locked
-    // so the active mode badge stays unmistakable across themes.
     let mode_pill = Span::styled(
-        format!(" {} ", mode),
+        format!("[{}]", mode),
         Style::default()
-            .fg(Palette::PAPER)
-            .bg(Palette::INK)
+            .fg(theme.body_fg)
             .add_modifier(Modifier::BOLD),
     );
-    // Caret is structural RED — always the "send" cue, regardless of theme.
     let caret = Span::styled(
         " ❯ ",
-        Style::default()
-            .fg(Palette::RED)
-            .bg(theme.body_bg)
-            .add_modifier(Modifier::BOLD),
+        Style::default().fg(Palette::RED).add_modifier(Modifier::BOLD),
     );
     let input_span = Span::styled(input.to_string(), body_style);
     let cursor_block = Span::styled(
@@ -381,28 +308,21 @@ pub fn prompt_row(
         }),
     );
     let line = Line::from(vec![mode_pill, caret, input_span, cursor_block]);
-    f.render_widget(Paragraph::new(line).style(body_style), layout[1]);
+    f.render_widget(Paragraph::new(line), layout[1]);
 
-    // Cursor position: after mode pill (mode width + 2 spaces) + caret (3) + input chars
     let mode_width = mode.chars().count() as u16 + 2;
     let cursor_x = layout[1].x + mode_width + 3 + input.chars().count() as u16;
     let cursor_y = layout[1].y;
 
-    // Hints row
     let muted_style = theme.muted;
     let mut hint_spans: Vec<Span<'static>> = Vec::new();
     for (i, (key, label)) in hints.iter().enumerate() {
         if i > 0 {
-            hint_spans.push(Span::styled("  ", muted_style));
+            hint_spans.push(Span::raw("  "));
         }
-        // Hint key chip — structural inverse (PAPER-on-INK) so the
-        // keybinding chip is visually consistent across themes.
         hint_spans.push(Span::styled(
-            format!(" {key} "),
-            Style::default()
-                .fg(Palette::PAPER)
-                .bg(Palette::INK)
-                .add_modifier(Modifier::BOLD),
+            format!("[{key}]"),
+            Style::default().fg(theme.body_fg).add_modifier(Modifier::BOLD),
         ));
         hint_spans.push(Span::styled(format!(" {label}"), muted_style));
     }
@@ -413,10 +333,7 @@ pub fn prompt_row(
     let model_len = model_status.chars().count() as u16;
     if hint_text_len + model_len + 2 < area.width {
         let pad = " ".repeat((area.width - hint_text_len - model_len - 1) as usize);
-        hint_spans.push(Span::styled(pad, muted_style));
-        // YYC-60: color the model_status span by context capacity ratio.
-        // ≤70% follows the active theme's body fg; 70-90% / >90% use the
-        // structural warn palette so the urgency cue is theme-agnostic.
+        hint_spans.push(Span::raw(pad));
         let status_fg = if capacity_ratio > 0.90 {
             Palette::RED
         } else if capacity_ratio > 0.70 {
@@ -426,71 +343,35 @@ pub fn prompt_row(
         };
         hint_spans.push(Span::styled(
             format!(" {model_status}"),
-            Style::default()
-                .fg(status_fg)
-                .bg(theme.body_bg)
-                .add_modifier(Modifier::BOLD),
+            Style::default().fg(status_fg).add_modifier(Modifier::BOLD),
         ));
     }
-    f.render_widget(
-        Paragraph::new(Line::from(hint_spans)).style(body_style),
-        layout[2],
-    );
+    f.render_widget(Paragraph::new(Line::from(hint_spans)), layout[2]);
 
     (cursor_x, cursor_y)
 }
 
-/// Bottom ticker strip — used in trading floor view. Scrolling text of recent
-/// sub-agent activity.
-///
-/// The ticker is structural inverse chrome (PAPER on INK) with a RED
-/// "TICKER" pill — the design canvas treats it as a fixed brutalist
-/// element, so it intentionally does not follow the active theme.
+/// Bottom ticker strip — used in trading floor view. Scrolling text of
+/// recent sub-agent activity. Foreground emphasis only.
 pub fn ticker(f: &mut TuiFrame, area: Rect, cells: &[(String, String, Color)]) {
     if area.height == 0 {
         return;
     }
     let mut spans = vec![Span::styled(
-        " TICKER ",
-        Style::default()
-            .fg(Palette::PAPER)
-            .bg(Palette::RED)
-            .add_modifier(Modifier::BOLD),
+        "[TICKER] ",
+        Style::default().fg(Palette::RED).add_modifier(Modifier::BOLD),
     )];
     for (sub, msg, color) in cells {
-        spans.push(Span::styled(
-            " ".to_string(),
-            Style::default().fg(Palette::PAPER).bg(Palette::INK),
-        ));
-        spans.push(Span::styled(
-            "█".to_string(),
-            Style::default().fg(*color).bg(Palette::INK),
-        ));
+        spans.push(Span::raw(" "));
+        spans.push(Span::styled("█", Style::default().fg(*color)));
         spans.push(Span::styled(
             format!(" #{sub} "),
-            Style::default()
-                .fg(Palette::PAPER)
-                .bg(Palette::INK)
-                .add_modifier(Modifier::BOLD),
+            Style::default().add_modifier(Modifier::BOLD),
         ));
-        spans.push(Span::styled(
-            format!("{msg} "),
-            Style::default().fg(Palette::PAPER).bg(Palette::INK),
-        ));
-        spans.push(Span::styled(
-            "│",
-            Style::default().fg(Palette::MUTED).bg(Palette::INK),
-        ));
+        spans.push(Span::raw(format!("{msg} ")));
+        spans.push(Span::styled("│", Style::default().fg(Palette::MUTED)));
     }
-    // Pad to full width with ink bg
-    let used: u16 = spans.iter().map(|s| s.content.chars().count() as u16).sum();
-    if used < area.width {
-        spans.push(Span::styled(
-            " ".repeat((area.width - used) as usize),
-            Style::default().bg(Palette::INK),
-        ));
-    }
-    f.render_widget(Paragraph::new(Line::from(spans)).style(inverse()), area);
+    f.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
 /// Render a structured tool-call card per the design canvas (YYC-74).
@@ -566,78 +447,55 @@ pub fn tool_card(
     }
     let gap = inner_w.saturating_sub(left_chars + right_chars);
 
-    // Continuous border around the whole card. Header rows sit on
-    // SLATE (including the top border row's bg); body rows sit on
-    // FAINT (which is darker than the TUI's PAPER but lighter than
-    // SLATE) so the title visually separates without ever breaking
-    // the outer rectangle.
-    let header_bg = Palette::SLATE;
-    let body_bg = Palette::FAINT;
-    let header_border = Style::default().fg(Palette::MUTED).bg(header_bg);
-    let body_border = Style::default().fg(Palette::MUTED).bg(body_bg);
+    // Border-only card. Foreground emphasis carries the visual hierarchy
+    // so the active terminal background shows through and copy-paste
+    // captures plain text.
+    let border = Style::default().fg(Palette::MUTED);
 
-    // ── Top border: ┌──...──┐ on SLATE so it merges with the header.
     let mut out = vec![Line::from(vec![
-        Span::styled("┌", header_border),
-        Span::styled("─".repeat(inner_w), header_border),
-        Span::styled("┐", header_border),
+        Span::styled("┌", border),
+        Span::styled("─".repeat(inner_w), border),
+        Span::styled("┐", border),
     ])];
 
-    // ── Header content: │ pill params  ...  status_pill │ on SLATE.
     let mut header: Vec<Span<'static>> = Vec::new();
-    header.push(Span::styled("│", header_border));
+    header.push(Span::styled("│", border));
     header.push(Span::styled(
         name_pill_text,
-        Style::default()
-            .fg(Palette::PAPER)
-            .bg(Palette::INK)
-            .add_modifier(Modifier::BOLD),
+        Style::default().add_modifier(Modifier::BOLD),
     ));
     if !params_text.is_empty() {
-        header.push(Span::styled(
-            params_text,
-            Style::default().fg(Palette::INK).bg(header_bg),
-        ));
+        header.push(Span::raw(params_text));
     }
     if gap > 0 {
-        header.push(Span::styled(
-            " ".repeat(gap),
-            Style::default().bg(header_bg),
-        ));
+        header.push(Span::raw(" ".repeat(gap)));
     }
     header.push(Span::styled(
         pill_body,
-        Style::default()
-            .fg(Palette::PAPER)
-            .bg(color)
-            .add_modifier(Modifier::BOLD),
+        Style::default().fg(color).add_modifier(Modifier::BOLD),
     ));
-    header.push(Span::styled("│", header_border));
+    header.push(Span::styled("│", border));
     out.push(Line::from(header));
 
-    // ── Body rows: │  text...padding  │ on FAINT.
     let body_indent = "  ";
     let body_inner = inner_w.saturating_sub(body_indent.chars().count());
 
     let render_body = |spans: &mut Vec<Span<'static>>, used: usize| {
         let pad = inner_w.saturating_sub(used);
         if pad > 0 {
-            spans.push(Span::styled(" ".repeat(pad), Style::default().bg(body_bg)));
+            spans.push(Span::raw(" ".repeat(pad)));
         }
-        spans.push(Span::styled("│", body_border));
+        spans.push(Span::styled("│", border));
     };
 
     if let Some(meta) = result_meta {
         let used = body_indent.chars().count() + meta.chars().count();
         let mut spans = vec![
-            Span::styled("│", body_border),
-            Span::styled(body_indent.to_string(), Style::default().bg(body_bg)),
+            Span::styled("│", border),
+            Span::raw(body_indent.to_string()),
             Span::styled(
                 meta.to_string(),
-                Style::default()
-                    .fg(Palette::MUTED)
-                    .bg(body_bg)
-                    .add_modifier(Modifier::BOLD),
+                Style::default().fg(Palette::MUTED).add_modifier(Modifier::BOLD),
             ),
         ];
         render_body(&mut spans, used);
@@ -652,33 +510,24 @@ pub fn tool_card(
                 chars.push('…');
             }
             let body: String = chars.iter().collect();
-            // YYC-74 bonus: diff coloring on lines that look like
-            // unified-diff entries (`+ ...` / `- ...`). Header lines
-            // (NEW FILE / MODIFIED / EDITED · path) get bold muted.
             let body_style = if body.starts_with("+ ") || body.starts_with("+") && body != "+" {
-                Style::default().fg(Palette::GREEN).bg(body_bg)
+                Style::default().fg(Palette::GREEN)
             } else if body.starts_with("- ") || body.starts_with("-") && body != "-" {
-                Style::default().fg(Palette::RED).bg(body_bg)
+                Style::default().fg(Palette::RED)
             } else if body.starts_with("NEW FILE")
                 || body.starts_with("MODIFIED")
                 || body.starts_with("EDITED")
             {
-                Style::default()
-                    .fg(Palette::MUTED)
-                    .bg(body_bg)
-                    .add_modifier(Modifier::BOLD)
+                Style::default().fg(Palette::MUTED).add_modifier(Modifier::BOLD)
             } else if body.starts_with("… ") {
-                Style::default()
-                    .fg(Palette::MUTED)
-                    .bg(body_bg)
-                    .add_modifier(Modifier::ITALIC)
+                Style::default().fg(Palette::MUTED).add_modifier(Modifier::ITALIC)
             } else {
-                Style::default().fg(Palette::INK).bg(body_bg)
+                Style::default()
             };
             let used = body_indent.chars().count() + body.chars().count();
             let mut spans = vec![
-                Span::styled("│", body_border),
-                Span::styled(body_indent.to_string(), Style::default().bg(body_bg)),
+                Span::styled("│", border),
+                Span::raw(body_indent.to_string()),
                 Span::styled(body, body_style),
             ];
             render_body(&mut spans, used);
@@ -686,7 +535,6 @@ pub fn tool_card(
         }
     }
 
-    // ── YYC-78: long-output footer when the result was clipped.
     if elided_lines > 0 {
         let footer = format!(
             "… {elided_lines} more line{} elided",
@@ -694,25 +542,21 @@ pub fn tool_card(
         );
         let used = body_indent.chars().count() + footer.chars().count();
         let mut spans = vec![
-            Span::styled("│", body_border),
-            Span::styled(body_indent.to_string(), Style::default().bg(body_bg)),
+            Span::styled("│", border),
+            Span::raw(body_indent.to_string()),
             Span::styled(
                 footer,
-                Style::default()
-                    .fg(Palette::MUTED)
-                    .bg(body_bg)
-                    .add_modifier(Modifier::ITALIC),
+                Style::default().fg(Palette::MUTED).add_modifier(Modifier::ITALIC),
             ),
         ];
         render_body(&mut spans, used);
         out.push(Line::from(spans));
     }
 
-    // ── Bottom border on FAINT, closing the rectangle.
     out.push(Line::from(vec![
-        Span::styled("└", body_border),
-        Span::styled("─".repeat(inner_w), body_border),
-        Span::styled("┘", body_border),
+        Span::styled("└", border),
+        Span::styled("─".repeat(inner_w), border),
+        Span::styled("┘", border),
     ]));
 
     out
