@@ -23,15 +23,58 @@ use lsp_types::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::str::FromStr;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStdin, Command};
-use tokio::sync::{Mutex, oneshot};
+use tokio::sync::{Mutex, Notify, oneshot};
+
+/// LSP standard error codes we treat as "still indexing" (YYC-72).
+/// `ContentModified` and `ServerCancelled` come from the LSP spec; both
+/// are common while rust-analyzer is doing its initial workspace pass.
+const LSP_CONTENT_MODIFIED: i64 = -32801;
+const LSP_REQUEST_CANCELLED: i64 = -32800;
+const LSP_SERVER_CANCELLED: i64 = -32802;
+
+/// Default seconds the LSP tools spend waiting for rust-analyzer to
+/// finish indexing before falling back to a "not ready" error (YYC-72).
+const DEFAULT_LSP_READINESS_WAIT_SECS: u64 = 15;
+
+/// Parsed JSON-RPC error response from an LSP request.
+#[derive(Debug, Clone)]
+struct LspProtoError {
+    code: i64,
+    message: String,
+}
+
+/// Typed error surface for LSP-backed tools (YYC-72). The agent sees
+/// `NotReady` as a message that tells it to retry rather than a
+/// silent `null`.
+#[derive(Debug, thiserror::Error)]
+pub enum LspError {
+    #[error("rust-analyzer is still indexing — retry in {retry_secs}s")]
+    NotReady { retry_secs: u64 },
+    #[error("LSP '{method}' request failed (code {code}): {message}")]
+    Request {
+        method: String,
+        code: i64,
+        message: String,
+    },
+}
+
+impl LspProtoError {
+    fn is_indexing(&self) -> bool {
+        matches!(
+            self.code,
+            LSP_CONTENT_MODIFIED | LSP_REQUEST_CANCELLED | LSP_SERVER_CANCELLED
+        )
+    }
+}
 
 /// Default server commands per language. Overridable via config.
 fn default_command(lang: Language) -> Option<(&'static str, &'static [&'static str])> {
@@ -61,7 +104,7 @@ struct RpcMessage {
     error: Option<Value>,
 }
 
-type Pending = Arc<Mutex<HashMap<i64, oneshot::Sender<Result<Value, String>>>>>;
+type Pending = Arc<Mutex<HashMap<i64, oneshot::Sender<Result<Value, LspProtoError>>>>>;
 type DiagCache = Arc<Mutex<HashMap<String, Vec<Diagnostic>>>>;
 
 /// One LSP server subprocess + its JSON-RPC plumbing.
@@ -73,6 +116,17 @@ pub struct LspServer {
     diagnostics: DiagCache,
     workspace_root: PathBuf,
     lang: Language,
+    /// Marks the server as ready once its initial workspace indexing
+    /// pass completes (YYC-72). Set true by the `$/progress` reader on
+    /// indexing-end notifications. Servers that never publish progress
+    /// (i.e. languages other than Rust) are treated as ready when the
+    /// first request goes through — see `wait_until_ready`.
+    is_ready: Arc<AtomicBool>,
+    ready_notify: Arc<Notify>,
+    /// Paths we've already sent `textDocument/didOpen` for; avoids
+    /// re-sending the same document and triggering `ContentModified`
+    /// cancellation of in-flight requests (YYC-72).
+    opened: Arc<Mutex<HashSet<String>>>,
 }
 
 impl LspServer {
@@ -102,11 +156,16 @@ impl LspServer {
 
         let pending: Pending = Arc::new(Mutex::new(HashMap::new()));
         let diagnostics: DiagCache = Arc::new(Mutex::new(HashMap::new()));
+        let is_ready: Arc<AtomicBool> = Arc::new(AtomicBool::new(false));
+        let ready_notify: Arc<Notify> = Arc::new(Notify::new());
+        let opened: Arc<Mutex<HashSet<String>>> = Arc::new(Mutex::new(HashSet::new()));
 
         // Reader task: pump messages off stdout, route by id (response)
         // or method (notification).
         let pending_clone = pending.clone();
         let diag_clone = diagnostics.clone();
+        let ready_clone = is_ready.clone();
+        let notify_clone = ready_notify.clone();
         let lang_name = lang.name();
         tokio::spawn(async move {
             let mut reader = BufReader::new(stdout);
@@ -118,7 +177,16 @@ impl LspServer {
                                 let mut p = pending_clone.lock().await;
                                 if let Some(tx) = p.remove(&id) {
                                     let r = if let Some(err) = msg.error {
-                                        Err(err.to_string())
+                                        let code = err
+                                            .get("code")
+                                            .and_then(|v| v.as_i64())
+                                            .unwrap_or(0);
+                                        let message = err
+                                            .get("message")
+                                            .and_then(|v| v.as_str())
+                                            .unwrap_or("(no message)")
+                                            .to_string();
+                                        Err(LspProtoError { code, message })
                                     } else {
                                         Ok(msg.result.unwrap_or(Value::Null))
                                     };
@@ -141,6 +209,28 @@ impl LspServer {
                                                 .lock()
                                                 .await
                                                 .insert(uri.to_string(), parsed);
+                                        }
+                                    }
+                                }
+                            } else if method == "$/progress" {
+                                // YYC-72: rust-analyzer reports indexing
+                                // status via $/progress. Mark the server
+                                // ready when it sends the end notification
+                                // for any indexing-flavored token. Other
+                                // tokens (cargo metadata, etc.) are also
+                                // counted as ready signals so we don't get
+                                // stuck on servers that don't publish a
+                                // dedicated indexing token.
+                                if let Some(params) = msg.params {
+                                    if let Some(value) = params.get("value") {
+                                        let kind = value
+                                            .get("kind")
+                                            .and_then(|v| v.as_str())
+                                            .unwrap_or("");
+                                        if kind == "end"
+                                            && !ready_clone.swap(true, Ordering::SeqCst)
+                                        {
+                                            notify_clone.notify_waiters();
                                         }
                                     }
                                 }
@@ -167,6 +257,9 @@ impl LspServer {
             diagnostics,
             workspace_root: workspace_root.clone(),
             lang,
+            is_ready,
+            ready_notify,
+            opened,
         };
 
         // Initialize handshake.
@@ -201,6 +294,8 @@ impl LspServer {
     }
 
     /// Send a request and await the response. Returns parsed `R`.
+    /// LSP error responses are mapped through `LspError` so callers can
+    /// distinguish "still indexing" from a real failure (YYC-72).
     pub async fn request<R, P>(&self, method: &str, params: P) -> Result<R>
     where
         R: for<'de> Deserialize<'de>,
@@ -222,8 +317,53 @@ impl LspServer {
             .await
             .map_err(|_| anyhow!("LSP request '{method}' timed out"))?
             .map_err(|_| anyhow!("LSP response channel closed for '{method}'"))?;
-        let value = raw.map_err(|e| anyhow!("LSP error on '{method}': {e}"))?;
+        let value = raw.map_err(|proto| {
+            if proto.is_indexing() {
+                anyhow::Error::from(LspError::NotReady {
+                    retry_secs: DEFAULT_LSP_READINESS_WAIT_SECS,
+                })
+            } else {
+                anyhow::Error::from(LspError::Request {
+                    method: method.to_string(),
+                    code: proto.code,
+                    message: proto.message,
+                })
+            }
+        })?;
         Ok(serde_json::from_value(value).context("decode LSP response")?)
+    }
+
+    /// Wait up to `timeout` for the server to publish an end-of-progress
+    /// notification (YYC-72). Returns true if ready by deadline.
+    /// Languages that never emit `$/progress` (anything other than
+    /// rust-analyzer today) collapse to "ready immediately" so this is
+    /// a no-op for them after the first call sets `is_ready`.
+    pub async fn wait_until_ready(&self, timeout: Duration) -> bool {
+        if self.is_ready.load(Ordering::SeqCst) {
+            return true;
+        }
+        let notified = self.ready_notify.notified();
+        if self.is_ready.load(Ordering::SeqCst) {
+            return true;
+        }
+        tokio::time::timeout(timeout, notified).await.is_ok()
+            || self.is_ready.load(Ordering::SeqCst)
+    }
+
+    /// True when the server has already signaled readiness — useful for
+    /// tools that want to short-circuit a redundant wait.
+    pub fn is_ready(&self) -> bool {
+        self.is_ready.load(Ordering::SeqCst)
+    }
+
+    /// Mark the server ready without waiting for a `$/progress` end —
+    /// callers that successfully complete a real request can flip the
+    /// flag so subsequent calls don't re-wait. Used as a fallback for
+    /// servers that never publish progress notifications.
+    pub fn mark_ready(&self) {
+        if !self.is_ready.swap(true, Ordering::SeqCst) {
+            self.ready_notify.notify_waiters();
+        }
     }
 
     /// Send a notification (no response).
@@ -236,10 +376,20 @@ impl LspServer {
         write_message(&self.stdin, &msg).await
     }
 
-    /// Open a file (sends `textDocument/didOpen`). Idempotent — safe to
-    /// call before each tool invocation; the server tracks state.
+    /// Open a file (sends `textDocument/didOpen`) once per unique path.
+    /// Re-sending the same document on every tool invocation can cause
+    /// rust-analyzer to emit `ContentModified` and cancel any in-flight
+    /// requests for that document (YYC-72). Callers that have actually
+    /// edited the file should use `did_change` instead.
     pub async fn did_open(&self, path: &Path, source: &str) -> Result<()> {
         let uri = path_to_uri(path)?;
+        let key = uri.to_string();
+        {
+            let mut opened = self.opened.lock().await;
+            if !opened.insert(key) {
+                return Ok(());
+            }
+        }
         let lang_id = self.lang.name().to_string();
         let item = TextDocumentItem {
             uri,
@@ -383,14 +533,22 @@ impl LspManager {
 
 // ─── high-level helpers used by the LSP tools ──────────────────────────
 
+async fn prepare_request(server: &LspServer, path: &Path) -> Result<()> {
+    let source = tokio::fs::read_to_string(path).await?;
+    server.did_open(path, &source).await?;
+    server
+        .wait_until_ready(Duration::from_secs(DEFAULT_LSP_READINESS_WAIT_SECS))
+        .await;
+    Ok(())
+}
+
 pub async fn goto_definition(
     server: &LspServer,
     path: &Path,
     line: u32,
     character: u32,
 ) -> Result<Option<Vec<Location>>> {
-    let source = tokio::fs::read_to_string(path).await?;
-    server.did_open(path, &source).await?;
+    prepare_request(server, path).await?;
     let uri = path_to_uri(path)?;
     let params = GotoDefinitionParams {
         text_document_position_params: TextDocumentPositionParams {
@@ -400,10 +558,9 @@ pub async fn goto_definition(
         work_done_progress_params: Default::default(),
         partial_result_params: Default::default(),
     };
-    let resp: Option<GotoDefinitionResponse> = server
-        .request("textDocument/definition", params)
-        .await
-        .ok();
+    let resp: Option<GotoDefinitionResponse> =
+        server.request("textDocument/definition", params).await?;
+    server.mark_ready();
     Ok(resp.map(|r| match r {
         GotoDefinitionResponse::Scalar(loc) => vec![loc],
         GotoDefinitionResponse::Array(v) => v,
@@ -423,8 +580,7 @@ pub async fn find_references(
     line: u32,
     character: u32,
 ) -> Result<Option<Vec<Location>>> {
-    let source = tokio::fs::read_to_string(path).await?;
-    server.did_open(path, &source).await?;
+    prepare_request(server, path).await?;
     let uri = path_to_uri(path)?;
     let params = ReferenceParams {
         text_document_position: TextDocumentPositionParams {
@@ -437,10 +593,8 @@ pub async fn find_references(
         work_done_progress_params: Default::default(),
         partial_result_params: Default::default(),
     };
-    let resp: Option<Vec<Location>> = server
-        .request("textDocument/references", params)
-        .await
-        .ok();
+    let resp: Option<Vec<Location>> = server.request("textDocument/references", params).await?;
+    server.mark_ready();
     Ok(resp)
 }
 
@@ -450,8 +604,7 @@ pub async fn hover(
     line: u32,
     character: u32,
 ) -> Result<Option<Hover>> {
-    let source = tokio::fs::read_to_string(path).await?;
-    server.did_open(path, &source).await?;
+    prepare_request(server, path).await?;
     let uri = path_to_uri(path)?;
     let params = HoverParams {
         text_document_position_params: TextDocumentPositionParams {
@@ -460,7 +613,8 @@ pub async fn hover(
         },
         work_done_progress_params: Default::default(),
     };
-    let resp: Option<Hover> = server.request("textDocument/hover", params).await.ok();
+    let resp: Option<Hover> = server.request("textDocument/hover", params).await?;
+    server.mark_ready();
     Ok(resp)
 }
 
@@ -488,4 +642,40 @@ pub async fn diagnostics_for(
         }
     }
     Ok(server.cached_diagnostics(path).await)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn proto_error_indexing_codes_classify_as_not_ready() {
+        for code in [
+            LSP_CONTENT_MODIFIED,
+            LSP_REQUEST_CANCELLED,
+            LSP_SERVER_CANCELLED,
+        ] {
+            let e = LspProtoError {
+                code,
+                message: "x".into(),
+            };
+            assert!(e.is_indexing(), "code {code} must classify as indexing");
+        }
+    }
+
+    #[test]
+    fn proto_error_other_codes_are_not_indexing() {
+        let e = LspProtoError {
+            code: -32601, // MethodNotFound
+            message: "nope".into(),
+        };
+        assert!(!e.is_indexing());
+    }
+
+    #[test]
+    fn lsp_error_not_ready_message_includes_retry_hint() {
+        let msg = format!("{}", LspError::NotReady { retry_secs: 15 });
+        assert!(msg.contains("indexing"));
+        assert!(msg.contains("15s"));
+    }
 }
