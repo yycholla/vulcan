@@ -17,6 +17,19 @@ impl PromptBuilder {
                 .join("\n")
         );
 
+        let preferences_section = "## Tool preferences\n\
+             Prefer native tools over `bash`. Bash is the last resort — use it only \
+             for pipes, ad-hoc sysadmin, or commands no native tool covers.\n\n\
+             | Task | Use | Not |\n\
+             |---|---|---|\n\
+             | Search file contents | `search_files` | `bash rg` / `grep -r` |\n\
+             | Structural code query | `code_query` (tree-sitter) | `bash grep` |\n\
+             | Read a file | `read_file` | `bash cat` / `head` / `tail` |\n\
+             | List a directory | `list_files` | `bash ls` / `tree` / `find` |\n\
+             | Check Rust compiles | `cargo_check` | `bash cargo check` |\n\
+             | Git status / diff / log / commit / push | `git_*` | `bash git ...` |\n\
+             | Goto-def, refs, hover | `goto_definition` / `find_references` / `hover` | (no bash equiv) |\n";
+
         format!(
             "You are Vulcan, a Rust AI agent. You help with coding, research, \
              file management, and automation.\n\n\
@@ -24,8 +37,8 @@ impl PromptBuilder {
              - Be concise and precise\n\
              - When working on multi-step tasks, use tools iteratively — one tool call at a time\n\
              - Read files before editing them\n\
-             - Use `bash` for builds, installs, git operations, and scripts\n\
              - After 5+ tool calls on a complex task, suggest saving a skill\n\n\
+             {preferences_section}\n\
              {tool_section}\n\
              ## Response Format\n\
              Respond naturally. If the user's request doesn't need tools, just answer directly. \
@@ -54,6 +67,29 @@ mod tests {
         assert!(
             !prompt.contains("include a `tool_calls` block"),
             "prompt should instruct native tool calling, not literal tool_calls text output: {prompt:?}"
+        );
+    }
+
+    /// YYC-86: the prompt must steer the model toward native tools and
+    /// position bash as a last resort. Without this section, even with
+    /// the YYC-85 description nudges the agent still falls back to
+    /// `rg`/`cat`/`cargo check` via bash.
+    #[test]
+    fn system_prompt_includes_native_tool_preference_table() {
+        let prompt = PromptBuilder.build_system_prompt(&ToolRegistry::new());
+        assert!(
+            prompt.contains("Tool preferences"),
+            "prompt missing 'Tool preferences' section: {prompt:?}"
+        );
+        for native in ["search_files", "cargo_check", "git_status", "read_file", "list_files"] {
+            assert!(
+                prompt.contains(native),
+                "preference table missing `{native}` reference: {prompt:?}"
+            );
+        }
+        assert!(
+            prompt.to_lowercase().contains("last resort"),
+            "prompt should call bash a last resort: {prompt:?}"
         );
     }
 }
