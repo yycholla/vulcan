@@ -31,6 +31,10 @@ pub fn build_router(state: AppState) -> Router {
             "/lanes",
             axum::routing::get(crate::gateway::routes::lanes::handle),
         )
+        .route(
+            "/inbound",
+            axum::routing::post(crate::gateway::routes::inbound::handle),
+        )
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             bearer_auth,
