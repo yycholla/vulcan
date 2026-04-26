@@ -431,6 +431,11 @@ fn initialize_conn(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
+#[cfg(test)]
+pub(crate) fn initialize_test_conn(conn: &Connection) -> Result<()> {
+    initialize_conn(conn)
+}
+
 fn upsert_session_metadata(
     conn: &Connection,
     session_id: &str,
