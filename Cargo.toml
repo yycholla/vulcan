@@ -70,6 +70,10 @@ tree-sitter-json = "0.24.8"
 # textDocument/* bodies. Verified at crates.io latest stable.
 lsp-types = "0.97"
 
+# Workspace walker that respects .gitignore (YYC-50). Used by the
+# code-graph indexer so we don't index target/, node_modules/, etc.
+ignore = "0.4.25"
+
 [profile.release]
 opt-level = "z"    # optimize for size
 lto = true

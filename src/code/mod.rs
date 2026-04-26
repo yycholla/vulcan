@@ -4,6 +4,7 @@
 //! alongside. Both share `Language` here so language detection has one
 //! source of truth.
 
+pub mod graph;
 pub mod lsp;
 
 use std::path::Path;

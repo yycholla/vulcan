@@ -65,6 +65,7 @@ pub trait Tool: Send + Sync {
 
 pub mod code;
 pub mod code_edit;
+pub mod code_graph;
 pub mod file;
 pub mod git;
 pub mod lsp;
@@ -149,7 +150,7 @@ impl ToolRegistry {
         let parser_cache = Arc::new(crate::code::ParserCache::new());
         registry.register(Arc::new(code::CodeOutlineTool::new(parser_cache.clone())));
         registry.register(Arc::new(code::CodeExtractTool::new(parser_cache.clone())));
-        registry.register(Arc::new(code::CodeQueryTool::new(parser_cache)));
+        registry.register(Arc::new(code::CodeQueryTool::new(parser_cache.clone())));
         // YYC-46: LSP-backed semantic tools. One manager pool — servers
         // are spawned lazily on first use per language.
         let lsp_mgr = lsp.unwrap_or_else(|| {
@@ -164,6 +165,16 @@ impl ToolRegistry {
         // YYC-49: AST-aware structural edits.
         registry.register(Arc::new(code_edit::ReplaceFunctionBodyTool));
         registry.register(Arc::new(code_edit::RenameSymbolTool::new(lsp_mgr)));
+        // YYC-50: workspace symbol index. Lazy — the agent has to run
+        // `index_code_graph` once before `find_symbol` returns hits.
+        let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+        if let Ok(graph) = crate::code::graph::CodeGraph::open(cwd, parser_cache.clone()) {
+            let graph_arc = Arc::new(graph);
+            registry.register(Arc::new(code_graph::IndexCodeGraphTool::new(
+                graph_arc.clone(),
+            )));
+            registry.register(Arc::new(code_graph::FindSymbolTool::new(graph_arc)));
+        }
         // YYC-36: native git tools — agent stops composing brittle
         // `git ...` shell strings through bash.
         registry.register(Arc::new(git::GitStatusTool));
