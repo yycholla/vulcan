@@ -13,6 +13,7 @@
 
 use std::collections::VecDeque;
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use anyhow::Result;
 use async_trait::async_trait;
@@ -206,6 +207,72 @@ impl LLMProvider for MockProvider {
         }
 
         let response = Self::build_chat_response(r)?;
+        let _ = tx.send(StreamEvent::Done(response));
+        Ok(())
+    }
+
+    fn max_context(&self) -> usize {
+        self.max_context
+    }
+}
+
+/// Deterministic generator-style provider for soak benchmarks.
+///
+/// Unlike `MockProvider` (which pops from a fixed queue), `GeneratedProvider`
+/// computes a response from the current turn index, letting callers drive
+/// thousands of turns without enqueueing thousands of `MockResponse`s.
+///
+/// The script closure takes the zero-indexed turn number and returns a
+/// `ChatResponse`. Counter is shared across `chat` and `chat_stream`.
+pub struct GeneratedProvider {
+    script: Box<dyn Fn(usize) -> ChatResponse + Send + Sync>,
+    counter: AtomicUsize,
+    max_context: usize,
+}
+
+impl GeneratedProvider {
+    pub fn new<F>(max_context: usize, script: F) -> Self
+    where
+        F: Fn(usize) -> ChatResponse + Send + Sync + 'static,
+    {
+        Self {
+            script: Box::new(script),
+            counter: AtomicUsize::new(0),
+            max_context,
+        }
+    }
+
+    pub fn turns_completed(&self) -> usize {
+        self.counter.load(Ordering::SeqCst)
+    }
+}
+
+#[async_trait]
+impl LLMProvider for GeneratedProvider {
+    async fn chat(
+        &self,
+        _messages: &[Message],
+        _tools: &[ToolDefinition],
+        _cancel: CancellationToken,
+    ) -> Result<ChatResponse> {
+        let turn = self.counter.fetch_add(1, Ordering::SeqCst);
+        Ok((self.script)(turn))
+    }
+
+    async fn chat_stream(
+        &self,
+        _messages: &[Message],
+        _tools: &[ToolDefinition],
+        tx: mpsc::UnboundedSender<StreamEvent>,
+        _cancel: CancellationToken,
+    ) -> Result<()> {
+        let turn = self.counter.fetch_add(1, Ordering::SeqCst);
+        let response = (self.script)(turn);
+        if let Some(content) = response.content.clone()
+            && !content.is_empty()
+        {
+            let _ = tx.send(StreamEvent::Text(content));
+        }
         let _ = tx.send(StreamEvent::Done(response));
         Ok(())
     }
