@@ -133,9 +133,8 @@ impl LspServer {
     /// Spawn the language server, send `initialize` + `initialized`,
     /// and start the background reader.
     pub async fn start(lang: Language, workspace_root: PathBuf) -> Result<Self> {
-        let (cmd, args) = default_command(lang).ok_or_else(|| {
-            anyhow!("No default LSP command for {}", lang.name())
-        })?;
+        let (cmd, args) = default_command(lang)
+            .ok_or_else(|| anyhow!("No default LSP command for {}", lang.name()))?;
         let mut child = Command::new(cmd)
             .args(args)
             .current_dir(&workspace_root)
@@ -177,10 +176,8 @@ impl LspServer {
                                 let mut p = pending_clone.lock().await;
                                 if let Some(tx) = p.remove(&id) {
                                     let r = if let Some(err) = msg.error {
-                                        let code = err
-                                            .get("code")
-                                            .and_then(|v| v.as_i64())
-                                            .unwrap_or(0);
+                                        let code =
+                                            err.get("code").and_then(|v| v.as_i64()).unwrap_or(0);
                                         let message = err
                                             .get("message")
                                             .and_then(|v| v.as_str())
@@ -200,15 +197,10 @@ impl LspServer {
                                         params.get("uri").and_then(|v| v.as_str()),
                                         params.get("diagnostics"),
                                     ) {
-                                        if let Ok(parsed) = serde_json::from_value::<
-                                            Vec<Diagnostic>,
-                                        >(
-                                            diags.clone()
-                                        ) {
-                                            diag_clone
-                                                .lock()
-                                                .await
-                                                .insert(uri.to_string(), parsed);
+                                        if let Ok(parsed) =
+                                            serde_json::from_value::<Vec<Diagnostic>>(diags.clone())
+                                        {
+                                            diag_clone.lock().await.insert(uri.to_string(), parsed);
                                         }
                                     }
                                 }
@@ -280,9 +272,7 @@ impl LspServer {
         server
             .request::<lsp_types::InitializeResult, _>("initialize", init)
             .await?;
-        server
-            .notify("initialized", InitializedParams {})
-            .await?;
+        server.notify("initialized", InitializedParams {}).await?;
         Ok(server)
     }
 
@@ -622,10 +612,7 @@ pub async fn hover(
 /// arrive asynchronously after `didOpen` so we wait briefly for the
 /// first publish; later calls (after edits) get the latest snapshot
 /// without delay.
-pub async fn diagnostics_for(
-    server: &LspServer,
-    path: &Path,
-) -> Result<Vec<Diagnostic>> {
+pub async fn diagnostics_for(server: &LspServer, path: &Path) -> Result<Vec<Diagnostic>> {
     let source = tokio::fs::read_to_string(path).await?;
     server.did_open(path, &source).await?;
     // Give the server up to 1.5s to publish initial diagnostics on

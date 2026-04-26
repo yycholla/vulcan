@@ -80,15 +80,14 @@ async fn main() -> Result<()> {
     #[cfg(feature = "bench-soak")]
     let _profiler = dhat::Profiler::new_heap();
 
-    let provider: Box<dyn LLMProvider> = Box::new(GeneratedProvider::new(128_000, |turn| {
-        ChatResponse {
+    let provider: Box<dyn LLMProvider> =
+        Box::new(GeneratedProvider::new(128_000, |turn| ChatResponse {
             content: Some(format!("response for turn {turn}")),
             tool_calls: None,
             usage: None,
             finish_reason: Some("stop".into()),
             reasoning_content: None,
-        }
-    }));
+        }));
 
     let mut agent = Agent::for_test(
         provider,

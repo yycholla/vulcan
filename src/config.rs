@@ -308,10 +308,7 @@ pub struct ApprovalConfig {
 
 impl ApprovalConfig {
     pub fn mode_for(&self, tool: &str) -> ApprovalMode {
-        self.per_tool
-            .get(tool)
-            .copied()
-            .unwrap_or(self.default)
+        self.per_tool.get(tool).copied().unwrap_or(self.default)
     }
 }
 
@@ -473,9 +470,8 @@ impl Config {
         let mut config = if main_path.exists() {
             let raw = std::fs::read_to_string(&main_path)
                 .with_context(|| format!("Failed to read {}", main_path.display()))?;
-            let parsed: Config = toml::from_str(&raw).with_context(|| {
-                format!("Failed to parse {}", main_path.display())
-            })?;
+            let parsed: Config = toml::from_str(&raw)
+                .with_context(|| format!("Failed to parse {}", main_path.display()))?;
             tracing::info!("Loaded main config from {}", main_path.display());
             parsed
         } else {
@@ -486,9 +482,8 @@ impl Config {
         if keybinds_path.exists() {
             let raw = std::fs::read_to_string(&keybinds_path)
                 .with_context(|| format!("Failed to read {}", keybinds_path.display()))?;
-            let kb: KeybindsConfig = toml::from_str(&raw).with_context(|| {
-                format!("Failed to parse {}", keybinds_path.display())
-            })?;
+            let kb: KeybindsConfig = toml::from_str(&raw)
+                .with_context(|| format!("Failed to parse {}", keybinds_path.display()))?;
             config.keybinds = kb;
             tracing::info!("Loaded keybinds from {}", keybinds_path.display());
         }
@@ -843,8 +838,7 @@ model = "qwen2.5"
         let keybinds_raw = std::fs::read_to_string(dir.path().join("keybinds.toml")).unwrap();
         assert!(keybinds_raw.contains("toggle_tools = \"F4\""));
 
-        let providers_raw =
-            std::fs::read_to_string(dir.path().join("providers.toml")).unwrap();
+        let providers_raw = std::fs::read_to_string(dir.path().join("providers.toml")).unwrap();
         assert!(providers_raw.contains("[local]"));
 
         // Re-run is a no-op (idempotent).

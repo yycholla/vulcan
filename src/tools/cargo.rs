@@ -114,10 +114,7 @@ impl Tool for CargoCheckTool {
                 Some(m) => m,
                 None => continue,
             };
-            let level = msg
-                .get("level")
-                .and_then(|v| v.as_str())
-                .unwrap_or("note");
+            let level = msg.get("level").and_then(|v| v.as_str()).unwrap_or("note");
             // Skip purely informational rustc notes (`level=note` only),
             // keep error/warning/help so the agent sees actionable output.
             if level == "note" {
@@ -127,10 +124,17 @@ impl Tool for CargoCheckTool {
                 .get("spans")
                 .and_then(|v| v.as_array())
                 .and_then(|a| a.iter().find(|s| s.get("is_primary") == Some(&json!(true))))
-                .or_else(|| msg.get("spans").and_then(|v| v.as_array()).and_then(|a| a.first()));
+                .or_else(|| {
+                    msg.get("spans")
+                        .and_then(|v| v.as_array())
+                        .and_then(|a| a.first())
+                });
             let (file, line, col) = match span {
                 Some(s) => (
-                    s.get("file_name").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                    s.get("file_name")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string(),
                     s.get("line_start").and_then(|v| v.as_u64()).unwrap_or(0),
                     s.get("column_start").and_then(|v| v.as_u64()).unwrap_or(0),
                 ),

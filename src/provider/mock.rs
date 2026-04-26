@@ -88,10 +88,7 @@ impl MockProvider {
 
     /// Enqueue a response containing multiple tool calls in a single turn —
     /// the parallel-dispatch path's primary input.
-    pub fn enqueue_tool_calls(
-        &self,
-        calls: Vec<(&str, &str, serde_json::Value)>,
-    ) -> &Self {
+    pub fn enqueue_tool_calls(&self, calls: Vec<(&str, &str, serde_json::Value)>) -> &Self {
         let tcs: Vec<ToolCall> = calls
             .into_iter()
             .map(|(name, id, args)| ToolCall {
@@ -300,11 +297,23 @@ mod generated_tests {
 
         let cancel = CancellationToken::new();
         let r1 = provider
-            .chat(&[Message::User { content: "hi".into() }], &[], cancel.clone())
+            .chat(
+                &[Message::User {
+                    content: "hi".into(),
+                }],
+                &[],
+                cancel.clone(),
+            )
             .await
             .unwrap();
         let r2 = provider
-            .chat(&[Message::User { content: "hi".into() }], &[], cancel)
+            .chat(
+                &[Message::User {
+                    content: "hi".into(),
+                }],
+                &[],
+                cancel,
+            )
             .await
             .unwrap();
         assert_eq!(r1.content.as_deref(), Some("turn-0"));

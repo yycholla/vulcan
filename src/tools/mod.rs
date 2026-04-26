@@ -179,7 +179,11 @@ fn parse_cargo_manifest(path: &std::path::Path) -> (Option<String>, Vec<String>)
         .and_then(|b| b.as_array())
         .map(|arr| {
             arr.iter()
-                .filter_map(|b| b.get("name").and_then(|n| n.as_str()).map(|s| s.to_string()))
+                .filter_map(|b| {
+                    b.get("name")
+                        .and_then(|n| n.as_str())
+                        .map(|s| s.to_string())
+                })
                 .collect()
         })
         .unwrap_or_default();

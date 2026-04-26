@@ -75,10 +75,7 @@ pub fn build_model_tree(provider_label: &str, models: &[ModelInfo]) -> ModelTree
     let mut grouped: BTreeMap<String, Vec<(usize, &str)>> = BTreeMap::new();
     for (i, m) in models.iter().enumerate() {
         let (lab, rest) = split_lab(&m.id, provider_label);
-        grouped
-            .entry(lab.to_string())
-            .or_default()
-            .push((i, rest));
+        grouped.entry(lab.to_string()).or_default().push((i, rest));
     }
     let mut labs: Vec<TreeNode> = grouped
         .into_iter()
@@ -117,10 +114,7 @@ fn build_lab_node(lab: &str, entries: &[(usize, &str)]) -> TreeNode {
         let toks = tokenize(rest);
         let series = toks.first().cloned().unwrap_or_else(|| rest.to_string());
         let tail: Vec<String> = toks.into_iter().skip(1).collect();
-        by_series
-            .entry(series)
-            .or_default()
-            .push((*idx, tail));
+        by_series.entry(series).or_default().push((*idx, tail));
     }
     for (series, leaves) in by_series {
         node.children.push(build_series_node(&series, &leaves));
@@ -301,7 +295,10 @@ impl<'a> MillerSource for UnifiedPickerSource<'a> {
                 .map(|(i, label)| MillerEntry {
                     label: label.clone(),
                     icon: "▸".into(),
-                    has_children: self.tree_for(i).map(|t| !t.labs.is_empty()).unwrap_or(false),
+                    has_children: self
+                        .tree_for(i)
+                        .map(|t| !t.labs.is_empty())
+                        .unwrap_or(false),
                 })
                 .collect();
         }
@@ -312,7 +309,12 @@ impl<'a> MillerSource for UnifiedPickerSource<'a> {
             .iter()
             .map(|node| MillerEntry {
                 label: node.label.clone(),
-                icon: if node.children.is_empty() { "·" } else { "▸" }.to_string(),
+                icon: if node.children.is_empty() {
+                    "·"
+                } else {
+                    "▸"
+                }
+                .to_string(),
                 has_children: !node.children.is_empty(),
             })
             .collect()
@@ -444,7 +446,12 @@ impl<'a> MillerSource for ModelPickerSource<'a> {
             .iter()
             .map(|node| MillerEntry {
                 label: node.label.clone(),
-                icon: if node.children.is_empty() { "·" } else { "▸" }.to_string(),
+                icon: if node.children.is_empty() {
+                    "·"
+                } else {
+                    "▸"
+                }
+                .to_string(),
                 has_children: !node.children.is_empty(),
             })
             .collect()
@@ -533,11 +540,7 @@ mod tests {
         assert_eq!(lab_labels, vec!["moonshot", "openai"]);
 
         let moonshot = tree.labs.iter().find(|n| n.label == "moonshot").unwrap();
-        let series_labels: Vec<&str> = moonshot
-            .children
-            .iter()
-            .map(|n| n.label.as_str())
-            .collect();
+        let series_labels: Vec<&str> = moonshot.children.iter().map(|n| n.label.as_str()).collect();
         assert_eq!(series_labels, vec!["kimi"]);
 
         let kimi = &moonshot.children[0];

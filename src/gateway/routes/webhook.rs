@@ -74,14 +74,15 @@ mod tests {
 
     fn app_state_with(registry: PlatformRegistry, db: Arc<StdMutex<Connection>>) -> AppState {
         let config = Arc::new(crate::config::Config::default());
-        let agent_map = crate::gateway::agent_map::AgentMap::new(
-            config,
-            std::time::Duration::from_secs(60),
-        );
+        let agent_map =
+            crate::gateway::agent_map::AgentMap::new(config, std::time::Duration::from_secs(60));
         AppState {
             api_token: Arc::new("secret".into()),
             inbound: Arc::new(crate::gateway::queue::InboundQueue::new(Arc::clone(&db))),
-            outbound: Arc::new(crate::gateway::queue::OutboundQueue::new(Arc::clone(&db), 5)),
+            outbound: Arc::new(crate::gateway::queue::OutboundQueue::new(
+                Arc::clone(&db),
+                5,
+            )),
             registry: Arc::new(registry),
             agent_map: Arc::new(agent_map),
         }
