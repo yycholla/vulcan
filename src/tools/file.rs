@@ -150,6 +150,54 @@ impl Tool for ListFiles {
     }
 }
 
+/// Build a compact unified-style diff preview for the YYC-74 card
+/// (YYC-bonus: matches Claude Code-style render). Caps at ~10 line
+/// pairs and 1KB so megabyte rewrites don't bloat the TUI.
+fn diff_preview(before: &str, after: &str, label: &str) -> String {
+    let max_lines = 10;
+    let max_chars = 1024;
+    let mut out = String::new();
+    out.push_str(label);
+    out.push('\n');
+    let before_lines: Vec<&str> = before.lines().collect();
+    let after_lines: Vec<&str> = after.lines().collect();
+    let mut emitted = 0;
+    for (i, line) in before_lines.iter().enumerate() {
+        if emitted >= max_lines || out.len() >= max_chars {
+            break;
+        }
+        // Only show before lines that aren't matched in after at the
+        // same index (cheap line-by-line comparison; not a real diff).
+        if after_lines.get(i).map(|s| *s) != Some(*line) {
+            out.push_str(&format!("- {line}\n"));
+            emitted += 1;
+        }
+    }
+    for (i, line) in after_lines.iter().enumerate() {
+        if emitted >= max_lines || out.len() >= max_chars {
+            break;
+        }
+        if before_lines.get(i).map(|s| *s) != Some(*line) {
+            out.push_str(&format!("+ {line}\n"));
+            emitted += 1;
+        }
+    }
+    let total_changes = before_lines
+        .iter()
+        .enumerate()
+        .filter(|(i, l)| after_lines.get(*i).map(|s| *s) != Some(**l))
+        .count()
+        + after_lines
+            .iter()
+            .enumerate()
+            .filter(|(i, l)| before_lines.get(*i).map(|s| *s) != Some(**l))
+            .count();
+    if emitted < total_changes {
+        out.push_str(&format!("… {} more change(s)\n", total_changes - emitted));
+    }
+    out
+}
+
 pub struct WriteFile {
     diff_sink: Option<crate::tools::EditDiffSink>,
 }
@@ -212,7 +260,16 @@ impl Tool for WriteFile {
             *sink.lock().unwrap() = Some(diff);
         }
 
-        Ok(ToolResult::ok(format!("Wrote {bytes} bytes to {path}")))
+        // YYC-bonus: surface a real diff in the card preview without
+        // polluting the LLM-facing output.
+        let label = if before.is_empty() {
+            format!("NEW FILE · {path}")
+        } else {
+            format!("MODIFIED · {path}")
+        };
+        let display = diff_preview(&before, content, &label);
+        Ok(ToolResult::ok(format!("Wrote {bytes} bytes to {path}"))
+            .with_display_preview(display))
     }
 }
 
@@ -349,9 +406,12 @@ impl Tool for PatchFile {
             *sink.lock().unwrap() = Some(diff);
         }
 
+        // YYC-bonus: render a Claude Code-style diff in the card.
+        let display = diff_preview(old, new, &format!("EDITED · {path}"));
         Ok(ToolResult::ok(format!(
             "Replaced {replaces} occurrence(s) in {path}"
-        )))
+        ))
+        .with_display_preview(display))
     }
 }
 

@@ -19,6 +19,12 @@ pub struct ToolResult {
     pub output: String,
     pub media: Vec<String>,
     pub is_error: bool,
+    /// Optional richer body the TUI uses for the YYC-74 card preview.
+    /// Lets file-edit tools render an actual diff (`+ ... / - ...`)
+    /// inside the card while the LLM-facing `output` stays terse
+    /// (`Replaced 1 occurrence(s) in foo.rs`). Plain-output tools
+    /// leave this `None` and the renderer falls back to `output`.
+    pub display_preview: Option<String>,
 }
 
 impl ToolResult {
@@ -27,6 +33,7 @@ impl ToolResult {
             output: output.into(),
             media: Vec::new(),
             is_error: false,
+            display_preview: None,
         }
     }
 
@@ -35,7 +42,13 @@ impl ToolResult {
             output: output.into(),
             media: Vec::new(),
             is_error: true,
+            display_preview: None,
         }
+    }
+
+    pub fn with_display_preview(mut self, preview: impl Into<String>) -> Self {
+        self.display_preview = Some(preview.into());
+        self
     }
 }
 

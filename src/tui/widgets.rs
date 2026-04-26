@@ -606,11 +606,34 @@ pub fn tool_card(
                 chars.push('…');
             }
             let body: String = chars.iter().collect();
+            // YYC-74 bonus: diff coloring on lines that look like
+            // unified-diff entries (`+ ...` / `- ...`). Header lines
+            // (NEW FILE / MODIFIED / EDITED · path) get bold muted.
+            let body_style = if body.starts_with("+ ") || body.starts_with("+") && body != "+" {
+                Style::default().fg(Palette::GREEN).bg(body_bg)
+            } else if body.starts_with("- ") || body.starts_with("-") && body != "-" {
+                Style::default().fg(Palette::RED).bg(body_bg)
+            } else if body.starts_with("NEW FILE")
+                || body.starts_with("MODIFIED")
+                || body.starts_with("EDITED")
+            {
+                Style::default()
+                    .fg(Palette::MUTED)
+                    .bg(body_bg)
+                    .add_modifier(Modifier::BOLD)
+            } else if body.starts_with("… ") {
+                Style::default()
+                    .fg(Palette::MUTED)
+                    .bg(body_bg)
+                    .add_modifier(Modifier::ITALIC)
+            } else {
+                Style::default().fg(Palette::INK).bg(body_bg)
+            };
             let used = body_indent.chars().count() + body.chars().count();
             let mut spans = vec![
                 Span::styled("│", body_border),
                 Span::styled(body_indent.to_string(), Style::default().bg(body_bg)),
-                Span::styled(body, Style::default().fg(Palette::INK).bg(body_bg)),
+                Span::styled(body, body_style),
             ];
             render_body(&mut spans, used);
             out.push(Line::from(spans));
