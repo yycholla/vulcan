@@ -631,16 +631,19 @@ impl Agent {
                         let result = this.dispatch_tool(&name, &args, cancel).await;
                         let elapsed_ms = started.elapsed().as_millis() as u64;
                         let ok = !result.is_error;
-                        // YYC-74: truncated output preview + meta line
-                        // for the card body.
+                        // YYC-74: truncated output preview + meta line.
+                        // YYC-78: elided line count for the auto-collapse
+                        // "N more lines" indicator.
                         let output_preview = preview_output(&result.output);
                         let result_meta = summarize_tool_result(&name, &result.output);
+                        let elided = elided_lines(&result.output, output_preview.as_deref());
                         let _ = ui_tx.send(StreamEvent::ToolCallEnd {
                             id: id.clone(),
                             name: name.clone(),
                             ok,
                             output_preview,
                             result_meta,
+                            elided_lines: elided,
                             elapsed_ms,
                         });
                         (id, result)
@@ -1053,17 +1056,26 @@ fn summarize_tool_result(name: &str, output: &str) -> Option<String> {
 }
 
 /// Truncated tool result for the YYC-74 card preview block — caps at
-/// ~6 lines / 400 chars. The full output still goes to the LLM via
+/// ~12 lines / 1 KB. The full output still goes to the LLM via
 /// `Message::Tool`; this is purely for rendering.
 fn preview_output(text: &str) -> Option<String> {
     let trimmed = text.trim();
     if trimmed.is_empty() {
         return None;
     }
-    let chars: Vec<char> = trimmed.chars().take(400).collect();
+    let chars: Vec<char> = trimmed.chars().take(1024).collect();
     let head: String = chars.iter().collect();
-    let lines: Vec<&str> = head.lines().take(6).collect();
+    let lines: Vec<&str> = head.lines().take(12).collect();
     Some(lines.join("\n"))
+}
+
+/// Number of full output lines hidden by `preview_output` (YYC-78).
+/// Used by the card to render `… N more lines elided` when the
+/// result was clipped.
+fn elided_lines(text: &str, preview: Option<&str>) -> usize {
+    let total = text.trim().lines().count();
+    let shown = preview.map(|p| p.lines().count()).unwrap_or(0);
+    total.saturating_sub(shown)
 }
 
 #[cfg(test)]
@@ -1380,12 +1392,26 @@ mod tests {
     }
 
     #[test]
-    fn preview_output_caps_to_six_lines_and_400_chars() {
-        let big = (1..=20).map(|n| format!("line {n}")).collect::<Vec<_>>().join("\n");
+    fn preview_output_caps_to_twelve_lines_and_one_kb() {
+        // YYC-78 raised the cap so collapsed cards still show useful
+        // context up front.
+        let big = (1..=40).map(|n| format!("line {n}")).collect::<Vec<_>>().join("\n");
         let preview = preview_output(&big).unwrap();
-        assert_eq!(preview.lines().count(), 6);
+        assert_eq!(preview.lines().count(), 12);
         assert!(preview.contains("line 1"));
-        assert!(!preview.contains("line 7"));
+        assert!(!preview.contains("line 13"));
+    }
+
+    #[test]
+    fn elided_lines_counts_what_was_clipped() {
+        let big = (1..=40).map(|n| format!("line {n}")).collect::<Vec<_>>().join("\n");
+        let preview = preview_output(&big);
+        let elided = elided_lines(&big, preview.as_deref());
+        assert_eq!(elided, 28);
+        // Short output → no elision.
+        let short = "one\ntwo\nthree";
+        let preview = preview_output(short);
+        assert_eq!(elided_lines(short, preview.as_deref()), 0);
     }
 
     #[test]

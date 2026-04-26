@@ -95,6 +95,9 @@ pub enum MessageSegment {
         /// "5 matches", "+12 -3"). Renders as a dimmed sub-header in
         /// the YYC-74 card.
         result_meta: Option<String>,
+        /// Lines elided beyond the preview (YYC-78). When > 0 the card
+        /// renders a "… N more lines elided" footer.
+        elided_lines: usize,
         elapsed_ms: Option<u64>,
     },
 }
@@ -188,6 +191,7 @@ impl ChatMessage {
             params_summary,
             output_preview: None,
             result_meta: None,
+            elided_lines: 0,
             elapsed_ms: None,
         });
     }
@@ -196,17 +200,18 @@ impl ChatMessage {
     /// Walks segments in reverse so concurrent dispatch (YYC-34) still
     /// pairs each end with its own start as the matching tail.
     pub fn finish_tool(&mut self, name: &str, ok: bool) {
-        self.finish_tool_with(name, ok, None, None, None);
+        self.finish_tool_with(name, ok, None, None, 0, None);
     }
 
     /// Same as `finish_tool` but also stamps the result preview, meta
-    /// summary, and timing for the YYC-74 card.
+    /// summary, elided count, and timing for the YYC-74 card.
     pub fn finish_tool_with(
         &mut self,
         name: &str,
         ok: bool,
         output_preview: Option<String>,
         result_meta: Option<String>,
+        elided_lines: usize,
         elapsed_ms: Option<u64>,
     ) {
         for seg in self.segments.iter_mut().rev() {
@@ -215,6 +220,7 @@ impl ChatMessage {
                 status,
                 output_preview: op,
                 result_meta: rm,
+                elided_lines: el,
                 elapsed_ms: em,
                 ..
             } = seg
@@ -223,6 +229,7 @@ impl ChatMessage {
                     *status = ToolStatus::Done(ok);
                     *op = output_preview;
                     *rm = result_meta;
+                    *el = elided_lines;
                     *em = elapsed_ms;
                     return;
                 }
@@ -1206,6 +1213,7 @@ mod tests {
             true,
             Some("hello\nworld".into()),
             Some("2 lines".into()),
+            0,
             Some(345),
         );
         match &m.segments[0] {
