@@ -18,7 +18,15 @@ default = []
 # profiler that swaps the global allocator) and hdrhistogram (latency
 # percentiles) — both optional so production builds skip them entirely.
 bench-soak = ["dep:dhat", "dep:hdrhistogram"]
-gateway = ["dep:axum", "dep:tower", "dep:tower-http", "dep:subtle", "dep:hmac", "dep:sha2"]
+gateway = [
+    "dep:axum",
+    "dep:tower",
+    "dep:tower-http",
+    "dep:subtle",
+    "dep:hmac",
+    "dep:sha2",
+    "dep:serenity",
+]
 
 [dependencies]
 # Async runtime
@@ -96,6 +104,7 @@ subtle = { version = "2.6.1", optional = true }
 # pulling a second copy of `digest`.
 hmac = { version = "0.12.1", optional = true }
 sha2 = { version = "0.10.9", optional = true }
+serenity = { version = "0.12", default-features = false, features = ["client", "gateway", "http", "model", "rustls_backend"], optional = true }
 
 # `http` types are shared between axum and the `Platform` trait method
 # `verify_webhook`. Promoted to a direct, NON-feature-gated dep so the trait

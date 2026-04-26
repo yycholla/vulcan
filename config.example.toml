@@ -100,3 +100,4 @@ theme = "system"
 # [gateway.discord]
 # enabled = false
 # bot_token = "..."
+# allow_bots = false
