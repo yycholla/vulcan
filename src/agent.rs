@@ -293,15 +293,15 @@ impl Agent {
         catalog.list_models().await.map_err(Into::into)
     }
 
-    /// Test-only constructor that takes a fully-built provider and an empty
-    /// (or test-curated) registry. Bypasses the env-derived config path so
-    /// tests don't need a real API key. Memory points at an in-memory or
+    /// Test/bench-only constructor that takes a fully-built provider and an
+    /// empty (or test-curated) registry. Bypasses the env-derived config
+    /// path so tests don't need a real API key. Memory points at an in-memory or
     /// temporary store via the caller — this constructor leaves the real
     /// `SessionStore::new()` path which writes to ~/.vulcan; tests should
     /// override `Agent::memory` if they care about isolation, or pass a
     /// custom session_id and accept that ~/.vulcan/sessions.db gets touched.
-    #[cfg(test)]
-    pub(crate) fn for_test(
+    #[cfg(any(test, feature = "bench-soak"))]
+    pub fn for_test(
         provider: Box<dyn LLMProvider>,
         tools: ToolRegistry,
         hooks: HookRegistry,

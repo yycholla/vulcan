@@ -13,9 +13,10 @@ readme = "README.md"
 autobenches = false
 
 [features]
-# Enabled only when running the soak binary. Pulls in dhat-rs, which swaps
-# the global allocator for heap profiling — never enabled by default.
-bench-soak = ["dep:dhat"]
+# Enabled only when running the soak binary. Pulls in dhat-rs (heap
+# profiler that swaps the global allocator) and hdrhistogram (latency
+# percentiles) — both optional so production builds skip them entirely.
+bench-soak = ["dep:dhat", "dep:hdrhistogram"]
 
 [dependencies]
 # Async runtime
@@ -85,6 +86,12 @@ ignore = "0.4.25"
 
 # Heap profiler for the soak binary. Optional — only linked under `bench-soak`.
 dhat = { version = "0.3", optional = true }
+
+# HDR histogram for soak-binary latency percentiles. Optional — only linked
+# into the runtime crate under `bench-soak`. (Also listed in
+# `[dev-dependencies]` so divan benches running under `cargo test` /
+# `cargo bench` can use it without enabling the feature.)
+hdrhistogram = { version = "7", optional = true }
 
 [profile.release]
 opt-level = "z"    # optimize for size
