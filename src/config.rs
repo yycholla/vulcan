@@ -31,6 +31,9 @@ pub struct Config {
 
     #[serde(default)]
     pub tui: TuiConfig,
+
+    #[serde(default)]
+    pub gateway: Option<GatewayConfig>,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -51,6 +54,32 @@ impl Default for TuiConfig {
             theme: default_theme_name(),
         }
     }
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct GatewayConfig {
+    #[serde(default = "default_gateway_bind")]
+    pub bind: String,
+    pub api_token: String,
+    #[serde(default = "default_gateway_idle_ttl_secs")]
+    pub idle_ttl_secs: u64,
+    #[serde(default = "default_gateway_max_concurrent_lanes")]
+    pub max_concurrent_lanes: usize,
+    #[serde(default = "default_gateway_outbound_max_attempts")]
+    pub outbound_max_attempts: u32,
+}
+
+fn default_gateway_bind() -> String {
+    "127.0.0.1:7777".into()
+}
+fn default_gateway_idle_ttl_secs() -> u64 {
+    1800
+}
+fn default_gateway_max_concurrent_lanes() -> usize {
+    64
+}
+fn default_gateway_outbound_max_attempts() -> u32 {
+    5
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -244,6 +273,7 @@ impl Default for Config {
             compaction: CompactionConfig::default(),
             embeddings: EmbeddingsConfig::default(),
             tui: TuiConfig::default(),
+            gateway: None,
         }
     }
 }
@@ -363,5 +393,20 @@ debug = "wire"
 
         assert!(ProviderDebugMode::Wire.logs_wire());
         assert!(ProviderDebugMode::Wire.logs_tool_fallback());
+    }
+
+    #[test]
+    fn gateway_section_parses_with_defaults() {
+        let toml = r#"
+            [gateway]
+            api_token = "test-token"
+        "#;
+        let cfg: Config = toml::from_str(toml).expect("parse");
+        let g = cfg.gateway.expect("gateway present");
+        assert_eq!(g.bind, "127.0.0.1:7777");
+        assert_eq!(g.api_token, "test-token");
+        assert_eq!(g.idle_ttl_secs, 1800);
+        assert_eq!(g.max_concurrent_lanes, 64);
+        assert_eq!(g.outbound_max_attempts, 5);
     }
 }
