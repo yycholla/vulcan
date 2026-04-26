@@ -167,8 +167,12 @@ impl ToolRegistry {
         registry.register(Arc::new(code_edit::RenameSymbolTool::new(lsp_mgr)));
         // YYC-50: workspace symbol index. Lazy — the agent has to run
         // `index_code_graph` once before `find_symbol` returns hits.
-        let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+
+        let Ok(cwd) = std::env::current_dir() else {
+            return tools;
+        };
         if let Ok(graph) = crate::code::graph::CodeGraph::open(cwd, parser_cache.clone()) {
+
             let graph_arc = Arc::new(graph);
             registry.register(Arc::new(code_graph::IndexCodeGraphTool::new(
                 graph_arc.clone(),
