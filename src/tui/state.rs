@@ -303,6 +303,7 @@ pub struct SessionState {
     pub last_active: i64,
     pub parent_session_id: Option<String>,
     pub lineage_label: Option<String>,
+    pub preview: Option<String>,
     pub status: SessionStatus,
     pub is_active: bool,
 }
@@ -711,6 +712,7 @@ impl AppState {
                     last_active: s.last_active,
                     parent_session_id: s.parent_session_id.clone(),
                     lineage_label: s.lineage_label.clone(),
+                    preview: s.preview.clone(),
                     status: if is_active {
                         SessionStatus::Live
                     } else {
@@ -1055,6 +1057,7 @@ mod tests {
                 message_count: 3,
                 parent_session_id: Some(parent_id.clone()),
                 lineage_label: Some("branched from auth cleanup".into()),
+                preview: None,
             }],
             &child_id,
         );

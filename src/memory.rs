@@ -91,6 +91,8 @@ pub struct SessionSummary {
     pub message_count: usize,
     pub parent_session_id: Option<String>,
     pub lineage_label: Option<String>,
+    /// First user-message content, truncated for the picker synopsis.
+    pub preview: Option<String>,
 }
 
 impl SessionStore {
@@ -308,7 +310,9 @@ impl SessionStore {
 
         let mut stmt = conn.prepare(
             "SELECT s.id, s.created_at, s.last_active, s.parent_session_id, s.lineage_label,
-                    (SELECT COUNT(*) FROM messages m WHERE m.session_id = s.id) AS msg_count
+                    (SELECT COUNT(*) FROM messages m WHERE m.session_id = s.id) AS msg_count,
+                    (SELECT content FROM messages m WHERE m.session_id = s.id AND m.role = 'user'
+                     ORDER BY m.position ASC LIMIT 1) AS preview
              FROM sessions s
              ORDER BY s.last_active DESC
              LIMIT ?1",
@@ -322,6 +326,9 @@ impl SessionStore {
                 parent_session_id: row.get(3)?,
                 lineage_label: row.get(4)?,
                 message_count: row.get::<_, i64>(5)? as usize,
+                preview: row.get::<_, Option<String>>(6)?.map(|s| {
+                    s.chars().take(60).collect::<String>().replace('\n', " ")
+                }),
             })
         })?;
 

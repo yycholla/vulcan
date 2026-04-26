@@ -137,6 +137,11 @@ const SLASH_COMMANDS: &[SlashCommand] = &[
         description: "Set diff render: /diff-style <unified|side-by-side|inline>",
         mid_turn_safe: true,
     },
+    SlashCommand {
+        name: "resume",
+        description: "Open session picker to switch to another session",
+        mid_turn_safe: false,
+    },
 ];
 
 fn short_id(id: &str) -> String {
@@ -979,6 +984,12 @@ pub async fn run_tui(config: &Config, resume: ResumeTarget) -> Result<()> {
                                                         }
                                                         continue;
                                                     }
+                                                    "resume" => {
+                                                        refresh_sessions(&agent, &mut app).await;
+                                                        app.show_session_picker = true;
+                                                        app.session_picker_selection = 0;
+                                                        continue;
+                                                    }
                                                     s if s.starts_with("search ") => {
                                                         let query = s[7..].trim();
                                                         if query.is_empty() {
@@ -1368,6 +1379,23 @@ fn draw_session_picker(f: &mut ratatui::Frame, area: Rect, app: &AppState) {
                         .add_modifier(Modifier::BOLD),
                 ),
             ]));
+
+            // Preview synopsis from first user message, if available.
+            if let Some(preview) = &s.preview {
+                lines.push(Line::from(vec![
+                    Span::styled(
+                        if is_active { "▸ " } else { "  " },
+                        Style::default().fg(bg).bg(bg),
+                    ),
+                    Span::styled(
+                        format!("  {}", preview),
+                        Style::default()
+                            .fg(Palette::MUTED)
+                            .bg(bg)
+                            .add_modifier(Modifier::DIM),
+                    ),
+                ]));
+            }
         }
     }
 
