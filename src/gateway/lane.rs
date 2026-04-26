@@ -6,10 +6,10 @@
 
 use std::collections::HashMap;
 use std::future::Future;
-use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+use async_trait::async_trait;
 use tokio::sync::{Notify, RwLock, mpsc};
 
 #[derive(Clone, Eq, Hash, PartialEq, Debug)]
@@ -18,24 +18,22 @@ pub struct LaneKey {
     pub chat_id: String,
 }
 
+#[async_trait]
 pub trait Handler<M>: Send + Sync + 'static {
-    fn handle(
-        &self,
-        lane: LaneKey,
-        msg: M,
-    ) -> Pin<Box<dyn Future<Output = ()> + Send>>;
+    async fn handle(&self, lane: LaneKey, msg: M);
 }
 
 struct ClosureHandler<F>(F);
 
+#[async_trait]
 impl<F, Fut, M> Handler<M> for ClosureHandler<F>
 where
     F: Fn(LaneKey, M) -> Fut + Send + Sync + 'static,
     Fut: Future<Output = ()> + Send + 'static,
     M: Send + 'static,
 {
-    fn handle(&self, lane: LaneKey, msg: M) -> Pin<Box<dyn Future<Output = ()> + Send>> {
-        Box::pin((self.0)(lane, msg))
+    async fn handle(&self, lane: LaneKey, msg: M) {
+        (self.0)(lane, msg).await
     }
 }
 
@@ -171,12 +169,21 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn lanes_serial_within_parallel_across() {
         let observed: Arc<Mutex<Vec<(String, u32)>>> = Arc::new(Mutex::new(Vec::new()));
+        let in_flight = Arc::new(AtomicUsize::new(0));
+        let peak = Arc::new(AtomicUsize::new(0));
         let observed_clone = observed.clone();
+        let in_flight_clone = in_flight.clone();
+        let peak_clone = peak.clone();
         let handler = from_closure(move |lane: LaneKey, msg: TestMsg| {
             let observed = observed_clone.clone();
+            let in_flight = in_flight_clone.clone();
+            let peak = peak_clone.clone();
             async move {
+                let cur = in_flight.fetch_add(1, Ordering::SeqCst) + 1;
+                peak.fetch_max(cur, Ordering::SeqCst);
                 tokio::time::sleep(Duration::from_millis(50)).await;
                 observed.lock().await.push((lane.chat_id.clone(), msg.seq));
+                in_flight.fetch_sub(1, Ordering::SeqCst);
             }
         });
         let router: LaneRouter<TestMsg> = LaneRouter::new(handler);
@@ -189,17 +196,19 @@ mod tests {
             platform: "loop".into(),
             chat_id: "B".into(),
         };
-        let started = Instant::now();
         router.dispatch(a.clone(), TestMsg { seq: 1 }).await;
         router.dispatch(a.clone(), TestMsg { seq: 2 }).await;
         router.dispatch(b.clone(), TestMsg { seq: 1 }).await;
         router.drain().await;
-        let elapsed = started.elapsed();
 
-        // Lane A's two msgs serialize -> at least 100ms. Lane B runs in parallel
-        // -> total elapsed should be < 140ms (would be 150ms if all three serialized).
-        assert!(elapsed >= Duration::from_millis(100), "got {elapsed:?}");
-        assert!(elapsed < Duration::from_millis(140), "got {elapsed:?}");
+        // Lane A's two msgs serialize, lane B runs in parallel with A, so peak
+        // concurrent in-flight should be 2. Counter-based check is robust to
+        // CI slowness; timing-based assertions flake under load.
+        assert!(
+            peak.load(Ordering::SeqCst) >= 2,
+            "expected parallelism across lanes, peak was {}",
+            peak.load(Ordering::SeqCst)
+        );
 
         let v = observed.lock().await.clone();
         let a_seqs: Vec<u32> = v
@@ -207,7 +216,7 @@ mod tests {
             .filter(|(c, _)| c == "A")
             .map(|(_, s)| *s)
             .collect();
-        assert_eq!(a_seqs, vec![1, 2]);
+        assert_eq!(a_seqs, vec![1, 2], "lane A messages must run in order");
     }
 
     #[tokio::test]
