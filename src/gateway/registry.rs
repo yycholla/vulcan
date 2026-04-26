@@ -16,8 +16,16 @@ impl PlatformRegistry {
         Self::default()
     }
 
-    pub fn register(&mut self, name: impl Into<String>, platform: Arc<dyn Platform>) {
-        self.inner.insert(name.into(), platform);
+    /// Register a platform under `name`. The name is the routing key used by
+    /// `send` (matched against `OutboundMessage::platform`); it is independent
+    /// of `Platform::name()`. Returns the previous entry if `name` was already
+    /// registered, so callers can detect double-wiring.
+    pub fn register(
+        &mut self,
+        name: impl Into<String>,
+        platform: Arc<dyn Platform>,
+    ) -> Option<Arc<dyn Platform>> {
+        self.inner.insert(name.into(), platform)
     }
 
     pub fn get(&self, name: &str) -> Option<Arc<dyn Platform>> {
@@ -72,5 +80,16 @@ mod tests {
     async fn registry_get_returns_none_for_missing() {
         let reg = PlatformRegistry::new();
         assert!(reg.get("nope").is_none());
+    }
+
+    #[tokio::test]
+    async fn register_returns_previous_entry() {
+        let lp1 = Arc::new(LoopbackPlatform::default());
+        let lp2 = Arc::new(LoopbackPlatform::default());
+        let mut reg = PlatformRegistry::new();
+        assert!(reg.register("loopback", lp1.clone()).is_none());
+        let prev = reg.register("loopback", lp2);
+        assert!(prev.is_some());
+        assert!(Arc::ptr_eq(&prev.unwrap(), &(lp1 as Arc<dyn Platform>)));
     }
 }

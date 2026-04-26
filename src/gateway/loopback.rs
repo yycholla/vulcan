@@ -37,7 +37,11 @@ impl Platform for LoopbackPlatform {
     }
 
     async fn recv(&self) -> Result<InboundMessage> {
-        std::future::pending().await
+        // Loopback has no inbound side. Return an error so a tokio::select!
+        // arm completes and the caller can match-and-skip; a never-resolving
+        // future would silently starve any consumer that polls multiple
+        // platforms.
+        anyhow::bail!("loopback has no inbound channel")
     }
 }
 
