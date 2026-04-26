@@ -19,15 +19,17 @@ impl Palette {
     pub const GREEN: Color = Color::Rgb(0x3F, 0x7A, 0x4F);
 }
 
-/// Default body style — terminal-default background.
+/// Default body style — terminal default fg/bg so chat text is
+/// readable on light and dark terminals (YYC-93 follow-up).
 pub fn body() -> Style {
-    Style::default().fg(Palette::INK)
+    Style::default()
 }
 
-/// Bold emphasis for header bars and chrome. No background paint so
-/// the active terminal theme shows through.
+/// Bold emphasis for header bars and chrome. Inherits the terminal's
+/// foreground; only bold modifier is added so light/dark terminals
+/// both render it visibly.
 pub fn inverse() -> Style {
-    Style::default().fg(Palette::INK).add_modifier(Modifier::BOLD)
+    Style::default().add_modifier(Modifier::BOLD)
 }
 
 /// Muted body text.

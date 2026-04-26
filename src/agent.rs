@@ -147,6 +147,13 @@ impl Agent {
             tools.register(Arc::new(crate::tools::ask_user::AskUserTool::new(
                 pause_tx.clone(),
             )));
+            // YYC-75: re-register edit_file with the pause channel so
+            // multi-site replaces route through the diff scrubber. Still
+            // shares the diff sink wired up in the registry constructor.
+            tools.register(Arc::new(crate::tools::file::PatchFile::with_pause(
+                Some(diff_sink.clone()),
+                pause_tx.clone(),
+            )));
         }
 
         // YYC-48: register embedding tools when [embeddings] is

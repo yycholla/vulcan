@@ -554,6 +554,19 @@ pub struct AppState {
     pub provider_picker_selection: usize,
     pub provider_picker_items: Vec<ProviderPickerEntry>,
 
+    /// Diff scrubber overlay (YYC-75). Opened when `edit_file` matches
+    /// multiple sites and the pause channel is wired. Each hunk
+    /// individually opt-in/out via `scrubber_accepted`.
+    pub show_diff_scrubber: bool,
+    pub scrubber_path: String,
+    pub scrubber_hunks: Vec<crate::pause::DiffScrubHunk>,
+    pub scrubber_accepted: Vec<bool>,
+    pub scrubber_selection: usize,
+    /// The pause we'll reply to when the user resolves the scrubber.
+    /// Stored separately from `pending_pause` so it doesn't conflict
+    /// with the pill-style prompts.
+    pub scrubber_pause: Option<crate::pause::AgentPause>,
+
     /// Active TUI theme — render code reads role styles via `state.theme.<role>`.
     /// Defaults to `Theme::system()` in `AppState::new` so unconfigured/test
     /// callers inherit terminal palette; production wires the real config-derived
@@ -656,6 +669,13 @@ impl AppState {
             show_provider_picker: false,
             provider_picker_selection: 0,
             provider_picker_items: Vec::new(),
+
+            show_diff_scrubber: false,
+            scrubber_path: String::new(),
+            scrubber_hunks: Vec::new(),
+            scrubber_accepted: Vec::new(),
+            scrubber_selection: 0,
+            scrubber_pause: None,
 
             theme: Theme::system(),
             keybinds: Keybinds::default(),

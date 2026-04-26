@@ -136,6 +136,9 @@ impl Tool for AskUserTool {
 
         match resume {
             AgentResume::Custom(v) => Ok(ToolResult::ok(v)),
+            AgentResume::AcceptHunks(_) => Ok(ToolResult::err(
+                "ask_user received AcceptHunks (wrong pause kind)",
+            )),
             AgentResume::Allow => Ok(ToolResult::ok("allow".to_string())),
             AgentResume::AllowAndRemember => Ok(ToolResult::ok("allow_and_remember".to_string())),
             AgentResume::Deny => Ok(ToolResult::err("user denied")),
