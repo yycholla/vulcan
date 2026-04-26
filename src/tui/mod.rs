@@ -880,6 +880,7 @@ pub async fn run_tui(config: &Config, resume: ResumeTarget) -> Result<()> {
                         ok,
                         output_preview,
                         result_meta,
+                        elided_lines,
                         elapsed_ms,
                         ..
                     }) => {
@@ -887,11 +888,13 @@ pub async fn run_tui(config: &Config, resume: ResumeTarget) -> Result<()> {
                             if matches!(last.role, ChatRole::Agent) {
                                 // YYC-74: stamp preview + meta + timing
                                 // onto the matching segment for the card.
+                                // YYC-78: stash elided count for collapse footer.
                                 last.finish_tool_with(
                                     &name,
                                     ok,
                                     output_preview,
                                     result_meta,
+                                    elided_lines,
                                     Some(elapsed_ms),
                                 );
                             }

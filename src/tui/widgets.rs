@@ -472,6 +472,7 @@ pub fn tool_card(
     params_summary: Option<&str>,
     output_preview: Option<&str>,
     result_meta: Option<&str>,
+    elided_lines: usize,
     elapsed_ms: Option<u64>,
     _accent: Color,
     width: u16,
@@ -614,6 +615,28 @@ pub fn tool_card(
             render_body(&mut spans, used);
             out.push(Line::from(spans));
         }
+    }
+
+    // ── YYC-78: long-output footer when the result was clipped.
+    if elided_lines > 0 {
+        let footer = format!(
+            "… {elided_lines} more line{} elided",
+            if elided_lines == 1 { "" } else { "s" }
+        );
+        let used = body_indent.chars().count() + footer.chars().count();
+        let mut spans = vec![
+            Span::styled("│", body_border),
+            Span::styled(body_indent.to_string(), Style::default().bg(body_bg)),
+            Span::styled(
+                footer,
+                Style::default()
+                    .fg(Palette::MUTED)
+                    .bg(body_bg)
+                    .add_modifier(Modifier::ITALIC),
+            ),
+        ];
+        render_body(&mut spans, used);
+        out.push(Line::from(spans));
     }
 
     // ── Bottom border on FAINT, closing the rectangle.
