@@ -1,5 +1,6 @@
 pub mod catalog;
 pub mod openai;
+pub mod think_sanitizer;
 
 #[cfg(any(test, feature = "bench-soak"))]
 pub mod mock;
