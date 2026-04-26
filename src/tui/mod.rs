@@ -834,6 +834,28 @@ pub async fn run_tui(config: &Config, resume: ResumeTarget) -> Result<()> {
                                                     .map(|m| m.id.clone());
                                             }
                                         }
+                                        KeyCode::Char('L') => {
+                                            // mini.files L: drill, and if the
+                                            // child is a leaf, commit.
+                                            if !miller_columns::drill(&mut state, &source) {
+                                                commit_id = source.leaf_at(&state.path)
+                                                    .and_then(|i| app.model_picker_items.get(i))
+                                                    .map(|m| m.id.clone());
+                                            } else {
+                                                commit_id = source.leaf_at(&state.path)
+                                                    .and_then(|i| app.model_picker_items.get(i))
+                                                    .map(|m| m.id.clone());
+                                            }
+                                        }
+                                        KeyCode::Char('H') => {
+                                            // mini.files H: ascend AND trim
+                                            // rightward — already implicit in
+                                            // ascend() since deeper path is
+                                            // dropped.
+                                            if !miller_columns::ascend(&mut state) {
+                                                close = true;
+                                            }
+                                        }
                                         KeyCode::Enter => {
                                             commit_id = source
                                                 .leaf_at(&state.path)

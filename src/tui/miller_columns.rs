@@ -129,9 +129,14 @@ pub fn ascend(state: &mut MillerState) -> bool {
     true
 }
 
+/// Width budget per column kind (mini.files defaults adapted to TUI).
+const WIDTH_FOCUS: u16 = 36;
+const WIDTH_NOFOCUS: u16 = 18;
+const WIDTH_PREVIEW: u16 = 40;
+
 /// Render the picker top-left-anchored inside `area`. Each column is a
-/// titled, bordered block; the rightmost column shows preview content
-/// for the focused selection.
+/// titled, bordered block; the focused column is wider; the rightmost
+/// column is a preview pane only when there's something to preview.
 pub fn render<S: MillerSource>(
     f: &mut Frame,
     area: Rect,
@@ -143,56 +148,63 @@ pub fn render<S: MillerSource>(
         return;
     }
 
-    // Work out how many columns we'll render: every drilled level + a
-    // preview column (always shown, even if empty, so the layout doesn't
-    // jump as the user drills).
     let drill_columns = state.focus + 1;
-    let total_columns = drill_columns + 1; // +1 preview
+    let preview = source.preview(&state.path);
+    let show_preview = preview.is_some();
 
-    // Width budget. Cap each column at ~30 cols, give the preview the
-    // larger remainder.
-    let col_w = (area.width / total_columns as u16)
-        .min(36)
-        .max(14);
-    let preview_w = area
-        .width
-        .saturating_sub(col_w * drill_columns as u16)
-        .max(col_w);
+    // Compute how many columns fit. Mini.files prioritizes focus + preview,
+    // then adds non-focused columns while space remains.
+    let mut budget = area.width;
+    let preview_w = if show_preview {
+        WIDTH_PREVIEW.min(budget.saturating_sub(WIDTH_FOCUS).max(WIDTH_PREVIEW.min(20)))
+    } else {
+        0
+    };
+    if show_preview {
+        budget = budget.saturating_sub(preview_w);
+    }
+    budget = budget.saturating_sub(WIDTH_FOCUS);
+    let mut max_visible_cols = 1; // focused
+    while budget >= WIDTH_NOFOCUS && max_visible_cols < drill_columns {
+        budget = budget.saturating_sub(WIDTH_NOFOCUS);
+        max_visible_cols += 1;
+    }
+
+    // Center the focused column in the visible window: `to` is the last
+    // column drawn, `from` the first.
+    let to = drill_columns;
+    let from = to.saturating_sub(max_visible_cols);
 
     let mut x_cursor = area.x;
-    let max_height = area.height;
+    let max_height = area.height.saturating_sub(1); // keep last row for footer
 
-    for col_idx in 0..drill_columns {
+    for col_idx in from..drill_columns {
         let prefix: Vec<usize> = state.path.iter().take(col_idx).copied().collect();
         let entries = source.entries(&prefix);
         let selection = state.path.get(col_idx).copied().unwrap_or(0);
         let header = source.header(&prefix);
-
-        let max_visible = max_height.saturating_sub(2);
-        let height = ((entries.len() as u16) + 2)
-            .min(max_height)
-            .max(if entries.is_empty() { 4 } else { 4 });
-        let _ = max_visible;
+        let is_focused = col_idx == state.focus;
+        let width = if is_focused { WIDTH_FOCUS } else { WIDTH_NOFOCUS };
 
         let rect = Rect {
             x: x_cursor,
             y: area.y,
-            width: col_w,
-            height,
+            width,
+            height: max_height,
         };
-        draw_column(f, rect, &header, &entries, selection, col_idx == state.focus, theme);
-        x_cursor = x_cursor.saturating_add(col_w);
+        draw_column(f, rect, &header, &entries, selection, is_focused, theme);
+        x_cursor = x_cursor.saturating_add(width);
     }
 
-    // Preview column — leaf detail or "no preview" placeholder.
-    let preview = source.preview(&state.path);
-    let preview_rect = Rect {
-        x: x_cursor,
-        y: area.y,
-        width: preview_w,
-        height: max_height,
-    };
-    draw_preview(f, preview_rect, preview.as_ref(), theme);
+    if show_preview && preview_w > 0 {
+        let preview_rect = Rect {
+            x: x_cursor,
+            y: area.y,
+            width: preview_w,
+            height: max_height,
+        };
+        draw_preview(f, preview_rect, preview.as_ref(), theme);
+    }
 }
 
 fn draw_column(
