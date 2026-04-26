@@ -63,6 +63,7 @@ pub trait Tool: Send + Sync {
     async fn call(&self, params: Value, cancel: CancellationToken) -> Result<ToolResult>;
 }
 
+pub mod ask_user;
 pub mod cargo;
 pub mod code;
 pub mod code_edit;
