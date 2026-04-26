@@ -17,6 +17,11 @@ pub struct ChatRenderOptions {
     pub show_reasoning: bool,
     pub dense: bool,
     pub width: u16,
+    /// Style for the agent "Thinking…"/"Answering…" placeholder. Caller
+    /// populates from `state.theme.muted` so the placeholder respects
+    /// the active theme. Default `Style::default()` is a safe fallback
+    /// for tests that don't care about styling.
+    pub muted_style: Style,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -188,14 +193,20 @@ impl ChatRenderStore {
             }
 
             if !text_emitted {
-                lines.push(agent_placeholder(message.has_reasoning()));
+                lines.push(agent_placeholder(
+                    message.has_reasoning(),
+                    options.muted_style,
+                ));
             }
         } else {
             if options.show_reasoning && is_agent && !message.reasoning.is_empty() {
                 lines.extend(reasoning_lines(&message.reasoning, false));
             }
             if is_agent && message.content.is_empty() {
-                lines.push(agent_placeholder(!message.reasoning.is_empty()));
+                lines.push(agent_placeholder(
+                    !message.reasoning.is_empty(),
+                    options.muted_style,
+                ));
             } else {
                 push_markdown_body(&mut lines, &message.content, accent);
             }
@@ -235,7 +246,7 @@ fn push_markdown_body(lines: &mut Vec<Line<'static>>, text: &str, accent: ratatu
     }
 }
 
-fn agent_placeholder(has_reasoning: bool) -> Line<'static> {
+fn agent_placeholder(has_reasoning: bool, muted: Style) -> Line<'static> {
     let label = if has_reasoning {
         "▎ Answering…"
     } else {
@@ -243,9 +254,7 @@ fn agent_placeholder(has_reasoning: bool) -> Line<'static> {
     };
     Line::from(Span::styled(
         label,
-        Style::default()
-            .fg(Palette::MUTED)
-            .add_modifier(Modifier::SLOW_BLINK),
+        muted.add_modifier(Modifier::SLOW_BLINK),
     ))
 }
 
@@ -265,6 +274,7 @@ mod tests {
             show_reasoning: true,
             dense: false,
             width: 80,
+            muted_style: Style::default(),
         };
 
         let window = store.visible_lines(&messages, options, 10, 5, None, 0);
@@ -281,6 +291,7 @@ mod tests {
             show_reasoning: true,
             dense: false,
             width: 80,
+            muted_style: Style::default(),
         };
         let narrow = ChatRenderOptions { width: 20, ..wide };
 
@@ -302,6 +313,7 @@ mod tests {
             show_reasoning: true,
             dense: false,
             width: 80,
+            muted_style: Style::default(),
         };
 
         let window = store.visible_lines(&messages, options, 90, 3, None, 0);
@@ -321,6 +333,7 @@ mod tests {
             show_reasoning: true,
             dense: false,
             width: 100,
+            muted_style: Style::default(),
         };
 
         let window = store.visible_lines(&messages, options, 4_900, 20, None, 0);
@@ -340,6 +353,7 @@ mod tests {
             show_reasoning: true,
             dense: false,
             width: 100,
+            muted_style: Style::default(),
         };
         let first = store.visible_lines_at(&messages, options, 0, 20);
         let tail_scroll = first.total_lines.saturating_sub(20);
@@ -373,6 +387,7 @@ mod tests {
             show_reasoning: true,
             dense: false,
             width: 80,
+            muted_style: Style::default(),
         };
 
         let _ = store.visible_lines(&messages, options, 0, 20, None, 0);
@@ -392,6 +407,7 @@ mod tests {
             show_reasoning: true,
             dense: true,
             width: 80,
+            muted_style: Style::default(),
         };
 
         let block = store.render_message_block(0, &message, options);
@@ -431,6 +447,7 @@ mod tests {
             show_reasoning: true,
             dense: true,
             width: 80,
+            muted_style: Style::default(),
         };
 
         let block = store.render_message_block(0, &message, options);
