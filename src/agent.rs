@@ -761,15 +761,31 @@ impl Agent {
     }
 
     /// Run a prompt with streaming — sends text tokens through `ui_tx` as they
-    /// arrive. Honors all hook events.
+    /// arrive. Honors all hook events. Internal cancel token is fresh per
+    /// turn; callers that need to fire the cancel without holding the
+    /// `Agent` mutex should use `run_prompt_stream_with_cancel` instead.
     pub async fn run_prompt_stream(
         &mut self,
         input: &str,
         ui_tx: mpsc::UnboundedSender<StreamEvent>,
     ) -> Result<String> {
-        // Fresh per-turn cancel token (see run_prompt).
-        self.turn_cancel = CancellationToken::new();
-        let cancel = self.turn_cancel.clone();
+        let cancel = CancellationToken::new();
+        self.run_prompt_stream_with_cancel(input, ui_tx, cancel).await
+    }
+
+    /// Streaming variant that accepts an external cancel token. The TUI uses
+    /// this so the Ctrl+C handler can fire the token directly without
+    /// blocking on the agent mutex held by the in-flight prompt task.
+    pub async fn run_prompt_stream_with_cancel(
+        &mut self,
+        input: &str,
+        ui_tx: mpsc::UnboundedSender<StreamEvent>,
+        cancel: CancellationToken,
+    ) -> Result<String> {
+        // Mirror the external token onto `self.turn_cancel` so internal
+        // tool dispatch / hook plumbing that still references `self.turn_cancel`
+        // sees the cancellation. The external token is the source of truth.
+        self.turn_cancel = cancel.clone();
 
         let system = self.prompt_builder.build_system_prompt(&self.tools);
         let tool_defs = self.tools.definitions();

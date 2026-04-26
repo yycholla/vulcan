@@ -524,6 +524,11 @@ pub struct AppState {
 
     cursor: Cell<(u16, u16)>,
     pub model_label: String,
+    /// Cancel token for the in-flight agent turn (YYC-105). Held outside
+    /// the agent mutex so the Ctrl+C handler can fire it without
+    /// blocking on the lock that the prompt task is holding for the
+    /// duration of the stream. `None` when no turn is in flight.
+    pub current_turn_cancel: Option<tokio_util::sync::CancellationToken>,
     /// Active named provider profile, if any (YYC-96). `None` means the
     /// session is running on the legacy unnamed `[provider]` block —
     /// `model_status()` omits the prefix in that case.
@@ -673,6 +678,7 @@ impl AppState {
             cursor: Cell::new((0, 0)),
             model_label,
             provider_label: None,
+            current_turn_cancel: None,
             prompt_tokens_total: 0,
             completion_tokens_total: 0,
             prompt_tokens_last: 0,

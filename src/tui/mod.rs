@@ -325,11 +325,17 @@ fn submit_prompt(
     app.at_bottom = true;
     app.note_prompt_submitted(&msg);
 
+    // YYC-105: hold a cancel token outside the agent mutex so Ctrl+C
+    // can fire it without waiting for the prompt task to release the
+    // lock. The agent mirrors the same token internally for tools /
+    // hooks that still consult `self.turn_cancel`.
+    let cancel = tokio_util::sync::CancellationToken::new();
+    app.current_turn_cancel = Some(cancel.clone());
     let tx = stream_tx.clone();
     let a = agent.clone();
     tokio::spawn(async move {
         let mut a = a.lock().await;
-        let _ = a.run_prompt_stream(&msg, tx).await;
+        let _ = a.run_prompt_stream_with_cancel(&msg, tx, cancel).await;
     });
 }
 
@@ -377,6 +383,7 @@ async fn handle_stream_event(
         }
         StreamEvent::Done(resp) => {
             app.thinking = false;
+            app.current_turn_cancel = None;
             if let Some(usage) = resp.usage {
                 // YYC-60: track lifetime totals for cost (YYC-67) and the
                 // latest prompt size for the in-status capacity bar.
@@ -403,6 +410,7 @@ async fn handle_stream_event(
                 }
             }
             app.thinking = false;
+            app.current_turn_cancel = None;
             // YYC-67: record provider-level error for telemetry.
             app.provider_errors_total = app.provider_errors_total.saturating_add(1);
             app.note_error(&e);
@@ -1296,12 +1304,13 @@ pub async fn run_tui(config: &Config, resume: ResumeTarget) -> Result<()> {
                                             if pending_quit {
                                                 exit = true;
                                             } else if app.thinking {
-                                                // Turn in flight: single Ctrl+C cancels it.
-                                                // Double Ctrl+C still exits (pending_quit path).
-                                                let a = agent.clone();
-                                                tokio::spawn(async move {
-                                                    a.lock().await.cancel_current_turn();
-                                                });
+                                                // YYC-105: fire the externally-held token directly
+                                                // rather than queueing a lock acquisition that
+                                                // would block on the in-flight prompt task. The
+                                                // agent mirror updates next iteration.
+                                                if let Some(c) = app.current_turn_cancel.as_ref() {
+                                                    c.cancel();
+                                                }
                                                 app.messages.push(ChatMessage {
                                                     role: ChatRole::System,
                                                     content: "Cancelling current turn… (Ctrl+C again to quit)".into(),
@@ -1756,7 +1765,10 @@ pub async fn run_tui(config: &Config, resume: ResumeTarget) -> Result<()> {
                             }
                         }
                     }
-                    None => app.thinking = false,
+                    None => {
+                        app.thinking = false;
+                        app.current_turn_cancel = None;
+                    }
                 }
             }
         }
