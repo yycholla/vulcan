@@ -1,25 +1,11 @@
 use ratatui::{
-    style::{Color, Modifier, Style},
+    style::{Modifier, Style},
     text::{Line, Span},
 };
 
-use super::theme::Palette;
+use super::theme::Theme;
 
-struct MdTheme;
-
-impl MdTheme {
-    const HEADING: Color = Color::Rgb(0xD6, 0x3B, 0x2F); // red accent
-    const ITALIC: Color = Color::Rgb(0x2B, 0x4F, 0xA8); // blue accent
-    const CODE: Color = Color::Rgb(0xE8, 0xB4, 0x3C); // yellow accent
-    const LINK: Color = Color::Rgb(0x2B, 0x4F, 0xA8);
-    const STRIKE: Color = Palette::MUTED;
-    const QUOTE: Color = Palette::MUTED;
-    const LIST_BULLET: Color = Color::Rgb(0xD6, 0x3B, 0x2F);
-    const HR: Color = Palette::MUTED;
-    const CODE_BLOCK_BG: Color = Color::Rgb(0x22, 0x20, 0x1B);
-}
-
-pub fn render_markdown(text: &str) -> Vec<Line<'static>> {
+pub fn render_markdown(text: &str, theme: &Theme) -> Vec<Line<'static>> {
     let mut lines = Vec::new();
     let mut in_code_block = false;
     let mut code_block_content: Vec<String> = Vec::new();
@@ -27,7 +13,7 @@ pub fn render_markdown(text: &str) -> Vec<Line<'static>> {
     for raw_line in text.lines() {
         if raw_line.trim_start().starts_with("```") {
             if in_code_block {
-                let block_lines = render_code_block(&code_block_content);
+                let block_lines = render_code_block(&code_block_content, theme);
                 lines.extend(block_lines);
                 code_block_content.clear();
                 in_code_block = false;
@@ -52,7 +38,15 @@ pub fn render_markdown(text: &str) -> Vec<Line<'static>> {
 
         if let Some(level) = heading_level(line) {
             let content = line.trim_start_matches('#').trim();
-            let spans = parse_inline(content);
+            let spans = parse_inline(content, theme);
+            let heading_style = match level {
+                1 => theme.heading_1,
+                2 => theme.heading_2,
+                3 => theme.heading_3,
+                4 => theme.heading_4,
+                5 => theme.heading_5,
+                _ => theme.heading_6,
+            };
             let mut styled = vec![Span::styled(
                 match level {
                     1 => "# ",
@@ -62,9 +56,7 @@ pub fn render_markdown(text: &str) -> Vec<Line<'static>> {
                     5 => "##### ",
                     _ => "###### ",
                 },
-                Style::default()
-                    .fg(MdTheme::HEADING)
-                    .add_modifier(Modifier::BOLD),
+                heading_style,
             )];
             styled.extend(spans);
             lines.push(Line::from(styled));
@@ -72,35 +64,26 @@ pub fn render_markdown(text: &str) -> Vec<Line<'static>> {
         }
 
         if let Some(content) = line.strip_prefix("> ") {
-            let mut spans = vec![Span::styled("▎ ", Style::default().fg(MdTheme::QUOTE))];
-            spans.extend(parse_inline(content));
-            lines.push(Line::from(spans).style(Style::default().fg(MdTheme::QUOTE)));
+            let mut spans = vec![Span::styled("▎ ", theme.blockquote)];
+            spans.extend(parse_inline(content, theme));
+            lines.push(Line::from(spans).style(theme.blockquote));
             continue;
         }
         if line == ">" {
-            lines.push(Line::from(Span::styled(
-                "▎",
-                Style::default().fg(MdTheme::QUOTE),
-            )));
+            lines.push(Line::from(Span::styled("▎", theme.blockquote)));
             continue;
         }
 
         if let Some(content) = line.strip_prefix("- ").or_else(|| line.strip_prefix("* ")) {
-            let mut spans = vec![Span::styled(
-                "• ",
-                Style::default().fg(MdTheme::LIST_BULLET),
-            )];
-            spans.extend(parse_inline(content));
+            let mut spans = vec![Span::styled("• ", theme.list_marker)];
+            spans.extend(parse_inline(content, theme));
             lines.push(Line::from(spans));
             continue;
         }
 
         if let Some((num_str, content)) = strip_ordered_list_prefix(line) {
-            let mut spans = vec![Span::styled(
-                format!("{}. ", num_str),
-                Style::default().fg(MdTheme::LIST_BULLET),
-            )];
-            spans.extend(parse_inline(content));
+            let mut spans = vec![Span::styled(format!("{}. ", num_str), theme.list_marker)];
+            spans.extend(parse_inline(content, theme));
             lines.push(Line::from(spans));
             continue;
         }
@@ -109,16 +92,16 @@ pub fn render_markdown(text: &str) -> Vec<Line<'static>> {
         if trimmed == "---" || trimmed == "***" || trimmed == "___" {
             lines.push(Line::from(Span::styled(
                 "─".repeat(50),
-                Style::default().fg(MdTheme::HR).add_modifier(Modifier::DIM),
+                theme.muted.add_modifier(Modifier::DIM),
             )));
             continue;
         }
 
-        lines.push(Line::from(parse_inline(line)));
+        lines.push(Line::from(parse_inline(line, theme)));
     }
 
     if in_code_block {
-        let block_lines = render_code_block(&code_block_content);
+        let block_lines = render_code_block(&code_block_content, theme);
         lines.extend(block_lines);
     }
 
@@ -162,29 +145,25 @@ fn strip_ordered_list_prefix(line: &str) -> Option<(&str, &str)> {
     }
 }
 
-fn render_code_block(lines: &[String]) -> Vec<Line<'static>> {
+fn render_code_block(lines: &[String], theme: &Theme) -> Vec<Line<'static>> {
     let mut result = Vec::new();
     if lines.is_empty() {
         result.push(Line::from(Span::styled(
             " ```",
-            Style::default()
-                .fg(MdTheme::CODE)
-                .add_modifier(Modifier::DIM),
+            theme.code_block.add_modifier(Modifier::DIM),
         )));
         return result;
     }
     for line in lines {
         result.push(Line::from(Span::styled(
             format!(" │{}", line),
-            Style::default()
-                .fg(MdTheme::CODE)
-                .bg(MdTheme::CODE_BLOCK_BG),
+            theme.code_block,
         )));
     }
     result
 }
 
-fn parse_inline(text: &str) -> Vec<Span<'static>> {
+fn parse_inline(text: &str, theme: &Theme) -> Vec<Span<'static>> {
     let mut spans: Vec<Span<'static>> = Vec::new();
     let chars: Vec<char> = text.chars().collect();
     let len = chars.len();
@@ -201,12 +180,7 @@ fn parse_inline(text: &str) -> Vec<Span<'static>> {
             let start = i + 1;
             if let Some(end) = chars[start..].iter().position(|&c| c == '`') {
                 let code: String = chars[start..start + end].iter().collect();
-                spans.push(Span::styled(
-                    code,
-                    Style::default()
-                        .fg(MdTheme::CODE)
-                        .bg(MdTheme::CODE_BLOCK_BG),
-                ));
+                spans.push(Span::styled(code, theme.inline_code));
                 i = start + end + 1;
                 continue;
             }
@@ -216,7 +190,7 @@ fn parse_inline(text: &str) -> Vec<Span<'static>> {
             let start = i + 2;
             if let Some(end) = chars[start..].windows(2).position(|w| w == ['*', '*']) {
                 let inner: String = chars[start..start + end].iter().collect();
-                let inner_spans = parse_inline(&inner);
+                let inner_spans = parse_inline(&inner, theme);
                 let styled: Vec<Span> = inner_spans
                     .into_iter()
                     .map(|s| {
@@ -236,9 +210,7 @@ fn parse_inline(text: &str) -> Vec<Span<'static>> {
                 let inner: String = chars[start..start + end].iter().collect();
                 spans.push(Span::styled(
                     inner,
-                    Style::default()
-                        .fg(MdTheme::ITALIC)
-                        .add_modifier(Modifier::ITALIC),
+                    Style::default().add_modifier(Modifier::ITALIC),
                 ));
                 i = start + end + 1;
                 continue;
@@ -249,12 +221,7 @@ fn parse_inline(text: &str) -> Vec<Span<'static>> {
             let start = i + 2;
             if let Some(end) = chars[start..].windows(2).position(|w| w == ['~', '~']) {
                 let inner: String = chars[start..start + end].iter().collect();
-                spans.push(Span::styled(
-                    inner,
-                    Style::default()
-                        .fg(MdTheme::STRIKE)
-                        .add_modifier(Modifier::CROSSED_OUT),
-                ));
+                spans.push(Span::styled(inner, theme.strikethrough));
                 i = start + end + 2;
                 continue;
             }
@@ -268,17 +235,10 @@ fn parse_inline(text: &str) -> Vec<Span<'static>> {
                 if after_close < len && chars[after_close] == '(' {
                     let url_start = after_close + 1;
                     if let Some(close_paren) = chars[url_start..].iter().position(|&c| c == ')') {
-                        let inner_spans = parse_inline(&text_inner);
+                        let inner_spans = parse_inline(&text_inner, theme);
                         let styled: Vec<Span> = inner_spans
                             .into_iter()
-                            .map(|s| {
-                                Span::styled(
-                                    s.content.clone(),
-                                    Style::default()
-                                        .fg(MdTheme::LINK)
-                                        .add_modifier(Modifier::UNDERLINED),
-                                )
-                            })
+                            .map(|s| Span::styled(s.content.clone(), theme.link))
                             .collect();
                         spans.extend(styled);
                         i = url_start + close_paren + 1;
