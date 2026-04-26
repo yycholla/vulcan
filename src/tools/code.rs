@@ -40,7 +40,7 @@ impl Tool for CodeOutlineTool {
         "code_outline"
     }
     fn description(&self) -> &str {
-        "Structural outline of a source file: top-level functions/types/etc with line ranges. JSON. Cheaper than read_file when the agent only needs the shape of a file."
+        "Structural outline of a source file: top-level functions/types/etc with line ranges. JSON. Cheaper than read_file when the agent only needs the shape of a file. Use this instead of `grep '^fn\\|^pub'` via bash."
     }
     fn schema(&self) -> Value {
         json!({
@@ -93,7 +93,7 @@ impl Tool for CodeExtractTool {
         "code_extract"
     }
     fn description(&self) -> &str {
-        "Return the source body of a single named symbol (function / class / type). When the agent already knows what it wants and shouldn't pay for surrounding code."
+        "Return the source body of a single named symbol (function / class / type). When the agent already knows what it wants and shouldn't pay for surrounding code. Use this instead of `awk '/fn name/,/^}/'` or `sed` ranges via bash."
     }
     fn schema(&self) -> Value {
         json!({
@@ -156,7 +156,7 @@ impl Tool for CodeQueryTool {
         "code_query"
     }
     fn description(&self) -> &str {
-        "Run a tree-sitter S-expression query against one source file. Strictly more expressive than ripgrep for structural patterns: '(function_item name: (identifier) @name)' to find all Rust fn names."
+        "Run a tree-sitter S-expression query against one source file. Strictly more expressive than ripgrep for structural patterns: '(function_item name: (identifier) @name)' to find all Rust fn names. Use this instead of `grep` for structural code patterns via bash."
     }
     fn schema(&self) -> Value {
         json!({

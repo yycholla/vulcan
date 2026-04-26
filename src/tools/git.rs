@@ -90,7 +90,7 @@ impl Tool for GitStatusTool {
         "git_status"
     }
     fn description(&self) -> &str {
-        "Show working tree status (staged, unstaged, untracked). Compact porcelain format."
+        "Show working tree status (staged, unstaged, untracked). Compact porcelain format. Use this instead of `git status` via bash."
     }
     fn schema(&self) -> Value {
         json!({ "type": "object", "properties": {} })
@@ -110,7 +110,7 @@ impl Tool for GitDiffTool {
         "git_diff"
     }
     fn description(&self) -> &str {
-        "Show diff for staged, unstaged, or specific path changes. Defaults to unstaged worktree changes."
+        "Show diff for staged, unstaged, or specific path changes. Defaults to unstaged worktree changes. Use this instead of `git diff` via bash."
     }
     fn schema(&self) -> Value {
         json!({
@@ -158,7 +158,7 @@ impl Tool for GitCommitTool {
         "git_commit"
     }
     fn description(&self) -> &str {
-        "Create a commit with the given message. Set `all=true` to stage all tracked changes first."
+        "Create a commit with the given message. Set `all=true` to stage all tracked changes first. Use this instead of `git commit -m` via bash."
     }
     fn schema(&self) -> Value {
         json!({
@@ -204,7 +204,7 @@ impl Tool for GitPushTool {
         "git_push"
     }
     fn description(&self) -> &str {
-        "Push the current branch to its remote tracking branch. Set `set_upstream=true` to push and create the upstream link in one go."
+        "Push the current branch to its remote tracking branch. Set `set_upstream=true` to push and create the upstream link in one go. Use this instead of `git push` via bash."
     }
     fn schema(&self) -> Value {
         json!({
@@ -253,7 +253,7 @@ impl Tool for GitBranchTool {
         "git_branch"
     }
     fn description(&self) -> &str {
-        "List, create, or switch branches. Default action lists local branches with the current one starred."
+        "List, create, or switch branches. Default action lists local branches with the current one starred. Use this instead of `git branch` / `git checkout` via bash."
     }
     fn schema(&self) -> Value {
         json!({
@@ -310,7 +310,7 @@ impl Tool for GitLogTool {
         "git_log"
     }
     fn description(&self) -> &str {
-        "Show recent commit history (oneline format). Defaults to last 10 commits."
+        "Show recent commit history (oneline format). Defaults to last 10 commits. Use this instead of `git log` via bash."
     }
     fn schema(&self) -> Value {
         json!({
