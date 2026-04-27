@@ -70,12 +70,17 @@ pub async fn process_one(
 
     // Consumer task: pump StreamEvents through the renderer. Lives until the
     // sender side (held by run_prompt_stream) is dropped.
+    //
+    // Returns `Err(anyhow::Error)` on the first `renderer.handle` failure
+    // (e.g., outbound enqueue failed) so the worker can mark the inbound
+    // row failed instead of silently swallowing a broken render. A panic
+    // inside this task is caught by `consumer.await` returning `JoinError`
+    // — also handled below as a turn-level failure.
     let consumer = tokio::spawn(async move {
         while let Some(ev) = rx.recv().await {
-            if let Err(e) = renderer.handle(ev).await {
-                tracing::error!(target: "gateway::worker", error = %e, "renderer.handle failed");
-            }
+            renderer.handle(ev).await?;
         }
+        Ok::<_, anyhow::Error>(())
     });
 
     // AssertUnwindSafe: we don't read Agent state after a panic — we just
@@ -93,10 +98,10 @@ pub async fn process_one(
 
     // The sender was moved into run_prompt_stream; closing it lets the
     // consumer drain to completion before we mark the inbound row done.
-    let _ = consumer.await;
+    let consumer_outcome = consumer.await;
 
     let panicked = unwind.is_err();
-    let result: anyhow::Result<String> = unwind.unwrap_or_else(|payload| {
+    let mut result: anyhow::Result<String> = unwind.unwrap_or_else(|payload| {
         let msg = payload
             .downcast_ref::<&'static str>()
             .map(|s| (*s).to_string())
@@ -106,6 +111,34 @@ pub async fn process_one(
             "agent panicked while running prompt: {msg}"
         ))
     });
+
+    // Surface renderer failures the same as agent failures. Two ways the
+    // consumer can fail:
+    //   1. JoinError — task panicked. Treat as a turn failure.
+    //   2. Inner `Err` from `renderer.handle` — outbound enqueue failed,
+    //      DB pool error, etc. The user will see no message; mark the
+    //      inbound row failed so retry / DLQ semantics kick in.
+    // Don't override an existing `Err` from the agent path — the first
+    // error wins.
+    if result.is_ok() {
+        match consumer_outcome {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => {
+                result = Err(e.context("stream renderer failed"));
+            }
+            Err(join_err) => {
+                result = Err(anyhow::anyhow!("stream renderer task panicked: {join_err}"));
+            }
+        }
+    } else if let Err(join_err) = consumer_outcome {
+        // Agent already failed; just log the consumer panic so it's not
+        // silently lost.
+        tracing::warn!(
+            target: "gateway::worker",
+            error = %join_err,
+            "stream renderer task panicked (agent path also failed)",
+        );
+    }
 
     // YYC-133: if the future panicked, the Agent's internal state is
     // suspect — message buffer mid-write, tool registry mid-mutation,

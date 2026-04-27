@@ -31,17 +31,22 @@ pub struct StreamRenderer {
     /// First chunk: false → emit with `edit_target = None`. Subsequent
     /// chunks: true → read RenderRegistry for the anchor.
     ///
-    /// Race window — PR-2b TODO: between `enqueued_first = true` (here)
+    /// Race window — PR-2c TODO: between `enqueued_first = true` (here)
     /// and the dispatcher writing the anchor (after Platform::send
     /// returns), a second chunk that fires inside the throttle interval
     /// reads `None` and emits another no-anchor send, producing a
     /// duplicate first message on the user's screen. The 1s Telegram
     /// edit-floor + the dispatcher's 250ms poll make this a narrow
-    /// window in practice; PR-2b should tighten it by either
+    /// window in practice; PR-2c should tighten it by either
     ///   (a) blocking subsequent enqueues until the anchor lands, or
     ///   (b) capturing the anchor synchronously inside the renderer
     ///       (skip the dispatcher round-trip for first send).
     enqueued_first: bool,
+    /// True when the buffer holds content that hasn't been flushed yet.
+    /// Without this, `Done` would always emit one final row even when
+    /// the prior throttle-driven flush already drained the buffer —
+    /// producing a duplicate row on every single-chunk turn.
+    dirty: bool,
 }
 
 impl StreamRenderer {
@@ -59,6 +64,7 @@ impl StreamRenderer {
             outbound,
             registry,
             enqueued_first: false,
+            dirty: false,
         }
     }
 
@@ -66,6 +72,7 @@ impl StreamRenderer {
         match ev {
             StreamEvent::Text(chunk) | StreamEvent::Reasoning(chunk) => {
                 self.buffer.push_str(&chunk);
+                self.dirty = true;
                 if self.last_emit.elapsed() >= self.interval {
                     self.flush().await?;
                 }
@@ -73,7 +80,7 @@ impl StreamRenderer {
             StreamEvent::ToolCallStart { .. } | StreamEvent::ToolCallEnd { .. } => {
                 self.flush().await?;
             }
-            // PR-2b TODO: surface ChatResponse.finish_reason / usage on
+            // PR-2c TODO: surface ChatResponse.finish_reason / usage on
             // the final flush so the chat surface can render a "✓ done"
             // footer with token counts.
             StreamEvent::Done(_) | StreamEvent::Error(_) => {
@@ -86,7 +93,12 @@ impl StreamRenderer {
     }
 
     async fn flush(&mut self) -> anyhow::Result<()> {
-        if self.buffer.is_empty() {
+        // Skip when the buffer is empty (turn ended with no text yet) OR
+        // when there's no new content since the last emit. The latter
+        // guard prevents `Done` from re-enqueuing the same body that the
+        // prior throttle-driven flush already drained — that would
+        // produce a duplicate row on every single-chunk turn.
+        if self.buffer.is_empty() || !self.dirty {
             return Ok(());
         }
         let edit_target = if self.enqueued_first {
@@ -106,6 +118,7 @@ impl StreamRenderer {
         self.outbound.enqueue(msg).await?;
         self.last_emit = Instant::now();
         self.enqueued_first = true;
+        self.dirty = false;
         Ok(())
     }
 }
@@ -184,6 +197,42 @@ mod tests {
         assert!(
             registry.anchor(&key()).is_none(),
             "Done should forget the anchor"
+        );
+    }
+
+    #[tokio::test]
+    async fn single_chunk_turn_enqueues_exactly_one_row() {
+        // PR-2b regression: before the `dirty` flag, a Text + Done
+        // sequence would enqueue two rows — once on the immediate
+        // throttle-cleared flush (interval=0), once again on Done's
+        // unconditional flush. With the dirty guard, Done is a no-op
+        // when nothing has changed since the last emit.
+        let outbound = fresh_outbound();
+        let registry = Arc::new(RenderRegistry::new());
+        let mut r = StreamRenderer::new(key(), 0, outbound.clone(), registry);
+        r.handle(StreamEvent::Text("hi back".into())).await.unwrap();
+        r.handle(StreamEvent::Done(crate::provider::ChatResponse {
+            content: None,
+            tool_calls: None,
+            usage: None,
+            finish_reason: None,
+            reasoning_content: None,
+        }))
+        .await
+        .unwrap();
+        let row1 = outbound
+            .claim_due(chrono::Utc::now().timestamp())
+            .await
+            .unwrap()
+            .expect("first row");
+        assert_eq!(row1.text, "hi back");
+        let row2 = outbound
+            .claim_due(chrono::Utc::now().timestamp())
+            .await
+            .unwrap();
+        assert!(
+            row2.is_none(),
+            "Done after a fully-flushed buffer must not enqueue a duplicate"
         );
     }
 
