@@ -87,23 +87,38 @@ pub struct SessionSummary {
 }
 
 impl SessionStore {
-    /// Open (or create) the session store at `~/.vulcan/sessions.db`. Panics
-    /// on fatal DB initialization errors — matches the existing pattern in
-    /// `AgentBuilder::build` (api key, provider).
-    pub fn new() -> Self {
+    /// Open (or create) the session store at `~/.vulcan/sessions.db`,
+    /// returning an error instead of panicking when the DB directory
+    /// can't be created, the file can't be opened, or schema
+    /// migrations fail. Production startup paths (gateway, TUI, CLI)
+    /// use this so misconfigured hosts surface an actionable message
+    /// rather than aborting the process (YYC-150).
+    pub fn try_new() -> Result<Self> {
         let dir = crate::config::vulcan_home();
-        std::fs::create_dir_all(&dir).ok();
+        std::fs::create_dir_all(&dir)
+            .with_context(|| format!("create vulcan_home at {}", dir.display()))?;
         let path = dir.join("sessions.db");
+        Self::try_open_at(&path)
+    }
 
-        let conn = Connection::open(&path)
-            .unwrap_or_else(|e| panic!("Failed to open session DB at {}: {e}", path.display()));
-
+    /// Open the session store at an arbitrary path. Used by
+    /// `try_new` after resolving `vulcan_home`, and by tests that
+    /// need to point at a temp directory.
+    pub fn try_open_at(path: &std::path::Path) -> Result<Self> {
+        let conn = Connection::open(path)
+            .with_context(|| format!("open session DB at {}", path.display()))?;
         initialize_conn(&conn)
-            .unwrap_or_else(|e| panic!("Failed to initialize session DB schema: {e}"));
-
-        Self {
+            .with_context(|| format!("initialize session DB schema at {}", path.display()))?;
+        Ok(Self {
             conn: Mutex::new(conn),
-        }
+        })
+    }
+
+    /// Panicking shim around `try_new`. Kept so existing test code
+    /// and the `Default` impl don't need to thread `Result` through;
+    /// production paths should call `try_new` (YYC-150).
+    pub fn new() -> Self {
+        Self::try_new().expect("SessionStore::new failed; use try_new() to handle the error")
     }
 
     /// Most recently active session, by `last_active`. `None` if there are no

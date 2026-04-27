@@ -73,7 +73,7 @@ async fn main() -> anyhow::Result<()> {
         }
         Some(Command::Search { query, limit }) => {
             init_cli_logging();
-            let store = vulcan::memory::SessionStore::new();
+            let store = vulcan::memory::SessionStore::try_new()?;
             let hits = store.search_messages(&query, limit)?;
             if hits.is_empty() {
                 println!("No matches.");

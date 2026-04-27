@@ -274,7 +274,7 @@ impl Agent {
             }
         }
         let skills = Arc::new(SkillRegistry::new(&config.skills_dir));
-        let memory = SessionStore::new();
+        let memory = SessionStore::try_new()?;
         let context =
             ContextManager::with_config(provider.max_context(), config.compaction.clone());
         let session_id = Uuid::new_v4().to_string();
@@ -289,7 +289,7 @@ impl Agent {
         // FTS read doesn't contend with the agent's main message-write
         // path on the existing memory mutex.
         if config.recall.enabled {
-            let recall_memory = Arc::new(SessionStore::new());
+            let recall_memory = Arc::new(SessionStore::try_new()?);
             hooks.register(Arc::new(RecallHook::new(recall_memory, config.recall)));
         }
 
