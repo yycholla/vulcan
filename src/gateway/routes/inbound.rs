@@ -33,6 +33,9 @@ pub async fn handle(
         chat_id: body.chat_id,
         user_id: body.user_id,
         text: body.text,
+        message_id: None,
+        reply_to: None,
+        attachments: vec![],
     };
     match state.inbound.enqueue(msg).await {
         Ok(id) => Ok((StatusCode::ACCEPTED, Json(serde_json::json!({"id": id})))),

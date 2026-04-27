@@ -12,6 +12,17 @@ pub struct InboundMessage {
     pub chat_id: String,
     pub user_id: String,
     pub text: String,
+    /// Platform's id for this received message. Populated when the
+    /// platform connector knows it (Discord/Telegram); `None` for
+    /// loopback/CLI which don't have a wire concept of a message id.
+    pub message_id: Option<String>,
+    /// Platform message id this is a reply to, if the user threaded
+    /// the message. Used by the agent to scope the lane's context
+    /// or by future tools that read thread state.
+    pub reply_to: Option<String>,
+    /// Media / file attachments the user sent. Empty by default.
+    /// `Platform::download_attachment` materializes blobs on demand.
+    pub attachments: Vec<Attachment>,
 }
 
 /// A message to deliver to a user
@@ -20,7 +31,19 @@ pub struct OutboundMessage {
     pub platform: String,
     pub chat_id: String,
     pub text: String,
-    pub attachments: Vec<String>,
+    /// Typed attachments to send. Empty by default. Replaces the
+    /// pre-PR-2 untyped `Vec<String>` of paths — kind drives the
+    /// platform's API choice (Telegram has separate sendPhoto /
+    /// sendDocument / sendVoice endpoints).
+    pub attachments: Vec<OutboundAttachment>,
+    /// Reply target. When set, the platform sends this message as
+    /// a reply to (or thread under) the referenced platform message.
+    pub reply_to: Option<String>,
+    /// When `Some`, the OutboundDispatcher calls `Platform::edit`
+    /// against the referenced message id instead of `Platform::send`.
+    /// Set by StreamRenderer for follow-up chunks of an in-flight
+    /// streaming response.
+    pub edit_target: Option<String>,
 }
 
 /// Result of a successful `Platform::send`. Carries the platform's

@@ -45,6 +45,9 @@ impl DiscordPlatform {
             chat_id: channel_id.to_string(),
             user_id: user_id.to_string(),
             text: text.to_string(),
+            message_id: None,
+            reply_to: None,
+            attachments: vec![],
         })
     }
 

@@ -84,6 +84,8 @@ pub async fn process_one(
                         chat_id: row.chat_id,
                         text: reply,
                         attachments: vec![],
+                        reply_to: None,
+                        edit_target: None,
                     },
                 )
                 .await?;
@@ -232,6 +234,9 @@ mod tests {
                 chat_id: "c".into(),
                 user_id: "u".into(),
                 text: "hi".into(),
+                message_id: None,
+                reply_to: None,
+                attachments: vec![],
             })
             .await
             .unwrap();
@@ -268,6 +273,9 @@ mod tests {
                 chat_id: "c".into(),
                 user_id: "u".into(),
                 text: "boom".into(),
+                message_id: None,
+                reply_to: None,
+                attachments: vec![],
             })
             .await
             .unwrap();
@@ -339,6 +347,9 @@ mod tests {
                 chat_id: "c".into(),
                 user_id: "u".into(),
                 text: "boom".into(),
+                message_id: None,
+                reply_to: None,
+                attachments: vec![],
             })
             .await
             .unwrap();
@@ -364,6 +375,9 @@ mod tests {
                 chat_id: "c".into(),
                 user_id: "u".into(),
                 text: "again".into(),
+                message_id: None,
+                reply_to: None,
+                attachments: vec![],
             })
             .await
             .unwrap();

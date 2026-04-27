@@ -417,6 +417,9 @@ mod tests {
                 chat_id: "c".into(),
                 user_id: "u".into(),
                 text: "recover me".into(),
+                message_id: None,
+                reply_to: None,
+                attachments: vec![],
             })
             .await
             .unwrap();

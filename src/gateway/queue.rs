@@ -455,6 +455,9 @@ mod tests {
             chat_id: "c1".into(),
             user_id: "u1".into(),
             text: "hi".into(),
+            message_id: None,
+            reply_to: None,
+            attachments: vec![],
         }
     }
 
@@ -464,6 +467,8 @@ mod tests {
             chat_id: "c1".into(),
             text: "hello".into(),
             attachments: vec![],
+            reply_to: None,
+            edit_target: None,
         }
     }
 
@@ -739,6 +744,8 @@ mod tests {
                     chat_id: "c1".into(),
                     text: "reply".into(),
                     attachments: vec![],
+                    reply_to: None,
+                    edit_target: None,
                 },
             )
             .await
