@@ -14,19 +14,26 @@ use tokio::task::JoinHandle;
 
 use crate::gateway::queue::OutboundQueue;
 use crate::gateway::registry::PlatformRegistry;
+use crate::gateway::render_registry::{RenderKey, RenderRegistry};
 use crate::platform::OutboundMessage;
 
 pub struct OutboundDispatcher {
     queue: Arc<OutboundQueue>,
     registry: Arc<PlatformRegistry>,
+    render_registry: Arc<RenderRegistry>,
     poll_interval: Duration,
 }
 
 impl OutboundDispatcher {
-    pub fn new(queue: Arc<OutboundQueue>, registry: Arc<PlatformRegistry>) -> Self {
+    pub fn new(
+        queue: Arc<OutboundQueue>,
+        registry: Arc<PlatformRegistry>,
+        render_registry: Arc<RenderRegistry>,
+    ) -> Self {
         Self {
             queue,
             registry,
+            render_registry,
             poll_interval: Duration::from_millis(250),
         }
     }
@@ -42,9 +49,15 @@ impl OutboundDispatcher {
         let Self {
             queue,
             registry,
+            render_registry,
             poll_interval,
         } = self;
-        let handle = tokio::spawn(dispatch_loop(queue, registry, poll_interval));
+        let handle = tokio::spawn(dispatch_loop(
+            queue,
+            registry,
+            render_registry,
+            poll_interval,
+        ));
         OutboundDispatcherHandle { handle }
     }
 }
@@ -68,6 +81,7 @@ impl Drop for OutboundDispatcherHandle {
 async fn dispatch_loop(
     queue: Arc<OutboundQueue>,
     registry: Arc<PlatformRegistry>,
+    render_registry: Arc<RenderRegistry>,
     poll_interval: Duration,
 ) {
     let mut ticker = tokio::time::interval(poll_interval);
@@ -77,19 +91,24 @@ async fn dispatch_loop(
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop {
         ticker.tick().await;
-        if let Err(e) = drain_due(&queue, &registry).await {
+        if let Err(e) = drain_due(&queue, &registry, &render_registry).await {
             tracing::error!(target: "gateway::outbound", error = %e, "drain_due errored");
         }
     }
 }
 
-async fn drain_due(queue: &OutboundQueue, registry: &PlatformRegistry) -> anyhow::Result<()> {
+async fn drain_due(
+    queue: &OutboundQueue,
+    registry: &PlatformRegistry,
+    render_registry: &RenderRegistry,
+) -> anyhow::Result<()> {
     loop {
         let now = chrono::Utc::now().timestamp();
         let Some(row) = queue.claim_due(now).await? else {
             return Ok(());
         };
         let id = row.id;
+        let edit_target = row.edit_target.clone();
         let msg = OutboundMessage {
             platform: row.platform,
             chat_id: row.chat_id,
@@ -98,10 +117,37 @@ async fn drain_due(queue: &OutboundQueue, registry: &PlatformRegistry) -> anyhow
             reply_to: row.reply_to,
             edit_target: row.edit_target,
         };
-        match registry.send(&msg).await {
-            Ok(_sent) => queue.mark_done(id).await?,
-            // PR-2 will capture `_sent.message_id` into RenderRegistry so
-            // edit-in-place can target it. For PR-1 the id is logged-only.
+        let result = if let Some(anchor) = edit_target {
+            // Route to edit; ignore SentMessage shape (edit returns ()).
+            let plat = registry
+                .get(&msg.platform)
+                .ok_or_else(|| anyhow::anyhow!("unknown platform: {}", msg.platform))?;
+            plat.edit(&msg.chat_id, &anchor, &msg.text).await
+        } else {
+            // First send: capture the SentMessage id into RenderRegistry
+            // under the lane key so the next chunk can target it.
+            let plat = registry
+                .get(&msg.platform)
+                .ok_or_else(|| anyhow::anyhow!("unknown platform: {}", msg.platform))?;
+            match plat.send(&msg).await {
+                Ok(sent) => {
+                    // Build the RenderKey from (platform, chat_id, turn_id).
+                    // Turn id isn't stored on the row in PR-2a — use chat_id
+                    // as a stand-in. PR-2b adds a turn_id column when it
+                    // wires the worker streaming path.
+                    let key = RenderKey {
+                        platform: msg.platform.clone(),
+                        chat_id: msg.chat_id.clone(),
+                        turn_id: msg.chat_id.clone(),
+                    };
+                    render_registry.set_anchor(key, sent.message_id);
+                    Ok(())
+                }
+                Err(e) => Err(e),
+            }
+        };
+        match result {
+            Ok(()) => queue.mark_done(id).await?,
             Err(e) => queue.mark_failed(id, &e.to_string()).await?,
         }
     }
@@ -141,7 +187,8 @@ mod tests {
         let mut reg = PlatformRegistry::new();
         reg.register("loopback", lp.clone());
         let reg = Arc::new(reg);
-        let dispatcher = OutboundDispatcher::new(q.clone(), reg)
+        let render_reg = Arc::new(RenderRegistry::new());
+        let dispatcher = OutboundDispatcher::new(q.clone(), reg, render_reg)
             .with_poll_interval(Duration::from_millis(20))
             .spawn();
 
@@ -160,6 +207,98 @@ mod tests {
         drop(dispatcher);
     }
 
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct EditTrackingPlatform {
+        send_calls: Arc<AtomicUsize>,
+        edit_calls: Arc<AtomicUsize>,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::platform::Platform for EditTrackingPlatform {
+        fn name(&self) -> &str {
+            "edit-tracker"
+        }
+        async fn start(&self) -> anyhow::Result<()> {
+            Ok(())
+        }
+        async fn send(
+            &self,
+            _msg: &OutboundMessage,
+        ) -> anyhow::Result<crate::platform::SentMessage> {
+            self.send_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(crate::platform::SentMessage {
+                message_id: "tracked-1".into(),
+            })
+        }
+        async fn edit(&self, _c: &str, _m: &str, _t: &str) -> anyhow::Result<()> {
+            self.edit_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+        async fn recv(&self) -> anyhow::Result<crate::platform::InboundMessage> {
+            anyhow::bail!("no recv")
+        }
+    }
+
+    #[tokio::test]
+    async fn dispatcher_routes_to_edit_when_edit_target_set() {
+        let queue = Arc::new(OutboundQueue::new(fresh_db(), 5));
+        let render_reg = Arc::new(RenderRegistry::new());
+        let send_calls = Arc::new(AtomicUsize::new(0));
+        let edit_calls = Arc::new(AtomicUsize::new(0));
+        let plat = Arc::new(EditTrackingPlatform {
+            send_calls: send_calls.clone(),
+            edit_calls: edit_calls.clone(),
+        });
+        let mut reg = PlatformRegistry::new();
+        reg.register("edit-tracker", plat);
+        let registry = Arc::new(reg);
+
+        queue
+            .enqueue(OutboundMessage {
+                platform: "edit-tracker".into(),
+                chat_id: "c".into(),
+                text: "edit me".into(),
+                attachments: vec![],
+                reply_to: None,
+                edit_target: Some("anchor-1".into()),
+            })
+            .await
+            .unwrap();
+        drain_due(&queue, &registry, &render_reg).await.unwrap();
+        assert_eq!(send_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(edit_calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn dispatcher_captures_send_anchor_into_render_registry() {
+        let queue = Arc::new(OutboundQueue::new(fresh_db(), 5));
+        let render_reg = Arc::new(RenderRegistry::new());
+        let plat = Arc::new(LoopbackPlatform::default());
+        let mut reg = PlatformRegistry::new();
+        reg.register("loopback", plat);
+        let registry = Arc::new(reg);
+
+        queue
+            .enqueue(OutboundMessage {
+                platform: "loopback".into(),
+                chat_id: "c".into(),
+                text: "first".into(),
+                attachments: vec![],
+                reply_to: None,
+                edit_target: None,
+            })
+            .await
+            .unwrap();
+        drain_due(&queue, &registry, &render_reg).await.unwrap();
+        let anchor = render_reg.anchor(&RenderKey {
+            platform: "loopback".into(),
+            chat_id: "c".into(),
+            turn_id: "c".into(),
+        });
+        assert!(anchor.is_some(), "first send should populate the registry");
+    }
+
     #[tokio::test]
     async fn failed_send_retries_after_backoff() {
         let db = fresh_db();
@@ -171,7 +310,8 @@ mod tests {
 
         let id = q.enqueue(out_msg("payload")).await.unwrap();
 
-        let dispatcher = OutboundDispatcher::new(q.clone(), reg)
+        let render_reg = Arc::new(RenderRegistry::new());
+        let dispatcher = OutboundDispatcher::new(q.clone(), reg, render_reg)
             .with_poll_interval(Duration::from_millis(20))
             .spawn();
 

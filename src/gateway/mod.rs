@@ -92,8 +92,13 @@ where
     }
 
     let evictor = agent_map.spawn_evictor();
-    let outbound_dispatcher =
-        OutboundDispatcher::new(Arc::clone(&outbound), Arc::clone(&registry)).spawn();
+    let render_registry = Arc::new(crate::gateway::render_registry::RenderRegistry::new());
+    let outbound_dispatcher = OutboundDispatcher::new(
+        Arc::clone(&outbound),
+        Arc::clone(&registry),
+        Arc::clone(&render_registry),
+    )
+    .spawn();
     let discord_dispatcher = if gateway.discord.enabled {
         Some(DiscordPlatform::spawn_gateway_client(
             gateway.discord.bot_token.clone(),
