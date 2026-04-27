@@ -395,6 +395,20 @@ fn score_tool_match(params: &Value, tool: &ToolDefinition) -> Option<(usize, usi
     Some((recognized, extras))
 }
 
+/// Generate a unique synthetic tool-call ID so multiple inferred calls
+/// in the same turn (or across turns) can be disambiguated by the
+/// downstream Tool-message protocol (YYC-127).
+fn next_fallback_call_id() -> String {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    static N: AtomicUsize = AtomicUsize::new(0);
+    let n = N.fetch_add(1, Ordering::Relaxed);
+    format!("fallback_tool_call_{n}")
+}
+
+fn tool_name_registered(tools: &[ToolDefinition], name: &str) -> bool {
+    tools.iter().any(|t| t.function.name == name)
+}
+
 fn infer_bare_object_tool_call(params: &Value, tools: &[ToolDefinition]) -> Option<ToolCall> {
     let mut best: Option<(&ToolDefinition, usize, usize)> = None;
 
@@ -420,7 +434,7 @@ fn infer_bare_object_tool_call(params: &Value, tools: &[ToolDefinition]) -> Opti
 
     let (tool, _, _) = best?;
     Some(ToolCall {
-        id: "fallback_tool_call_0".into(),
+        id: next_fallback_call_id(),
         call_type: "function".into(),
         function: crate::provider::ToolCallFunction {
             name: tool.function.name.clone(),
@@ -441,11 +455,20 @@ fn infer_content_tool_calls(content: &str, tools: &[ToolDefinition]) -> Option<V
         if let Some(tool_calls) = obj.get("tool_calls").and_then(|v| v.as_array()) {
             let parsed = tool_calls
                 .iter()
-                .enumerate()
-                .filter_map(|(idx, call)| {
+                .filter_map(|call| {
                     let call_obj = call.as_object()?;
                     let function = call_obj.get("function")?.as_object()?;
                     let name = function.get("name")?.as_str()?.to_string();
+                    // YYC-127: drop entries whose name doesn't match any
+                    // registered tool. Without this an inferred call could
+                    // dispatch into the agent's "unknown tool" path with
+                    // attacker-controlled args.
+                    if !tool_name_registered(tools, &name) {
+                        tracing::warn!(
+                            "tool-call inference: rejecting tool_calls[] entry with unregistered name '{name}'",
+                        );
+                        return None;
+                    }
                     let arguments = function.get("arguments")?;
                     let arguments = if let Some(s) = arguments.as_str() {
                         s.to_string()
@@ -453,17 +476,25 @@ fn infer_content_tool_calls(content: &str, tools: &[ToolDefinition]) -> Option<V
                         serde_json::to_string(arguments).ok()?
                     };
                     Some(ToolCall {
+                        // YYC-127: prefer the model-supplied id; fall back to
+                        // a per-process unique counter so multiple inferred
+                        // calls in the same turn don't collide.
                         id: call_obj
                             .get("id")
                             .and_then(|v| v.as_str())
                             .map(str::to_string)
-                            .unwrap_or_else(|| format!("fallback_tool_call_{idx}")),
+                            .unwrap_or_else(next_fallback_call_id),
                         call_type: "function".into(),
                         function: crate::provider::ToolCallFunction { name, arguments },
                     })
                 })
                 .collect::<Vec<_>>();
             if !parsed.is_empty() {
+                tracing::warn!(
+                    "tool-call inference: parsed {} call(s) from content tool_calls[] field — \
+                     model emitted free-text instead of structured tool_calls",
+                    parsed.len(),
+                );
                 return Some(parsed);
             }
         }
@@ -475,13 +506,26 @@ fn infer_content_tool_calls(content: &str, tools: &[ToolDefinition]) -> Option<V
                 .or_else(|| obj.get("tool_name"))
                 .and_then(|v| v.as_str())
         {
+            // YYC-127: enforce that the inferred call targets a tool that
+            // actually exists. A model describing a hypothetical action in
+            // prose could otherwise trigger dispatch with an arbitrary name.
+            if !tool_name_registered(tools, name) {
+                tracing::warn!(
+                    "tool-call inference: rejecting name/arguments object with unregistered tool '{name}'",
+                );
+                return None;
+            }
             let arguments = if let Some(s) = arguments.as_str() {
                 s.to_string()
             } else {
                 serde_json::to_string(arguments).ok()?
             };
+            tracing::warn!(
+                "tool-call inference: parsed name/arguments object as call to '{name}' — \
+                 model emitted free-text instead of structured tool_calls",
+            );
             return Some(vec![ToolCall {
-                id: "fallback_tool_call_0".into(),
+                id: next_fallback_call_id(),
                 call_type: "function".into(),
                 function: crate::provider::ToolCallFunction {
                     name: name.to_string(),
@@ -491,7 +535,13 @@ fn infer_content_tool_calls(content: &str, tools: &[ToolDefinition]) -> Option<V
         }
     }
 
-    infer_bare_object_tool_call(&value, tools).map(|tc| vec![tc])
+    let inferred = infer_bare_object_tool_call(&value, tools)?;
+    tracing::warn!(
+        "tool-call inference: matched bare JSON object against tool '{}' by field overlap — \
+         model emitted free-text instead of structured tool_calls",
+        inferred.function.name,
+    );
+    Some(vec![inferred])
 }
 
 #[async_trait::async_trait]
@@ -1101,6 +1151,126 @@ mod tests {
             serde_json::from_str::<Value>(&inferred[0].function.arguments).unwrap(),
             json!({"command":"ls -la","dependencies":[]})
         );
+    }
+
+    fn bash_and_read_tools() -> Vec<ToolDefinition> {
+        vec![
+            ToolDefinition {
+                tool_type: "function".into(),
+                function: crate::provider::ToolFunction {
+                    name: "bash".into(),
+                    description: "Run a shell command".into(),
+                    parameters: json!({
+                        "type": "object",
+                        "properties": { "command": { "type": "string" } },
+                        "required": ["command"]
+                    }),
+                },
+            },
+            ToolDefinition {
+                tool_type: "function".into(),
+                function: crate::provider::ToolFunction {
+                    name: "read_file".into(),
+                    description: "Read a file".into(),
+                    parameters: json!({
+                        "type": "object",
+                        "properties": { "path": { "type": "string" } },
+                        "required": ["path"]
+                    }),
+                },
+            },
+        ]
+    }
+
+    #[test]
+    fn content_fallback_rejects_prose_about_tool_calls() {
+        // YYC-127: a model that *describes* what it would do — even using
+        // tool-shaped vocabulary — must not trigger execution. JSON parse
+        // fails, so no inference fires.
+        let tools = bash_and_read_tools();
+        let prose = "I will call the `bash` tool with command \"ls -la\" \
+                     and arguments=[] to list the current directory.";
+        assert!(infer_content_tool_calls(prose, &tools).is_none());
+    }
+
+    #[test]
+    fn content_fallback_rejects_truncated_json() {
+        // YYC-127: clipped JSON (e.g. a context-limit cut-off) must be
+        // rejected — serde_json strict parsing handles this without us
+        // having to hand-roll bracket counting.
+        let tools = bash_and_read_tools();
+        let truncated = r#"{"command":"rm -rf /tmp/foo"#; // missing closing quote + brace
+        assert!(infer_content_tool_calls(truncated, &tools).is_none());
+
+        let half_object = r#"{"command":"echo hi","#; // trailing comma + missing close
+        assert!(infer_content_tool_calls(half_object, &tools).is_none());
+    }
+
+    #[test]
+    fn content_fallback_rejects_name_arguments_for_unregistered_tool() {
+        // YYC-127: a `name`/`arguments` object naming a tool that isn't in
+        // the registry must not produce a ToolCall — otherwise an attacker-
+        // controlled prose blob could synthesize a call to anything.
+        let tools = bash_and_read_tools();
+        let unknown = r#"{"name":"send_email","arguments":{"to":"a@b.c"}}"#;
+        assert!(infer_content_tool_calls(unknown, &tools).is_none());
+    }
+
+    #[test]
+    fn content_fallback_accepts_name_arguments_for_registered_tool() {
+        // Sanity: legitimate name/arguments form still parses when the
+        // tool is registered.
+        let tools = bash_and_read_tools();
+        let ok = r#"{"name":"bash","arguments":{"command":"echo hi"}}"#;
+        let inferred = infer_content_tool_calls(ok, &tools).expect("registered tool accepted");
+        assert_eq!(inferred.len(), 1);
+        assert_eq!(inferred[0].function.name, "bash");
+    }
+
+    #[test]
+    fn content_fallback_drops_tool_calls_array_entries_with_unknown_names() {
+        // YYC-127: tool_calls[] entries naming an unregistered tool are
+        // dropped; a single registered call is still returned.
+        let tools = bash_and_read_tools();
+        let mixed = r#"{
+            "tool_calls": [
+                {"function": {"name": "send_email", "arguments": {"to":"x@y"}}},
+                {"function": {"name": "bash", "arguments": "{\"command\":\"ls\"}"}}
+            ]
+        }"#;
+        let inferred = infer_content_tool_calls(mixed, &tools).expect("at least one valid call");
+        assert_eq!(inferred.len(), 1);
+        assert_eq!(inferred[0].function.name, "bash");
+    }
+
+    #[test]
+    fn content_fallback_assigns_unique_ids_across_multiple_calls() {
+        // YYC-127: multiple inferred calls within a single response, and
+        // across separate inferences, must have distinct IDs so the
+        // downstream Tool message protocol can disambiguate them.
+        let tools = bash_and_read_tools();
+        let multi = r#"{
+            "tool_calls": [
+                {"function": {"name": "bash", "arguments": "{\"command\":\"ls\"}"}},
+                {"function": {"name": "read_file", "arguments": "{\"path\":\"/tmp/a\"}"}}
+            ]
+        }"#;
+        let first = infer_content_tool_calls(multi, &tools).expect("two calls");
+        assert_eq!(first.len(), 2);
+        assert_ne!(first[0].id, first[1].id);
+
+        // A second inference call must not collide with the first batch.
+        let single = r#"{"command":"echo hi"}"#;
+        let second = infer_content_tool_calls(single, &tools).expect("one call");
+        assert_eq!(second.len(), 1);
+        assert_ne!(first[0].id, second[0].id);
+        assert_ne!(first[1].id, second[0].id);
+    }
+
+    #[test]
+    fn content_fallback_no_tools_registered_returns_none() {
+        // Edge case: no tools means no inference is even attempted.
+        assert!(infer_content_tool_calls(r#"{"command":"ls"}"#, &[]).is_none());
     }
 
     #[test]
