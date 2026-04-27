@@ -45,6 +45,12 @@ parking_lot = "0.12"
 # Pattern-based secret redaction in provider wire-debug logs (YYC-135).
 regex = "1"
 
+# Real BPE tokenizer for context budget estimation (YYC-129). Uses
+# cl100k_base — the OpenAI tokenizer for GPT-4 / GPT-3.5-turbo, which
+# is also a strong cross-provider estimator (Anthropic / open-weights
+# tokenizers are within a few percent on most prose / code).
+tiktoken-rs = "0.11"
+
 # HTTP / LLM API
 reqwest = { version = "0.13", features = ["json", "stream"] }
 
