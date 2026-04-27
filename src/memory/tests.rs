@@ -393,12 +393,10 @@ fn append_messages_preserves_prior_row_ids() {
         let mut stmt = conn
             .prepare("SELECT id FROM messages WHERE session_id = ?1 ORDER BY position")
             .unwrap();
-        let rows = stmt
-            .query_map(params![id], |row| row.get(0))
+        stmt.query_map(params![id], |row| row.get(0))
             .unwrap()
             .collect::<rusqlite::Result<Vec<i64>>>()
-            .unwrap();
-        rows
+            .unwrap()
     };
     assert_eq!(
         ids_after.len(),

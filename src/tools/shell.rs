@@ -166,12 +166,19 @@ impl PtySession {
 
 struct PtyRegistry {
     sessions: Mutex<HashMap<String, Arc<PtySession>>>,
+    /// YYC-162: idempotent reaper guard. `spawn_idle_reaper` flips
+    /// this from false to true atomically; the second caller sees
+    /// the prior `true` and bails out so multiple `make_tools()`
+    /// calls (or future direct `Arc::clone` paths) can't double-spawn
+    /// reapers over the same registry state.
+    reaper_started: AtomicBool,
 }
 
 impl PtyRegistry {
     fn new() -> Arc<Self> {
         Arc::new(Self {
             sessions: Mutex::new(HashMap::new()),
+            reaper_started: AtomicBool::new(false),
         })
     }
 
@@ -363,12 +370,23 @@ impl PtyRegistry {
     }
 
     /// Spawn a background task that periodically reaps idle sessions
-    /// (YYC-117). No-ops outside a tokio runtime so synchronous callers
-    /// (some unit tests that build a `ToolRegistry` without a runtime)
-    /// don't panic on `tokio::spawn`.
-    fn spawn_idle_reaper(self: Arc<Self>, idle: Duration) {
+    /// (YYC-117). Returns `true` when this call actually spawned the
+    /// reaper, `false` when the call was a no-op. No-op cases:
+    /// the caller is outside a tokio runtime (synchronous test
+    /// harnesses that build a `ToolRegistry` without one) or another
+    /// caller already started a reaper for this registry (YYC-162
+    /// idempotence).
+    fn spawn_idle_reaper(self: Arc<Self>, idle: Duration) -> bool {
         if tokio::runtime::Handle::try_current().is_err() {
-            return;
+            return false;
+        }
+        // YYC-162: at most one reaper per `PtyRegistry` instance.
+        // `swap` is the standard "set-and-test" idiom — the first
+        // caller observes `false` and proceeds; later callers see
+        // `true` and skip. `Acquire`/`Release` orders the spawn with
+        // any subsequent reads of registry state.
+        if self.reaper_started.swap(true, Ordering::AcqRel) {
+            return false;
         }
         tokio::spawn(async move {
             loop {
@@ -376,6 +394,7 @@ impl PtyRegistry {
                 let _ = self.close_idle(idle);
             }
         });
+        true
     }
 
     fn get(&self, session_id: &str) -> Result<Arc<PtySession>> {
@@ -944,6 +963,37 @@ mod tests {
         let read = buf.read_from(0, 1024);
         assert_eq!(read.output, "world");
         assert_eq!(read.next_cursor, 11);
+    }
+
+    // YYC-162: spawn_idle_reaper must be idempotent on the same
+    // registry. Second call returns false; the AtomicBool stays
+    // true. Guards against double-spawned reapers when multiple
+    // ToolRegistries (or future Arc::clone callers) share state.
+    #[tokio::test]
+    async fn spawn_idle_reaper_is_idempotent_within_runtime() {
+        let registry = PtyRegistry::new();
+        let first = registry.clone().spawn_idle_reaper(Duration::from_secs(60));
+        let second = registry.clone().spawn_idle_reaper(Duration::from_secs(60));
+        assert!(first, "first call should spawn reaper");
+        assert!(!second, "second call must be a no-op");
+        assert!(registry.reaper_started.load(Ordering::Acquire));
+    }
+
+    // YYC-162: outside a tokio runtime the spawn must return false
+    // (not panic) so synchronous callers like tool registry
+    // construction in test harnesses can build cleanly.
+    #[test]
+    fn spawn_idle_reaper_returns_false_without_runtime() {
+        let registry = PtyRegistry::new();
+        let spawned = registry.clone().spawn_idle_reaper(Duration::from_secs(60));
+        assert!(
+            !spawned,
+            "spawn_idle_reaper must be a no-op without a tokio runtime",
+        );
+        assert!(
+            !registry.reaper_started.load(Ordering::Acquire),
+            "reaper_started should remain false when spawn is skipped",
+        );
     }
 
     #[cfg(unix)]
