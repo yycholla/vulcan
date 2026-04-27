@@ -531,7 +531,7 @@ mod tests {
             chat_id: "c".into(),
         };
         assert!(
-            !agent_map.inner().read().await.contains_key(&lane),
+            !agent_map.inner().lock().contains_key(&lane),
             "lane should have been evicted after panic"
         );
 

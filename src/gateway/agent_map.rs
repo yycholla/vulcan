@@ -14,7 +14,13 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
-use tokio::sync::{Mutex, RwLock};
+// YYC-154: the lane map's critical sections never await, so a sync
+// `parking_lot::Mutex` keeps locks short on the gateway hot path
+// without paying tokio async-mutex overhead. The per-lane Agent
+// itself stays behind `tokio::sync::Mutex` because run_prompt holds
+// it across `.await`.
+use parking_lot::Mutex as SyncMutex;
+use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
 
 use crate::agent::Agent;
@@ -41,7 +47,7 @@ pub(crate) type AgentBuilder =
     Arc<dyn Fn(HookRegistry) -> Pin<Box<dyn Future<Output = Result<Agent>> + Send>> + Send + Sync>;
 
 pub struct AgentMap {
-    inner: Arc<RwLock<HashMap<LaneKey, LaneEntry>>>,
+    inner: Arc<SyncMutex<HashMap<LaneKey, LaneEntry>>>,
     config: Arc<Config>,
     idle_ttl: Duration,
     #[cfg(test)]
@@ -70,7 +76,7 @@ pub struct LaneSnapshot {
 impl AgentMap {
     pub fn new(config: Arc<Config>, idle_ttl: Duration) -> Self {
         Self {
-            inner: Arc::new(RwLock::new(HashMap::new())),
+            inner: Arc::new(SyncMutex::new(HashMap::new())),
             config,
             idle_ttl,
             #[cfg(test)]
@@ -88,7 +94,7 @@ impl AgentMap {
         builder: AgentBuilder,
     ) -> Self {
         Self {
-            inner: Arc::new(RwLock::new(HashMap::new())),
+            inner: Arc::new(SyncMutex::new(HashMap::new())),
             config,
             idle_ttl,
             builder: Some(builder),
@@ -98,19 +104,14 @@ impl AgentMap {
     /// Returns the Agent for `lane`, building one on first call. Bumps
     /// `last_activity` on every call so the Task 9 evictor sees liveness.
     pub async fn get_or_spawn(&self, lane: &LaneKey) -> Result<Arc<Mutex<Agent>>> {
-        // Fast path: read-lock probe. Drop the read guard before re-acquiring
-        // as a writer to bump `last_activity`.
+        // Fast path: lock the map briefly to bump last_activity and
+        // return the cached Arc. The sync `parking_lot::Mutex` (YYC-154)
+        // keeps this scope short and never crosses an `.await`.
         {
-            let map = self.inner.read().await;
-            if map.contains_key(lane) {
-                drop(map);
-                let mut map = self.inner.write().await;
-                if let Some(entry) = map.get_mut(lane) {
-                    entry.last_activity = Instant::now();
-                    return Ok(Arc::clone(&entry.agent));
-                }
-                // Fell through: a concurrent evictor (future) removed the
-                // entry between our drop and re-acquire. Treat as a miss.
+            let mut map = self.inner.lock();
+            if let Some(entry) = map.get_mut(lane) {
+                entry.last_activity = Instant::now();
+                return Ok(Arc::clone(&entry.agent));
             }
         }
 
@@ -150,7 +151,7 @@ impl AgentMap {
 
         // Triple-check: another task may have spawned the same lane while we
         // were building. If so, drop our agent and adopt theirs.
-        let mut map = self.inner.write().await;
+        let mut map = self.inner.lock();
         if let Some(entry) = map.get_mut(lane) {
             entry.last_activity = Instant::now();
             return Ok(Arc::clone(&entry.agent));
@@ -172,7 +173,7 @@ impl AgentMap {
     /// Count of currently-active lanes. Used by GET /v1/lanes (Task 15) and
     /// tests.
     pub async fn active_lanes(&self) -> usize {
-        self.inner.read().await.len()
+        self.inner.lock().len()
     }
 
     /// Snapshot every active lane. Sorted ascending by
@@ -180,19 +181,20 @@ impl AgentMap {
     /// first. Read-locked iteration over `inner`; returns an owned `Vec` so
     /// the lock is dropped before serialization.
     pub async fn snapshot(&self) -> Vec<LaneSnapshot> {
-        let map = self.inner.read().await;
         let now = Instant::now();
-        let mut out: Vec<LaneSnapshot> = map
-            .iter()
-            .map(|(k, entry)| LaneSnapshot {
-                platform: k.platform.clone(),
-                chat_id: k.chat_id.clone(),
-                session_id: entry.session_id.clone(),
-                last_activity_secs_ago: now
-                    .saturating_duration_since(entry.last_activity)
-                    .as_secs(),
-            })
-            .collect();
+        let mut out: Vec<LaneSnapshot> = {
+            let map = self.inner.lock();
+            map.iter()
+                .map(|(k, entry)| LaneSnapshot {
+                    platform: k.platform.clone(),
+                    chat_id: k.chat_id.clone(),
+                    session_id: entry.session_id.clone(),
+                    last_activity_secs_ago: now
+                        .saturating_duration_since(entry.last_activity)
+                        .as_secs(),
+                })
+                .collect()
+        };
         // Most-recent first; tie-break on (platform, chat_id) so JSON output
         // is deterministic when two lanes land in the same second bucket.
         out.sort_by(|a, b| {
@@ -206,7 +208,7 @@ impl AgentMap {
 
     /// Internal accessor for tests + the future evictor (Task 9).
     #[allow(dead_code)]
-    pub(crate) fn inner(&self) -> Arc<RwLock<HashMap<LaneKey, LaneEntry>>> {
+    pub(crate) fn inner(&self) -> Arc<SyncMutex<HashMap<LaneKey, LaneEntry>>> {
         Arc::clone(&self.inner)
     }
 
@@ -219,7 +221,7 @@ impl AgentMap {
     /// No-op when the lane has no entry. Returns whether an entry was
     /// removed so the caller can log appropriately.
     pub async fn evict(&self, lane: &LaneKey) -> bool {
-        self.inner.write().await.remove(lane).is_some()
+        self.inner.lock().remove(lane).is_some()
     }
 
     /// Spawn a background task that periodically evicts lanes idle longer
@@ -251,7 +253,7 @@ impl AgentMap {
         last_activity: Instant,
     ) {
         let session_id = derive_session_id(&lane);
-        let mut map = self.inner.write().await;
+        let mut map = self.inner.lock();
         map.insert(
             lane,
             LaneEntry {
@@ -264,38 +266,32 @@ impl AgentMap {
     }
 }
 
-pub(crate) async fn evict_idle(inner: &Arc<RwLock<HashMap<LaneKey, LaneEntry>>>, ttl: Duration) {
-    // Build the to-evict list under the read lock; do the actual removal +
-    // end_session under the write lock + outside the map. This keeps the
-    // write lock window tight even if many lanes age out at once.
+pub(crate) async fn evict_idle(inner: &Arc<SyncMutex<HashMap<LaneKey, LaneEntry>>>, ttl: Duration) {
+    // Build the to-evict list and remove entries under a single sync
+    // lock. The previous read-then-write split existed because the map
+    // used `tokio::sync::RwLock` and we wanted to keep the writer
+    // window tight; with `parking_lot::Mutex` (YYC-154) one short
+    // critical section is faster than re-locking, and end_session
+    // still happens outside the lock by spawning per-entry tasks.
     let now = Instant::now();
-    let candidates: Vec<LaneKey> = {
-        let map = inner.read().await;
-        map.iter()
+    let evicted: Vec<(LaneKey, LaneEntry)> = {
+        let mut map = inner.lock();
+        let stale: Vec<LaneKey> = map
+            .iter()
             .filter(|(_, entry)| now.duration_since(entry.last_activity) > ttl)
             .map(|(k, _)| k.clone())
-            .collect()
-    };
-    if candidates.is_empty() {
-        return;
-    }
-    let evicted = {
-        let mut map = inner.write().await;
-        let mut taken = Vec::with_capacity(candidates.len());
-        for lane in &candidates {
-            if let Some(entry) = map.get(lane) {
-                // Re-check liveness — a concurrent get_or_spawn may have
-                // bumped last_activity between our snapshot and the write
-                // lock.
-                if now.duration_since(entry.last_activity) > ttl
-                    && let Some(entry) = map.remove(lane)
-                {
-                    taken.push((lane.clone(), entry));
-                }
+            .collect();
+        let mut taken = Vec::with_capacity(stale.len());
+        for lane in stale {
+            if let Some(entry) = map.remove(&lane) {
+                taken.push((lane, entry));
             }
         }
         taken
     };
+    if evicted.is_empty() {
+        return;
+    }
     for (lane, entry) in evicted {
         // end_session calls LspManager::shutdown_all which can stall if a
         // child server is wedged. Spawn each shutdown so the eviction loop
@@ -479,7 +475,7 @@ mod tests {
         // SCAN_INTERVAL (60s).
         {
             let inner = map.inner();
-            let mut guard = inner.write().await;
+            let mut guard = inner.lock();
             if let Some(entry) = guard.get_mut(&lane) {
                 entry.last_activity = Instant::now() - Duration::from_secs(60);
             }
@@ -509,6 +505,39 @@ mod tests {
 
         super::evict_idle(&map.inner, Duration::from_secs(60)).await;
         assert_eq!(map.active_lanes().await, 0);
+    }
+
+    // YYC-154: under the sync mutex, concurrent first-touches on the
+    // same lane must still resolve to a single Agent. Drives 16
+    // tasks against one lane and asserts every clone shares the Arc.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_first_touch_same_lane_dedups_to_one_agent() {
+        let map = Arc::new(AgentMap::with_builder(
+            test_config(),
+            Duration::from_secs(60),
+            mock_agent_builder(),
+        ));
+        let lane = test_lane("concurrent");
+        let mut handles = Vec::new();
+        for _ in 0..16 {
+            let map = Arc::clone(&map);
+            let lane = lane.clone();
+            handles.push(tokio::spawn(async move {
+                map.get_or_spawn(&lane).await.expect("spawn")
+            }));
+        }
+        let mut agents = Vec::new();
+        for h in handles {
+            agents.push(h.await.expect("join"));
+        }
+        let first = &agents[0];
+        for a in &agents[1..] {
+            assert!(
+                Arc::ptr_eq(first, a),
+                "all concurrent get_or_spawns must dedup to one agent",
+            );
+        }
+        assert_eq!(map.active_lanes().await, 1);
     }
 
     #[tokio::test(start_paused = true)]
