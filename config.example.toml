@@ -141,7 +141,9 @@ theme = "system"
 # [gateway.telegram]
 # enabled = false
 # bot_token = "..."
-# webhook_secret = "..."
+# webhook_secret = ""              # empty disables webhook receive
+# allowed_chat_ids = []            # empty = open
+# poll_interval_secs = 25
 
 # [gateway.discord]
 # enabled = false

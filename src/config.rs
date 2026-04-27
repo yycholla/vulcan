@@ -229,6 +229,12 @@ pub struct GatewayConfig {
     pub outbound_max_attempts: u32,
     #[serde(default)]
     pub discord: DiscordConfig,
+    /// YYC-18 PR-3: Telegram connector. Behind the `telegram` cargo
+    /// feature at the wiring layer; the config struct itself lives
+    /// unconditionally so TOML round-trips cleanly regardless of the
+    /// feature set the binary was built with.
+    #[serde(default)]
+    pub telegram: TelegramConfig,
     /// YYC-18 PR-2c: slash commands routed through the gateway worker
     /// before falling through to the streaming agent. Built-ins
     /// (/help, /status, /clear, /resume) are pre-registered by
@@ -284,6 +290,36 @@ pub struct DiscordConfig {
     pub bot_token: String,
     #[serde(default)]
     pub allow_bots: bool,
+}
+
+/// YYC-18 PR-3: Telegram connector configuration.
+#[derive(Debug, Deserialize, Clone, Default)]
+pub struct TelegramConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub bot_token: String,
+    /// When set, the gateway accepts webhook POSTs at
+    /// `/webhook/telegram` and verifies the
+    /// `X-Telegram-Bot-Api-Secret-Token` header against this value.
+    /// Empty means webhooks disabled — gateway only receives via
+    /// long-poll.
+    #[serde(default)]
+    pub webhook_secret: String,
+    /// Chat ids allowed to talk to the bot. Empty = open (every chat
+    /// the bot is added to is served). Telegram chat ids are i64;
+    /// negative for groups, positive for DMs.
+    #[serde(default)]
+    pub allowed_chat_ids: Vec<i64>,
+    /// How many seconds the long-poll `getUpdates` request waits for
+    /// new messages. 0 = short-poll (busy loop). Telegram caps at 50;
+    /// 25 is a reasonable middle.
+    #[serde(default = "default_telegram_poll_interval_secs")]
+    pub poll_interval_secs: u32,
+}
+
+fn default_telegram_poll_interval_secs() -> u32 {
+    25
 }
 
 fn default_gateway_bind() -> String {
