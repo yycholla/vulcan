@@ -32,7 +32,13 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStdin, Command};
-use tokio::sync::{Mutex, Notify, oneshot};
+// YYC-155: split lock kinds explicitly. The two mutexes that wrap
+// async I/O (`child.kill().await`, `stdin.write_all().await`) keep
+// `tokio::sync::Mutex` because they're held across `.await`. All
+// other LSP state is short-lived sync access (HashMap inserts,
+// counter bumps) that has no reason to pay the async-mutex cost.
+use parking_lot::Mutex;
+use tokio::sync::{Mutex as AsyncMutex, Notify, oneshot};
 
 /// LSP standard error codes we treat as "still indexing" (YYC-72).
 /// `ContentModified` and `ServerCancelled` come from the LSP spec; both
@@ -109,8 +115,11 @@ type DiagCache = Arc<Mutex<HashMap<String, Vec<Diagnostic>>>>;
 
 /// One LSP server subprocess + its JSON-RPC plumbing.
 pub struct LspServer {
-    child: Mutex<Child>,
-    stdin: Mutex<ChildStdin>,
+    /// Async mutex: `kill().await` runs while held (YYC-155).
+    child: AsyncMutex<Child>,
+    /// Async mutex: `write_all().await` + `flush().await` run while
+    /// held during every JSON-RPC frame send (YYC-155).
+    stdin: AsyncMutex<ChildStdin>,
     next_id: Mutex<i64>,
     pending: Pending,
     diagnostics: DiagCache,
@@ -196,7 +205,7 @@ impl LspServer {
                     Ok(Some(msg)) => {
                         if let Some(Value::Number(n)) = msg.id {
                             if let Some(id) = n.as_i64() {
-                                let mut p = pending_clone.lock().await;
+                                let mut p = pending_clone.lock();
                                 if let Some(tx) = p.remove(&id) {
                                     let r = if let Some(err) = msg.error {
                                         let code =
@@ -223,7 +232,7 @@ impl LspServer {
                                     && let Ok(parsed) =
                                         serde_json::from_value::<Vec<Diagnostic>>(diags.clone())
                                 {
-                                    diag_clone.lock().await.insert(uri.to_string(), parsed);
+                                    diag_clone.lock().insert(uri.to_string(), parsed);
                                 }
                             } else if method == "$/progress" {
                                 // YYC-72: rust-analyzer reports indexing
@@ -275,7 +284,7 @@ impl LspServer {
             alive_clone.store(false, Ordering::SeqCst);
             ready_clone.store(true, Ordering::SeqCst);
             notify_clone.notify_waiters();
-            let mut pending = pending_clone.lock().await;
+            let mut pending = pending_clone.lock();
             for (_, tx) in pending.drain() {
                 let _ = tx.send(Err(LspProtoError {
                     code: -32000,
@@ -285,8 +294,8 @@ impl LspServer {
         });
 
         let server = Self {
-            child: Mutex::new(child),
-            stdin: Mutex::new(stdin),
+            child: AsyncMutex::new(child),
+            stdin: AsyncMutex::new(stdin),
             next_id: Mutex::new(1),
             pending,
             diagnostics,
@@ -384,7 +393,7 @@ impl LspServer {
             alive_clone.store(false, Ordering::SeqCst);
             ready_clone.store(true, Ordering::SeqCst);
             notify_clone.notify_waiters();
-            let mut pending = pending_clone.lock().await;
+            let mut pending = pending_clone.lock();
             for (_, tx) in pending.drain() {
                 let _ = tx.send(Err(LspProtoError {
                     code: -32000,
@@ -393,8 +402,8 @@ impl LspServer {
             }
         });
         Ok(Self {
-            child: Mutex::new(child),
-            stdin: Mutex::new(stdin),
+            child: AsyncMutex::new(child),
+            stdin: AsyncMutex::new(stdin),
             next_id: Mutex::new(1),
             pending,
             diagnostics,
@@ -407,8 +416,8 @@ impl LspServer {
         })
     }
 
-    async fn next_id(&self) -> i64 {
-        let mut id = self.next_id.lock().await;
+    fn next_id(&self) -> i64 {
+        let mut id = self.next_id.lock();
         let n = *id;
         *id += 1;
         n
@@ -432,9 +441,9 @@ impl LspServer {
                 self.lang.name()
             );
         }
-        let id = self.next_id().await;
+        let id = self.next_id();
         let (tx, rx) = oneshot::channel();
-        self.pending.lock().await.insert(id, tx);
+        self.pending.lock().insert(id, tx);
 
         let msg = json!({
             "jsonrpc": "2.0",
@@ -523,7 +532,7 @@ impl LspServer {
         let uri = path_to_uri(path)?;
         let key = uri.to_string();
         {
-            let mut opened = self.opened.lock().await;
+            let mut opened = self.opened.lock();
             if !opened.insert(key) {
                 return Ok(());
             }
@@ -553,7 +562,6 @@ impl LspServer {
         };
         self.diagnostics
             .lock()
-            .await
             .get(&uri)
             .cloned()
             .unwrap_or_default()
@@ -608,7 +616,7 @@ where
     Ok(Some(msg))
 }
 
-async fn write_message(stdin: &Mutex<ChildStdin>, msg: &Value) -> Result<()> {
+async fn write_message(stdin: &AsyncMutex<ChildStdin>, msg: &Value) -> Result<()> {
     let body = serde_json::to_vec(msg)?;
     let mut guard = stdin.lock().await;
     guard
@@ -673,7 +681,7 @@ impl LspManager {
     pub async fn server(&self, lang: Language) -> Result<Arc<LspServer>> {
         // Fast path: existing live server.
         {
-            let servers = self.servers.lock().await;
+            let servers = self.servers.lock();
             if let Some(s) = servers.get(&lang)
                 && s.is_alive()
             {
@@ -684,7 +692,7 @@ impl LspManager {
         // Either no cached entry, or the entry is dead. Drop the
         // dead one before respawning so the lock window stays small.
         let was_dead = {
-            let mut servers = self.servers.lock().await;
+            let mut servers = self.servers.lock();
             match servers.get(&lang) {
                 Some(s) if !s.is_alive() => {
                     servers.remove(&lang);
@@ -715,7 +723,7 @@ impl LspManager {
                     )
                 })?,
         );
-        let mut servers = self.servers.lock().await;
+        let mut servers = self.servers.lock();
         // Race-protect: another caller may have inserted while we spawned.
         Ok(servers.entry(lang).or_insert(server).clone())
     }
@@ -726,18 +734,9 @@ impl LspManager {
     /// silently churning a crash-looping server.
     fn bump_restart_counter(&self, lang: Language) -> Result<()> {
         let now = Instant::now();
-        // `Mutex::blocking_lock` can't be used here because we're in
-        // an async fn. Use try_lock-style pattern via a tokio
-        // try_lock — but we already hold no other locks, so a
-        // standard async lock is fine; this fn is sync to keep the
-        // call site small.
-        let mut map = self.restarts.try_lock().unwrap_or_else(|_| {
-            // Should be uncontended in practice; tokio Mutex
-            // try_lock fails only when another caller holds it. Fall
-            // back to a busy-poll, but in real usage this branch is
-            // unreachable since `server` serializes around it.
-            panic!("LSP restart tracker contended unexpectedly");
-        });
+        // YYC-155: parking_lot::Mutex is sync, so the call is just a
+        // short non-await critical section. No try_lock dance needed.
+        let mut map = self.restarts.lock();
         let entry = map.entry(lang).or_insert(RestartTracker {
             window_start: now,
             attempts: 0,
@@ -761,8 +760,15 @@ impl LspManager {
     /// Reap all running servers. Called from `BeforeAgentEnd` so the
     /// children don't outlive the agent.
     pub async fn shutdown_all(&self) {
-        let mut servers = self.servers.lock().await;
-        for (_, s) in servers.drain() {
+        // YYC-155: drain under the sync lock first, then shutdown
+        // each server outside the lock so the per-server `.await`
+        // can't deadlock the parking_lot mutex on long-running
+        // shutdown handshakes.
+        let drained: Vec<Arc<LspServer>> = {
+            let mut servers = self.servers.lock();
+            servers.drain().map(|(_, s)| s).collect()
+        };
+        for s in drained {
             s.shutdown().await;
         }
     }
@@ -1007,7 +1013,6 @@ mod tests {
         manager
             .servers
             .lock()
-            .await
             .insert(Language::Rust, Arc::clone(&dead));
 
         // Verify cached entry is evicted: the manager should detect
@@ -1016,7 +1021,7 @@ mod tests {
         // Direct test of the eviction branch without spawning a real
         // server (which would need rust-analyzer on PATH):
         {
-            let mut servers = manager.servers.lock().await;
+            let mut servers = manager.servers.lock();
             if let Some(s) = servers.get(&Language::Rust)
                 && !s.is_alive()
             {
@@ -1024,7 +1029,7 @@ mod tests {
             }
         }
         assert!(
-            manager.servers.lock().await.get(&Language::Rust).is_none(),
+            manager.servers.lock().get(&Language::Rust).is_none(),
             "dead entry should be evicted",
         );
     }
