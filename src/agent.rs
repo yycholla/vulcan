@@ -20,6 +20,47 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
+/// Heuristic for "local" provider endpoints (loopback, link-local, mDNS
+/// `.local`, RFC1918 private IPv4). Used to skip the API key requirement
+/// when switching to or starting up against a self-hosted endpoint that
+/// typically doesn't need auth.
+fn is_local_base_url(base_url: &str) -> bool {
+    let lower = base_url.to_ascii_lowercase();
+    let host_port = lower
+        .split_once("://")
+        .map(|(_, rest)| rest)
+        .unwrap_or(&lower);
+    let host = host_port
+        .split(|c: char| c == '/' || c == '?')
+        .next()
+        .unwrap_or("");
+    let host = host
+        .strip_prefix('[')
+        .and_then(|h| h.split_once(']').map(|(host, _)| host))
+        .unwrap_or_else(|| host.split(':').next().unwrap_or(""));
+    if host == "localhost" || host.ends_with(".local") {
+        return true;
+    }
+    if host == "127.0.0.1" || host == "0.0.0.0" || host == "::1" {
+        return true;
+    }
+    let parts: Vec<&str> = host.split('.').collect();
+    if parts.len() == 4 {
+        let a = parts[0].parse::<u8>().ok();
+        let b = parts[1].parse::<u8>().ok();
+        if let (Some(a), Some(b)) = (a, b) {
+            if a == 127 || a == 10 || (a == 192 && b == 168) || (a == 172 && (16..=31).contains(&b))
+            {
+                return true;
+            }
+            if a == 169 && b == 254 {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 /// The core agent — orchestrates the LLM, tools, hooks, and state.
 ///
 /// One Agent per session. Hold it across turns: the hook registry's stateful
@@ -103,11 +144,21 @@ impl Agent {
         mut hooks: HookRegistry,
         pause_tx: Option<PauseSender>,
     ) -> Result<Self> {
-        let api_key = config.api_key().ok_or_else(|| {
-            anyhow::anyhow!(
-                "No API key configured. Set VULCAN_API_KEY or add api_key to ~/.vulcan/config.toml"
-            )
-        })?;
+        // Local / self-hosted endpoints don't require auth; allow empty
+        // string in that case (matches `switch_provider` semantics).
+        let api_key = match config.api_key() {
+            Some(k) => k,
+            None if config.provider.disable_catalog
+                || is_local_base_url(&config.provider.base_url) =>
+            {
+                String::new()
+            }
+            None => {
+                anyhow::bail!(
+                    "No API key configured. Set VULCAN_API_KEY or add api_key to ~/.vulcan/config.toml"
+                );
+            }
+        };
 
         // ── Catalog: validate the configured model and (optionally) override
         // max_context with whatever the catalog says it actually is. Non-fatal:
@@ -347,12 +398,23 @@ impl Agent {
                 .ok_or_else(|| anyhow::anyhow!("Provider profile '{name}' not found in config"))?,
             None => config.provider.clone(),
         };
-        let api_key = config.api_key_for(&next_config).ok_or_else(|| {
-            anyhow::anyhow!(
-                "No API key for provider '{}' (set VULCAN_API_KEY or supply api_key in config)",
-                profile.unwrap_or("[provider]"),
-            )
-        })?;
+        // Local / self-hosted endpoints (Ollama, llama.cpp, vLLM unauth)
+        // typically don't need an API key; skip the requirement when the
+        // base URL looks local or the user explicitly disabled catalog
+        // fetching. Falls back to empty string so the OpenAI-compat path
+        // sends `Authorization: Bearer ` and the server ignores it.
+        let api_key = match config.api_key_for(&next_config) {
+            Some(k) => k,
+            None if next_config.disable_catalog || is_local_base_url(&next_config.base_url) => {
+                String::new()
+            }
+            None => {
+                anyhow::bail!(
+                    "No API key for provider '{}' (set VULCAN_API_KEY or supply api_key in config)",
+                    profile.unwrap_or("[provider]"),
+                );
+            }
+        };
 
         let selection = Self::resolve_model_selection(&next_config, &api_key).await?;
         let provider: Box<dyn LLMProvider> = Box::new(
