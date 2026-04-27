@@ -34,6 +34,69 @@ pub(crate) fn atomic_write(path: &Path, content: &str) -> Result<()> {
     Ok(())
 }
 
+/// YYC-156: retention window for migration backup files. Backups
+/// older than this are eligible for cleanup by
+/// `prune_stale_bak_files`. 30 days is generous enough that an
+/// operator who notices a config issue weeks later can still roll
+/// back, while preventing indefinite accumulation of stale `.bak`
+/// files in `~/.vulcan/`.
+pub const BAK_RETENTION_SECS: u64 = 30 * 24 * 60 * 60;
+
+/// YYC-156: known config backup file basenames. Anything matching
+/// these gets retention-checked; arbitrary `.bak` files in the dir
+/// are left alone. Keeping the set explicit avoids deleting backups
+/// the user manually staged for some other reason.
+const KNOWN_BAK_FILES: &[&str] = &["config.toml.bak", "keybinds.toml.bak", "providers.toml.bak"];
+
+/// YYC-156: remove known config backup files (`config.toml.bak`,
+/// `keybinds.toml.bak`, `providers.toml.bak`) in `dir` whose
+/// modified time is older than `retention`. Returns the number of
+/// files pruned. Errors stat'ing or removing individual files are
+/// logged and skipped — the caller continues with whatever was
+/// reachable.
+pub fn prune_stale_bak_files(dir: &Path, retention: std::time::Duration) -> usize {
+    let now = std::time::SystemTime::now();
+    let mut pruned = 0;
+    for name in KNOWN_BAK_FILES {
+        let bak = dir.join(name);
+        let metadata = match std::fs::metadata(&bak) {
+            Ok(m) => m,
+            Err(_) => continue,
+        };
+        let modified = match metadata.modified() {
+            Ok(m) => m,
+            Err(_) => continue,
+        };
+        let age = match now.duration_since(modified) {
+            Ok(a) => a,
+            // Future-dated backup (clock skew) — leave alone.
+            Err(_) => continue,
+        };
+        if age > retention {
+            match std::fs::remove_file(&bak) {
+                Ok(()) => {
+                    tracing::info!(
+                        target: "config",
+                        path = %bak.display(),
+                        age_secs = age.as_secs(),
+                        "pruned stale config backup",
+                    );
+                    pruned += 1;
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        target: "config",
+                        path = %bak.display(),
+                        error = %e,
+                        "failed to prune stale config backup",
+                    );
+                }
+            }
+        }
+    }
+    pruned
+}
+
 /// Snapshot `path` to `<path>.bak` and return the backup's path.
 /// Used by `Config::migrate` so a failed migration can roll the
 /// original file back into place (YYC-136). Caller is expected to
@@ -918,6 +981,15 @@ impl Config {
 
         let result = Self::migrate_inner(dir, force, &main_path);
 
+        if result.is_ok() {
+            // YYC-156: opportunistically prune stale .bak files now
+            // that we've snapshotted a fresh one. The retention
+            // window protects recent rollback intent; older backups
+            // from prior migrations no longer have a meaningful
+            // restore target.
+            let _ = prune_stale_bak_files(dir, std::time::Duration::from_secs(BAK_RETENTION_SECS));
+        }
+
         if let Err(e) = &result {
             tracing::warn!(
                 "config migration failed mid-flight: {e}. Rolling back from {}",
@@ -1097,6 +1169,63 @@ toggle_tools = "F2"
 
         assert!(ProviderDebugMode::Wire.logs_wire());
         assert!(ProviderDebugMode::Wire.logs_tool_fallback());
+    }
+
+    // YYC-156: stale backup files are pruned by retention age.
+    #[test]
+    fn prune_stale_bak_files_removes_aged_backups() {
+        let dir = tempfile::tempdir().unwrap();
+        let bak = dir.path().join("config.toml.bak");
+        std::fs::write(&bak, "old contents").unwrap();
+        // Backdate the mtime by 40 days, past the 30-day default.
+        let aged = std::time::SystemTime::now() - std::time::Duration::from_secs(40 * 24 * 60 * 60);
+        let f = std::fs::File::options().write(true).open(&bak).unwrap();
+        f.set_modified(aged).unwrap();
+        drop(f);
+
+        let removed = prune_stale_bak_files(
+            dir.path(),
+            std::time::Duration::from_secs(BAK_RETENTION_SECS),
+        );
+        assert_eq!(removed, 1);
+        assert!(!bak.exists(), "stale .bak should have been removed");
+    }
+
+    // YYC-156: fresh backups (within the retention window) survive.
+    #[test]
+    fn prune_stale_bak_files_keeps_fresh_backups() {
+        let dir = tempfile::tempdir().unwrap();
+        let bak = dir.path().join("config.toml.bak");
+        std::fs::write(&bak, "fresh contents").unwrap();
+
+        let removed = prune_stale_bak_files(
+            dir.path(),
+            std::time::Duration::from_secs(BAK_RETENTION_SECS),
+        );
+        assert_eq!(removed, 0);
+        assert!(bak.exists(), "fresh .bak must be kept");
+    }
+
+    // YYC-156: an unknown .bak filename is left alone — only the
+    // known config-backup names are eligible for cleanup so a
+    // user's hand-staged `mybackup.bak` stays put.
+    #[test]
+    fn prune_stale_bak_files_ignores_unknown_filenames() {
+        let dir = tempfile::tempdir().unwrap();
+        let bak = dir.path().join("mybackup.bak");
+        std::fs::write(&bak, "user backup").unwrap();
+        let aged =
+            std::time::SystemTime::now() - std::time::Duration::from_secs(365 * 24 * 60 * 60);
+        let f = std::fs::File::options().write(true).open(&bak).unwrap();
+        f.set_modified(aged).unwrap();
+        drop(f);
+
+        let removed = prune_stale_bak_files(
+            dir.path(),
+            std::time::Duration::from_secs(BAK_RETENTION_SECS),
+        );
+        assert_eq!(removed, 0);
+        assert!(bak.exists(), "unknown .bak files must not be pruned");
     }
 
     // YYC-147: stream_channel_capacity defaults to 1024 when not
