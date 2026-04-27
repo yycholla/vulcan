@@ -9,7 +9,7 @@ use std::io::{Read, Write};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
@@ -20,9 +20,20 @@ const DEFAULT_COLS: u16 = 80;
 const DEFAULT_READ_BYTES: usize = 8 * 1024;
 const MAX_OUTPUT_CHARS: usize = 50_000;
 const SESSION_BUFFER_BYTES: usize = 64 * 1024;
+/// Sessions idle for longer than this are closed by the background reaper
+/// (YYC-117). 30 minutes matches the issue's default; production agents
+/// rarely return to a PTY after that long.
+const PTY_IDLE_TIMEOUT: Duration = Duration::from_secs(30 * 60);
+/// How often the reaper task scans the session table.
+const PTY_REAPER_INTERVAL: Duration = Duration::from_secs(30);
 
 pub fn make_tools() -> Vec<Arc<dyn Tool>> {
     let registry = PtyRegistry::new();
+    // YYC-117: spawn an idle reaper so abandoned PTY sessions don't leak
+    // their child shells + reader threads. Only fires inside a tokio
+    // runtime; synchronous callers (e.g. some unit tests that build a
+    // ToolRegistry without a runtime) skip the spawn cleanly.
+    registry.clone().spawn_idle_reaper(PTY_IDLE_TIMEOUT);
     vec![
         Arc::new(BashTool),
         Arc::new(PtyCreateTool::new(registry.clone())),
@@ -119,6 +130,25 @@ struct PtySession {
     output: Mutex<OutputBuffer>,
     exit_code: Mutex<Option<i32>>,
     closed: AtomicBool,
+    /// Last time the session was read from or written to. The idle reaper
+    /// (YYC-117) compares this against `PTY_IDLE_TIMEOUT` to decide which
+    /// sessions to close.
+    last_used: Mutex<Instant>,
+}
+
+impl PtySession {
+    fn touch(&self) {
+        if let Ok(mut t) = self.last_used.lock() {
+            *t = Instant::now();
+        }
+    }
+
+    fn last_used(&self) -> Instant {
+        self.last_used
+            .lock()
+            .map(|t| *t)
+            .unwrap_or_else(|_| Instant::now())
+    }
 }
 
 impl PtySession {
@@ -199,6 +229,7 @@ impl PtyRegistry {
             output: Mutex::new(OutputBuffer::new(SESSION_BUFFER_BYTES)),
             exit_code: Mutex::new(None),
             closed: AtomicBool::new(false),
+            last_used: Mutex::new(Instant::now()),
         });
 
         spawn_reader_thread(reader, session.clone());
@@ -237,6 +268,8 @@ impl PtyRegistry {
         writer
             .flush()
             .with_context(|| format!("Failed to flush PTY session {session_id}"))?;
+        // YYC-117: count writes as activity for the idle reaper.
+        session.touch();
         Ok(input.len())
     }
 
@@ -251,6 +284,8 @@ impl PtyRegistry {
             .exit_code
             .lock()
             .map_err(|_| anyhow::anyhow!("PTY exit status poisoned"))?;
+        // YYC-117: count reads as activity for the idle reaper.
+        session.touch();
         Ok(PtyReadPayload {
             session_id: session_id.to_string(),
             output: read.output,
@@ -297,6 +332,50 @@ impl PtyRegistry {
         for id in ids {
             let _ = self.close(&id);
         }
+    }
+
+    /// Close every session whose `last_used` is older than `idle` (YYC-117).
+    /// Returns the IDs that were reaped so callers (tests, telemetry) can
+    /// observe what got cleaned up.
+    fn close_idle(&self, idle: Duration) -> Vec<String> {
+        let now = Instant::now();
+        let stale: Vec<String> = match self.sessions.lock() {
+            Ok(sessions) => sessions
+                .iter()
+                .filter_map(|(id, s)| {
+                    if now.duration_since(s.last_used()) > idle {
+                        Some(id.clone())
+                    } else {
+                        None
+                    }
+                })
+                .collect(),
+            Err(_) => return Vec::new(),
+        };
+        for id in &stale {
+            if let Err(e) = self.close(id) {
+                tracing::warn!("idle reaper: failed to close PTY {id}: {e}");
+            } else {
+                tracing::info!("idle reaper: closed PTY session {id}");
+            }
+        }
+        stale
+    }
+
+    /// Spawn a background task that periodically reaps idle sessions
+    /// (YYC-117). No-ops outside a tokio runtime so synchronous callers
+    /// (some unit tests that build a `ToolRegistry` without a runtime)
+    /// don't panic on `tokio::spawn`.
+    fn spawn_idle_reaper(self: Arc<Self>, idle: Duration) {
+        if tokio::runtime::Handle::try_current().is_err() {
+            return;
+        }
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(PTY_REAPER_INTERVAL).await;
+                let _ = self.close_idle(idle);
+            }
+        });
     }
 
     fn get(&self, session_id: &str) -> Result<Arc<PtySession>> {
@@ -917,6 +996,41 @@ mod tests {
 
         let summary = registry.close(&summary.session_id).unwrap();
         assert!(summary.closed);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn close_idle_reaps_stale_sessions_only() {
+        // YYC-117: a session whose last_used drifted past `idle` should be
+        // closed by close_idle; an active session should be left alone.
+        let registry = PtyRegistry::new();
+        let stale = registry
+            .create(Some("bash"), None, Some("stale"), Some(24), Some(80))
+            .unwrap();
+        let active = registry
+            .create(Some("bash"), None, Some("active"), Some(24), Some(80))
+            .unwrap();
+
+        let idle = Duration::from_secs(60);
+
+        // Backdate the stale session's last_used so it falls outside the
+        // idle window. Active session keeps its just-created last_used.
+        {
+            let sessions = registry.sessions.lock().unwrap();
+            let stale_session = sessions.get(&stale.session_id).unwrap();
+            *stale_session.last_used.lock().unwrap() =
+                Instant::now() - (idle + Duration::from_secs(1));
+        }
+
+        let reaped = registry.close_idle(idle);
+        assert_eq!(reaped, vec![stale.session_id.clone()]);
+
+        let remaining = registry.list().unwrap();
+        let names: Vec<_> = remaining.iter().filter_map(|s| s.name.clone()).collect();
+        assert_eq!(names, vec!["active".to_string()]);
+
+        // Cleanup: close the active session so the test exits cleanly.
+        let _ = registry.close(&active.session_id);
     }
 
     #[cfg(unix)]
