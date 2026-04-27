@@ -1,4 +1,5 @@
 use crate::config::ProviderDebugMode;
+use crate::provider::redact::{redact_response_text, redact_value};
 use crate::provider::{
     ChatResponse, LLMProvider, Message, ProviderError, StreamEvent, ToolCall, ToolDefinition, Usage,
 };
@@ -83,11 +84,18 @@ impl OpenAIProvider {
         let url = format!("{}/chat/completions", self.base_url);
         let body = self.build_request(messages, tools);
         if self.debug_mode.logs_wire() {
+            // YYC-135: redact recognizable secret shapes (Bearer tokens,
+            // sk-* keys, GitHub PATs, AWS access key IDs) and truncate
+            // long string leaves before they hit the log file. Without
+            // this the wire-debug log becomes a covert exfiltration
+            // vector — exactly the file users tend to share for
+            // support.
+            let redacted = redact_value(&body);
             tracing::info!(
                 provider = "openai-compat",
                 model = %self.model,
                 url = %url,
-                request_body = %body,
+                request_body = %redacted,
                 "provider wire request"
             );
         }
@@ -336,19 +344,26 @@ fn summarize_wire_response(raw: &str) -> WireResponseSummary {
 fn log_wire_response(model: &str, raw: &str) {
     let summary = summarize_wire_response(raw);
     if let Some(body) = summary.raw_body {
+        // YYC-135: same redaction discipline as the request log — secret
+        // material can show up in a non-streaming response body when an
+        // upstream echoes the request, and assistant text could include
+        // tool output that read a config file.
+        let redacted = redact_response_text(&body);
         tracing::info!(
             provider = "openai-compat",
             model = %model,
-            response_body = %body,
+            response_body = %redacted,
             "provider wire response"
         );
     } else {
+        let preview = summary.non_sse_preview.as_deref().unwrap_or("");
+        let redacted_preview = redact_response_text(preview);
         tracing::info!(
             provider = "openai-compat",
             model = %model,
             sse_data_lines = summary.sse_data_lines,
             has_done_marker = summary.has_done_marker,
-            non_sse_preview = summary.non_sse_preview.as_deref().unwrap_or(""),
+            non_sse_preview = %redacted_preview,
             "provider wire response (stream summary; completion chunks suppressed)"
         );
     }
@@ -1311,6 +1326,41 @@ data: [DONE]
         assert!((8000..10000).contains(&d4), "got {d4}");
         assert!((16000..20000).contains(&d5), "got {d5}");
         assert!((16000..20000).contains(&d6), "got {d6} (should be capped)");
+    }
+
+    #[test]
+    fn wire_request_redaction_strips_bearer_and_sk_keys_from_logged_body() {
+        // YYC-135 acceptance pin: a request body that carries a Bearer
+        // token or sk-* key (e.g. via tool-output content) must be
+        // logged with the secret redacted. Reproduces the do_request
+        // log path: build_request would produce a JSON body, and
+        // redact_value is what runs before tracing::info!.
+        use crate::provider::redact::redact_value;
+        let body = serde_json::json!({
+            "model": "claude-haiku-4.5",
+            "messages": [
+                {
+                    "role": "user",
+                    "content": "the auth header was Bearer sk-test-aaaaaaaaaaaaaaaa",
+                },
+                {
+                    "role": "assistant",
+                    "content": "ok, calling the API with sk-test-bbbbbbbbbbbbbbbb",
+                },
+            ],
+        });
+        let redacted = redact_value(&body);
+        let serialized = redacted.to_string();
+        assert!(
+            !serialized.contains("sk-test-aaaaaaaaaaaaaaaa"),
+            "Bearer sk- key leaked: {serialized}",
+        );
+        assert!(
+            !serialized.contains("sk-test-bbbbbbbbbbbbbbbb"),
+            "bare sk- key leaked: {serialized}",
+        );
+        assert!(serialized.contains("Bearer [REDACTED]"));
+        assert!(serialized.contains("sk-[REDACTED]"));
     }
 
     #[test]

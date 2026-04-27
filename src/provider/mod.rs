@@ -1,6 +1,7 @@
 pub mod catalog;
 pub mod factory;
 pub mod openai;
+pub mod redact;
 pub mod think_sanitizer;
 
 pub mod mock;
