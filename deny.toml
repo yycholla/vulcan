@@ -25,6 +25,18 @@ ignore = [
     # mis-issued certificate; we don't run a CA / accept user-controlled
     # PKI. Re-evaluate on next serenity major.
     { id = "RUSTSEC-2026-0099", reason = "transitive via serenity; name-constraint path requires CA mis-issuance." },
+    # RUSTSEC-2026-0049: CRLs not considered authoritative by
+    # Distribution Point due to faulty matching logic. Same
+    # rustls-webpki 0.102.8 chain via serenity. We don't validate CRLs
+    # against Distribution Points; the WebSocket TLS path serenity
+    # uses doesn't reach this matcher.
+    { id = "RUSTSEC-2026-0049", reason = "transitive via serenity; CRL matching path unreachable." },
+    # RUSTSEC-2026-0098: name constraints for URI names were
+    # incorrectly accepted. Same chain. The advisory itself notes
+    # rustls-webpki has no API for asserting URI names, so the
+    # constraint check was running on input the library doesn't accept
+    # in the first place. Functionally unreachable for our usage.
+    { id = "RUSTSEC-2026-0098", reason = "transitive via serenity; URI name constraint API not exposed." },
 ]
 
 [licenses]
