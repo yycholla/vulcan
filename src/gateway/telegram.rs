@@ -11,12 +11,13 @@
 //!     other platforms.
 //!
 //! Both paths normalize through `inbound_from_update_parts` (parts +
-//! allow-list filter) so the filter logic lives in one place. The
-//! long-poll path uses `inbound_from_update` (typed `Update`) and the
-//! webhook path uses `inbound_from_value` (serde_json `Value`, since
-//! the body arrives as bytes). Live HTTP path is exercised by
-//! integration tests / manual smoke; the parsing helpers are
-//! unit-tested.
+//! allow-list filter) so the filter logic lives in one place. Long-
+//! poll feeds typed `Update`s straight into `inbound_from_update`;
+//! the webhook path round-trips `serde_json::Value` -> typed `Update`
+//! via `inbound_from_value` and then dispatches to the same typed
+//! walker, so media extraction lives in one place. Live HTTP is
+//! exercised by integration tests / manual smoke; the parsing
+//! helpers are unit-tested.
 
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -428,6 +429,68 @@ impl Platform for TelegramPlatform {
         anyhow::bail!("telegram receives messages through the long-poll task or webhook")
     }
 
+    async fn download_attachment(
+        &self,
+        att: &crate::platform::Attachment,
+    ) -> Result<std::path::PathBuf> {
+        use teloxide_core::net::Download;
+        // Telegram-specific contract: Attachment.url stores the opaque
+        // file_id (Telegram has no public CDN URL until bot.get_file
+        // resolves it). Discord stores real HTTPS URLs in the same
+        // field; same shape, platform-specific interpretation.
+        let file_id = att.url.as_ref().ok_or_else(|| {
+            anyhow::anyhow!("telegram attachment has no file_id (url field empty)")
+        })?;
+        let file = self
+            .bot
+            .get_file(FileId(file_id.clone()))
+            .await
+            .with_context(|| format!("telegram get_file({file_id}) failed"))?;
+
+        let dir = crate::config::vulcan_home()
+            .join("attachments")
+            .join("telegram");
+        tokio::fs::create_dir_all(&dir)
+            .await
+            .context("create attachments dir")?;
+        // Filename strategy mirrors Discord's PR-4 hardening: take
+        // Path::file_name() of the user-supplied original_name to
+        // defang `../etc/passwd` style traversal. If the result is
+        // None or degenerate (empty / "." / ".."), fall through to a
+        // UUID so adversarial names can't collide on a literal landing
+        // pad.
+        let raw = att.original_name.as_deref();
+        let stripped = raw
+            .and_then(|n| std::path::Path::new(n).file_name())
+            .and_then(|s| s.to_str())
+            .filter(|s| !s.is_empty() && *s != "." && *s != "..");
+        let filename = match stripped {
+            Some(n) => n.to_string(),
+            None => format!("att-{}.bin", uuid::Uuid::new_v4()),
+        };
+        let path = dir.join(&filename);
+
+        let mut f = tokio::fs::File::create(&path)
+            .await
+            .with_context(|| format!("create {}", path.display()))?;
+        self.bot
+            .download_file(&file.path, &mut f)
+            .await
+            .with_context(|| format!("telegram download_file({}) failed", file.path))?;
+
+        // Best-effort sync; log on failure so flaky-disk diagnostics
+        // are tractable but don't fail the agent.
+        if let Err(e) = f.sync_all().await {
+            tracing::warn!(
+                target: "gateway::telegram",
+                error = %e,
+                path = %path.display(),
+                "fsync failed during download_attachment; continuing",
+            );
+        }
+        Ok(path)
+    }
+
     async fn verify_webhook(
         &self,
         headers: &http::HeaderMap,
@@ -451,12 +514,14 @@ impl Platform for TelegramPlatform {
     }
 
     fn capabilities(&self) -> PlatformCapabilities {
+        // PR-3b flips media on: send dispatches by AttachmentKind to
+        // send_photo / send_voice / send_video / send_audio /
+        // send_document; download_attachment resolves file_id via
+        // bot.get_file and streams the body via bot.download_file.
         PlatformCapabilities {
             supports_edit: true,
-            // PR-3 is text-only; the supports_media_* flags + send_photo /
-            // send_document / download_attachment wiring land in PR-3b.
-            supports_media_send: false,
-            supports_media_recv: false,
+            supports_media_send: true,
+            supports_media_recv: true,
             supports_threads: true,
             // Telegram caps edits to ~1/sec/chat. The renderer's
             // throttle reads this to space out streaming chunks.
@@ -659,13 +724,13 @@ mod tests {
     }
 
     #[test]
-    fn capabilities_declare_edit_and_threads_true_media_false() {
+    fn capabilities_declare_edit_threads_and_media_true() {
         let p = TelegramPlatform::new("Bot 123:abc", vec![], None).expect("ctor");
         let caps = p.capabilities();
         assert!(caps.supports_edit);
         assert!(caps.supports_threads);
-        assert!(!caps.supports_media_send);
-        assert!(!caps.supports_media_recv);
+        assert!(caps.supports_media_send);
+        assert!(caps.supports_media_recv);
         assert_eq!(caps.edit_min_interval_ms, 1000);
     }
 
