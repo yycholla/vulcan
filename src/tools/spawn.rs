@@ -133,7 +133,7 @@ impl Tool for SpawnSubagentTool {
         })
     }
 
-    async fn call(&self, params: Value, _cancel: CancellationToken) -> Result<ToolResult> {
+    async fn call(&self, params: Value, cancel: CancellationToken) -> Result<ToolResult> {
         let task = match params["task"].as_str() {
             Some(t) if !t.trim().is_empty() => t.to_string(),
             _ => {
@@ -162,6 +162,23 @@ impl Tool for SpawnSubagentTool {
             .register(None, summary_for_store, max_iter);
         let child_id = record.id;
 
+        // YYC-208: pre-cancellation short-circuit. Skip the agent
+        // build entirely if the parent already cancelled — saves a
+        // catalog fetch + provider setup that would be wasted.
+        if cancel.is_cancelled() {
+            self.orchestration.mark_cancelled(child_id);
+            let payload = json!({
+                "status": "cancelled",
+                "child_id": child_id.to_string(),
+                "summary": "child cancelled before start",
+                "budget_used": {
+                    "iterations": 0,
+                    "max_iterations": max_iter,
+                },
+            });
+            return Ok(ToolResult::ok(serde_json::to_string_pretty(&payload)?));
+        }
+
         let child = Agent::builder(self.config.as_ref())
             .with_hooks(HookRegistry::new())
             .with_max_iterations(max_iter)
@@ -182,8 +199,32 @@ impl Tool for SpawnSubagentTool {
         self.orchestration
             .update_status(child_id, crate::orchestration::ChildStatus::Running);
 
-        let run_result = child.run_prompt(&task).await;
+        // YYC-208: fork a child cancellation token from the parent's
+        // so cancelling the parent turn aborts the child's loop.
+        // `child_token` cancels when the parent's token cancels and
+        // can also be cancelled independently for a future
+        // per-child kill action.
+        let child_cancel = cancel.child_token();
+        let run_result = child
+            .run_prompt_with_cancel(&task, child_cancel.clone())
+            .await;
         let iterations = child.iterations();
+        // If parent cancelled, mark Cancelled regardless of how the
+        // child's run_prompt happened to surface — its Err shape on
+        // cancellation isn't load-bearing here.
+        if cancel.is_cancelled() {
+            self.orchestration.mark_cancelled(child_id);
+            let payload = json!({
+                "status": "cancelled",
+                "child_id": child_id.to_string(),
+                "summary": "child cancelled by parent",
+                "budget_used": {
+                    "iterations": iterations,
+                    "max_iterations": max_iter,
+                },
+            });
+            return Ok(ToolResult::ok(serde_json::to_string_pretty(&payload)?));
+        }
         match run_result {
             Ok(final_text) => {
                 self.orchestration
@@ -261,6 +302,32 @@ mod tests {
             .await
             .expect("call ok");
         assert!(result.is_error);
+    }
+
+    // YYC-208: a parent token cancelled before tool.call runs
+    // short-circuits child build and marks the orchestration
+    // record `Cancelled` without spawning anything.
+    #[tokio::test]
+    async fn precancelled_parent_marks_record_cancelled() {
+        let cfg = Arc::new(Config::default());
+        let store = Arc::new(OrchestrationStore::new());
+        let tool = SpawnSubagentTool::with_store(cfg, Arc::clone(&store));
+        let cancel = CancellationToken::new();
+        cancel.cancel();
+        let result = tool
+            .call(json!({"task": "hello"}), cancel)
+            .await
+            .expect("call ok");
+        assert!(!result.is_error);
+        assert!(result.output.contains("\"status\": \"cancelled\""));
+        // Exactly one record, terminal Cancelled.
+        assert_eq!(store.len(), 1);
+        let recent = store.recent(1);
+        assert_eq!(
+            recent[0].status,
+            crate::orchestration::ChildStatus::Cancelled,
+        );
+        assert!(recent[0].ended_at.is_some());
     }
 
     #[test]
