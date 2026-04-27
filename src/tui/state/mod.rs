@@ -1,3 +1,32 @@
+//! TUI application state.
+//!
+//! # Threading model (YYC-163)
+//!
+//! `AppState` is **single-threaded**. The TUI's main loop owns it
+//! and is the only place that reads or writes it; rendering, input
+//! handling, and persistence all happen on that same thread. The
+//! type therefore uses `std::cell::Cell` and `std::cell::RefCell`
+//! for interior mutability instead of `Mutex` / `RwLock` — there is
+//! no synchronization to pay because there is no contention.
+//!
+//! ## Why this matters
+//!
+//! `Cell`/`RefCell` are `!Sync`. A future refactor that tries to
+//! move rendering or event handling onto another thread will hit a
+//! compile error rather than a silent borrow-tracking panic, which
+//! is what we want — the right answer in that scenario is to
+//! either keep the work on the TUI thread (preferred) or replace
+//! the affected fields with proper synchronization primitives.
+//!
+//! ## What stays thread-confined
+//!
+//! The whole `AppState` value, plus everything it transitively
+//! reaches through `Cell` / `RefCell`. Anything that needs to be
+//! shared with worker tasks (the agent loop, the audit buffer, the
+//! diff sink) is wrapped in `Arc<Mutex<…>>` or
+//! `Arc<parking_lot::Mutex<…>>` separately — see the field-level
+//! documentation below for which ones cross threads on purpose.
+
 use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
 
