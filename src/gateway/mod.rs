@@ -28,6 +28,7 @@ pub mod registry;
 pub mod render_registry;
 pub mod routes;
 pub mod scheduler;
+pub mod scheduler_store;
 pub mod server;
 pub mod stream_render;
 #[cfg(feature = "telegram")]
@@ -177,7 +178,15 @@ where
     // expression can't slip past startup. The handle drops with
     // the function scope so the loop is reaped on shutdown.
     let scheduler_handle = if !scheduler_config.jobs.is_empty() {
-        let scheduler = scheduler::Scheduler::from_config(&scheduler_config, Arc::clone(&inbound))?;
+        // YYC-17 PR-3: persist run history alongside the gateway
+        // queues so operator tooling can read `scheduler_runs`
+        // without coordinating two databases.
+        let store = scheduler_store::SchedulerStore::new(db.clone());
+        let scheduler = scheduler::Scheduler::from_config_with_store(
+            &scheduler_config,
+            Arc::clone(&inbound),
+            Some(store),
+        )?;
         if scheduler.enabled_jobs() > 0 {
             Some(scheduler.spawn())
         } else {

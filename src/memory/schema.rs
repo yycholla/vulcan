@@ -122,6 +122,21 @@ CREATE TABLE IF NOT EXISTS outbound_queue (
   turn_id TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_outbound_due ON outbound_queue(state, next_attempt_at);
+
+-- YYC-17 PR-3: scheduler job runs. The scheduler config is the
+-- authoritative job list (so re-deploys with updated cron/prompt
+-- text take effect on restart); this table only carries the
+-- mutable run-time state per job_id.
+CREATE TABLE IF NOT EXISTS scheduler_runs (
+    job_id           TEXT PRIMARY KEY,
+    last_fired_at    INTEGER,
+    last_status      TEXT, -- 'enqueued' | 'skipped' | 'enqueue_failed'
+    last_error       TEXT,
+    last_inbound_id  INTEGER,
+    total_fires      INTEGER NOT NULL DEFAULT 0,
+    skipped_fires    INTEGER NOT NULL DEFAULT 0,
+    failed_fires     INTEGER NOT NULL DEFAULT 0
+);
 "#;
 
 /// Apply per-connection PRAGMAs. SQLite's `busy_timeout` is connection

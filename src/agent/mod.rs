@@ -55,7 +55,12 @@ pub(in crate::agent) fn is_local_base_url(base_url: &str) -> bool {
         Some(url::Host::Ipv4(ip)) => is_local_ipv4(ip),
 
         Some(url::Host::Ipv6(ip)) => {
-            if ip.is_loopback() || ip.is_unspecified() || ip.is_unique_local() || ip.is_link_local() {
+            if ip.is_loopback() || ip.is_unspecified() || ip.is_unique_local() {
+                return true;
+            }
+            // YYC-152: fe80::/10 unicast link-local. `Ipv6Addr::is_unicast_link_local`
+            // is unstable, so check the prefix bits manually.
+            if (ip.segments()[0] & 0xffc0) == 0xfe80 {
                 return true;
             }
             if let Some(v4) = ip.to_ipv4_mapped() {
