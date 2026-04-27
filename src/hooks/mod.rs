@@ -7,6 +7,7 @@
 //! events accumulate across all handlers.
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use anyhow::Result;
@@ -122,11 +123,39 @@ pub trait HookHandler: Send + Sync {
     async fn session_end(&self, _session_id: &str, _total_turns: u32) {}
 }
 
+/// Snapshot of per-failure-mode counters. Returned from
+/// [`HookRegistry::failure_metrics`] so callers (telemetry, tests) can
+/// distinguish "handler crashed" from "handler too slow" without having
+/// to grep tracing output (YYC-120).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct HookFailureCounts {
+    /// Handlers that exceeded `handler_timeout`.
+    pub timeouts: usize,
+    /// Handlers that returned `Err(_)` from their event method.
+    pub errors: usize,
+}
+
+#[derive(Default)]
+struct HookFailureMetrics {
+    timeouts: AtomicUsize,
+    errors: AtomicUsize,
+}
+
+impl HookFailureMetrics {
+    fn snapshot(&self) -> HookFailureCounts {
+        HookFailureCounts {
+            timeouts: self.timeouts.load(Ordering::Relaxed),
+            errors: self.errors.load(Ordering::Relaxed),
+        }
+    }
+}
+
 /// Holds the registered handlers in priority order and exposes one emit method
 /// per event.
 pub struct HookRegistry {
     handlers: Vec<Arc<dyn HookHandler>>,
     handler_timeout: Duration,
+    failure_metrics: HookFailureMetrics,
 }
 
 impl HookRegistry {
@@ -134,6 +163,7 @@ impl HookRegistry {
         Self {
             handlers: Vec::new(),
             handler_timeout: Duration::from_secs(30),
+            failure_metrics: HookFailureMetrics::default(),
         }
     }
 
@@ -149,6 +179,14 @@ impl HookRegistry {
 
     pub fn handler_count(&self) -> usize {
         self.handlers.len()
+    }
+
+    /// Snapshot of per-failure-mode counters since registry construction
+    /// (YYC-120). Telemetry surfaces and tests use this to differentiate
+    /// "handler crashed" from "handler too slow"; the agent loop logs each
+    /// failure with the same distinction via tracing.
+    pub fn failure_metrics(&self) -> HookFailureCounts {
+        self.failure_metrics.snapshot()
     }
 
     /// Emit BeforePrompt to every handler and return the outgoing prompt with
@@ -322,11 +360,35 @@ impl HookRegistry {
         match timeout(self.handler_timeout, fut).await {
             Ok(Ok(o)) => Some(o),
             Ok(Err(e)) => {
-                tracing::warn!("hook {} returned error: {e}", h.name());
+                // YYC-120: errors and timeouts both drop the handler's
+                // contribution to the event, but they're operationally
+                // distinct — a crashed handler is a bug, a slow one is a
+                // capacity / dependency problem. Count them separately so
+                // metrics surfaces (and `failure_metrics()`) can branch on
+                // the failure mode rather than just "something went wrong".
+                self.failure_metrics
+                    .errors
+                    .fetch_add(1, Ordering::Relaxed);
+                tracing::warn!(
+                    handler = h.name(),
+                    failure = "error",
+                    "hook {} returned error: {e}",
+                    h.name()
+                );
                 None
             }
             Err(_) => {
-                tracing::warn!("hook {} timed out", h.name());
+                self.failure_metrics
+                    .timeouts
+                    .fetch_add(1, Ordering::Relaxed);
+                tracing::warn!(
+                    handler = h.name(),
+                    failure = "timeout",
+                    timeout_ms = self.handler_timeout.as_millis() as u64,
+                    "hook {} timed out after {:?}",
+                    h.name(),
+                    self.handler_timeout
+                );
                 None
             }
         }
@@ -352,6 +414,7 @@ mod tests {
         before_tool_outcome: HookOutcome,
         before_tool_calls: AtomicUsize,
         sleep_ms: u64,
+        return_error: bool,
     }
 
     impl Probe {
@@ -362,10 +425,17 @@ mod tests {
                 before_tool_outcome: outcome,
                 before_tool_calls: AtomicUsize::new(0),
                 sleep_ms: 0,
+                return_error: false,
             }
         }
         fn slow(mut self, ms: u64) -> Self {
             self.sleep_ms = ms;
+            self
+        }
+        /// Force the handler to return `Err(_)` from `before_tool_call`.
+        /// Used by YYC-120 tests to exercise the error vs. timeout split.
+        fn errors(mut self) -> Self {
+            self.return_error = true;
             self
         }
     }
@@ -387,6 +457,9 @@ mod tests {
             self.before_tool_calls.fetch_add(1, Ordering::SeqCst);
             if self.sleep_ms > 0 {
                 tokio::time::sleep(std::time::Duration::from_millis(self.sleep_ms)).await;
+            }
+            if self.return_error {
+                anyhow::bail!("synthetic handler failure");
             }
             Ok(self.before_tool_outcome.clone())
         }
@@ -448,6 +521,37 @@ mod tests {
             ToolCallDecision::Block(r) => assert_eq!(r, "first"),
             other => panic!("expected first probe to win, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn timeout_and_error_increment_distinct_failure_counters() {
+        // YYC-120: production observability needs a clear split between
+        // "handler too slow" and "handler crashed". Both still drop the
+        // outcome (the loop is unaffected), but the counters differ so
+        // metrics surfaces can branch on the failure mode.
+        let mut reg = HookRegistry::new().with_timeout(std::time::Duration::from_millis(50));
+        let slow = Arc::new(
+            Probe::new("slow", 10, HookOutcome::Continue).slow(500),
+        );
+        let crashed = Arc::new(Probe::new("crashed", 20, HookOutcome::Continue).errors());
+        reg.register(slow);
+        reg.register(crashed);
+
+        let _ = reg
+            .before_tool_call("bash", &Value::Null, CancellationToken::new())
+            .await;
+
+        let counts = reg.failure_metrics();
+        assert_eq!(counts.timeouts, 1, "timeout should bump the timeout counter");
+        assert_eq!(counts.errors, 1, "error should bump the error counter");
+
+        // Second invocation accumulates rather than resets.
+        let _ = reg
+            .before_tool_call("bash", &Value::Null, CancellationToken::new())
+            .await;
+        let counts = reg.failure_metrics();
+        assert_eq!(counts.timeouts, 2);
+        assert_eq!(counts.errors, 2);
     }
 
     #[tokio::test]
