@@ -39,14 +39,16 @@ pub async fn process_one(
     // may be inconsistent, but the next get_or_spawn after eviction will
     // build a fresh one. This is the same trade-off catch_unwind always
     // makes; the alternative (poisoning the lane forever) is worse.
-    let result: anyhow::Result<String> = AssertUnwindSafe(async {
+    let unwind = AssertUnwindSafe(async {
         let agent = agent_map.get_or_spawn(&lane).await?;
         let mut agent = agent.lock().await;
         agent.run_prompt(&row.text).await
     })
     .catch_unwind()
-    .await
-    .unwrap_or_else(|payload| {
+    .await;
+
+    let panicked = unwind.is_err();
+    let result: anyhow::Result<String> = unwind.unwrap_or_else(|payload| {
         let msg = payload
             .downcast_ref::<&'static str>()
             .map(|s| (*s).to_string())
@@ -56,6 +58,21 @@ pub async fn process_one(
             "agent panicked while running prompt: {msg}"
         ))
     });
+
+    // YYC-133: if the future panicked, the Agent's internal state is
+    // suspect — message buffer mid-write, tool registry mid-mutation,
+    // hooks holding partial state. Force-evict the lane entry so the
+    // *next* inbound row builds a fresh Agent rather than locking
+    // against a deadlocked / corrupted one.
+    if panicked {
+        let removed = agent_map.evict(&lane).await;
+        tracing::warn!(
+            lane = %row.platform,
+            chat_id = %row.chat_id,
+            removed,
+            "evicted lane agent after panic; next request will build fresh state",
+        );
+    }
 
     match result {
         Ok(reply) => {
@@ -269,6 +286,98 @@ mod tests {
                 .await
                 .unwrap()
                 .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn worker_panic_evicts_lane_so_next_request_builds_fresh_agent() {
+        // YYC-133 acceptance pin: a panic during run_prompt should
+        // remove the lane's cached Agent. The next inbound row for the
+        // same lane gets a freshly built Agent and runs cleanly.
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let db = fresh_db();
+        let inbound = InboundQueue::new(db.clone());
+        let outbound = OutboundQueue::new(db.clone(), 5);
+
+        // Builder counts how many Agents it constructs. First call →
+        // panicking provider; second call → canned-reply provider.
+        let calls = Arc::new(AtomicUsize::new(0));
+        let calls_for_builder = Arc::clone(&calls);
+        let builder: AgentBuilder = Arc::new(move |hooks: HookRegistry| {
+            let n = calls_for_builder.fetch_add(1, Ordering::SeqCst);
+            Box::pin(async move {
+                if n == 0 {
+                    Ok(Agent::for_test(
+                        Box::new(PanickingProvider),
+                        ToolRegistry::new(),
+                        hooks,
+                        empty_skills(),
+                    ))
+                } else {
+                    let mock = Arc::new(MockProvider::new(128_000));
+                    mock.enqueue_text("recovered");
+                    Ok(Agent::for_test(
+                        Box::new(ProviderHandle(mock)),
+                        ToolRegistry::new(),
+                        hooks,
+                        empty_skills(),
+                    ))
+                }
+            })
+        });
+        let agent_map = AgentMap::with_builder(test_config(), Duration::from_secs(60), builder);
+
+        // First row: panics. process_one should propagate the panic AND
+        // evict the lane.
+        inbound
+            .enqueue(InboundMessage {
+                platform: "loopback".into(),
+                chat_id: "c".into(),
+                user_id: "u".into(),
+                text: "boom".into(),
+            })
+            .await
+            .unwrap();
+        let row = inbound.claim_next().await.unwrap().expect("row");
+        let res = process_one(row, &agent_map, &inbound, &outbound).await;
+        assert!(res.is_err());
+
+        // Lane should now be empty in the AgentMap (evicted).
+        let lane = LaneKey {
+            platform: "loopback".into(),
+            chat_id: "c".into(),
+        };
+        assert!(
+            !agent_map.inner().read().await.contains_key(&lane),
+            "lane should have been evicted after panic"
+        );
+
+        // Second row: builder fires a second time, returns a clean
+        // Agent, and the worker drives it to a Continue + reply.
+        inbound
+            .enqueue(InboundMessage {
+                platform: "loopback".into(),
+                chat_id: "c".into(),
+                user_id: "u".into(),
+                text: "again".into(),
+            })
+            .await
+            .unwrap();
+        let row = inbound.claim_next().await.unwrap().expect("row");
+        process_one(row, &agent_map, &inbound, &outbound)
+            .await
+            .unwrap();
+
+        let reply = outbound
+            .claim_due(chrono::Utc::now().timestamp())
+            .await
+            .unwrap()
+            .expect("outbound row from recovered agent");
+        assert_eq!(reply.text, "recovered");
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            2,
+            "builder should have run twice — once for the panicking agent, once for the rebuild"
         );
     }
 }
