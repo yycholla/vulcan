@@ -1,0 +1,90 @@
+name: ci
+
+on:
+  pull_request:
+    types: [opened, reopened, synchronize]
+    # Skip Graphite-internal temporary bases. They get deleted as the
+    # stack rebases, which would otherwise leave dangling failing checks.
+    # https://graphite.com/docs/setup-recommended-ci-settings
+    branches-ignore:
+      - "**/graphite-base/**"
+  push:
+    branches: [main]
+
+# Cancel in-progress runs for the same PR/branch when a new push lands.
+# Saves CI minutes during stack restacks (which push frequently).
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+# Least-privilege GITHUB_TOKEN per CodeQL `actions/missing-workflow-permissions`.
+# Read-only at the workflow level; jobs that need more (e.g. uploading
+# artifacts) inherit, since artifact upload uses a separate token scope.
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: "-D warnings"
+
+jobs:
+  fmt:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - run: cargo fmt --all -- --check
+
+  clippy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      # Pre-existing warnings on main; gate is informational until cleanup
+      # tracked in YYC follow-up. Remove `continue-on-error` once clean.
+      - run: cargo clippy --all-targets --all-features
+        continue-on-error: true
+
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        features:
+          - ""
+          - "gateway"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build
+        run: cargo build --all-targets --features "${{ matrix.features }}"
+      - name: Test
+        run: cargo test --all-targets --features "${{ matrix.features }}"
+
+  feature-powerset:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@cargo-hack
+      - run: cargo hack check --feature-powerset --no-dev-deps --exclude-features bench-soak
+
+  deny:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check
