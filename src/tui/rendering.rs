@@ -19,11 +19,12 @@ use tokio::sync::Mutex;
 use crate::agent::Agent;
 use crate::config::Config;
 
+use super::keymap::SlashCommand;
 use super::miller_columns;
 use super::model_picker;
 use super::state::{AppState, SessionStatus};
 use super::theme::Theme;
-use super::{SlashCommand, body, short_id};
+use super::{body, short_id};
 
 pub(super) fn draw_palette(
     f: &mut Frame,
