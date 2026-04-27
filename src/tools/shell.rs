@@ -27,6 +27,15 @@ const PTY_IDLE_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 /// How often the reaper task scans the session table.
 const PTY_REAPER_INTERVAL: Duration = Duration::from_secs(30);
 
+/// YYC-160: per-registry cap on live (non-closed) PTY sessions.
+/// One `ToolRegistry` owns one `PtyRegistry`, so this is effectively
+/// a per-agent cap. Bursts that try to spawn beyond the cap are
+/// refused with an actionable error before we hit `EMFILE`/process
+/// limits. Closed sessions don't count — they hold no real
+/// resources and are cleaned up by the idle reaper or by the user
+/// via `pty_close`.
+const MAX_PTY_SESSIONS: usize = 16;
+
 pub fn make_tools() -> Vec<Arc<dyn Tool>> {
     let registry = PtyRegistry::new();
     // YYC-117: spawn an idle reaper so abandoned PTY sessions don't leak
@@ -172,6 +181,11 @@ struct PtyRegistry {
     /// calls (or future direct `Arc::clone` paths) can't double-spawn
     /// reapers over the same registry state.
     reaper_started: AtomicBool,
+    /// YYC-160: cap on live PTY sessions. Defaults to
+    /// `MAX_PTY_SESSIONS`; tests construct a registry with a smaller
+    /// cap via `with_cap_for_test` to exercise the cap path
+    /// without spawning 17 real shells.
+    max_sessions: usize,
 }
 
 impl PtyRegistry {
@@ -179,6 +193,16 @@ impl PtyRegistry {
         Arc::new(Self {
             sessions: Mutex::new(HashMap::new()),
             reaper_started: AtomicBool::new(false),
+            max_sessions: MAX_PTY_SESSIONS,
+        })
+    }
+
+    #[cfg(test)]
+    fn with_cap_for_test(cap: usize) -> Arc<Self> {
+        Arc::new(Self {
+            sessions: Mutex::new(HashMap::new()),
+            reaper_started: AtomicBool::new(false),
+            max_sessions: cap,
         })
     }
 
@@ -190,6 +214,25 @@ impl PtyRegistry {
         rows: Option<u16>,
         cols: Option<u16>,
     ) -> Result<PtySessionSummary> {
+        // YYC-160: enforce per-registry cap before spawning. Counted
+        // under the existing sessions lock; closed sessions don't
+        // consume real resources and are excluded from the count.
+        {
+            let sessions = self
+                .sessions
+                .lock()
+                .map_err(|_| anyhow::anyhow!("PTY session registry poisoned"))?;
+            let live = sessions
+                .values()
+                .filter(|s| !s.closed.load(Ordering::SeqCst))
+                .count();
+            if live >= self.max_sessions {
+                anyhow::bail!(
+                    "PTY session cap reached ({} live sessions); close an existing session via pty_close before creating a new one",
+                    self.max_sessions,
+                );
+            }
+        }
         let shell = shell
             .map(str::to_string)
             .or_else(|| std::env::var("SHELL").ok())
@@ -994,6 +1037,51 @@ mod tests {
             !registry.reaper_started.load(Ordering::Acquire),
             "reaper_started should remain false when spawn is skipped",
         );
+    }
+
+    // YYC-160: the per-registry cap must refuse new sessions once
+    // the limit is reached. Uses cap=1 so the test only spawns one
+    // real shell, then asserts the second create returns an error
+    // mentioning the cap.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn create_refuses_when_pty_cap_reached() {
+        let registry = PtyRegistry::with_cap_for_test(1);
+        let _first = registry
+            .create(Some("bash"), None, Some("a"), Some(24), Some(80))
+            .expect("first create");
+        let err = registry
+            .create(Some("bash"), None, Some("b"), Some(24), Some(80))
+            .expect_err("second create must hit cap");
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("cap reached") && msg.contains("pty_close"),
+            "unexpected cap error: {msg}",
+        );
+        registry.close_all();
+    }
+
+    // YYC-160: closing a session must free a slot so a follow-up
+    // create succeeds. Guards against an off-by-one in the live-count
+    // filter or a regression that double-counts closed entries.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn closing_session_frees_pty_cap_slot() {
+        let registry = PtyRegistry::with_cap_for_test(1);
+        let first = registry
+            .create(Some("bash"), None, Some("a"), Some(24), Some(80))
+            .expect("first create");
+        // At cap.
+        assert!(
+            registry
+                .create(Some("bash"), None, Some("b"), Some(24), Some(80))
+                .is_err()
+        );
+        registry.close(&first.session_id).expect("close");
+        let second = registry
+            .create(Some("bash"), None, Some("b"), Some(24), Some(80))
+            .expect("second create after close");
+        registry.close(&second.session_id).ok();
     }
 
     #[cfg(unix)]
