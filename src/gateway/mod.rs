@@ -422,6 +422,19 @@ mod tests {
             .unwrap();
         let claimed = inbound.claim_next().await.unwrap().expect("processing row");
         assert_eq!(claimed.text, "recover me");
+        // YYC-137: stamp the heartbeat into the past so the gateway's
+        // startup recover_processing (which only resets stale rows)
+        // picks this up. Without this the row's fresh heartbeat looks
+        // like a live worker is mid-flight and recovery skips it.
+        {
+            let c = db.get().unwrap();
+            let now = chrono::Utc::now().timestamp();
+            c.execute(
+                "UPDATE inbound_queue SET last_heartbeat_at = ?1 WHERE id = ?2",
+                rusqlite::params![now - 7200, claimed.id],
+            )
+            .unwrap();
+        }
 
         let mut registry = PlatformRegistry::new();
         let loopback = Arc::new(LoopbackPlatform::default());

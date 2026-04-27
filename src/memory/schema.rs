@@ -72,7 +72,14 @@ CREATE TABLE IF NOT EXISTS inbound_queue (
   text     TEXT NOT NULL,
   received_at INTEGER NOT NULL,
   attempts INTEGER NOT NULL DEFAULT 0,
-  state    TEXT NOT NULL  -- 'pending'|'processing'|'failed'
+  -- 'pending' | 'processing' | 'failed' | 'dead'
+  -- 'dead' = exceeded max_attempts; held for manual replay, never auto-claimed (YYC-137).
+  state    TEXT NOT NULL,
+  last_error TEXT,
+  -- Wallclock the worker last touched this row. claim_next sets it to now;
+  -- recover_processing only resets rows whose heartbeat is stale relative
+  -- to the configured threshold (YYC-137).
+  last_heartbeat_at INTEGER
 );
 CREATE INDEX IF NOT EXISTS idx_inbound_lane  ON inbound_queue(platform, chat_id, state);
 CREATE INDEX IF NOT EXISTS idx_inbound_state ON inbound_queue(state, received_at);
@@ -100,6 +107,12 @@ pub(in crate::memory) fn initialize_conn(conn: &Connection) -> Result<()> {
     let _ = conn.execute("ALTER TABLE sessions ADD COLUMN parent_session_id TEXT", []);
     let _ = conn.execute("ALTER TABLE sessions ADD COLUMN lineage_label TEXT", []);
     let _ = conn.execute("ALTER TABLE sessions ADD COLUMN provider_profile TEXT", []);
+    // YYC-137: dead-letter + heartbeat columns for inbound_queue.
+    let _ = conn.execute("ALTER TABLE inbound_queue ADD COLUMN last_error TEXT", []);
+    let _ = conn.execute(
+        "ALTER TABLE inbound_queue ADD COLUMN last_heartbeat_at INTEGER",
+        [],
+    );
     Ok(())
 }
 

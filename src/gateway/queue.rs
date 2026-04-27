@@ -4,8 +4,23 @@ use rusqlite::params;
 use crate::memory::DbPool;
 use crate::platform::{InboundMessage, OutboundMessage};
 
+/// Default per-row attempt cap before mark_failed routes a row to the
+/// dead-letter queue (YYC-137). Operators can override via
+/// `InboundQueue::with_policy`.
+pub const DEFAULT_INBOUND_MAX_ATTEMPTS: u32 = 3;
+
+/// Default staleness threshold for `recover_processing`. Rows whose
+/// `last_heartbeat_at` is older than `now - this` are considered
+/// crashed and reset to `pending`. Anything fresher is left running
+/// (YYC-137 dedup against duplicate work after a quick worker
+/// restart). 30 min picked to comfortably exceed the longest healthy
+/// run_prompt turn; tunable via `with_policy`.
+pub const DEFAULT_INBOUND_HEARTBEAT_STALE_SECS: i64 = 1800;
+
 pub struct InboundQueue {
     conn: DbPool,
+    max_attempts: u32,
+    heartbeat_stale_secs: i64,
 }
 
 #[derive(Debug, Clone)]
@@ -19,9 +34,39 @@ pub struct InboundRow {
     pub attempts: i64,
 }
 
+/// Snapshot of a dead-letter row for the DLQ admin endpoint.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct DeadInboundRow {
+    pub id: i64,
+    pub platform: String,
+    pub chat_id: String,
+    pub user_id: String,
+    pub text: String,
+    pub received_at: i64,
+    pub attempts: i64,
+    pub last_error: Option<String>,
+}
+
 impl InboundQueue {
     pub fn new(conn: DbPool) -> Self {
-        Self { conn }
+        Self::with_policy(
+            conn,
+            DEFAULT_INBOUND_MAX_ATTEMPTS,
+            DEFAULT_INBOUND_HEARTBEAT_STALE_SECS,
+        )
+    }
+
+    /// Construct with explicit retry + heartbeat-staleness policy
+    /// (YYC-137). `max_attempts` caps how many times a single row gets
+    /// retried before it's routed to the dead-letter queue;
+    /// `heartbeat_stale_secs` controls how old a `processing` row's
+    /// heartbeat must be before `recover_processing` recycles it.
+    pub fn with_policy(conn: DbPool, max_attempts: u32, heartbeat_stale_secs: i64) -> Self {
+        Self {
+            conn,
+            max_attempts,
+            heartbeat_stale_secs,
+        }
     }
 
     pub async fn enqueue(&self, msg: InboundMessage) -> Result<i64> {
@@ -43,15 +88,18 @@ impl InboundQueue {
             .conn
             .get()
             .map_err(|e| anyhow!("queue DB pool checkout: {e}"))?;
+        let now = chrono::Utc::now().timestamp();
         // RETURNING (SQLite >= 3.35) makes the claim a single atomic statement.
+        // YYC-137: stamp last_heartbeat_at on claim so recover_processing can
+        // tell live-but-slow rows from crash-orphaned ones.
         let mut stmt = conn.prepare(
             "UPDATE inbound_queue \
-             SET state='processing', attempts = attempts + 1 \
+             SET state='processing', attempts = attempts + 1, last_heartbeat_at = ?1 \
              WHERE id = (SELECT id FROM inbound_queue WHERE state='pending' \
                          ORDER BY received_at ASC LIMIT 1) \
              RETURNING id, platform, chat_id, user_id, text, received_at, attempts",
         )?;
-        let mut rows = stmt.query([])?;
+        let mut rows = stmt.query(params![now])?;
         if let Some(row) = rows.next()? {
             Ok(Some(InboundRow {
                 id: row.get(0)?,
@@ -65,6 +113,23 @@ impl InboundQueue {
         } else {
             Ok(None)
         }
+    }
+
+    /// Refresh `last_heartbeat_at` for a row in-flight (YYC-137). Long
+    /// runs that exceed the stale threshold can call this periodically
+    /// to keep `recover_processing` from racing them on next startup.
+    pub async fn heartbeat(&self, id: i64) -> Result<()> {
+        let conn = self
+            .conn
+            .get()
+            .map_err(|e| anyhow!("queue DB pool checkout: {e}"))?;
+        let now = chrono::Utc::now().timestamp();
+        conn.execute(
+            "UPDATE inbound_queue SET last_heartbeat_at = ?1 \
+             WHERE id = ?2 AND state = 'processing'",
+            params![now, id],
+        )?;
+        Ok(())
     }
 
     pub async fn mark_done(&self, id: i64) -> Result<()> {
@@ -96,30 +161,123 @@ impl InboundQueue {
         Ok(outbound_id)
     }
 
+    /// Record a processing failure. If the row's `attempts` count has
+    /// reached `max_attempts` it routes to the dead-letter queue
+    /// (`state='dead'`) so it stops being claimed. Otherwise the row
+    /// goes back to `state='pending'` for another try (YYC-137).
     pub async fn mark_failed(&self, id: i64, error: &str) -> Result<()> {
         let conn = self
             .conn
             .get()
             .map_err(|e| anyhow!("queue DB pool checkout: {e}"))?;
-        // inbound_queue has no last_error column; narrate via tracing instead.
-        tracing::warn!(target: "gateway::queue", id, error, "inbound message marked failed");
-        conn.execute(
-            "UPDATE inbound_queue SET state='failed' WHERE id = ?1",
+        let attempts: i64 = conn.query_row(
+            "SELECT attempts FROM inbound_queue WHERE id = ?1",
             params![id],
+            |row| row.get(0),
+        )?;
+        let next_state = if attempts as u32 >= self.max_attempts {
+            tracing::warn!(
+                target: "gateway::queue",
+                id, attempts, error, max_attempts = self.max_attempts,
+                "inbound message exhausted retries; routing to dead-letter queue",
+            );
+            "dead"
+        } else {
+            tracing::warn!(
+                target: "gateway::queue",
+                id, attempts, error, max_attempts = self.max_attempts,
+                "inbound message marked failed; will retry",
+            );
+            "pending"
+        };
+        conn.execute(
+            "UPDATE inbound_queue SET state = ?1, last_error = ?2 WHERE id = ?3",
+            params![next_state, error, id],
         )?;
         Ok(())
     }
 
+    /// Reset crash-orphaned `processing` rows back to `pending`.
+    ///
+    /// YYC-137: only rows whose `last_heartbeat_at` is older than
+    /// `now - heartbeat_stale_secs` (or null — pre-heartbeat-column
+    /// rows from older DB versions) are reset. Recently-touched rows
+    /// are assumed to belong to a live worker and are left alone, so
+    /// a fast worker restart doesn't duplicate in-flight work.
     pub async fn recover_processing(&self) -> Result<usize> {
         let conn = self
             .conn
             .get()
             .map_err(|e| anyhow!("queue DB pool checkout: {e}"))?;
+        let now = chrono::Utc::now().timestamp();
+        let cutoff = now - self.heartbeat_stale_secs;
         let n = conn.execute(
-            "UPDATE inbound_queue SET state='pending' WHERE state='processing'",
-            [],
+            "UPDATE inbound_queue SET state='pending' \
+             WHERE state='processing' \
+               AND (last_heartbeat_at IS NULL OR last_heartbeat_at < ?1)",
+            params![cutoff],
         )?;
         Ok(n)
+    }
+
+    /// Count of rows currently in the dead-letter queue (YYC-137).
+    pub async fn count_dead(&self) -> Result<usize> {
+        let conn = self
+            .conn
+            .get()
+            .map_err(|e| anyhow!("queue DB pool checkout: {e}"))?;
+        let n: i64 = conn.query_row(
+            "SELECT count(*) FROM inbound_queue WHERE state='dead'",
+            [],
+            |row| row.get(0),
+        )?;
+        Ok(n.max(0) as usize)
+    }
+
+    /// Snapshot the most recent `limit` dead-letter rows so an admin
+    /// endpoint can surface them for replay (YYC-137).
+    pub async fn list_dead(&self, limit: usize) -> Result<Vec<DeadInboundRow>> {
+        let conn = self
+            .conn
+            .get()
+            .map_err(|e| anyhow!("queue DB pool checkout: {e}"))?;
+        let mut stmt = conn.prepare(
+            "SELECT id, platform, chat_id, user_id, text, received_at, attempts, last_error \
+             FROM inbound_queue WHERE state='dead' \
+             ORDER BY received_at DESC LIMIT ?1",
+        )?;
+        let rows = stmt
+            .query_map(params![limit as i64], |row| {
+                Ok(DeadInboundRow {
+                    id: row.get(0)?,
+                    platform: row.get(1)?,
+                    chat_id: row.get(2)?,
+                    user_id: row.get(3)?,
+                    text: row.get(4)?,
+                    received_at: row.get(5)?,
+                    attempts: row.get(6)?,
+                    last_error: row.get(7)?,
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+
+    /// Move a dead row back to `pending` so it gets re-claimed on the
+    /// next worker poll. Resets `attempts` to 0 so the retry budget
+    /// starts fresh; preserves `last_error` for diagnostics. Returns
+    /// whether the row was found in `dead` state (YYC-137).
+    pub async fn replay_dead(&self, id: i64) -> Result<bool> {
+        let conn = self
+            .conn
+            .get()
+            .map_err(|e| anyhow!("queue DB pool checkout: {e}"))?;
+        let n = conn.execute(
+            "UPDATE inbound_queue SET state='pending', attempts=0 \
+             WHERE id = ?1 AND state='dead'",
+            params![id],
+        )?;
+        Ok(n > 0)
     }
 }
 
@@ -459,25 +617,109 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn mark_failed_sets_state() {
-        let q = InboundQueue::new(test_conn());
+    async fn mark_failed_retries_until_max_attempts_then_routes_to_dead() {
+        // YYC-137: single retry budget = max_attempts. After
+        // max_attempts mark_failed cycles, the row lands in
+        // state='dead' and is no longer claimable.
+        let q = InboundQueue::with_policy(test_conn(), 2, 60);
         let id = q.enqueue(sample_msg()).await.unwrap();
-        let _ = q.claim_next().await.unwrap();
-        q.mark_failed(id, "boom").await.unwrap();
-        assert!(q.claim_next().await.unwrap().is_none());
+
+        // attempt 1 → fail → back to pending (still under cap).
+        let _ = q.claim_next().await.unwrap().expect("attempt 1");
+        q.mark_failed(id, "boom-1").await.unwrap();
+        assert!(
+            q.claim_next().await.unwrap().is_some(),
+            "row should be re-claimable after first failure",
+        );
+
+        // attempt 2 → fail → exhausts budget → state='dead'.
+        q.mark_failed(id, "boom-2").await.unwrap();
+        assert!(
+            q.claim_next().await.unwrap().is_none(),
+            "row should not re-claim after reaching max_attempts",
+        );
+        assert_eq!(q.count_dead().await.unwrap(), 1);
+
+        // last_error preserved + replay_dead resets attempts and
+        // re-arms the row.
+        let dead = q.list_dead(10).await.unwrap();
+        assert_eq!(dead.len(), 1);
+        assert_eq!(dead[0].last_error.as_deref(), Some("boom-2"));
+        assert_eq!(dead[0].attempts, 2);
+
+        let replayed = q.replay_dead(id).await.unwrap();
+        assert!(replayed);
+        let row = q.claim_next().await.unwrap().expect("row replayed");
+        assert_eq!(
+            row.attempts, 1,
+            "replay_dead should reset attempts to 0 then claim bumps to 1"
+        );
     }
 
     #[tokio::test]
-    async fn recover_processing_resets_to_pending() {
+    async fn recover_processing_resets_only_stale_heartbeats() {
+        // YYC-137 acceptance: a freshly-claimed row (recent heartbeat)
+        // is NOT recovered — that's the in-flight worker. Only rows
+        // older than heartbeat_stale_secs get reset.
         let conn = test_conn();
-        let q = InboundQueue::new(conn.clone());
-        q.enqueue(sample_msg()).await.unwrap();
+
+        // heartbeat_stale_secs = 60: a just-claimed row's heartbeat
+        // is too fresh to reset.
+        let live = InboundQueue::with_policy(conn.clone(), 5, 60);
+        let live_id = live.enqueue(sample_msg()).await.unwrap();
+        let _ = live.claim_next().await.unwrap().expect("claim");
+
+        let recovered_live = live.recover_processing().await.unwrap();
+        assert_eq!(
+            recovered_live, 0,
+            "live worker's fresh heartbeat should not be recovered",
+        );
+        assert!(
+            live.claim_next().await.unwrap().is_none(),
+            "row should remain in 'processing'",
+        );
+
+        // Force the heartbeat into the past + run recovery with
+        // heartbeat_stale_secs=10. Now the row IS stale.
+        {
+            let c = conn.get().unwrap();
+            let now = chrono::Utc::now().timestamp();
+            c.execute(
+                "UPDATE inbound_queue SET last_heartbeat_at = ?1 WHERE id = ?2",
+                params![now - 3600, live_id],
+            )
+            .unwrap();
+        }
+        let stale = InboundQueue::with_policy(conn.clone(), 5, 10);
+        let recovered_stale = stale.recover_processing().await.unwrap();
+        assert_eq!(recovered_stale, 1);
+        assert!(
+            stale.claim_next().await.unwrap().is_some(),
+            "stale row should be re-claimable after recovery",
+        );
+    }
+
+    #[tokio::test]
+    async fn heartbeat_refreshes_last_heartbeat_at() {
+        let conn = test_conn();
+        let q = InboundQueue::with_policy(conn.clone(), 5, 60);
+        let id = q.enqueue(sample_msg()).await.unwrap();
         let _ = q.claim_next().await.unwrap();
-        drop(q);
-        let q2 = InboundQueue::new(conn);
-        let recovered = q2.recover_processing().await.unwrap();
-        assert_eq!(recovered, 1);
-        assert!(q2.claim_next().await.unwrap().is_some());
+
+        // Stamp heartbeat into the past, then refresh; recovery with
+        // a 10s window now leaves it alone.
+        {
+            let c = conn.get().unwrap();
+            let now = chrono::Utc::now().timestamp();
+            c.execute(
+                "UPDATE inbound_queue SET last_heartbeat_at = ?1 WHERE id = ?2",
+                params![now - 3600, id],
+            )
+            .unwrap();
+        }
+        q.heartbeat(id).await.unwrap();
+        let q_strict = InboundQueue::with_policy(conn, 5, 10);
+        assert_eq!(q_strict.recover_processing().await.unwrap(), 0);
     }
 
     #[tokio::test]
