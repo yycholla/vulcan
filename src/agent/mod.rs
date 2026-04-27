@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use crate::config::{Config, ProviderConfig};
+use crate::config::{CompactionConfig, Config, ProviderConfig};
 use crate::context::ContextManager;
 use crate::hooks::HookRegistry;
 use crate::hooks::approval::ApprovalHook;
@@ -92,6 +92,7 @@ pub struct Agent {
     /// catalog at startup (YYC-67). `None` when the catalog is disabled
     /// or the provider doesn't publish pricing.
     pub(in crate::agent) pricing: Option<crate::provider::catalog::Pricing>,
+    pub(in crate::agent) compaction_config: CompactionConfig,
     /// Active provider profile and resolved auth. Kept so user-facing
     /// commands can switch models without reconstructing the long-lived
     /// Agent, hook registry, tools, memory, or session state.
@@ -274,7 +275,8 @@ impl Agent {
         }
         let skills = Arc::new(SkillRegistry::new(&config.skills_dir));
         let memory = SessionStore::new();
-        let context = ContextManager::new(provider.max_context());
+        let context =
+            ContextManager::with_config(provider.max_context(), config.compaction.clone());
         let session_id = Uuid::new_v4().to_string();
 
         // Built-in hook: surface available skills to the LLM via BeforePrompt.
@@ -354,6 +356,7 @@ impl Agent {
             turn_cancel: CancellationToken::new(),
             diff_sink,
             pricing,
+            compaction_config: config.compaction.clone(),
             provider_config: config.provider.clone(),
             provider_api_key: api_key,
             active_profile: None,
@@ -420,6 +423,7 @@ impl Agent {
             turn_cancel: CancellationToken::new(),
             diff_sink: crate::tools::new_diff_sink(),
             pricing: None,
+            compaction_config: CompactionConfig::default(),
             provider_config: ProviderConfig::default(),
             provider_api_key: "test-key".into(),
             active_profile: None,

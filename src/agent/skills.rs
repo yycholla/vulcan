@@ -151,7 +151,6 @@ fn sanitize_skill_name(raw: &str) -> String {
         result.pop();
     }
     result
-
 }
 
 fn render_skill_markdown(draft: &DraftSkill, sanitized_name: &str) -> String {
