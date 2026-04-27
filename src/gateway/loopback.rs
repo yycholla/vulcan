@@ -6,6 +6,7 @@ use anyhow::Result;
 use hmac::{Hmac, Mac};
 use sha2::Sha256;
 use tokio::sync::Mutex;
+use uuid::Uuid;
 
 use crate::platform::{InboundMessage, OutboundMessage, Platform};
 
@@ -63,7 +64,7 @@ impl Platform for LoopbackPlatform {
         Ok(())
     }
 
-    async fn send(&self, msg: &OutboundMessage) -> Result<()> {
+    async fn send(&self, msg: &OutboundMessage) -> Result<crate::platform::SentMessage> {
         // Atomic compare-and-decrement: if there are failures left, decrement
         // and error; else record and return Ok.
         loop {
@@ -80,7 +81,13 @@ impl Platform for LoopbackPlatform {
             }
         }
         self.recorded.lock().await.push(msg.clone());
-        Ok(())
+        Ok(crate::platform::SentMessage {
+            message_id: Uuid::new_v4().to_string(),
+        })
+    }
+
+    fn capabilities(&self) -> crate::platform::PlatformCapabilities {
+        crate::platform::PlatformCapabilities::default()
     }
 
     async fn recv(&self) -> Result<InboundMessage> {
@@ -177,5 +184,28 @@ mod tests {
         assert!(lp.send(&m).await.is_ok());
         assert!(lp.send(&m).await.is_ok());
         assert_eq!(lp.recorded().await.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn loopback_send_returns_unique_message_ids() {
+        let lp = LoopbackPlatform::new();
+        let m = OutboundMessage {
+            platform: "loopback".into(),
+            chat_id: "c".into(),
+            text: "x".into(),
+            attachments: vec![],
+        };
+        let s1 = lp.send(&m).await.unwrap();
+        let s2 = lp.send(&m).await.unwrap();
+        assert_ne!(s1.message_id, s2.message_id);
+        assert!(!s1.message_id.is_empty());
+    }
+
+    #[test]
+    fn loopback_capabilities_declare_no_features_for_now() {
+        let lp = LoopbackPlatform::new();
+        let caps = lp.capabilities();
+        assert!(!caps.supports_edit);
+        assert!(!caps.supports_media_send);
     }
 }
