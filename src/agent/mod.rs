@@ -451,6 +451,11 @@ impl Agent {
         &self.lsp_manager
     }
 
+    /// Loaded skills for the active session (YYC-37 /skills slash).
+    pub fn skills(&self) -> &[crate::skills::Skill] {
+        self.skills.list()
+    }
+
     /// Save only new messages since the last save, avoiding the O(n) DELETE +
     /// re-INSERT that `save_messages` does. Tracks `last_saved_count` so
     /// subsequent calls only persist `messages[last_saved_count..]`.
