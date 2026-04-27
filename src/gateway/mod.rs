@@ -23,6 +23,7 @@ pub mod loopback;
 pub mod outbound;
 pub mod queue;
 pub mod registry;
+pub mod render_registry;
 pub mod routes;
 pub mod server;
 pub mod worker;
