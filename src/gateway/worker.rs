@@ -1,38 +1,87 @@
-//! Lane worker — pulls a claimed inbound row, drives the per-lane Agent,
-//! and enqueues the reply for the outbound delivery loop.
+//! Lane worker — pulls a claimed inbound row, drives the per-lane Agent in
+//! streaming mode, and pumps each `StreamEvent` through `StreamRenderer` so
+//! it lands on the outbound queue as a series of edit-in-place updates.
 //!
-//! The lane router (`lane.rs`) hands one inbound row at a time to
-//! `process_one`. We deliberately catch panics from `Agent::run_prompt` so a
-//! single wedged Agent doesn't kill the whole lane worker task — the row gets
-//! marked `failed` and the worker loop survives to claim the next row.
+//! The lane router (`mod.rs`'s inbound dispatcher) hands one inbound row at a
+//! time to `process_one`. We deliberately catch panics from
+//! `Agent::run_prompt_stream` so a single wedged Agent doesn't kill the whole
+//! lane worker task — the row gets marked `failed` and the worker loop
+//! survives to claim the next row.
+
+use std::sync::Arc;
 
 use crate::gateway::agent_map::AgentMap;
 use crate::gateway::lane::LaneKey;
 use crate::gateway::queue::{InboundQueue, InboundRow, OutboundQueue};
-use crate::platform::OutboundMessage;
+use crate::gateway::render_registry::{RenderKey, RenderRegistry};
+use crate::gateway::stream_render::StreamRenderer;
+use crate::platform::PlatformCapabilities;
 
 use futures_util::FutureExt;
 use std::panic::AssertUnwindSafe;
+use uuid::Uuid;
 
-/// Drive one inbound row through its Agent and enqueue the reply.
+/// Drive one inbound row through its Agent and pump streamed output to the
+/// outbound queue via `StreamRenderer`.
 ///
 /// Steps:
-/// 1. Look up or spawn the Agent for the row's lane.
-/// 2. Run the prompt; catch panics so the lane worker survives.
-/// 3. On success: enqueue the reply on the outbound queue and mark the
-///    inbound row `done`.
-/// 4. On failure (Err or panic): mark the inbound row `failed` and bubble
+/// 1. Mint a fresh per-turn UUID and build the `RenderKey` for this turn.
+/// 2. Look up or spawn the Agent for the row's lane.
+/// 3. Run the prompt under `run_prompt_stream`, with a consumer task draining
+///    `StreamEvent`s into the renderer.
+/// 4. Catch panics so the lane worker survives a wedged Agent; on panic, evict
+///    the lane so the next request rebuilds fresh state.
+/// 5. On success: mark the inbound row `done` (the renderer has already
+///    enqueued the streamed output, including the final flush triggered by
+///    `StreamEvent::Done`).
+/// 6. On failure (Err or panic): mark the inbound row `failed` and bubble
 ///    the error up to the lane worker for logging.
 pub async fn process_one(
     row: InboundRow,
     agent_map: &AgentMap,
     inbound_queue: &InboundQueue,
-    _outbound_queue: &OutboundQueue,
+    outbound_queue: &Arc<OutboundQueue>,
+    render_registry: &Arc<RenderRegistry>,
+    platform_caps: PlatformCapabilities,
 ) -> anyhow::Result<()> {
     let lane = LaneKey {
         platform: row.platform.clone(),
         chat_id: row.chat_id.clone(),
     };
+
+    let turn_id = Uuid::new_v4().to_string();
+    let render_key = RenderKey {
+        platform: row.platform.clone(),
+        chat_id: row.chat_id.clone(),
+        turn_id: turn_id.clone(),
+    };
+
+    // Build the renderer once; it'll be moved into the consumer task.
+    let mut renderer = StreamRenderer::new(
+        render_key,
+        platform_caps.edit_min_interval_ms,
+        outbound_queue.clone(),
+        render_registry.clone(),
+    );
+
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<crate::provider::StreamEvent>(
+        crate::provider::STREAM_CHANNEL_CAPACITY,
+    );
+
+    // Consumer task: pump StreamEvents through the renderer. Lives until the
+    // sender side (held by run_prompt_stream) is dropped.
+    //
+    // Returns `Err(anyhow::Error)` on the first `renderer.handle` failure
+    // (e.g., outbound enqueue failed) so the worker can mark the inbound
+    // row failed instead of silently swallowing a broken render. A panic
+    // inside this task is caught by `consumer.await` returning `JoinError`
+    // — also handled below as a turn-level failure.
+    let consumer = tokio::spawn(async move {
+        while let Some(ev) = rx.recv().await {
+            renderer.handle(ev).await?;
+        }
+        Ok::<_, anyhow::Error>(())
+    });
 
     // AssertUnwindSafe: we don't read Agent state after a panic — we just
     // mark the inbound row failed and drop our handle. The Agent's own state
@@ -42,13 +91,17 @@ pub async fn process_one(
     let unwind = AssertUnwindSafe(async {
         let agent = agent_map.get_or_spawn(&lane).await?;
         let mut agent = agent.lock().await;
-        agent.run_prompt(&row.text).await
+        agent.run_prompt_stream(&row.text, tx).await
     })
     .catch_unwind()
     .await;
 
+    // The sender was moved into run_prompt_stream; closing it lets the
+    // consumer drain to completion before we mark the inbound row done.
+    let consumer_outcome = consumer.await;
+
     let panicked = unwind.is_err();
-    let result: anyhow::Result<String> = unwind.unwrap_or_else(|payload| {
+    let mut result: anyhow::Result<String> = unwind.unwrap_or_else(|payload| {
         let msg = payload
             .downcast_ref::<&'static str>()
             .map(|s| (*s).to_string())
@@ -58,6 +111,34 @@ pub async fn process_one(
             "agent panicked while running prompt: {msg}"
         ))
     });
+
+    // Surface renderer failures the same as agent failures. Two ways the
+    // consumer can fail:
+    //   1. JoinError — task panicked. Treat as a turn failure.
+    //   2. Inner `Err` from `renderer.handle` — outbound enqueue failed,
+    //      DB pool error, etc. The user will see no message; mark the
+    //      inbound row failed so retry / DLQ semantics kick in.
+    // Don't override an existing `Err` from the agent path — the first
+    // error wins.
+    if result.is_ok() {
+        match consumer_outcome {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => {
+                result = Err(e.context("stream renderer failed"));
+            }
+            Err(join_err) => {
+                result = Err(anyhow::anyhow!("stream renderer task panicked: {join_err}"));
+            }
+        }
+    } else if let Err(join_err) = consumer_outcome {
+        // Agent already failed; just log the consumer panic so it's not
+        // silently lost.
+        tracing::warn!(
+            target: "gateway::worker",
+            error = %join_err,
+            "stream renderer task panicked (agent path also failed)",
+        );
+    }
 
     // YYC-133: if the future panicked, the Agent's internal state is
     // suspect — message buffer mid-write, tool registry mid-mutation,
@@ -75,20 +156,11 @@ pub async fn process_one(
     }
 
     match result {
-        Ok(reply) => {
-            inbound_queue
-                .complete_with_outbound(
-                    row.id,
-                    OutboundMessage {
-                        platform: row.platform,
-                        chat_id: row.chat_id,
-                        text: reply,
-                        attachments: vec![],
-                        reply_to: None,
-                        edit_target: None,
-                    },
-                )
-                .await?;
+        Ok(_final_text) => {
+            // The renderer has already enqueued the streamed output
+            // (including the final flush triggered by StreamEvent::Done).
+            // Just mark the inbound row done.
+            inbound_queue.mark_done(row.id).await?;
             Ok(())
         }
         Err(e) => {
@@ -113,9 +185,10 @@ mod tests {
     use crate::config::Config;
     use crate::gateway::agent_map::{AgentBuilder, AgentMap};
     use crate::gateway::queue::{InboundQueue, OutboundQueue};
+    use crate::gateway::render_registry::RenderRegistry;
     use crate::hooks::HookRegistry;
     use crate::memory::DbPool;
-    use crate::platform::InboundMessage;
+    use crate::platform::{InboundMessage, PlatformCapabilities};
     use crate::provider::mock::MockProvider;
     use crate::provider::{ChatResponse, LLMProvider, Message, StreamEvent, ToolDefinition};
     use crate::skills::SkillRegistry;
@@ -221,11 +294,20 @@ mod tests {
         AgentMap::with_builder(test_config(), Duration::from_secs(60), builder)
     }
 
+    fn streaming_caps() -> PlatformCapabilities {
+        PlatformCapabilities {
+            supports_edit: true,
+            edit_min_interval_ms: 0,
+            ..PlatformCapabilities::default()
+        }
+    }
+
     #[tokio::test]
     async fn worker_runs_agent_and_enqueues_reply() {
         let db = fresh_db();
         let inbound = InboundQueue::new(db.clone());
-        let outbound = OutboundQueue::new(db.clone(), 5);
+        let outbound = Arc::new(OutboundQueue::new(db.clone(), 5));
+        let render_registry = Arc::new(RenderRegistry::new());
         let agent_map = agent_map_with_canned_reply("hi back");
 
         let id = inbound
@@ -243,18 +325,32 @@ mod tests {
         let row = inbound.claim_next().await.unwrap().expect("row");
         assert_eq!(row.id, id);
 
-        process_one(row, &agent_map, &inbound, &outbound)
-            .await
-            .unwrap();
+        process_one(
+            row,
+            &agent_map,
+            &inbound,
+            &outbound,
+            &render_registry,
+            streaming_caps(),
+        )
+        .await
+        .unwrap();
 
+        // The streaming pipeline emits one (or more) outbound rows for
+        // the canned "hi back" reply via the renderer. The first row
+        // should carry the streamed text; pin that.
         let row = outbound
             .claim_due(chrono::Utc::now().timestamp())
             .await
             .unwrap()
-            .expect("outbound row");
+            .expect("outbound row from renderer");
         assert_eq!(row.text, "hi back");
         assert_eq!(row.platform, "loopback");
         assert_eq!(row.chat_id, "c");
+        assert!(
+            row.turn_id.is_some(),
+            "streaming row should carry a per-turn id"
+        );
     }
 
     #[tokio::test]
@@ -264,7 +360,8 @@ mod tests {
         // looping back to 'pending'.
         let db = fresh_db();
         let inbound = crate::gateway::queue::InboundQueue::with_policy(db.clone(), 1, 60);
-        let outbound = OutboundQueue::new(db.clone(), 5);
+        let outbound = Arc::new(OutboundQueue::new(db.clone(), 5));
+        let render_registry = Arc::new(RenderRegistry::new());
         let agent_map = agent_map_with_panicking_provider();
 
         inbound
@@ -281,7 +378,15 @@ mod tests {
             .unwrap();
         let row = inbound.claim_next().await.unwrap().expect("row");
 
-        let res = process_one(row, &agent_map, &inbound, &outbound).await;
+        let res = process_one(
+            row,
+            &agent_map,
+            &inbound,
+            &outbound,
+            &render_registry,
+            streaming_caps(),
+        )
+        .await;
         assert!(
             res.is_err(),
             "process_one should propagate the panic as Err"
@@ -291,7 +396,8 @@ mod tests {
         assert!(inbound.claim_next().await.unwrap().is_none());
         assert_eq!(inbound.count_dead().await.unwrap(), 1);
 
-        // Outbound should be empty (no reply enqueued).
+        // Outbound should be empty (no reply enqueued — the panic fires
+        // before any StreamEvent reaches the renderer).
         assert!(
             outbound
                 .claim_due(chrono::Utc::now().timestamp())
@@ -303,13 +409,14 @@ mod tests {
 
     #[tokio::test]
     async fn worker_panic_evicts_lane_so_next_request_builds_fresh_agent() {
-        // YYC-133 acceptance pin: a panic during run_prompt should
+        // YYC-133 acceptance pin: a panic during run_prompt_stream should
         // remove the lane's cached Agent. The next inbound row for the
         // same lane gets a freshly built Agent and runs cleanly.
         use std::sync::atomic::{AtomicUsize, Ordering};
         let db = fresh_db();
         let inbound = InboundQueue::new(db.clone());
-        let outbound = OutboundQueue::new(db.clone(), 5);
+        let outbound = Arc::new(OutboundQueue::new(db.clone(), 5));
+        let render_registry = Arc::new(RenderRegistry::new());
 
         // Builder counts how many Agents it constructs. First call →
         // panicking provider; second call → canned-reply provider.
@@ -354,7 +461,15 @@ mod tests {
             .await
             .unwrap();
         let row = inbound.claim_next().await.unwrap().expect("row");
-        let res = process_one(row, &agent_map, &inbound, &outbound).await;
+        let res = process_one(
+            row,
+            &agent_map,
+            &inbound,
+            &outbound,
+            &render_registry,
+            streaming_caps(),
+        )
+        .await;
         assert!(res.is_err());
 
         // Lane should now be empty in the AgentMap (evicted).
@@ -368,7 +483,7 @@ mod tests {
         );
 
         // Second row: builder fires a second time, returns a clean
-        // Agent, and the worker drives it to a Continue + reply.
+        // Agent, and the worker drives it to a streamed reply.
         inbound
             .enqueue(InboundMessage {
                 platform: "loopback".into(),
@@ -382,9 +497,16 @@ mod tests {
             .await
             .unwrap();
         let row = inbound.claim_next().await.unwrap().expect("row");
-        process_one(row, &agent_map, &inbound, &outbound)
-            .await
-            .unwrap();
+        process_one(
+            row,
+            &agent_map,
+            &inbound,
+            &outbound,
+            &render_registry,
+            streaming_caps(),
+        )
+        .await
+        .unwrap();
 
         let reply = outbound
             .claim_due(chrono::Utc::now().timestamp())

@@ -44,6 +44,11 @@ pub struct OutboundMessage {
     /// Set by StreamRenderer for follow-up chunks of an in-flight
     /// streaming response.
     pub edit_target: Option<String>,
+    /// Per-turn id used by RenderRegistry to scope edit-in-place
+    /// anchors. `None` for non-streaming rows (CommandDispatcher
+    /// replies, /v1/inbound webhooks); the dispatcher then falls
+    /// back to chat_id for the registry key.
+    pub turn_id: Option<String>,
 }
 
 /// Result of a successful `Platform::send`. Carries the platform's

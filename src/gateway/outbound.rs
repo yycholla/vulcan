@@ -109,6 +109,7 @@ async fn drain_due(
         };
         let id = row.id;
         let edit_target = row.edit_target.clone();
+        let turn_id = row.turn_id.clone();
         let msg = OutboundMessage {
             platform: row.platform,
             chat_id: row.chat_id,
@@ -116,6 +117,7 @@ async fn drain_due(
             attachments: row.attachments,
             reply_to: row.reply_to,
             edit_target: row.edit_target,
+            turn_id: row.turn_id,
         };
         let result = if let Some(anchor) = edit_target {
             // Route to edit; ignore SentMessage shape (edit returns ()).
@@ -137,13 +139,14 @@ async fn drain_due(
             match plat.send(&msg).await {
                 Ok(sent) => {
                     // Build the RenderKey from (platform, chat_id, turn_id).
-                    // Turn id isn't stored on the row in PR-2a — use chat_id
-                    // as a stand-in. PR-2b adds a turn_id column when it
-                    // wires the worker streaming path.
+                    // turn_id is populated by StreamRenderer for streaming
+                    // rows; non-streaming rows (CommandDispatcher replies,
+                    // /v1/inbound webhooks) fall back to chat_id so the
+                    // registry key still scopes per-lane.
                     let key = RenderKey {
                         platform: msg.platform.clone(),
                         chat_id: msg.chat_id.clone(),
-                        turn_id: msg.chat_id.clone(),
+                        turn_id: turn_id.clone().unwrap_or_else(|| msg.chat_id.clone()),
                     };
                     // PR-2b TODO: anchor write happens before mark_done.
                     // If the subsequent mark_done fails (DB pool / disk),
@@ -192,6 +195,7 @@ mod tests {
             attachments: vec![],
             reply_to: None,
             edit_target: None,
+            turn_id: None,
         }
     }
 
@@ -277,6 +281,7 @@ mod tests {
                 attachments: vec![],
                 reply_to: None,
                 edit_target: Some("anchor-1".into()),
+                turn_id: None,
             })
             .await
             .unwrap();
@@ -302,6 +307,7 @@ mod tests {
                 attachments: vec![],
                 reply_to: None,
                 edit_target: None,
+                turn_id: Some("t1".into()),
             })
             .await
             .unwrap();
@@ -309,7 +315,7 @@ mod tests {
         let anchor = render_reg.anchor(&RenderKey {
             platform: "loopback".into(),
             chat_id: "c".into(),
-            turn_id: "c".into(),
+            turn_id: "t1".into(),
         });
         assert!(anchor.is_some(), "first send should populate the registry");
     }

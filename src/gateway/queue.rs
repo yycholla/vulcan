@@ -152,8 +152,8 @@ impl InboundQueue {
         tx.execute(
             "INSERT INTO outbound_queue \
              (platform, chat_id, text, attachments_json, enqueued_at, next_attempt_at, state, \
-              edit_target, reply_to) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?5, 'pending', ?6, ?7)",
+              edit_target, reply_to, turn_id) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?5, 'pending', ?6, ?7, ?8)",
             params![
                 msg.platform,
                 msg.chat_id,
@@ -162,6 +162,7 @@ impl InboundQueue {
                 now,
                 msg.edit_target,
                 msg.reply_to,
+                msg.turn_id,
             ],
         )?;
         let outbound_id = tx.last_insert_rowid();
@@ -313,6 +314,9 @@ pub struct OutboundRow {
     pub edit_target: Option<String>,
     /// Reply / thread target on the platform side.
     pub reply_to: Option<String>,
+    /// YYC-18 PR-2b: per-turn id used by the dispatcher to build the
+    /// RenderKey for anchor capture. `None` for non-streaming rows.
+    pub turn_id: Option<String>,
 }
 
 // Retry waits indexed by failures-so-far: 1st → 5s, 2nd → 30s, ... clamps at 7200s.
@@ -337,8 +341,8 @@ impl OutboundQueue {
         conn.execute(
             "INSERT INTO outbound_queue \
              (platform, chat_id, text, attachments_json, enqueued_at, next_attempt_at, state, \
-              edit_target, reply_to) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?5, 'pending', ?6, ?7)",
+              edit_target, reply_to, turn_id) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?5, 'pending', ?6, ?7, ?8)",
             params![
                 msg.platform,
                 msg.chat_id,
@@ -347,6 +351,7 @@ impl OutboundQueue {
                 now,
                 msg.edit_target,
                 msg.reply_to,
+                msg.turn_id,
             ],
         )?;
         Ok(conn.last_insert_rowid())
@@ -364,7 +369,8 @@ impl OutboundQueue {
                          WHERE state='pending' AND next_attempt_at <= ?1 \
                          ORDER BY next_attempt_at ASC, id ASC LIMIT 1) \
              RETURNING id, platform, chat_id, text, attachments_json, enqueued_at, \
-                       next_attempt_at, attempts, state, last_error, edit_target, reply_to",
+                       next_attempt_at, attempts, state, last_error, edit_target, reply_to, \
+                       turn_id",
         )?;
         let mut rows = stmt.query(params![now])?;
         if let Some(row) = rows.next()? {
@@ -383,6 +389,7 @@ impl OutboundQueue {
                 last_error: row.get(9)?,
                 edit_target: row.get(10)?,
                 reply_to: row.get(11)?,
+                turn_id: row.get(12)?,
             }))
         } else {
             Ok(None)
@@ -442,7 +449,8 @@ impl OutboundQueue {
             .map_err(|e| anyhow!("queue DB pool checkout: {e}"))?;
         let mut stmt = conn.prepare(
             "SELECT id, platform, chat_id, text, attachments_json, enqueued_at, \
-                    next_attempt_at, attempts, state, last_error, edit_target, reply_to \
+                    next_attempt_at, attempts, state, last_error, edit_target, reply_to, \
+                    turn_id \
              FROM outbound_queue WHERE id = ?1",
         )?;
         let mut rows = stmt.query(params![id])?;
@@ -462,6 +470,7 @@ impl OutboundQueue {
                 last_error: row.get(9)?,
                 edit_target: row.get(10)?,
                 reply_to: row.get(11)?,
+                turn_id: row.get(12)?,
             })
         } else {
             Err(anyhow!("row not found"))
@@ -497,6 +506,7 @@ mod tests {
             attachments: vec![],
             reply_to: None,
             edit_target: None,
+            turn_id: None,
         }
     }
 
@@ -510,6 +520,7 @@ mod tests {
             attachments: vec![],
             reply_to: Some("parent-msg-1".into()),
             edit_target: Some("anchor-msg-7".into()),
+            turn_id: None,
         };
         q.enqueue(msg).await.unwrap();
         let row = q
@@ -519,6 +530,27 @@ mod tests {
             .expect("row");
         assert_eq!(row.edit_target, Some("anchor-msg-7".into()));
         assert_eq!(row.reply_to, Some("parent-msg-1".into()));
+    }
+
+    #[tokio::test]
+    async fn outbound_queue_round_trips_turn_id() {
+        let q = OutboundQueue::new(test_conn(), 5);
+        let msg = OutboundMessage {
+            platform: "loopback".into(),
+            chat_id: "c".into(),
+            text: "x".into(),
+            attachments: vec![],
+            reply_to: None,
+            edit_target: None,
+            turn_id: Some("turn-abc".into()),
+        };
+        q.enqueue(msg).await.unwrap();
+        let row = q
+            .claim_due(chrono::Utc::now().timestamp())
+            .await
+            .unwrap()
+            .expect("row");
+        assert_eq!(row.turn_id, Some("turn-abc".into()));
     }
 
     #[tokio::test]
@@ -536,6 +568,7 @@ mod tests {
             }],
             reply_to: None,
             edit_target: None,
+            turn_id: None,
         };
         q.enqueue(msg).await.unwrap();
         let row = q
@@ -822,6 +855,7 @@ mod tests {
                     attachments: vec![],
                     reply_to: None,
                     edit_target: None,
+                    turn_id: None,
                 },
             )
             .await

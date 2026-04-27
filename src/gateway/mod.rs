@@ -112,6 +112,8 @@ where
         Arc::clone(&inbound),
         Arc::clone(&outbound),
         Arc::clone(&agent_map),
+        Arc::clone(&render_registry),
+        Arc::clone(&registry),
     );
 
     let app = build_router(AppState {
@@ -145,17 +147,40 @@ fn spawn_inbound_dispatcher(
     inbound: Arc<InboundQueue>,
     outbound: Arc<OutboundQueue>,
     agent_map: Arc<AgentMap>,
+    render_registry: Arc<crate::gateway::render_registry::RenderRegistry>,
+    platform_registry: Arc<PlatformRegistry>,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
         let handler_inbound = Arc::clone(&inbound);
         let handler_outbound = Arc::clone(&outbound);
         let handler_agent_map = Arc::clone(&agent_map);
+        let handler_render_registry = Arc::clone(&render_registry);
+        let handler_platform_registry = Arc::clone(&platform_registry);
         let handler = from_closure(move |_lane: LaneKey, row: InboundRow| {
             let inbound = Arc::clone(&handler_inbound);
             let outbound = Arc::clone(&handler_outbound);
             let agent_map = Arc::clone(&handler_agent_map);
+            let render_registry = Arc::clone(&handler_render_registry);
+            let platform_registry = Arc::clone(&handler_platform_registry);
             async move {
-                if let Err(e) = worker::process_one(row, &agent_map, &inbound, &outbound).await {
+                // Pick capabilities from the registered platform; default
+                // (zero-feature) for an unknown platform name so the
+                // worker still runs but the renderer's throttle behaves
+                // as a "no edits, single-shot send" pipeline.
+                let caps = platform_registry
+                    .get(&row.platform)
+                    .map(|p| p.capabilities())
+                    .unwrap_or_default();
+                if let Err(e) = worker::process_one(
+                    row,
+                    &agent_map,
+                    &inbound,
+                    &outbound,
+                    &render_registry,
+                    caps,
+                )
+                .await
+                {
                     tracing::error!(target: "gateway::inbound", error = %e, "inbound row failed");
                 }
             }

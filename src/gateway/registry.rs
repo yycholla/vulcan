@@ -54,6 +54,7 @@ mod tests {
             attachments: vec![],
             reply_to: None,
             edit_target: None,
+            turn_id: None,
         }
     }
 
