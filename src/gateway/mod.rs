@@ -136,6 +136,8 @@ where
         Some(DiscordPlatform::spawn_gateway_client(
             gateway.discord.bot_token.clone(),
             gateway.discord.allow_bots,
+            gateway.discord.allowed_guild_ids.clone(),
+            gateway.discord.allowed_channel_ids.clone(),
             Arc::clone(&inbound),
         )?)
     } else {

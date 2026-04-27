@@ -56,6 +56,30 @@ impl DiscordPlatform {
         })
     }
 
+    /// YYC-19: allowlist gate. Returns true when the message
+    /// should be accepted. Empty allowlists mean "open" so the
+    /// default DiscordConfig behaves like the pre-allowlist code.
+    /// DM messages (no `guild_id`) are always allowed — DMs are
+    /// already gated by who the bot has DM'd; locking them out by
+    /// guild id would lock the bot out of itself.
+    pub(crate) fn passes_allowlist(
+        guild_id: Option<u64>,
+        channel_id: u64,
+        allowed_guild_ids: &[u64],
+        allowed_channel_ids: &[u64],
+    ) -> bool {
+        if let Some(gid) = guild_id
+            && !allowed_guild_ids.is_empty()
+            && !allowed_guild_ids.contains(&gid)
+        {
+            return false;
+        }
+        if !allowed_channel_ids.is_empty() && !allowed_channel_ids.contains(&channel_id) {
+            return false;
+        }
+        true
+    }
+
     fn map_attachment(att: &serenity::model::channel::Attachment) -> crate::platform::Attachment {
         use crate::platform::{Attachment, AttachmentKind};
         // Robust MIME-prefix classifier: handle parameters
@@ -99,11 +123,21 @@ impl DiscordPlatform {
     pub fn spawn_gateway_client(
         bot_token: String,
         allow_bots: bool,
+        allowed_guild_ids: Vec<u64>,
+        allowed_channel_ids: Vec<u64>,
         inbound: Arc<InboundQueue>,
     ) -> Result<JoinHandle<()>> {
         Self::validate_bot_token(&bot_token)?;
         Ok(tokio::spawn(async move {
-            if let Err(e) = run_gateway_client(bot_token, allow_bots, inbound).await {
+            if let Err(e) = run_gateway_client(
+                bot_token,
+                allow_bots,
+                allowed_guild_ids,
+                allowed_channel_ids,
+                inbound,
+            )
+            .await
+            {
                 tracing::error!(target: "gateway::discord", error = %e, "discord gateway client stopped");
             }
         }))
@@ -262,11 +296,27 @@ impl Platform for DiscordPlatform {
 struct DiscordEventHandler {
     inbound: Arc<InboundQueue>,
     allow_bots: bool,
+    /// YYC-19: guild allowlist. Empty = open (default).
+    allowed_guild_ids: Vec<u64>,
+    /// YYC-19: channel allowlist. Empty = open (default).
+    allowed_channel_ids: Vec<u64>,
 }
 
 #[serenity::async_trait]
 impl EventHandler for DiscordEventHandler {
     async fn message(&self, _ctx: SerenityContext, msg: Message) {
+        // YYC-19: drop messages from unallowed guilds/channels
+        // before any further work. Cheaper than queueing and
+        // dropping later, and keeps the inbound queue clean of
+        // poisoned rows from public-server crosschat.
+        if !DiscordPlatform::passes_allowlist(
+            msg.guild_id.map(|g| g.get()),
+            msg.channel_id.get(),
+            &self.allowed_guild_ids,
+            &self.allowed_channel_ids,
+        ) {
+            return;
+        }
         let attachments = msg
             .attachments
             .iter()
@@ -295,6 +345,8 @@ impl EventHandler for DiscordEventHandler {
 async fn run_gateway_client(
     bot_token: String,
     allow_bots: bool,
+    allowed_guild_ids: Vec<u64>,
+    allowed_channel_ids: Vec<u64>,
     inbound: Arc<InboundQueue>,
 ) -> Result<()> {
     let intents = GatewayIntents::GUILD_MESSAGES
@@ -303,6 +355,8 @@ async fn run_gateway_client(
     let handler = DiscordEventHandler {
         inbound,
         allow_bots,
+        allowed_guild_ids,
+        allowed_channel_ids,
     };
     let mut client = Client::builder(&bot_token, intents)
         .event_handler(handler)
@@ -318,6 +372,76 @@ async fn run_gateway_client(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // YYC-19: empty allowlists keep the door open (default).
+    #[test]
+    fn passes_allowlist_open_by_default() {
+        assert!(DiscordPlatform::passes_allowlist(Some(1), 2, &[], &[]));
+        assert!(DiscordPlatform::passes_allowlist(None, 2, &[], &[]));
+    }
+
+    // YYC-19: a guild allowlist drops messages from non-listed guilds
+    // but still lets DMs (no guild_id) through.
+    #[test]
+    fn passes_allowlist_filters_by_guild() {
+        assert!(!DiscordPlatform::passes_allowlist(
+            Some(99),
+            42,
+            &[1, 2, 3],
+            &[],
+        ));
+        assert!(DiscordPlatform::passes_allowlist(
+            Some(2),
+            42,
+            &[1, 2, 3],
+            &[]
+        ));
+        assert!(
+            DiscordPlatform::passes_allowlist(None, 42, &[1, 2, 3], &[]),
+            "DMs (no guild) must always pass guild allowlist",
+        );
+    }
+
+    // YYC-19: a channel allowlist drops messages from non-listed
+    // channels regardless of guild.
+    #[test]
+    fn passes_allowlist_filters_by_channel() {
+        assert!(!DiscordPlatform::passes_allowlist(
+            Some(1),
+            42,
+            &[],
+            &[100, 200],
+        ));
+        assert!(DiscordPlatform::passes_allowlist(
+            Some(1),
+            100,
+            &[],
+            &[100, 200],
+        ));
+    }
+
+    // YYC-19: when both filters set, both must match.
+    #[test]
+    fn passes_allowlist_requires_both_when_both_set() {
+        assert!(DiscordPlatform::passes_allowlist(
+            Some(1),
+            100,
+            &[1],
+            &[100]
+        ));
+        assert!(!DiscordPlatform::passes_allowlist(
+            Some(2),
+            100,
+            &[1],
+            &[100]
+        ));
+        assert!(!DiscordPlatform::passes_allowlist(
+            Some(1),
+            999,
+            &[1],
+            &[100]
+        ));
+    }
 
     #[test]
     fn inbound_from_message_parts_uses_channel_as_chat_id() {
