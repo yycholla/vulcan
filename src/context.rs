@@ -2,6 +2,7 @@ use std::sync::OnceLock;
 
 use tiktoken_rs::{CoreBPE, cl100k_base};
 
+use crate::config::CompactionConfig;
 use crate::provider::Message;
 
 /// Lazy-initialized cl100k_base BPE encoder (YYC-129). cl100k_base is
@@ -51,6 +52,7 @@ and chit-chat. Aim for under 1500 words. Do not add commentary about being a sum
 pub struct ContextManager {
     max_context: usize,
     current_tokens: usize,
+    enabled: bool,
     summary: Option<String>,
     reserved_tokens: usize,
     trigger_ratio: f64,
@@ -60,11 +62,6 @@ pub struct ContextManager {
     keep_recent: usize,
 }
 
-/// Default reservation for the next response. Capped at `max_context / 4`
-/// in `ContextManager::new` so an 8K-context model never has its entire
-/// budget swallowed by the reservation alone (YYC-129).
-const DEFAULT_RESERVED_TOKENS: usize = 50_000;
-
 /// Floor on the cap. Even tiny-context models keep at least this much
 /// budget for the next response so `should_compact` can fire before the
 /// provider rejects the request.
@@ -72,18 +69,21 @@ const MIN_RESERVED_TOKENS: usize = 1_024;
 
 impl ContextManager {
     pub fn new(max_context: usize) -> Self {
-        // YYC-129: reserved_tokens used to be a flat 50K — larger than
-        // an 8K-context model's entire budget. Cap it at max_context/4
-        // so reservation scales with the actual window, but keep a
-        // 1K floor so even tiny windows leave room for a reply.
+        Self::with_config(max_context, CompactionConfig::default())
+    }
+
+    pub fn with_config(max_context: usize, config: CompactionConfig) -> Self {
+        // Cap the configured reservation at max_context/4 so small-context
+        // models do not spend the whole window reserving room for output.
         let reserved_cap = (max_context / 4).max(MIN_RESERVED_TOKENS);
-        let reserved_tokens = DEFAULT_RESERVED_TOKENS.min(reserved_cap);
+        let reserved_tokens = config.reserved_tokens.min(reserved_cap);
         Self {
             max_context,
             current_tokens: 0,
+            enabled: config.enabled,
             summary: None,
             reserved_tokens,
-            trigger_ratio: 0.85,
+            trigger_ratio: config.trigger_ratio,
             keep_recent: 6,
         }
     }
@@ -100,8 +100,8 @@ impl ContextManager {
 
     /// Should the next turn be preceded by a compaction pass?
     pub fn should_compact(&self, messages: &[Message]) -> bool {
-        if self.summary.is_none() && messages.len() > 50 {
-            return true;
+        if !self.enabled {
+            return false;
         }
 
         let estimated_tokens = self.estimate_tokens(messages);
@@ -254,11 +254,13 @@ fn format_history(messages: &[Message]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::CompactionConfig;
 
     fn manager(max_context: usize) -> ContextManager {
         ContextManager {
             max_context,
             current_tokens: 0,
+            enabled: true,
             summary: None,
             reserved_tokens: 0,
             trigger_ratio: 0.85,
@@ -309,16 +311,57 @@ mod tests {
     }
 
     #[test]
-    fn long_history_heuristic_fires_only_once_per_session() {
-        let mut ctx = manager(1_000_000);
+    fn long_tiny_history_does_not_compact_before_context_threshold() {
+        let ctx = manager(1_000_000);
         let messages = (0..51)
             .map(|n| user(format!("turn {n}")))
             .collect::<Vec<_>>();
 
-        assert!(ctx.should_compact(&messages));
-        ctx.install_summary("stub".into());
-
         assert!(!ctx.should_compact(&messages));
+    }
+
+    #[test]
+    fn compaction_can_be_disabled_by_config() {
+        let ctx = ContextManager::with_config(
+            100,
+            CompactionConfig {
+                enabled: false,
+                trigger_ratio: 0.50,
+                reserved_tokens: 0,
+            },
+        );
+        let large = "hello world ".repeat(100);
+
+        assert!(!ctx.should_compact(&[user(large)]));
+    }
+
+    #[test]
+    fn trigger_ratio_comes_from_config() {
+        let ctx = ContextManager::with_config(
+            100,
+            CompactionConfig {
+                enabled: true,
+                trigger_ratio: 0.20,
+                reserved_tokens: 0,
+            },
+        );
+        let around_twenty_tokens = "hello world ".repeat(10);
+
+        assert!(ctx.should_compact(&[user(around_twenty_tokens)]));
+    }
+
+    #[test]
+    fn reserved_tokens_come_from_config_and_still_scale_to_context() {
+        let ctx = ContextManager::with_config(
+            1_000_000,
+            CompactionConfig {
+                enabled: true,
+                trigger_ratio: 0.95,
+                reserved_tokens: 250_000,
+            },
+        );
+
+        assert_eq!(ctx.reserved_tokens, 250_000);
     }
 
     #[test]

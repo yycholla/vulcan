@@ -32,7 +32,6 @@ pub(super) fn init_terminal() -> Result<Terminal<CrosstermBackend<std::io::Stdou
     Ok(terminal)
 }
 
-
 pub(super) fn restore_terminal() -> Result<()> {
     ratatui::crossterm::terminal::disable_raw_mode()?;
     ratatui::crossterm::execute!(
@@ -46,4 +45,3 @@ pub(super) fn restore_terminal() -> Result<()> {
     )?;
     Ok(())
 }
-

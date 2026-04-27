@@ -33,7 +33,8 @@ impl Agent {
 
         self.provider = provider;
         self.provider_config = next_config;
-        self.context = ContextManager::new(selection.max_context);
+        self.context =
+            ContextManager::with_config(selection.max_context, self.compaction_config.clone());
         self.pricing = selection.pricing.clone();
 
         Ok(selection)
@@ -91,7 +92,9 @@ impl Agent {
         self.provider = provider;
         self.provider_config = next_config;
         self.provider_api_key = api_key;
-        self.context = ContextManager::new(selection.max_context);
+        self.context =
+            ContextManager::with_config(selection.max_context, config.compaction.clone());
+        self.compaction_config = config.compaction.clone();
         self.pricing = selection.pricing.clone();
         self.active_profile = profile.map(str::to_string);
 

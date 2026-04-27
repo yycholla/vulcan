@@ -149,7 +149,6 @@ mod tests {
         normalize_cwd_line(&out)
     }
 
-
     fn normalize_cwd_line(prompt: &str) -> String {
         let mut out = String::with_capacity(prompt.len());
         for line in prompt.split_inclusive('\n') {
@@ -168,7 +167,6 @@ mod tests {
         }
         out
     }
-
 
     /// YYC-86: the prompt must steer the model toward native tools and
     /// position bash as a last resort. Without this section, even with
