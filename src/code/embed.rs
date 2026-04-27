@@ -378,7 +378,7 @@ fn vec_to_bytes(v: &[f32]) -> Vec<u8> {
 }
 
 fn bytes_to_vec(b: &[u8]) -> Option<Vec<f32>> {
-    if b.len() % 4 != 0 {
+    if !b.len().is_multiple_of(4) {
         return None;
     }
     let mut out = Vec::with_capacity(b.len() / 4);
@@ -411,7 +411,7 @@ mod tests {
 
     #[test]
     fn vec_bytes_round_trip() {
-        let v = vec![1.0_f32, -2.5, 0.0, 3.14159];
+        let v = vec![1.0_f32, -2.5, 0.0, 3.75];
         let b = vec_to_bytes(&v);
         let back = bytes_to_vec(&b).unwrap();
         assert_eq!(v, back);

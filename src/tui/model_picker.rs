@@ -506,7 +506,7 @@ impl<'a> MillerSource for ModelPickerSource<'a> {
 }
 
 fn tokenize(rest: &str) -> Vec<String> {
-    rest.split(|c: char| c == '-' || c == ':')
+    rest.split(['-', ':'])
         .filter(|s| !s.is_empty())
         .map(|s| s.to_string())
         .collect()

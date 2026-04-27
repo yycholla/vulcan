@@ -168,7 +168,7 @@ fn diff_preview(before: &str, after: &str, label: &str) -> String {
         }
         // Only show before lines that aren't matched in after at the
         // same index (cheap line-by-line comparison; not a real diff).
-        if after_lines.get(i).map(|s| *s) != Some(*line) {
+        if after_lines.get(i).copied() != Some(*line) {
             out.push_str(&format!("- {line}\n"));
             emitted += 1;
         }
@@ -177,7 +177,7 @@ fn diff_preview(before: &str, after: &str, label: &str) -> String {
         if emitted >= max_lines || out.len() >= max_chars {
             break;
         }
-        if before_lines.get(i).map(|s| *s) != Some(*line) {
+        if before_lines.get(i).copied() != Some(*line) {
             out.push_str(&format!("+ {line}\n"));
             emitted += 1;
         }
@@ -185,12 +185,12 @@ fn diff_preview(before: &str, after: &str, label: &str) -> String {
     let total_changes = before_lines
         .iter()
         .enumerate()
-        .filter(|(i, l)| after_lines.get(*i).map(|s| *s) != Some(**l))
+        .filter(|(i, l)| after_lines.get(*i).copied() != Some(**l))
         .count()
         + after_lines
             .iter()
             .enumerate()
-            .filter(|(i, l)| before_lines.get(*i).map(|s| *s) != Some(**l))
+            .filter(|(i, l)| before_lines.get(*i).copied() != Some(**l))
             .count();
     if emitted < total_changes {
         out.push_str(&format!("… {} more change(s)\n", total_changes - emitted));

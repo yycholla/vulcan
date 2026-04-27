@@ -323,15 +323,14 @@ fn extract_host(base_url: &str) -> &str {
     let after_scheme = s.split_once("://").map(|(_, rest)| rest).unwrap_or(s);
     // Strip path/query: everything before the first '/' (or '?').
     let host_port = after_scheme
-        .split(|c| c == '/' || c == '?')
+        .split(['/', '?'])
         .next()
         .unwrap_or("");
     // IPv6 in brackets: [::1]:8080.
-    if let Some(rest) = host_port.strip_prefix('[') {
-        if let Some(end) = rest.find(']') {
+    if let Some(rest) = host_port.strip_prefix('[')
+        && let Some(end) = rest.find(']') {
             return &rest[..end];
         }
-    }
     // Strip :port for IPv4 / hostname.
     host_port.split(':').next().unwrap_or("")
 }
@@ -409,6 +408,25 @@ async fn pick_or_input_model(
     Ok(models[pick].id.clone())
 }
 
+async fn fetch_models_with_timeout(base_url: &str, api_key: &str) -> Result<Vec<ModelInfo>> {
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(8))
+        .build()?;
+    let cache_ttl = Duration::from_secs(0); // bypass cache during interactive setup
+    let cat = catalog::for_base_url(client, base_url, api_key, cache_ttl);
+    let models = cat.list_models().await.map_err(anyhow::Error::from)?;
+    Ok(models)
+}
+
+fn profile_exists(dir: &Path, name: &str) -> Result<bool> {
+    let cfg = crate::config::Config::load_from_dir(dir).unwrap_or_default();
+    Ok(cfg.providers.contains_key(name))
+}
+
+fn dialoguer_theme() -> dialoguer::theme::ColorfulTheme {
+    dialoguer::theme::ColorfulTheme::default()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -455,23 +473,4 @@ mod tests {
         assert_eq!(extract_host("https://10.0.0.5"), "10.0.0.5");
         assert_eq!(extract_host(""), "");
     }
-}
-
-async fn fetch_models_with_timeout(base_url: &str, api_key: &str) -> Result<Vec<ModelInfo>> {
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(8))
-        .build()?;
-    let cache_ttl = Duration::from_secs(0); // bypass cache during interactive setup
-    let cat = catalog::for_base_url(client, base_url, api_key, cache_ttl);
-    let models = cat.list_models().await.map_err(anyhow::Error::from)?;
-    Ok(models)
-}
-
-fn profile_exists(dir: &Path, name: &str) -> Result<bool> {
-    let cfg = crate::config::Config::load_from_dir(dir).unwrap_or_default();
-    Ok(cfg.providers.contains_key(name))
-}
-
-fn dialoguer_theme() -> dialoguer::theme::ColorfulTheme {
-    dialoguer::theme::ColorfulTheme::default()
 }

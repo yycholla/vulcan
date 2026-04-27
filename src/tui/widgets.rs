@@ -46,7 +46,7 @@ pub fn frame(
         width: inner.width,
         height: 1,
     };
-    let bar_fg = accent.unwrap_or_else(|| theme.body_fg);
+    let bar_fg = accent.unwrap_or(theme.body_fg);
     let bar_style = Style::default().fg(bar_fg).add_modifier(Modifier::BOLD);
 
     let mut spans = vec![
@@ -290,7 +290,7 @@ pub fn prompt_row_height(input: &str, width: u16, mode: &str) -> u16 {
     let prefix = mode.chars().count() as u16 + 2 + 3 + 1; // [MODE] + space + ❯ + cursor
     let avail = width.saturating_sub(prefix).max(1) as usize;
     let chars = input.chars().count();
-    let input_lines = ((chars + 1).max(1) + avail - 1) / avail; // +1 for cursor block
+    let input_lines = (chars + 1).max(1).div_ceil(avail); // +1 for cursor block
     let input_lines = input_lines.max(1) as u16;
     1 + input_lines + 1
 }

@@ -362,8 +362,8 @@ async fn handle_stream_event(
 ) {
     match ev {
         StreamEvent::Text(chunk) => {
-            if let Some(last) = app.messages.last_mut() {
-                if matches!(last.role, ChatRole::Agent) {
+            if let Some(last) = app.messages.last_mut()
+                && matches!(last.role, ChatRole::Agent) {
                     // Append to both the segment timeline (the YYC-71
                     // ordered renderer) and the legacy `content` field
                     // (kept so other code that peeks at .content keeps working).
@@ -380,19 +380,17 @@ async fn handle_stream_event(
                         last.content.push_str(&chunk);
                     }
                 }
-            }
         }
         StreamEvent::Reasoning(chunk) => {
             // Per-token reasoning trace from thinking-mode models. Push to
             // the segment timeline so it interleaves with tool calls in
             // render order; also append to the legacy `reasoning` field so
             // latest_reasoning() etc. continue to work.
-            if let Some(last) = app.messages.last_mut() {
-                if matches!(last.role, ChatRole::Agent) {
+            if let Some(last) = app.messages.last_mut()
+                && matches!(last.role, ChatRole::Agent) {
                     last.append_reasoning(&chunk);
                     last.reasoning.push_str(&chunk);
                 }
-            }
             app.note_reasoning();
         }
         StreamEvent::Done(resp) => {
@@ -418,11 +416,10 @@ async fn handle_stream_event(
             }
         }
         StreamEvent::Error(e) => {
-            if let Some(last) = app.messages.last_mut() {
-                if last.content.is_empty() {
+            if let Some(last) = app.messages.last_mut()
+                && last.content.is_empty() {
                     last.set_content(format!("⚠ Error: {e}"));
                 }
-            }
             app.thinking = false;
             app.current_turn_cancel = None;
             // YYC-67: record provider-level error for telemetry.
@@ -435,11 +432,10 @@ async fn handle_stream_event(
             // YYC-71: push the tool-call segment into the timeline
             // (interleaved with reasoning/text). YYC-74: carry the args
             // summary so the card has structured context.
-            if let Some(last) = app.messages.last_mut() {
-                if matches!(last.role, ChatRole::Agent) {
+            if let Some(last) = app.messages.last_mut()
+                && matches!(last.role, ChatRole::Agent) {
                     last.push_tool_start_with(name.clone(), args_summary);
                 }
-            }
             app.note_tool_start(&name);
         }
         StreamEvent::ToolCallEnd {
@@ -451,8 +447,8 @@ async fn handle_stream_event(
             elapsed_ms,
             ..
         } => {
-            if let Some(last) = app.messages.last_mut() {
-                if matches!(last.role, ChatRole::Agent) {
+            if let Some(last) = app.messages.last_mut()
+                && matches!(last.role, ChatRole::Agent) {
                     // YYC-74: stamp preview + meta + timing onto the matching
                     // segment for the card. YYC-78: stash elided count for the
                     // collapse footer.
@@ -465,7 +461,6 @@ async fn handle_stream_event(
                         Some(elapsed_ms),
                     );
                 }
-            }
             // YYC-67: tool call telemetry.
             app.tool_calls_total = app.tool_calls_total.saturating_add(1);
             if !ok {
@@ -714,8 +709,8 @@ pub async fn run_tui(config: &Config, resume: ResumeTarget) -> Result<()> {
                 ev = key_rx.recv() => {
                     match ev {
                         Some(KeyEv::Press(event)) => {
-                            if let Event::Key(key) = event {
-                                if key.kind == KeyEventKind::Press {
+                            if let Event::Key(key) = event
+                                && key.kind == KeyEventKind::Press {
                                     let total = app.scrubber_hunks.len();
                                     match key.code {
                                         KeyCode::Up | KeyCode::Char('k') => {
@@ -793,7 +788,6 @@ pub async fn run_tui(config: &Config, resume: ResumeTarget) -> Result<()> {
                                         _ => {}
                                     }
                                 }
-                            }
                         }
                         Some(KeyEv::Error(e)) => {
                             tracing::error!("Terminal input error (diff scrubber): {e}");
@@ -821,8 +815,8 @@ pub async fn run_tui(config: &Config, resume: ResumeTarget) -> Result<()> {
                 ev = key_rx.recv() => {
                     match ev {
                         Some(KeyEv::Press(event)) => {
-                            if let Event::Key(key) = event {
-                                if key.kind == KeyEventKind::Press {
+                            if let Event::Key(key) = event
+                                && key.kind == KeyEventKind::Press {
                                     let mut commit: Option<(Option<String>, String)> = None;
                                     let mut close = false;
                                     let mut state = miller_columns::MillerState {
@@ -931,7 +925,6 @@ pub async fn run_tui(config: &Config, resume: ResumeTarget) -> Result<()> {
                                         app.model_picker_focus = 0;
                                     }
                                 }
-                            }
                         }
                         Some(KeyEv::Error(e)) => {
                             tracing::error!("Terminal input error (model picker): {e}");
@@ -950,8 +943,8 @@ pub async fn run_tui(config: &Config, resume: ResumeTarget) -> Result<()> {
                 ev = key_rx.recv() => {
                     match ev {
                         Some(KeyEv::Press(event)) => {
-                            if let Event::Key(key) = event {
-                                if key.kind == KeyEventKind::Press {
+                            if let Event::Key(key) = event
+                                && key.kind == KeyEventKind::Press {
                                     match key.code {
                                         KeyCode::Up | KeyCode::Char('k') => {
                                             app.provider_picker_selection = app.provider_picker_selection.saturating_sub(1);
@@ -1002,7 +995,6 @@ pub async fn run_tui(config: &Config, resume: ResumeTarget) -> Result<()> {
                                         _ => {}
                                     }
                                 }
-                            }
                         }
                         Some(KeyEv::Error(e)) => {
                             tracing::error!("Terminal input error (provider picker): {e}");
@@ -1021,8 +1013,8 @@ pub async fn run_tui(config: &Config, resume: ResumeTarget) -> Result<()> {
                 ev = key_rx.recv() => {
                     match ev {
                         Some(KeyEv::Press(event)) => {
-                            if let Event::Key(key) = event {
-                                if key.kind == KeyEventKind::Press {
+                            if let Event::Key(key) = event
+                                && key.kind == KeyEventKind::Press {
                                     match key.code {
                                         KeyCode::Up | KeyCode::Char('k') => {
                                             app.session_picker_selection = app.session_picker_selection.saturating_sub(1);
@@ -1111,7 +1103,6 @@ pub async fn run_tui(config: &Config, resume: ResumeTarget) -> Result<()> {
                                         _ => {}
                                     }
                                 }
-                            }
                         }
                         Some(KeyEv::Error(e)) => {
                             tracing::error!("Terminal input error (picker): {e}");
@@ -1197,8 +1188,8 @@ pub async fn run_tui(config: &Config, resume: ResumeTarget) -> Result<()> {
             ev = key_rx.recv() => {
                 match ev {
                     Some(KeyEv::Press(event)) => {
-                        if let Event::Key(key) = event {
-                            if key.kind == KeyEventKind::Press {
+                        if let Event::Key(key) = event
+                            && key.kind == KeyEventKind::Press {
                                 // ── If a pause is active, intercept the keys that
                                 // dispatch a response. Anything else falls through
                                 // to normal handling so the user can still scroll, etc.
@@ -1421,8 +1412,7 @@ pub async fn run_tui(config: &Config, resume: ResumeTarget) -> Result<()> {
                                             pending_quit = false;
 
                                             // slash commands
-                                            if msg.starts_with('/') {
-                                                let body = &msg[1..];
+                                            if let Some(body) = msg.strip_prefix('/') {
                                                 match body {
                                                     "exit" | "quit" => { exit = true; continue; }
                                                     "help" => {
@@ -1491,11 +1481,10 @@ pub async fn run_tui(config: &Config, resume: ResumeTarget) -> Result<()> {
                                                         continue;
                                                     }
                                                     s if s.starts_with("view ") => {
-                                                        if let Ok(n) = s[5..].trim().parse::<u8>() {
-                                                            if let Some(v) = View::from_index(n) {
+                                                        if let Ok(n) = s[5..].trim().parse::<u8>()
+                                                            && let Some(v) = View::from_index(n) {
                                                                 app.view = v;
                                                             }
-                                                        }
                                                         continue;
                                                     }
                                                     "resume" => {
@@ -1701,11 +1690,10 @@ pub async fn run_tui(config: &Config, resume: ResumeTarget) -> Result<()> {
                                     }
                                     KeyCode::Tab => {
                                         pending_quit = false;
-                                        if let Some(rest) = app.input.strip_prefix('/') {
-                                            if let Some(c) = complete_slash(rest) {
+                                        if let Some(rest) = app.input.strip_prefix('/')
+                                            && let Some(c) = complete_slash(rest) {
                                                 app.input = format!("/{c}");
                                             }
-                                        }
                                     }
                                     KeyCode::Up => {
                                         // YYC-70: arrows navigate the slash menu when open.
@@ -1757,7 +1745,6 @@ pub async fn run_tui(config: &Config, resume: ResumeTarget) -> Result<()> {
                                     _ => { pending_quit = false; }
                                 }
                             }
-                        }
                     }
                     Some(KeyEv::Error(e)) => {
                         tracing::error!("Terminal input error: {e}");
@@ -1775,13 +1762,12 @@ pub async fn run_tui(config: &Config, resume: ResumeTarget) -> Result<()> {
                             force_redraw |= stream_event_forces_redraw(&ev);
                             handle_stream_event(&mut app, &agent, &stream_tx, ev).await;
                         }
-                        if !force_redraw {
-                            if let RenderWake::Wait(delay) =
+                        if !force_redraw
+                            && let RenderWake::Wait(delay) =
                                 render_wake_for_stream_batch(last_draw, Instant::now(), false)
                             {
                                 tokio::time::sleep(delay).await;
                             }
-                        }
                     }
                     None => {
                         app.thinking = false;
@@ -1801,148 +1787,6 @@ pub async fn run_tui(config: &Config, resume: ResumeTarget) -> Result<()> {
 
     restore_terminal()?;
     Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn stream_batching_caps_stream_redraws_to_frame_budget() {
-        let start = Instant::now();
-
-        assert_eq!(
-            render_wake_for_stream_batch(start, start + Duration::from_millis(1), false),
-            RenderWake::Wait(Duration::from_millis(15))
-        );
-    }
-
-    #[test]
-    fn input_events_render_immediately() {
-        let start = Instant::now();
-
-        assert_eq!(
-            render_wake_for_stream_batch(start, start + Duration::from_millis(1), true),
-            RenderWake::Now
-        );
-    }
-
-    #[test]
-    fn model_command_is_available_and_deferred_mid_turn() {
-        let command = SLASH_COMMANDS
-            .iter()
-            .find(|cmd| cmd.name == "model")
-            .expect("model slash command");
-
-        assert!(!command.mid_turn_safe);
-        assert_eq!(filter_commands("mod")[0].name, "model");
-    }
-
-    #[test]
-    fn build_provider_picker_entries_lists_default_first_then_named_sorted() {
-        use crate::config::{Config, ProviderConfig};
-        use std::collections::HashMap;
-
-        let mut providers = HashMap::new();
-        let mut local = ProviderConfig::default();
-        local.base_url = "http://localhost:11434/v1".into();
-        local.model = "qwen2.5".into();
-        providers.insert("local".into(), local);
-        let mut alpha = ProviderConfig::default();
-        alpha.base_url = "https://alpha.example".into();
-        alpha.model = "alpha-1".into();
-        providers.insert("alpha".into(), alpha);
-
-        let mut config = Config::default();
-        config.provider.base_url = "https://openrouter.ai/api/v1".into();
-        config.provider.model = "deepseek/v4".into();
-        config.providers = providers;
-
-        let entries = build_provider_picker_entries(&config);
-        assert_eq!(entries.len(), 3);
-        assert!(entries[0].name.is_none());
-        assert_eq!(entries[0].model, "deepseek/v4");
-        assert_eq!(entries[1].name.as_deref(), Some("alpha"));
-        assert_eq!(entries[2].name.as_deref(), Some("local"));
-    }
-
-    #[test]
-    fn provider_command_is_available_and_deferred_mid_turn() {
-        let command = SLASH_COMMANDS
-            .iter()
-            .find(|cmd| cmd.name == "provider")
-            .expect("provider slash command");
-
-        assert!(!command.mid_turn_safe);
-        assert_eq!(filter_commands("prov")[0].name, "provider");
-    }
-
-    #[test]
-    fn format_provider_list_marks_active_profile_and_lists_named() {
-        use crate::config::{Config, ProviderConfig};
-        use std::collections::HashMap;
-
-        let mut providers = HashMap::new();
-        let mut local = ProviderConfig::default();
-        local.base_url = "http://localhost:11434/v1".into();
-        local.model = "qwen2.5".into();
-        providers.insert("local".into(), local);
-
-        let mut config = Config::default();
-        config.provider.base_url = "https://openrouter.ai/api/v1".into();
-        config.provider.model = "deepseek/v4".into();
-        config.providers = providers;
-
-        let active_default = format_provider_list(&config, None);
-        assert!(active_default.contains("* default · https://openrouter.ai/api/v1 · deepseek/v4"));
-        assert!(active_default.contains("  local · http://localhost:11434/v1 · qwen2.5"));
-
-        let active_local = format_provider_list(&config, Some("local"));
-        assert!(active_local.contains("  default · https://openrouter.ai/api/v1"));
-        assert!(active_local.contains("* local · http://localhost:11434/v1"));
-    }
-
-    #[test]
-    fn format_provider_list_handles_no_named_profiles() {
-        use crate::config::Config;
-        let config = Config::default();
-        let report = format_provider_list(&config, None);
-        assert!(report.contains("* default"));
-        assert!(report.contains("(no named [providers.<name>] profiles configured)"));
-    }
-
-    #[test]
-    fn format_model_list_marks_active_model() {
-        let models = vec![
-            crate::provider::catalog::ModelInfo {
-                id: "model-a".into(),
-                display_name: "Model A".into(),
-                context_length: 1_000,
-                pricing: None,
-                features: crate::provider::catalog::ModelFeatures {
-                    tools: true,
-                    vision: false,
-                    json_mode: true,
-                    reasoning: false,
-                },
-                top_provider: None,
-            },
-            crate::provider::catalog::ModelInfo {
-                id: "model-b".into(),
-                display_name: "Model B".into(),
-                context_length: 0,
-                pricing: None,
-                features: crate::provider::catalog::ModelFeatures::default(),
-                top_provider: None,
-            },
-        ];
-
-        let report = format_model_list("model-a", &models);
-
-        assert!(report.contains("* model-a · ctx 1,000 · tools,json"));
-        assert!(report.contains("  model-b · ctx unknown"));
-        assert!(report.contains("Use /model <id> to switch."));
-    }
 }
 
 fn draw_palette(
@@ -2572,4 +2416,146 @@ fn restore_terminal() -> Result<()> {
         ratatui::crossterm::terminal::LeaveAlternateScreen,
     )?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn stream_batching_caps_stream_redraws_to_frame_budget() {
+        let start = Instant::now();
+
+        assert_eq!(
+            render_wake_for_stream_batch(start, start + Duration::from_millis(1), false),
+            RenderWake::Wait(Duration::from_millis(15))
+        );
+    }
+
+    #[test]
+    fn input_events_render_immediately() {
+        let start = Instant::now();
+
+        assert_eq!(
+            render_wake_for_stream_batch(start, start + Duration::from_millis(1), true),
+            RenderWake::Now
+        );
+    }
+
+    #[test]
+    fn model_command_is_available_and_deferred_mid_turn() {
+        let command = SLASH_COMMANDS
+            .iter()
+            .find(|cmd| cmd.name == "model")
+            .expect("model slash command");
+
+        assert!(!command.mid_turn_safe);
+        assert_eq!(filter_commands("mod")[0].name, "model");
+    }
+
+    #[test]
+    fn build_provider_picker_entries_lists_default_first_then_named_sorted() {
+        use crate::config::{Config, ProviderConfig};
+        use std::collections::HashMap;
+
+        let mut providers = HashMap::new();
+        let mut local = ProviderConfig::default();
+        local.base_url = "http://localhost:11434/v1".into();
+        local.model = "qwen2.5".into();
+        providers.insert("local".into(), local);
+        let mut alpha = ProviderConfig::default();
+        alpha.base_url = "https://alpha.example".into();
+        alpha.model = "alpha-1".into();
+        providers.insert("alpha".into(), alpha);
+
+        let mut config = Config::default();
+        config.provider.base_url = "https://openrouter.ai/api/v1".into();
+        config.provider.model = "deepseek/v4".into();
+        config.providers = providers;
+
+        let entries = build_provider_picker_entries(&config);
+        assert_eq!(entries.len(), 3);
+        assert!(entries[0].name.is_none());
+        assert_eq!(entries[0].model, "deepseek/v4");
+        assert_eq!(entries[1].name.as_deref(), Some("alpha"));
+        assert_eq!(entries[2].name.as_deref(), Some("local"));
+    }
+
+    #[test]
+    fn provider_command_is_available_and_deferred_mid_turn() {
+        let command = SLASH_COMMANDS
+            .iter()
+            .find(|cmd| cmd.name == "provider")
+            .expect("provider slash command");
+
+        assert!(!command.mid_turn_safe);
+        assert_eq!(filter_commands("prov")[0].name, "provider");
+    }
+
+    #[test]
+    fn format_provider_list_marks_active_profile_and_lists_named() {
+        use crate::config::{Config, ProviderConfig};
+        use std::collections::HashMap;
+
+        let mut providers = HashMap::new();
+        let mut local = ProviderConfig::default();
+        local.base_url = "http://localhost:11434/v1".into();
+        local.model = "qwen2.5".into();
+        providers.insert("local".into(), local);
+
+        let mut config = Config::default();
+        config.provider.base_url = "https://openrouter.ai/api/v1".into();
+        config.provider.model = "deepseek/v4".into();
+        config.providers = providers;
+
+        let active_default = format_provider_list(&config, None);
+        assert!(active_default.contains("* default · https://openrouter.ai/api/v1 · deepseek/v4"));
+        assert!(active_default.contains("  local · http://localhost:11434/v1 · qwen2.5"));
+
+        let active_local = format_provider_list(&config, Some("local"));
+        assert!(active_local.contains("  default · https://openrouter.ai/api/v1"));
+        assert!(active_local.contains("* local · http://localhost:11434/v1"));
+    }
+
+    #[test]
+    fn format_provider_list_handles_no_named_profiles() {
+        use crate::config::Config;
+        let config = Config::default();
+        let report = format_provider_list(&config, None);
+        assert!(report.contains("* default"));
+        assert!(report.contains("(no named [providers.<name>] profiles configured)"));
+    }
+
+    #[test]
+    fn format_model_list_marks_active_model() {
+        let models = vec![
+            crate::provider::catalog::ModelInfo {
+                id: "model-a".into(),
+                display_name: "Model A".into(),
+                context_length: 1_000,
+                pricing: None,
+                features: crate::provider::catalog::ModelFeatures {
+                    tools: true,
+                    vision: false,
+                    json_mode: true,
+                    reasoning: false,
+                },
+                top_provider: None,
+            },
+            crate::provider::catalog::ModelInfo {
+                id: "model-b".into(),
+                display_name: "Model B".into(),
+                context_length: 0,
+                pricing: None,
+                features: crate::provider::catalog::ModelFeatures::default(),
+                top_provider: None,
+            },
+        ];
+
+        let report = format_model_list("model-a", &models);
+
+        assert!(report.contains("* model-a · ctx 1,000 · tools,json"));
+        assert!(report.contains("  model-b · ctx unknown"));
+        assert!(report.contains("Use /model <id> to switch."));
+    }
 }

@@ -10,7 +10,7 @@ pub fn format_thousands(n: u32) -> String {
     let bytes = s.as_bytes();
     let mut out = String::with_capacity(s.len() + s.len() / 3);
     for (i, b) in bytes.iter().enumerate() {
-        if i > 0 && (bytes.len() - i) % 3 == 0 {
+        if i > 0 && (bytes.len() - i).is_multiple_of(3) {
             out.push(',');
         }
         out.push(*b as char);
@@ -230,7 +230,7 @@ impl ChatMessage {
                 self.bump_render_version();
             }
             _ => {
-                let trimmed = chunk.trim_start_matches(|c: char| c == '\n' || c == '\r');
+                let trimmed = chunk.trim_start_matches(['\n', '\r']);
                 if trimmed.is_empty() {
                     return;
                 }
@@ -314,8 +314,7 @@ impl ChatMessage {
                 elapsed_ms: em,
                 ..
             } = seg
-            {
-                if n == name && matches!(status, ToolStatus::InProgress) {
+                && n == name && matches!(status, ToolStatus::InProgress) {
                     *status = ToolStatus::Done(ok);
                     *op = output_preview;
                     *rm = result_meta;
@@ -324,7 +323,6 @@ impl ChatMessage {
                     self.bump_render_version();
                     return;
                 }
-            }
         }
     }
 }
@@ -746,9 +744,9 @@ impl AppState {
     /// trading-floor tool-log pane. Returns demo data if no audit buffer is
     /// attached or it's still empty.
     pub fn tool_log_view(&self, max: usize) -> Vec<ToolLogRow> {
-        if let Some(buf) = &self.audit_log {
-            if let Ok(buf) = buf.lock() {
-                if !buf.is_empty() {
+        if let Some(buf) = &self.audit_log
+            && let Ok(buf) = buf.lock()
+                && !buf.is_empty() {
                     return buf
                         .iter()
                         .rev()
@@ -770,8 +768,6 @@ impl AppState {
                         .rev()
                         .collect();
                 }
-            }
-        }
         demo_tool_log()
     }
 
@@ -1403,7 +1399,7 @@ mod tests {
         // Ctrl+K) so prompt-row chips render in any terminal font.
         let app = AppState::new("test".into(), 100);
         let hints = app.prompt_hints();
-        let pairs: Vec<(String, String)> = hints.iter().cloned().collect();
+        let pairs: Vec<(String, String)> = hints.to_vec();
         assert!(
             pairs.contains(&("Ctrl+T".into(), "tools".into())),
             "expected Ctrl+T tools in {pairs:?}"
@@ -1424,7 +1420,7 @@ mod tests {
             mods: KeyModifiers::NONE,
         };
         let app = AppState::new("test".into(), 100).with_keybinds(kb);
-        let pairs: Vec<(String, String)> = app.prompt_hints().iter().cloned().collect();
+        let pairs: Vec<(String, String)> = app.prompt_hints().to_vec();
         assert!(
             pairs.contains(&("F2".into(), "tools".into())),
             "expected F2 tools in {pairs:?}"

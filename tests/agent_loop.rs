@@ -81,6 +81,7 @@ async fn agent_read_file_tool_result_flows_into_next_llm_turn() {
 }
 
 #[tokio::test]
+#[allow(clippy::await_holding_lock)]
 async fn agent_tool_loop_can_read_edit_and_cargo_check_real_project() {
     let _cwd = CWD_LOCK.lock().unwrap();
     let dir = tempdir().unwrap();
