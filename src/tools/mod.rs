@@ -333,6 +333,8 @@ impl ToolRegistry {
         registry.register(Arc::new(lsp::FindReferencesTool::new(lsp_mgr.clone())));
         registry.register(Arc::new(lsp::HoverTool::new(lsp_mgr.clone())));
         registry.register(Arc::new(lsp::DiagnosticsTool::new(lsp_mgr.clone())));
+        // YYC-201: workspace-wide symbol search via LSP.
+        registry.register(Arc::new(lsp::WorkspaceSymbolTool::new(lsp_mgr.clone())));
         // YYC-49: AST-aware structural edits.
         registry.register(Arc::new(code_edit::ReplaceFunctionBodyTool));
         registry.register(Arc::new(code_edit::RenameSymbolTool::new(lsp_mgr)));

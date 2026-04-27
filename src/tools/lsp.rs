@@ -7,7 +7,9 @@
 //! tree-sitter tools (YYC-45).
 
 use crate::code::Language;
-use crate::code::lsp::{LspManager, diagnostics_for, find_references, goto_definition, hover};
+use crate::code::lsp::{
+    LspManager, diagnostics_for, find_references, goto_definition, hover, workspace_symbol,
+};
 use crate::tools::{Tool, ToolResult};
 use anyhow::Result;
 use async_trait::async_trait;
@@ -209,6 +211,146 @@ impl Tool for HoverTool {
         };
         let payload = json!({ "hover": resp });
         Ok(ToolResult::ok(serde_json::to_string_pretty(&payload)?))
+    }
+}
+
+#[derive(Clone)]
+pub struct WorkspaceSymbolTool {
+    manager: Arc<LspManager>,
+}
+
+impl WorkspaceSymbolTool {
+    pub fn new(manager: Arc<LspManager>) -> Self {
+        Self { manager }
+    }
+}
+
+#[async_trait]
+impl Tool for WorkspaceSymbolTool {
+    fn name(&self) -> &str {
+        "workspace_symbol"
+    }
+    fn description(&self) -> &str {
+        "Search for symbols (functions, types, modules) by name across the workspace via LSP. Returns structured hits with file + line + container so the agent can find a definition without knowing the path. Falls back to a clear error when no LSP server is running for the language."
+    }
+    fn schema(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "Substring or fuzzy match against symbol names. Empty string lists everything (server-defined order)."
+                },
+                "language": {
+                    "type": "string",
+                    "description": "Which language's LSP to query. Required because workspace_symbol is a per-server search; e.g. \"rust\", \"typescript\", \"python\", \"go\"."
+                }
+            },
+            "required": ["query", "language"]
+        })
+    }
+    async fn call(&self, params: Value, _cancel: CancellationToken) -> Result<ToolResult> {
+        let query = params["query"]
+            .as_str()
+            .ok_or_else(|| anyhow::anyhow!("query required"))?;
+        let lang_name = params["language"]
+            .as_str()
+            .ok_or_else(|| anyhow::anyhow!("language required"))?;
+        let lang = match Language::from_name(lang_name) {
+            Some(l) => l,
+            None => {
+                return Ok(ToolResult::err(format!(
+                    "Unknown language `{lang_name}`. Supported: rust, typescript, javascript, python, go.",
+                )));
+            }
+        };
+        let server = match self.manager.server(lang).await {
+            Ok(s) => s,
+            Err(e) => {
+                return Ok(ToolResult::err(format!(
+                    "LSP unavailable for {}: {e}",
+                    lang.name(),
+                )));
+            }
+        };
+        let symbols = match workspace_symbol(&server, query).await {
+            Ok(r) => r.unwrap_or_default(),
+            Err(e) => return Ok(ToolResult::err(format!("{e}"))),
+        };
+        // Project the LSP shape into a leaner JSON the agent can read
+        // without learning lsp_types: name, kind (number → label),
+        // container, file, line (1-indexed for parity with the
+        // other tools).
+        let hits: Vec<Value> = symbols
+            .into_iter()
+            .map(|s| {
+                let path = s.location.uri.path().as_str().to_string();
+                let line = s.location.range.start.line + 1;
+                json!({
+                    "name": s.name,
+                    "kind": format!("{:?}", s.kind),
+                    "container": s.container_name,
+                    "file": path,
+                    "line": line,
+                })
+            })
+            .collect();
+        let payload = json!({
+            "query": query,
+            "language": lang.name(),
+            "count": hits.len(),
+            "hits": hits,
+        });
+        Ok(ToolResult::ok(serde_json::to_string_pretty(&payload)?))
+    }
+}
+
+#[cfg(test)]
+mod workspace_symbol_tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    fn tool() -> WorkspaceSymbolTool {
+        WorkspaceSymbolTool::new(Arc::new(LspManager::new(PathBuf::from("."))))
+    }
+
+    // YYC-201: missing query is rejected up front.
+    #[tokio::test]
+    async fn workspace_symbol_requires_query() {
+        let t = tool();
+        let err = t
+            .call(json!({"language": "rust"}), CancellationToken::new())
+            .await
+            .expect_err("missing query must error");
+        assert!(format!("{err:#}").contains("query required"));
+    }
+
+    // YYC-201: missing language is rejected up front.
+    #[tokio::test]
+    async fn workspace_symbol_requires_language() {
+        let t = tool();
+        let err = t
+            .call(json!({"query": "foo"}), CancellationToken::new())
+            .await
+            .expect_err("missing language must error");
+        assert!(format!("{err:#}").contains("language required"));
+    }
+
+    // YYC-201: unknown language → structured ToolResult error,
+    // not a panic. Lists the supported set so the agent can retry.
+    #[tokio::test]
+    async fn workspace_symbol_unknown_language_returns_tool_error() {
+        let t = tool();
+        let result = t
+            .call(
+                json!({"query": "foo", "language": "klingon"}),
+                CancellationToken::new(),
+            )
+            .await
+            .expect("call ok");
+        assert!(result.is_error);
+        assert!(result.output.contains("Unknown language"));
+        assert!(result.output.contains("rust"));
     }
 }
 

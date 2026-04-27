@@ -55,6 +55,21 @@ impl Language {
         }
     }
 
+    /// YYC-201: inverse of `name()`. Used by the workspace_symbol
+    /// tool, which takes a language string from the agent (`"rust"`,
+    /// `"go"`, …) rather than a file path.
+    pub fn from_name(s: &str) -> Option<Self> {
+        match s.to_ascii_lowercase().as_str() {
+            "rust" => Some(Self::Rust),
+            "python" | "py" => Some(Self::Python),
+            "typescript" | "ts" => Some(Self::TypeScript),
+            "javascript" | "js" => Some(Self::JavaScript),
+            "go" => Some(Self::Go),
+            "json" => Some(Self::Json),
+            _ => None,
+        }
+    }
+
     /// Tree-sitter grammar for this language.
     fn grammar(self) -> TsLanguage {
         match self {
