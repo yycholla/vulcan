@@ -79,6 +79,8 @@ mod tests {
             outbound: Arc::new(crate::gateway::queue::OutboundQueue::new(db.clone(), 5)),
             registry: Arc::new(registry),
             agent_map: Arc::new(agent_map),
+            scheduler_jobs: Arc::new(Vec::new()),
+            scheduler_store: None,
         }
     }
 
@@ -194,6 +196,8 @@ mod tests {
             )),
             registry: Arc::new(registry_with_loopback()),
             agent_map: Arc::new(agent_map),
+            scheduler_jobs: Arc::new(Vec::new()),
+            scheduler_store: None,
         };
         let app = build_router(state);
         let resp = app

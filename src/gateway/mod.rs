@@ -208,12 +208,23 @@ where
         Arc::clone(&commands),
     );
 
+    // YYC-17 PR-4: clone the scheduler config + store handle into
+    // AppState so the /v1/scheduler observability route can answer
+    // without going through the runtime.
+    let scheduler_jobs = Arc::new(scheduler_config.jobs.clone());
+    let scheduler_store_for_route = if !scheduler_config.jobs.is_empty() {
+        Some(scheduler_store::SchedulerStore::new(db.clone()))
+    } else {
+        None
+    };
     let app = build_router(AppState {
         api_token: Arc::new(gateway.api_token),
         inbound,
         outbound,
         registry,
         agent_map,
+        scheduler_jobs,
+        scheduler_store: scheduler_store_for_route,
     });
 
     let addr = listener
