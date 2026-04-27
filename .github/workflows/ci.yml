@@ -94,7 +94,10 @@ jobs:
       - name: Generate coverage (lcov)
         run: cargo llvm-cov nextest --all-features --workspace --lcov --output-path lcov.info
       - name: Coverage summary
-        run: cargo llvm-cov report --all-features --workspace --summary-only
+        # `report` reads the data the previous `nextest` step generated;
+        # it doesn't take feature flags. Newer cargo-llvm-cov rejects
+        # `--all-features` on this subcommand outright.
+        run: cargo llvm-cov report --summary-only
       - name: Upload lcov
         uses: actions/upload-artifact@v4
         with:
