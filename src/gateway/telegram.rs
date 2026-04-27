@@ -1,18 +1,23 @@
 //! Telegram platform connector powered by teloxide-core.
 //!
-//! `TelegramPlatform` implements `Platform` against teloxide-core's
-//! HTTP client + types. Webhook receive: `verify_webhook` reads
-//! `X-Telegram-Bot-Api-Secret-Token` and constant-time compares via
-//! `subtle`. The /webhook/:platform route is shared with other
-//! platforms.
+//! Two receive paths feed the same `InboundQueue`:
 //!
-//! Inbound parsing flows through `inbound_from_value` (serde_json
+//!   * Long-poll: `spawn_long_poll` runs `bot.get_updates()` with
+//!     offset-based ack in a tokio task. Mirrors Discord's
+//!     `spawn_gateway_client` — fire-and-forget JoinHandle.
+//!   * Webhook: `verify_webhook` reads
+//!     `X-Telegram-Bot-Api-Secret-Token` and constant-time compares
+//!     via `subtle`. The /webhook/:platform route is shared with
+//!     other platforms.
+//!
+//! Both paths normalize through `inbound_from_value` (serde_json
 //! Update shape parser) -> `inbound_from_update_parts` (parts +
 //! allow-list filter) so the shape and filter logic lives in one
-//! place. The long-poll receive task lives in a separate file-local
-//! impl block and feeds the same helpers.
+//! place. Live HTTP path is exercised by integration tests / manual
+//! smoke; the parsing helpers are unit-tested.
 
 use std::collections::HashSet;
+use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use teloxide_core::{
@@ -20,7 +25,9 @@ use teloxide_core::{
     prelude::Requester,
     types::{ChatId, MessageId, ReplyParameters},
 };
+use tokio::task::JoinHandle;
 
+use crate::gateway::queue::InboundQueue;
 use crate::platform::{
     InboundMessage, OutboundMessage, Platform, PlatformCapabilities, SentMessage,
 };
@@ -116,6 +123,26 @@ impl TelegramPlatform {
             .map(MessageId)
             .with_context(|| format!("invalid Telegram message_id '{id}'"))
     }
+
+    /// Spawn the long-poll loop. Returns a JoinHandle the gateway can
+    /// abort on shutdown. Errors inside the loop are logged + the loop
+    /// continues — Telegram's getUpdates is idempotent (offset-based)
+    /// so transient failures self-heal on the next call.
+    pub fn spawn_long_poll(
+        bot_token: String,
+        allowed_chat_ids: Vec<i64>,
+        poll_interval_secs: u32,
+        inbound: Arc<InboundQueue>,
+    ) -> Result<JoinHandle<()>> {
+        if bot_token.trim().is_empty() {
+            anyhow::bail!("gateway.telegram.bot_token is required when Telegram is enabled");
+        }
+        let allowed = allowed_set(allowed_chat_ids);
+        let bot = Bot::new(bot_token);
+        Ok(tokio::spawn(async move {
+            run_long_poll(bot, allowed, poll_interval_secs, inbound).await;
+        }))
+    }
 }
 
 fn allowed_set(ids: Vec<i64>) -> Option<HashSet<i64>> {
@@ -205,6 +232,59 @@ impl Platform for TelegramPlatform {
             // Telegram caps edits to ~1/sec/chat. The renderer's
             // throttle reads this to space out streaming chunks.
             edit_min_interval_ms: 1000,
+        }
+    }
+}
+
+async fn run_long_poll(
+    bot: Bot,
+    allowed: Option<HashSet<i64>>,
+    poll_interval_secs: u32,
+    inbound: Arc<InboundQueue>,
+) {
+    use teloxide_core::payloads::GetUpdatesSetters;
+    let mut offset: i32 = 0;
+    loop {
+        let req = bot.get_updates().offset(offset).timeout(poll_interval_secs);
+        match req.await {
+            Ok(updates) => {
+                for u in updates {
+                    // UpdateId is u32; cast saturating to i32 because the
+                    // GetUpdates `offset` parameter is i32. Telegram's
+                    // update ids are monotonically increasing but bounded
+                    // well below i32::MAX in practice.
+                    offset = (u.id.0 as i32).saturating_add(1);
+                    let val = match serde_json::to_value(&u) {
+                        Ok(v) => v,
+                        Err(e) => {
+                            tracing::warn!(
+                                target: "gateway::telegram",
+                                error = %e,
+                                "could not serialize Update to value",
+                            );
+                            continue;
+                        }
+                    };
+                    let Some(inb) = TelegramPlatform::inbound_from_value(&val, &allowed) else {
+                        continue;
+                    };
+                    if let Err(e) = inbound.enqueue(inb).await {
+                        tracing::error!(
+                            target: "gateway::telegram",
+                            error = %e,
+                            "failed to enqueue telegram inbound",
+                        );
+                    }
+                }
+            }
+            Err(e) => {
+                tracing::warn!(
+                    target: "gateway::telegram",
+                    error = %e,
+                    "telegram getUpdates failed; backing off",
+                );
+                tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+            }
         }
     }
 }
