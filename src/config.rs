@@ -355,6 +355,12 @@ pub struct ProviderConfig {
     /// turn ends with a "reached maximum iteration limit" message.
     #[serde(default)]
     pub max_iterations: u32,
+    /// Cap on `max_tokens` (max output tokens) the provider will produce
+    /// for a single response. Provider default if `None` (currently 8096).
+    /// Lower this for small-context models where the default would crowd
+    /// out room for the prompt; raise it for models with long-form output.
+    #[serde(default)]
+    pub max_output_tokens: Option<usize>,
 }
 
 #[derive(Debug, Deserialize, Clone, Default)]
@@ -497,6 +503,7 @@ impl Default for ProviderConfig {
             disable_catalog: false,
             debug: ProviderDebugMode::Off,
             max_iterations: 0,
+            max_output_tokens: None,
         }
     }
 }

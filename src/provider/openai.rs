@@ -10,6 +10,11 @@ use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
+/// Default cap on output tokens when the user hasn't configured one.
+/// Anthropic Sonnet/Haiku, GPT-4o, OpenRouter all accept up to 8192;
+/// 8096 leaves a small margin and matches the historical hardcode.
+pub(crate) const DEFAULT_MAX_OUTPUT_TOKENS: usize = 8096;
+
 /// OpenAI-compatible provider (works with OpenRouter, Anthropic, Ollama, etc.)
 pub struct OpenAIProvider {
     client: Client,
@@ -18,6 +23,7 @@ pub struct OpenAIProvider {
     model: String,
     max_context: usize,
     max_retries: u32,
+    max_output_tokens: usize,
     /// Capability metadata from the provider catalog. This tells us the model
     /// can support structured outputs if some future caller explicitly asks
     /// for them, but normal chat/tool turns do not auto-enable
@@ -27,12 +33,14 @@ pub struct OpenAIProvider {
 }
 
 impl OpenAIProvider {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         base_url: &str,
         api_key: &str,
         model: &str,
         max_context: usize,
         max_retries: u32,
+        max_output_tokens: Option<usize>,
         supports_json_mode: bool,
         debug_mode: ProviderDebugMode,
     ) -> Result<Self> {
@@ -48,6 +56,7 @@ impl OpenAIProvider {
             model: model.to_string(),
             max_context,
             max_retries,
+            max_output_tokens: max_output_tokens.unwrap_or(DEFAULT_MAX_OUTPUT_TOKENS),
             _supports_json_mode: supports_json_mode,
             debug_mode,
         })
@@ -58,7 +67,7 @@ impl OpenAIProvider {
             "model": self.model,
             "messages": messages,
             "stream": true,
-            "max_tokens": 8096,
+            "max_tokens": self.max_output_tokens,
         });
 
         if !tools.is_empty() {
@@ -1052,6 +1061,7 @@ mod tests {
             "test-model",
             128_000,
             0,
+            None,
             supports_json_mode,
             ProviderDebugMode::Off,
         )

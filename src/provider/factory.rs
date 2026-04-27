@@ -47,6 +47,7 @@ impl ProviderFactory for DefaultProviderFactory {
                     &cfg.model,
                     max_context,
                     cfg.max_retries,
+                    cfg.max_output_tokens,
                     json_mode,
                     cfg.debug,
                 )
