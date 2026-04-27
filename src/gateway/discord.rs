@@ -85,17 +85,25 @@ impl Platform for DiscordPlatform {
         Ok(())
     }
 
-    async fn send(&self, msg: &OutboundMessage) -> Result<()> {
+    async fn send(&self, msg: &OutboundMessage) -> Result<crate::platform::SentMessage> {
         let channel_id = ChannelId::new(Self::channel_id_from_chat(&msg.chat_id)?);
-        channel_id
+        let sent = channel_id
             .say(&self.http, &msg.text)
             .await
             .context("discord send failed")?;
-        Ok(())
+        Ok(crate::platform::SentMessage {
+            message_id: sent.id.get().to_string(),
+        })
     }
 
     async fn recv(&self) -> Result<InboundMessage> {
         anyhow::bail!("discord receives messages through the Serenity gateway task")
+    }
+
+    fn capabilities(&self) -> crate::platform::PlatformCapabilities {
+        // PR-1 declares only what's wired today (text-only send). PR-4
+        // flips edit + media + threads to true alongside their wire impls.
+        crate::platform::PlatformCapabilities::default()
     }
 }
 
@@ -190,5 +198,18 @@ mod tests {
     fn channel_id_from_chat_rejects_non_numeric_chat_id() {
         let err = DiscordPlatform::channel_id_from_chat("not-a-channel").expect_err("invalid id");
         assert!(err.to_string().contains("invalid Discord channel id"));
+    }
+
+    #[test]
+    fn discord_capabilities_declare_no_features_for_now() {
+        // PR-1 declares Discord's current shipping surface (no edit, no
+        // typed media). PR-4 flips these to true alongside the matching
+        // wire impls.
+        let p = DiscordPlatform::new("Bot abc.def.ghi").expect("ctor");
+        let caps = p.capabilities();
+        assert!(!caps.supports_edit);
+        assert!(!caps.supports_media_send);
+        assert!(!caps.supports_media_recv);
+        assert!(!caps.supports_threads);
     }
 }

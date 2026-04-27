@@ -97,7 +97,9 @@ async fn drain_due(queue: &OutboundQueue, registry: &PlatformRegistry) -> anyhow
             attachments: row.attachments,
         };
         match registry.send(&msg).await {
-            Ok(()) => queue.mark_done(id).await?,
+            Ok(_sent) => queue.mark_done(id).await?,
+            // PR-2 will capture `_sent.message_id` into RenderRegistry so
+            // edit-in-place can target it. For PR-1 the id is logged-only.
             Err(e) => queue.mark_failed(id, &e.to_string()).await?,
         }
     }

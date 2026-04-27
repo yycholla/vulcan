@@ -32,7 +32,7 @@ impl PlatformRegistry {
         self.inner.get(name).cloned()
     }
 
-    pub async fn send(&self, msg: &OutboundMessage) -> Result<()> {
+    pub async fn send(&self, msg: &OutboundMessage) -> Result<crate::platform::SentMessage> {
         let plat = self
             .get(&msg.platform)
             .ok_or_else(|| anyhow!("unknown platform: {}", msg.platform))?;
@@ -80,6 +80,21 @@ mod tests {
     async fn registry_get_returns_none_for_missing() {
         let reg = PlatformRegistry::new();
         assert!(reg.get("nope").is_none());
+    }
+
+    #[tokio::test]
+    async fn registry_send_returns_sent_message_id() {
+        let lp = Arc::new(LoopbackPlatform::default());
+        let mut reg = PlatformRegistry::new();
+        reg.register("loopback", lp.clone());
+        let sent = reg
+            .send(&out_msg("loopback", "c", "hello"))
+            .await
+            .expect("send ok");
+        assert!(!sent.message_id.is_empty(), "message id should be set");
+        let recorded = lp.recorded().await;
+        assert_eq!(recorded.len(), 1);
+        assert_eq!(recorded[0].text, "hello");
     }
 
     #[tokio::test]
