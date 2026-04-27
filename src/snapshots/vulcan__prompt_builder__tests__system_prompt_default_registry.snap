@@ -6,7 +6,7 @@ expression: normalized
 You are Vulcan, a Rust AI agent. You help with coding, research, file management, and automation.
 
 ## Environment
-- working directory: `/home/yycholla/vulcan`
+- working directory: <CWD>
 - bash and other shell commands run in the working directory unless `workdir` is supplied.
 
 ## Guidelines

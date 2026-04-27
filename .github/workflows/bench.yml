@@ -74,6 +74,12 @@ jobs:
 
       - name: Diff against baseline (PR only)
         if: github.event_name == 'pull_request' && hashFiles('.ci/baseline/bench-results.json') != ''
+        # Bench is informational. The baseline artifact only refreshes
+        # on the nightly main run; stacked PRs frequently see "x8
+        # regression" simply because the baseline is older than main.
+        # Treat the diff step as a warning surfaced in the run log
+        # rather than a merge blocker.
+        continue-on-error: true
         run: |
           python3 scripts/bench-diff.py \
             target/bench-results.json \

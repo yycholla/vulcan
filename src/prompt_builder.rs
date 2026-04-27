@@ -132,18 +132,43 @@ mod tests {
         // single placeholder so prompt copy changes are caught here, but
         // tool churn lives in dedicated assertions above.
         let marker = "## Available Tools";
-        let Some(start) = prompt.find(marker) else {
-            return prompt.to_string();
-        };
-        let tail = &prompt[start + marker.len()..];
-        let end_rel = tail.find("\n##").unwrap_or(tail.len());
         let mut out = String::with_capacity(prompt.len());
-        out.push_str(&prompt[..start]);
-        out.push_str(marker);
-        out.push_str("\n<tool list normalized>\n");
-        out.push_str(&tail[end_rel..]);
+        if let Some(start) = prompt.find(marker) {
+            let tail = &prompt[start + marker.len()..];
+            let end_rel = tail.find("\n##").unwrap_or(tail.len());
+            out.push_str(&prompt[..start]);
+            out.push_str(marker);
+            out.push_str("\n<tool list normalized>\n");
+            out.push_str(&tail[end_rel..]);
+        } else {
+            out.push_str(prompt);
+        }
+        // Snapshot guard runs in CI (different absolute path) and on the
+        // contributor's box. Strip the working-directory line so the
+        // snapshot pins prompt copy, not the runner's filesystem.
+        normalize_cwd_line(&out)
+    }
+
+
+    fn normalize_cwd_line(prompt: &str) -> String {
+        let mut out = String::with_capacity(prompt.len());
+        for line in prompt.split_inclusive('\n') {
+            let trimmed = line.trim_start();
+            if trimmed.starts_with("- working directory:") {
+                let leading_ws = &line[..line.len() - trimmed.len()];
+                out.push_str(leading_ws);
+                out.push_str("- working directory: <CWD>");
+                // Preserve original line ending
+                if line.ends_with('\n') {
+                    out.push('\n');
+                }
+            } else {
+                out.push_str(line);
+            }
+        }
         out
     }
+
 
     /// YYC-86: the prompt must steer the model toward native tools and
     /// position bash as a last resort. Without this section, even with
