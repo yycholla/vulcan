@@ -16,6 +16,8 @@
 use crate::code::Language;
 use anyhow::{Context, Result, anyhow};
 use lsp_types::{
+    CallHierarchyIncomingCall, CallHierarchyIncomingCallsParams, CallHierarchyItem,
+    CallHierarchyOutgoingCall, CallHierarchyOutgoingCallsParams, CallHierarchyPrepareParams,
     ClientCapabilities, Diagnostic, DidOpenTextDocumentParams, GotoDefinitionParams,
     GotoDefinitionResponse, Hover, HoverParams, InitializeParams, InitializedParams, Location,
     Position, ReferenceContext, ReferenceParams, SymbolInformation, TextDocumentIdentifier,
@@ -930,6 +932,72 @@ fn flatten_goto_response(r: GotoDefinitionResponse) -> Vec<Location> {
             })
             .collect(),
     }
+}
+
+/// YYC-203: prepare a call-hierarchy item at the given position.
+/// LSP's call hierarchy is a two-step query: first resolve the
+/// symbol at the cursor to a `CallHierarchyItem`, then ask the
+/// server for its incoming or outgoing calls. Returns an empty
+/// vec when the position doesn't resolve to a callable symbol.
+pub async fn prepare_call_hierarchy(
+    server: &LspServer,
+    path: &Path,
+    line: u32,
+    character: u32,
+) -> Result<Vec<CallHierarchyItem>> {
+    prepare_request(server, path).await?;
+    let uri = path_to_uri(path)?;
+    let params = CallHierarchyPrepareParams {
+        text_document_position_params: TextDocumentPositionParams {
+            text_document: TextDocumentIdentifier { uri },
+            position: Position { line, character },
+        },
+        work_done_progress_params: Default::default(),
+    };
+    let resp: Option<Vec<CallHierarchyItem>> = server
+        .request("textDocument/prepareCallHierarchy", params)
+        .await?;
+    server.mark_ready();
+    Ok(resp.unwrap_or_default())
+}
+
+/// YYC-203: resolve incoming calls for an already-prepared call-
+/// hierarchy item. The `from` field on each result is the calling
+/// function; `from_ranges` are the call sites within it.
+pub async fn call_hierarchy_incoming(
+    server: &LspServer,
+    item: CallHierarchyItem,
+) -> Result<Vec<CallHierarchyIncomingCall>> {
+    let params = CallHierarchyIncomingCallsParams {
+        item,
+        work_done_progress_params: Default::default(),
+        partial_result_params: Default::default(),
+    };
+    let resp: Option<Vec<CallHierarchyIncomingCall>> = server
+        .request("callHierarchy/incomingCalls", params)
+        .await?;
+    server.mark_ready();
+    Ok(resp.unwrap_or_default())
+}
+
+/// YYC-203: resolve outgoing calls for an already-prepared call-
+/// hierarchy item. The `to` field on each result is the called
+/// function; `from_ranges` are the call sites within the prepared
+/// item that reach it.
+pub async fn call_hierarchy_outgoing(
+    server: &LspServer,
+    item: CallHierarchyItem,
+) -> Result<Vec<CallHierarchyOutgoingCall>> {
+    let params = CallHierarchyOutgoingCallsParams {
+        item,
+        work_done_progress_params: Default::default(),
+        partial_result_params: Default::default(),
+    };
+    let resp: Option<Vec<CallHierarchyOutgoingCall>> = server
+        .request("callHierarchy/outgoingCalls", params)
+        .await?;
+    server.mark_ready();
+    Ok(resp.unwrap_or_default())
 }
 
 /// YYC-201: workspace-wide symbol search. Mirrors `goto_definition`
