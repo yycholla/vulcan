@@ -148,6 +148,14 @@ theme = "system"
 # bot_token = "..."
 # allow_bots = false
 
+# YYC-18 PR-2c: gateway slash commands.
+# Builtins (help / status / clear / resume) are registered automatically;
+# entries here override or add custom commands. Shell commands receive
+# VULCAN_PLATFORM / VULCAN_CHAT_ID / VULCAN_USER_ID env vars and the
+# user's message body on stdin.
+# [gateway.commands]
+# mybot = { kind = "shell", command = "scripts/mybot.sh", timeout_secs = 30 }
+
 [keybinds]
 # TUI key bindings (YYC-90). Strings are parsed at startup; unparseable
 # values fall back to the defaults shown here with a tracing warning.
