@@ -14,8 +14,9 @@ use anyhow::Result;
 use lsp_types::{
     CallHierarchyIncomingCall, CallHierarchyIncomingCallsParams, CallHierarchyItem,
     CallHierarchyOutgoingCall, CallHierarchyOutgoingCallsParams, CallHierarchyPrepareParams,
-    Diagnostic, GotoDefinitionParams, GotoDefinitionResponse, Hover, HoverParams, Location,
-    Position, ReferenceContext, ReferenceParams, SymbolInformation, TextDocumentIdentifier,
+    CodeActionContext, CodeActionOrCommand, CodeActionParams, CodeActionResponse, Diagnostic,
+    GotoDefinitionParams, GotoDefinitionResponse, Hover, HoverParams, Location, Position, Range,
+    ReferenceContext, ReferenceParams, SymbolInformation, TextDocumentIdentifier,
     TextDocumentPositionParams, WorkspaceSymbolParams, WorkspaceSymbolResponse,
     request::{GotoImplementationResponse, GotoTypeDefinitionResponse},
 };
@@ -252,6 +253,37 @@ pub async fn workspace_symbol(
         // file + line, not full-range spans.
         WorkspaceSymbolResponse::Nested(_) => Vec::new(),
     }))
+}
+
+/// YYC-204: list available code actions (fix-its + refactors) for a
+/// line range. Input range is 0-indexed half-open per LSP spec.
+/// Pass any diagnostics the caller wants the server to consider —
+/// rust-analyzer / pyright surface different actions when a
+/// diagnostic is in scope (e.g. "import this name", "remove unused").
+pub async fn code_action(
+    server: &LspServer,
+    path: &Path,
+    start: Position,
+    end: Position,
+    diagnostics: Vec<Diagnostic>,
+) -> Result<Vec<CodeActionOrCommand>> {
+    prepare_request(server, path).await?;
+    let uri = path_to_uri(path)?;
+    let params = CodeActionParams {
+        text_document: TextDocumentIdentifier { uri },
+        range: Range { start, end },
+        context: CodeActionContext {
+            diagnostics,
+            only: None,
+            trigger_kind: None,
+        },
+        work_done_progress_params: Default::default(),
+        partial_result_params: Default::default(),
+    };
+    let resp: Option<CodeActionResponse> =
+        server.request("textDocument/codeAction", params).await?;
+    server.mark_ready();
+    Ok(resp.unwrap_or_default())
 }
 
 /// Open the file then return what the server has cached. Diagnostics

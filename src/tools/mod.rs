@@ -340,6 +340,8 @@ impl ToolRegistry {
         registry.register(Arc::new(lsp::ImplementationTool::new(lsp_mgr.clone())));
         // YYC-203: incoming/outgoing call hierarchy.
         registry.register(Arc::new(lsp::CallHierarchyTool::new(lsp_mgr.clone())));
+        // YYC-204: code actions (fix-its + refactors).
+        registry.register(Arc::new(lsp::CodeActionTool::new(lsp_mgr.clone())));
         // YYC-49: AST-aware structural edits.
         registry.register(Arc::new(code_edit::ReplaceFunctionBodyTool));
         registry.register(Arc::new(code_edit::RenameSymbolTool::new(lsp_mgr)));

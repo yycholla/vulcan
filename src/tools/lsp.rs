@@ -8,9 +8,9 @@
 
 use crate::code::Language;
 use crate::code::lsp::{
-    LspManager, call_hierarchy_incoming, call_hierarchy_outgoing, diagnostics_for, find_references,
-    goto_definition, hover, implementation, prepare_call_hierarchy, type_definition,
-    workspace_symbol,
+    LspManager, call_hierarchy_incoming, call_hierarchy_outgoing, code_action, diagnostics_for,
+    find_references, goto_definition, hover, implementation, prepare_call_hierarchy,
+    type_definition, workspace_symbol,
 };
 use crate::tools::{Tool, ToolResult};
 use anyhow::Result;
@@ -336,6 +336,121 @@ impl Tool for ImplementationTool {
             Err(e) => return Ok(ToolResult::err(format!("{e}"))),
         };
         let payload = json!({ "implementations": locs });
+        Ok(ToolResult::ok(serde_json::to_string_pretty(&payload)?))
+    }
+}
+
+#[derive(Clone)]
+pub struct CodeActionTool {
+    manager: Arc<LspManager>,
+}
+
+impl CodeActionTool {
+    pub fn new(manager: Arc<LspManager>) -> Self {
+        Self { manager }
+    }
+}
+
+#[async_trait]
+impl Tool for CodeActionTool {
+    fn name(&self) -> &str {
+        "code_action"
+    }
+    fn description(&self) -> &str {
+        "List the LSP code actions (fix-its + refactors) available for a line range. Returns each action's title, kind, whether it's marked preferred by the server, and whether it carries an edit. This tool is read-only; applying the edit is a separate step."
+    }
+    fn schema(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "path": { "type": "string" },
+                "start_line": {
+                    "type": "integer",
+                    "description": "1-indexed source line where the range starts"
+                },
+                "end_line": {
+                    "type": "integer",
+                    "description": "1-indexed source line where the range ends (inclusive). Defaults to start_line."
+                },
+                "start_character": {
+                    "type": "integer",
+                    "description": "0-indexed column at start. Default 0."
+                },
+                "end_character": {
+                    "type": "integer",
+                    "description": "0-indexed column at end. Default 0; the server treats line-only ranges as the whole line."
+                }
+            },
+            "required": ["path", "start_line"]
+        })
+    }
+    async fn call(&self, params: Value, _cancel: CancellationToken) -> Result<ToolResult> {
+        use lsp_types::Position as LspPosition;
+        let path = params["path"]
+            .as_str()
+            .ok_or_else(|| anyhow::anyhow!("path required"))?;
+        let start_line = params["start_line"]
+            .as_u64()
+            .ok_or_else(|| anyhow::anyhow!("start_line required"))?;
+        let end_line = params["end_line"].as_u64().unwrap_or(start_line);
+        let start_char = params["start_character"].as_u64().unwrap_or(0) as u32;
+        let end_char = params["end_character"].as_u64().unwrap_or(0) as u32;
+        let lang = match lang_for(path) {
+            Ok(l) => l,
+            Err(e) => return Ok(ToolResult::err(e.to_string())),
+        };
+        let server = match self.manager.server(lang).await {
+            Ok(s) => s,
+            Err(e) => {
+                return Ok(ToolResult::err(format!(
+                    "LSP unavailable for {}: {e}",
+                    lang.name()
+                )));
+            }
+        };
+        let pb = PathBuf::from(path);
+        let start = LspPosition {
+            line: (start_line as u32).saturating_sub(1),
+            character: start_char,
+        };
+        let end = LspPosition {
+            line: (end_line as u32).saturating_sub(1),
+            character: end_char,
+        };
+        // Pull current cached diagnostics so the server can offer
+        // diagnostic-keyed fixes (e.g. rust-analyzer's "import this
+        // name"). Empty diagnostics are valid; the server still
+        // returns refactors that don't depend on errors.
+        let diags = server.cached_diagnostics(&pb).await;
+        let actions = match code_action(&server, &pb, start, end, diags).await {
+            Ok(a) => a,
+            Err(e) => return Ok(ToolResult::err(format!("{e}"))),
+        };
+        // Project the LSP shape into a flat agent-friendly list.
+        let hits: Vec<Value> = actions
+            .into_iter()
+            .map(|a| match a {
+                lsp_types::CodeActionOrCommand::Command(cmd) => json!({
+                    "title": cmd.title,
+                    "kind": "command",
+                    "is_preferred": false,
+                    "has_edit": false,
+                    "command": cmd.command,
+                }),
+                lsp_types::CodeActionOrCommand::CodeAction(action) => json!({
+                    "title": action.title,
+                    "kind": action.kind.map(|k| k.as_str().to_string()),
+                    "is_preferred": action.is_preferred.unwrap_or(false),
+                    "has_edit": action.edit.is_some(),
+                    "command": action.command.map(|c| c.command),
+                }),
+            })
+            .collect();
+        let payload = json!({
+            "path": path,
+            "count": hits.len(),
+            "actions": hits,
+        });
         Ok(ToolResult::ok(serde_json::to_string_pretty(&payload)?))
     }
 }
