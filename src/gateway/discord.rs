@@ -58,14 +58,27 @@ impl DiscordPlatform {
 
     fn map_attachment(att: &serenity::model::channel::Attachment) -> crate::platform::Attachment {
         use crate::platform::{Attachment, AttachmentKind};
+        // Robust MIME-prefix classifier: handle parameters
+        // ("image/png; charset=utf-8") and case ("IMAGE/PNG").
         let kind = att
             .content_type
             .as_deref()
-            .map(|mime| match mime.split('/').next().unwrap_or("") {
-                "image" => AttachmentKind::Image,
-                "video" => AttachmentKind::Video,
-                "audio" => AttachmentKind::Audio,
-                _ => AttachmentKind::Document,
+            .map(|mime| {
+                let primary = mime
+                    .split(';')
+                    .next()
+                    .unwrap_or("")
+                    .trim()
+                    .split('/')
+                    .next()
+                    .unwrap_or("")
+                    .to_ascii_lowercase();
+                match primary.as_str() {
+                    "image" => AttachmentKind::Image,
+                    "video" => AttachmentKind::Video,
+                    "audio" => AttachmentKind::Audio,
+                    _ => AttachmentKind::Document,
+                }
             })
             .unwrap_or(AttachmentKind::Other);
         Attachment {
@@ -172,7 +185,8 @@ impl Platform for DiscordPlatform {
         &self,
         att: &crate::platform::Attachment,
     ) -> Result<std::path::PathBuf> {
-        use std::io::Write;
+        use futures_util::StreamExt;
+        use tokio::io::AsyncWriteExt;
         let url = att
             .url
             .as_ref()
@@ -182,30 +196,51 @@ impl Platform for DiscordPlatform {
             .with_context(|| format!("fetch {url}"))?
             .error_for_status()
             .with_context(|| format!("non-2xx fetching {url}"))?;
-        let bytes = resp.bytes().await.context("read attachment body")?;
 
         let dir = crate::config::vulcan_home()
             .join("attachments")
             .join("discord");
-        std::fs::create_dir_all(&dir).context("create attachments dir")?;
-        let filename = att
-            .original_name
-            .clone()
-            .unwrap_or_else(|| format!("att-{}.bin", uuid::Uuid::new_v4()));
-        // Strip any path separators — file came from the network.
-        let filename = std::path::Path::new(&filename)
-            .file_name()
+        tokio::fs::create_dir_all(&dir)
+            .await
+            .context("create attachments dir")?;
+        // Filename strategy: take Path::file_name() of the network-supplied
+        // name to defang `../etc/passwd` style traversal. If the result is
+        // None or degenerate (empty / "."  / ".."), fall through to a UUID
+        // so adversarial names can't collide on a literal "attachment"
+        // landing pad.
+        let raw = att.original_name.as_deref();
+        let stripped = raw
+            .and_then(|n| std::path::Path::new(n).file_name())
             .and_then(|s| s.to_str())
-            .unwrap_or("attachment")
-            .to_string();
+            .filter(|s| !s.is_empty() && *s != "." && *s != "..");
+        let filename = match stripped {
+            Some(n) => n.to_string(),
+            None => format!("att-{}.bin", uuid::Uuid::new_v4()),
+        };
         let path = dir.join(&filename);
-        let mut f =
-            std::fs::File::create(&path).with_context(|| format!("create {}", path.display()))?;
-        f.write_all(&bytes)
-            .with_context(|| format!("write {}", path.display()))?;
-        // Best-effort sync; ignore failure so a flaky fsync doesn't
-        // bubble up to the agent.
-        f.sync_all().ok();
+        let mut f = tokio::fs::File::create(&path)
+            .await
+            .with_context(|| format!("create {}", path.display()))?;
+        // Stream the body chunk-by-chunk so a 500MB Nitro attachment
+        // doesn't materialize fully in memory before the first byte
+        // hits disk.
+        let mut stream = resp.bytes_stream();
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk.with_context(|| format!("read chunk from {url}"))?;
+            f.write_all(&chunk)
+                .await
+                .with_context(|| format!("write {}", path.display()))?;
+        }
+        // Best-effort sync; log on failure so flaky-disk diagnostics
+        // are tractable but don't fail the agent.
+        if let Err(e) = f.sync_all().await {
+            tracing::warn!(
+                target: "gateway::discord",
+                error = %e,
+                path = %path.display(),
+                "fsync failed during download_attachment; continuing",
+            );
+        }
         Ok(path)
     }
 
@@ -420,6 +455,8 @@ mod tests {
         // Serenity 0.12 struct: id, filename, proxy_url, size, url
         // (description, height, width, content_type, duration_secs are
         // Option, and waveform/ephemeral default).
+        // Tied to serenity 0.12 Attachment shape; if a bump fails this
+        // test, see serenity::model::channel::Attachment fields.
         let json = serde_json::json!({
             "id": "1",
             "filename": "x.png",
@@ -434,6 +471,42 @@ mod tests {
         assert_eq!(mapped.mime.as_deref(), Some("image/png"));
         assert_eq!(mapped.original_name.as_deref(), Some("x.png"));
         assert_eq!(mapped.url.as_deref(), Some("https://cdn.discord/x.png"));
+    }
+
+    #[test]
+    fn map_attachment_handles_mime_with_parameters_and_case() {
+        use serenity::model::channel::Attachment as SerenityAtt;
+        // Real Discord uploads occasionally carry parameters
+        // ("image/png; charset=utf-8") or non-canonical case
+        // ("IMAGE/PNG"). The classifier should still land Image —
+        // a stricter prefix check would silently mis-bucket as
+        // Document and lose downstream rendering hints.
+        let cases = [
+            (
+                "image/png; charset=utf-8",
+                crate::platform::AttachmentKind::Image,
+            ),
+            ("IMAGE/PNG", crate::platform::AttachmentKind::Image),
+            ("  video/mp4 ", crate::platform::AttachmentKind::Video),
+            ("audio/ogg", crate::platform::AttachmentKind::Audio),
+            ("application/pdf", crate::platform::AttachmentKind::Document),
+        ];
+        for (mime, expected) in cases {
+            let json = serde_json::json!({
+                "id": "1",
+                "filename": "x",
+                "size": 0,
+                "url": "https://cdn.discord/x",
+                "proxy_url": "https://cdn.discord/x",
+                "content_type": mime,
+            });
+            let att: SerenityAtt = serde_json::from_value(json).expect("att deser");
+            assert_eq!(
+                DiscordPlatform::map_attachment(&att).kind,
+                expected,
+                "mime '{mime}' should map to {expected:?}",
+            );
+        }
     }
 
     #[test]
