@@ -716,6 +716,46 @@ impl Config {
     /// `config.toml` (main), `keybinds.toml`, `providers.toml`.
     /// Missing files are fine; legacy monolithic `config.toml` blocks
     /// still work and are surfaced via a deprecation log.
+    /// YYC-161: scan the raw TOML for top-level keys outside the
+    /// known set so misspelled sections (`[recal]` instead of
+    /// `[recall]`) surface a startup warning rather than silently
+    /// reverting to defaults. Returns a sorted, deduplicated list of
+    /// unknown keys; an empty Vec is the happy path.
+    ///
+    /// Conservative on purpose: nested-section validation is left to
+    /// serde because adding nested allowlists would have to be
+    /// updated every time a sub-struct gains a field, and forward
+    /// compatibility with future sections would suffer.
+    pub fn detect_unknown_top_level_keys(raw: &str) -> Vec<String> {
+        const KNOWN: &[&str] = &[
+            "provider",
+            "providers",
+            "tools",
+            "skills_dir",
+            "auto_create_skills",
+            "compaction",
+            "embeddings",
+            "tui",
+            "gateway",
+            "keybinds",
+            "recall",
+        ];
+        let Ok(value) = toml::from_str::<toml::Value>(raw) else {
+            return Vec::new();
+        };
+        let Some(table) = value.as_table() else {
+            return Vec::new();
+        };
+        let mut unknown: Vec<String> = table
+            .keys()
+            .filter(|k| !KNOWN.contains(&k.as_str()))
+            .cloned()
+            .collect();
+        unknown.sort();
+        unknown.dedup();
+        unknown
+    }
+
     pub fn load() -> Result<Self> {
         let home = vulcan_home();
         if home.join("config.toml").exists()
@@ -750,6 +790,16 @@ impl Config {
         let mut config = if main_path.exists() {
             let raw = std::fs::read_to_string(&main_path)
                 .with_context(|| format!("Failed to read {}", main_path.display()))?;
+            // YYC-161: warn on unknown top-level keys before parsing
+            // into the strongly-typed `Config`. Default-heavy serde
+            // would otherwise silently drop typos (e.g.
+            // `[dangerous_commands]` instead of
+            // `[tools.dangerous_commands]`) onto unused config keys.
+            for key in Self::detect_unknown_top_level_keys(&raw) {
+                tracing::warn!(
+                    "config.toml: unknown top-level key `{key}` ignored. Did you mean a nested section like `[tools.{key}]`? See config.example.toml for the canonical layout.",
+                );
+            }
             let parsed: Config = toml::from_str(&raw)
                 .with_context(|| format!("Failed to parse {}", main_path.display()))?;
             tracing::info!("Loaded main config from {}", main_path.display());
@@ -1013,6 +1063,60 @@ toggle_tools = "F2"
 
         assert!(ProviderDebugMode::Wire.logs_wire());
         assert!(ProviderDebugMode::Wire.logs_tool_fallback());
+    }
+
+    // YYC-161: a clean canonical config should produce no
+    // unknown-key warnings.
+    #[test]
+    fn detect_unknown_keys_returns_empty_for_canonical_config() {
+        let toml = r#"
+            [provider]
+            api_key = "k"
+            [tools]
+            [recall]
+            enabled = false
+            [keybinds]
+            [tui]
+            theme = "system"
+        "#;
+        assert!(Config::detect_unknown_top_level_keys(toml).is_empty());
+    }
+
+    // YYC-161: a typo at the top level must be reported so the user
+    // can fix it instead of silently getting defaults.
+    #[test]
+    fn detect_unknown_keys_flags_top_level_typo() {
+        let toml = r#"
+            [recal]
+            enabled = true
+        "#;
+        let unknown = Config::detect_unknown_top_level_keys(toml);
+        assert_eq!(unknown, vec!["recal".to_string()]);
+    }
+
+    // YYC-161: more than one unknown key should be returned sorted
+    // and deduplicated for stable warning output.
+    #[test]
+    fn detect_unknown_keys_returns_sorted_unique_list() {
+        let toml = r#"
+            [zeta]
+            x = 1
+            [alpha]
+            y = 2
+            [recall]
+            enabled = false
+        "#;
+        let unknown = Config::detect_unknown_top_level_keys(toml);
+        assert_eq!(unknown, vec!["alpha".to_string(), "zeta".to_string()],);
+    }
+
+    // YYC-161: malformed TOML should not panic the detector — that
+    // path is taken before the strongly-typed parse, which will
+    // surface a proper parse error to the user.
+    #[test]
+    fn detect_unknown_keys_returns_empty_for_invalid_toml() {
+        let raw = "this is not = valid =[ toml";
+        assert!(Config::detect_unknown_top_level_keys(raw).is_empty());
     }
 
     #[test]
