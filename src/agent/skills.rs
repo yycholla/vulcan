@@ -145,10 +145,13 @@ fn sanitize_skill_name(raw: &str) -> String {
             last_dash = true;
         }
     }
-    while out.ends_with('-') {
-        out.pop();
+
+    let mut result: String = out.chars().take(40).collect();
+    while result.ends_with('-') {
+        result.pop();
     }
-    out.chars().take(40).collect()
+    result
+
 }
 
 fn render_skill_markdown(draft: &DraftSkill, sanitized_name: &str) -> String {
