@@ -8,6 +8,15 @@
 use anyhow::Context;
 use anyhow::Result;
 use rusqlite::{Connection, params};
+use std::time::Duration;
+
+/// YYC-149: every SQLite connection used by `SessionStore` and the
+/// gateway pool gets this busy timeout so blocking writes don't pin a
+/// tokio worker thread on transient lock contention. 5s is generous
+/// enough to absorb a WAL checkpoint or a slow disk burst without
+/// surfacing `SQLITE_BUSY`, and short enough that a wedged connection
+/// surfaces an error rather than stalling indefinitely.
+pub(in crate::memory) const BUSY_TIMEOUT: Duration = Duration::from_millis(5_000);
 
 /// Connection pool used by the gateway daemon (YYC-113). Replaces the
 /// previous `Arc<Mutex<Connection>>` that serialized every gateway worker
@@ -115,7 +124,17 @@ CREATE TABLE IF NOT EXISTS outbound_queue (
 CREATE INDEX IF NOT EXISTS idx_outbound_due ON outbound_queue(state, next_attempt_at);
 "#;
 
+/// Apply per-connection PRAGMAs. SQLite's `busy_timeout` is connection
+/// scoped, so this must run on every fresh connection — not just the
+/// one that ran schema init (YYC-149).
+pub(in crate::memory) fn apply_connection_pragmas(conn: &Connection) -> Result<()> {
+    conn.busy_timeout(BUSY_TIMEOUT)?;
+    conn.execute_batch("PRAGMA foreign_keys = ON;")?;
+    Ok(())
+}
+
 pub(in crate::memory) fn initialize_conn(conn: &Connection) -> Result<()> {
+    apply_connection_pragmas(conn)?;
     conn.execute_batch(SCHEMA)?;
 
     // Idempotent migrations for DBs created before additive columns landed.
@@ -148,7 +167,17 @@ pub(crate) fn open_gateway_pool() -> Result<DbPool> {
     let dir = crate::config::vulcan_home();
     std::fs::create_dir_all(&dir).ok();
     let path = dir.join("sessions.db");
-    let manager = r2d2_sqlite::SqliteConnectionManager::file(&path);
+    // YYC-149: `with_init` runs on every fresh connection r2d2
+    // instantiates so the busy_timeout (5s) is applied on every
+    // checkout, not just the one that ran schema migrations.
+    let manager = r2d2_sqlite::SqliteConnectionManager::file(&path).with_init(|conn| {
+        apply_connection_pragmas(conn).map_err(|e| {
+            rusqlite::Error::SqliteFailure(
+                rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_ERROR),
+                Some(format!("apply_connection_pragmas: {e}")),
+            )
+        })
+    });
     let pool = r2d2::Pool::builder()
         .build(manager)
         .with_context(|| format!("Failed to build gateway DB pool at {}", path.display()))?;
@@ -165,7 +194,16 @@ pub(crate) fn open_gateway_pool() -> Result<DbPool> {
 /// `open_gateway_pool` against a temp file.
 #[cfg(all(test, feature = "gateway"))]
 pub(crate) fn in_memory_gateway_pool() -> Result<DbPool> {
-    let manager = r2d2_sqlite::SqliteConnectionManager::memory();
+    // YYC-149: same per-connection busy_timeout treatment as the
+    // production pool so test parity matches runtime behavior.
+    let manager = r2d2_sqlite::SqliteConnectionManager::memory().with_init(|conn| {
+        apply_connection_pragmas(conn).map_err(|e| {
+            rusqlite::Error::SqliteFailure(
+                rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_ERROR),
+                Some(format!("apply_connection_pragmas: {e}")),
+            )
+        })
+    });
     let pool = r2d2::Pool::builder()
         .max_size(1)
         .build(manager)
