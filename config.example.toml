@@ -30,6 +30,11 @@ catalog_cache_ttl_hours = 24
 # When the agent hits this limit without a text-only response, the turn
 # ends with a "reached maximum iteration limit" message.
 # max_iterations = 0
+# Cap on output tokens (`max_tokens`) for a single response. Provider
+# default if unset (currently 8096). Lower this for small-context models
+# where the default would crowd out the prompt; raise it for long-form
+# output models that accept >8k.
+# max_output_tokens = 8096
 
 # Optional named provider profiles. The active TUI `/model` command uses
 # `[provider]` today; named profiles bind base URL, auth, and default model
