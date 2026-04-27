@@ -5,6 +5,7 @@ use crate::context::ContextManager;
 use crate::hooks::HookRegistry;
 use crate::hooks::approval::ApprovalHook;
 use crate::hooks::diagnostics::DiagnosticsHook;
+use crate::hooks::recall::RecallHook;
 use crate::hooks::safety::SafetyHook;
 use crate::hooks::skills::SkillsHook;
 use crate::memory::SessionStore;
@@ -272,6 +273,17 @@ impl Agent {
 
         // Built-in hook: surface available skills to the LLM via BeforePrompt.
         hooks.register(Arc::new(SkillsHook::new(skills.clone())));
+
+        // YYC-42: optionally recall relevant past-session context on the
+        // first turn of a fresh session. Off by default — config
+        // `[recall].enabled = true` opts in. Uses its own SessionStore
+        // handle (separate connection to the same SQLite file) so the
+        // FTS read doesn't contend with the agent's main message-write
+        // path on the existing memory mutex.
+        if config.recall.enabled {
+            let recall_memory = Arc::new(SessionStore::new());
+            hooks.register(Arc::new(RecallHook::new(recall_memory, config.recall)));
+        }
 
         // Built-in hook (YYC-51): auto-run LSP diagnostics after every
         // successful edit_file/write_file. No-op when LSP isn't

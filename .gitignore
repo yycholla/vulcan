@@ -19,3 +19,4 @@ story.md
 
 # Claude Code session-local artifacts (loop lockfile, etc.)
 .claude/
+code-analysis.md

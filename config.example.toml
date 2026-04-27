@@ -77,6 +77,20 @@ default = "always"
 policy = "prompt"
 quota_per_session = 5
 
+# YYC-42: auto-recall relevant past-session context on the first turn
+# of a fresh session. Off by default — enable after reviewing the
+# privacy tradeoff (recalled snippets land in the system prompt and
+# are visible to the model).
+#   max_hits          — top-N FTS5 results per recall fire.
+#   min_score         — BM25 ceiling (FTS5 ranks negative; lower =
+#                       better match). Default 0.0 keeps everything.
+#   max_chars_per_hit — truncation per snippet to bound context bloat.
+[recall]
+enabled = false
+max_hits = 5
+min_score = 0.0
+max_chars_per_hit = 400
+
 [compaction]
 # Auto-compress context when token usage is high
 enabled = true
