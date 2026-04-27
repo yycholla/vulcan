@@ -213,11 +213,13 @@ impl Platform for DiscordPlatform {
             .and_then(|n| std::path::Path::new(n).file_name())
             .and_then(|s| s.to_str())
             .filter(|s| !s.is_empty() && *s != "." && *s != "..");
+
         let filename = match stripped {
-            Some(n) => n.to_string(),
+            Some(n) => format!("{}-{}", uuid::Uuid::new_v4(), n),
             None => format!("att-{}.bin", uuid::Uuid::new_v4()),
         };
         let path = dir.join(&filename);
+
         let mut f = tokio::fs::File::create(&path)
             .await
             .with_context(|| format!("create {}", path.display()))?;
