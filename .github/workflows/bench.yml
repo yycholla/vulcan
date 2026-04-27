@@ -2,6 +2,9 @@ name: bench
 
 on:
   pull_request:
+    types: [opened, reopened, synchronize]
+    branches-ignore:
+      - "**/graphite-base/**"
     paths:
       - 'src/**'
       - 'benches/**'
@@ -14,6 +17,13 @@ on:
     # Nightly 04:17 UTC. Refreshes the baseline artifact on `main`.
     - cron: '17 4 * * *'
   workflow_dispatch:
+
+# Least-privilege GITHUB_TOKEN. `actions: read` lets
+# dawidd6/action-download-artifact fetch the prior baseline from the
+# main-branch workflow runs.
+permissions:
+  contents: read
+  actions: read
 
 jobs:
   bench:

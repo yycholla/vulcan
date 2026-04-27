@@ -17,6 +17,12 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
+# Least-privilege GITHUB_TOKEN per CodeQL `actions/missing-workflow-permissions`.
+# Read-only at the workflow level; jobs that need more (e.g. uploading
+# artifacts) inherit, since artifact upload uses a separate token scope.
+permissions:
+  contents: read
+
 env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: "-D warnings"
