@@ -17,6 +17,7 @@ use tokio::net::TcpListener;
 use tokio::task::JoinHandle;
 
 pub mod agent_map;
+pub mod commands;
 pub mod discord;
 pub mod lane;
 pub mod loopback;
