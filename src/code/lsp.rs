@@ -21,6 +21,7 @@ use lsp_types::{
     Position, ReferenceContext, ReferenceParams, SymbolInformation, TextDocumentIdentifier,
     TextDocumentItem, TextDocumentPositionParams, Uri, WorkspaceFolder, WorkspaceSymbolParams,
     WorkspaceSymbolResponse,
+    request::{GotoImplementationResponse, GotoTypeDefinitionResponse},
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -860,6 +861,75 @@ pub async fn hover(
     let resp: Option<Hover> = server.request("textDocument/hover", params).await?;
     server.mark_ready();
     Ok(resp)
+}
+
+/// YYC-202: jump to the type definition of the expression at the
+/// given position. Same response shape as `goto_definition` so the
+/// tool layer can reuse the same projection code path.
+pub async fn type_definition(
+    server: &LspServer,
+    path: &Path,
+    line: u32,
+    character: u32,
+) -> Result<Option<Vec<Location>>> {
+    prepare_request(server, path).await?;
+    let uri = path_to_uri(path)?;
+    let params = GotoDefinitionParams {
+        text_document_position_params: TextDocumentPositionParams {
+            text_document: TextDocumentIdentifier { uri },
+            position: Position { line, character },
+        },
+        work_done_progress_params: Default::default(),
+        partial_result_params: Default::default(),
+    };
+    let resp: Option<GotoTypeDefinitionResponse> = server
+        .request("textDocument/typeDefinition", params)
+        .await?;
+    server.mark_ready();
+    Ok(resp.map(flatten_goto_response))
+}
+
+/// YYC-202: list every implementation of the trait/interface at the
+/// given position. Mirrors `goto_definition` for the response shape.
+pub async fn implementation(
+    server: &LspServer,
+    path: &Path,
+    line: u32,
+    character: u32,
+) -> Result<Option<Vec<Location>>> {
+    prepare_request(server, path).await?;
+    let uri = path_to_uri(path)?;
+    let params = GotoDefinitionParams {
+        text_document_position_params: TextDocumentPositionParams {
+            text_document: TextDocumentIdentifier { uri },
+            position: Position { line, character },
+        },
+        work_done_progress_params: Default::default(),
+        partial_result_params: Default::default(),
+    };
+    let resp: Option<GotoImplementationResponse> = server
+        .request("textDocument/implementation", params)
+        .await?;
+    server.mark_ready();
+    Ok(resp.map(flatten_goto_response))
+}
+
+/// YYC-202: shared collapse for the three shapes
+/// `GotoDefinitionResponse` (and its type/impl aliases) can take.
+/// Pulled into a helper because typeDefinition + implementation
+/// reuse the same projection.
+fn flatten_goto_response(r: GotoDefinitionResponse) -> Vec<Location> {
+    match r {
+        GotoDefinitionResponse::Scalar(loc) => vec![loc],
+        GotoDefinitionResponse::Array(v) => v,
+        GotoDefinitionResponse::Link(links) => links
+            .into_iter()
+            .map(|l| Location {
+                uri: l.target_uri,
+                range: l.target_range,
+            })
+            .collect(),
+    }
 }
 
 /// YYC-201: workspace-wide symbol search. Mirrors `goto_definition`

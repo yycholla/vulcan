@@ -8,7 +8,8 @@
 
 use crate::code::Language;
 use crate::code::lsp::{
-    LspManager, diagnostics_for, find_references, goto_definition, hover, workspace_symbol,
+    LspManager, diagnostics_for, find_references, goto_definition, hover, implementation,
+    type_definition, workspace_symbol,
 };
 use crate::tools::{Tool, ToolResult};
 use anyhow::Result;
@@ -210,6 +211,130 @@ impl Tool for HoverTool {
             Err(e) => return Ok(ToolResult::err(format!("{e}"))),
         };
         let payload = json!({ "hover": resp });
+        Ok(ToolResult::ok(serde_json::to_string_pretty(&payload)?))
+    }
+}
+
+#[derive(Clone)]
+pub struct TypeDefinitionTool {
+    manager: Arc<LspManager>,
+}
+
+impl TypeDefinitionTool {
+    pub fn new(manager: Arc<LspManager>) -> Self {
+        Self { manager }
+    }
+}
+
+#[async_trait]
+impl Tool for TypeDefinitionTool {
+    fn name(&self) -> &str {
+        "type_definition"
+    }
+    fn description(&self) -> &str {
+        "For an expression at file:line:col, jump to where its TYPE is declared. Different from goto_definition: that returns the symbol's binding site; this returns the declaration of the type. JSON locations."
+    }
+    fn schema(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "path": { "type": "string" },
+                "line": { "type": "integer", "description": "1-indexed source line" },
+                "character": { "type": "integer", "description": "0-indexed column" }
+            },
+            "required": ["path", "line", "character"]
+        })
+    }
+    async fn call(&self, params: Value, _cancel: CancellationToken) -> Result<ToolResult> {
+        let path = params["path"]
+            .as_str()
+            .ok_or_else(|| anyhow::anyhow!("path required"))?;
+        let line = params["line"]
+            .as_u64()
+            .ok_or_else(|| anyhow::anyhow!("line required"))?;
+        let character = params["character"].as_u64().unwrap_or(0);
+        let lang = match lang_for(path) {
+            Ok(l) => l,
+            Err(e) => return Ok(ToolResult::err(e.to_string())),
+        };
+        let server = match self.manager.server(lang).await {
+            Ok(s) => s,
+            Err(e) => {
+                return Ok(ToolResult::err(format!(
+                    "LSP unavailable for {}: {e}",
+                    lang.name()
+                )));
+            }
+        };
+        let pb = PathBuf::from(path);
+        let line0 = (line as u32).saturating_sub(1);
+        let resp = match type_definition(&server, &pb, line0, character as u32).await {
+            Ok(r) => r,
+            Err(e) => return Ok(ToolResult::err(format!("{e}"))),
+        };
+        let payload = json!({ "locations": resp.unwrap_or_default() });
+        Ok(ToolResult::ok(serde_json::to_string_pretty(&payload)?))
+    }
+}
+
+#[derive(Clone)]
+pub struct ImplementationTool {
+    manager: Arc<LspManager>,
+}
+
+impl ImplementationTool {
+    pub fn new(manager: Arc<LspManager>) -> Self {
+        Self { manager }
+    }
+}
+
+#[async_trait]
+impl Tool for ImplementationTool {
+    fn name(&self) -> &str {
+        "implementation"
+    }
+    fn description(&self) -> &str {
+        "For a trait or interface at file:line:col, list every implementation site as JSON locations. In Rust this finds `impl Trait for Type` blocks; in Go/TS, the implementing types of an interface."
+    }
+    fn schema(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "path": { "type": "string" },
+                "line": { "type": "integer", "description": "1-indexed source line" },
+                "character": { "type": "integer", "description": "0-indexed column" }
+            },
+            "required": ["path", "line", "character"]
+        })
+    }
+    async fn call(&self, params: Value, _cancel: CancellationToken) -> Result<ToolResult> {
+        let path = params["path"]
+            .as_str()
+            .ok_or_else(|| anyhow::anyhow!("path required"))?;
+        let line = params["line"]
+            .as_u64()
+            .ok_or_else(|| anyhow::anyhow!("line required"))?;
+        let character = params["character"].as_u64().unwrap_or(0);
+        let lang = match lang_for(path) {
+            Ok(l) => l,
+            Err(e) => return Ok(ToolResult::err(e.to_string())),
+        };
+        let server = match self.manager.server(lang).await {
+            Ok(s) => s,
+            Err(e) => {
+                return Ok(ToolResult::err(format!(
+                    "LSP unavailable for {}: {e}",
+                    lang.name()
+                )));
+            }
+        };
+        let pb = PathBuf::from(path);
+        let line0 = (line as u32).saturating_sub(1);
+        let locs = match implementation(&server, &pb, line0, character as u32).await {
+            Ok(r) => r.unwrap_or_default(),
+            Err(e) => return Ok(ToolResult::err(format!("{e}"))),
+        };
+        let payload = json!({ "implementations": locs });
         Ok(ToolResult::ok(serde_json::to_string_pretty(&payload)?))
     }
 }
