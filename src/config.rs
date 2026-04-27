@@ -91,6 +91,14 @@ pub struct Config {
     #[serde(default = "default_skills_dir")]
     pub skills_dir: PathBuf,
 
+    /// YYC-20: when true, after 5+ iterations the agent asks the
+    /// active provider to summarize the turn as a draft skill and
+    /// writes it to `<skills_dir>/_pending/<name>.md` for manual
+    /// review. Off by default — opting in burns extra tokens at the
+    /// end of long turns.
+    #[serde(default)]
+    pub auto_create_skills: bool,
+
     #[serde(default)]
     pub compaction: CompactionConfig,
 
@@ -510,6 +518,7 @@ impl Default for Config {
             providers: HashMap::new(),
             tools: ToolsConfig::default(),
             skills_dir: default_skills_dir(),
+            auto_create_skills: false,
             compaction: CompactionConfig::default(),
             embeddings: EmbeddingsConfig::default(),
             tui: TuiConfig::default(),

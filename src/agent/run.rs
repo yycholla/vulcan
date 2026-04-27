@@ -225,7 +225,7 @@ impl Agent {
                 self.save_messages(&messages)?;
                 self.turns = self.turns.saturating_add(1);
                 if iteration >= 5 {
-                    self.skills.try_auto_create(input, &text)?;
+                    let _ = self.auto_create_skill_from_turn(input, &text).await;
                 }
                 return Ok(text);
             }
@@ -383,7 +383,9 @@ impl Agent {
                 self.save_messages(&messages)?;
                 self.turns = self.turns.saturating_add(1);
                 if iteration >= 5 {
-                    self.skills.try_auto_create(input, &full_response)?;
+                    let _ = self
+                        .auto_create_skill_from_turn(input, &full_response)
+                        .await;
                 }
 
                 // YYC-104: empty terminal turn — surface a structured hint

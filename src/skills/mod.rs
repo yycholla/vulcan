@@ -156,19 +156,15 @@ impl SkillRegistry {
         self.skills.is_empty()
     }
 
+    /// Where this registry reads skill files from. Used by YYC-20's
+    /// auto-creation path to write drafts under
+    /// `<skills_dir>/_pending/<name>.md`.
+    pub fn skills_dir(&self) -> &PathBuf {
+        &self.skills_dir
+    }
+
     /// List all loaded skills
     pub fn list(&self) -> &[Skill] {
         &self.skills
-    }
-
-    /// Try to auto-create a skill from a complex interaction
-    pub fn try_auto_create(&self, input: &str, response: &str) -> Result<Option<String>> {
-        // This is a stub — in the real implementation, this would use the LLM
-        // to analyze the interaction and suggest a skill to save.
-        // For now, we log the opportunity.
-        tracing::info!(
-            "Auto-skill opportunity detected:\n  Input: {input:.80}\n  Response: {response:.80}"
-        );
-        Ok(None)
     }
 }
