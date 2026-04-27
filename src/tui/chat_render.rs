@@ -698,4 +698,49 @@ mod tests {
         assert!(tool < text);
         assert!(rendered.iter().any(|line| line.contains("OK")));
     }
+
+    /// Snapshot-locks the visible rendering of a small fixed transcript.
+    /// Catches accidental changes to spacing, prefixes, tool-card layout,
+    /// and reasoning placement that the per-assertion tests above wouldn't
+    /// notice. Width pinned to 60, theme system, dense=true so the snapshot
+    /// is reproducible across machines.
+    #[test]
+    fn snapshot_small_transcript_render() {
+        let mut store = ChatRenderStore::default();
+
+        let messages = vec![
+            ChatMessage::new(ChatRole::User, "what's in src/main.rs?"),
+            {
+                let mut m = ChatMessage::new(ChatRole::Agent, "");
+                m.append_reasoning("inspecting file");
+                m.push_tool_start_with("read_file", Some("src/main.rs".to_string()));
+                m.finish_tool_with(
+                    "read_file",
+                    true,
+                    Some("fn main() {}".to_string()),
+                    Some("1 line".to_string()),
+                    0,
+                    Some(12),
+                );
+                m.append_text("The file is a one-line `main`.");
+                m
+            },
+        ];
+
+        let options = ChatRenderOptions {
+            show_reasoning: true,
+            dense: true,
+            width: 60,
+            muted_style: Style::default(),
+        };
+        let window = store.visible_lines_at(&messages, options, &Theme::system(), 0, 200);
+        let body: String = window
+            .lines
+            .iter()
+            .map(line_text)
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        insta::assert_snapshot!("chat_render_small_transcript", body);
+    }
 }

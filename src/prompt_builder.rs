@@ -115,6 +115,36 @@ mod tests {
         );
     }
 
+    /// Snapshot guard for the system prompt produced against the *default*
+    /// tool registry. Catches accidental wording drift in the
+    /// guidelines/preferences/format sections without rewriting the
+    /// existing per-keyword assertions. Tool list is normalized so adding
+    /// a new tool doesn't churn this snapshot.
+    #[test]
+    fn system_prompt_snapshot_default_registry() {
+        let prompt = PromptBuilder.build_system_prompt(&ToolRegistry::new());
+        let normalized = normalize_tool_list(&prompt);
+        insta::assert_snapshot!("system_prompt_default_registry", normalized);
+    }
+
+    fn normalize_tool_list(prompt: &str) -> String {
+        // Replace the `## Available Tools` body up to the next `##` with a
+        // single placeholder so prompt copy changes are caught here, but
+        // tool churn lives in dedicated assertions above.
+        let marker = "## Available Tools";
+        let Some(start) = prompt.find(marker) else {
+            return prompt.to_string();
+        };
+        let tail = &prompt[start + marker.len()..];
+        let end_rel = tail.find("\n##").unwrap_or(tail.len());
+        let mut out = String::with_capacity(prompt.len());
+        out.push_str(&prompt[..start]);
+        out.push_str(marker);
+        out.push_str("\n<tool list normalized>\n");
+        out.push_str(&tail[end_rel..]);
+        out
+    }
+
     /// YYC-86: the prompt must steer the model toward native tools and
     /// position bash as a last resort. Without this section, even with
     /// the YYC-85 description nudges the agent still falls back to
