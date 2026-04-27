@@ -90,17 +90,34 @@ pub struct OutboundAttachment {
 pub trait Platform: Send + Sync {
     fn name(&self) -> &str;
     async fn start(&self) -> Result<()>;
-    async fn send(&self, msg: &OutboundMessage) -> Result<()>;
+
+    /// Deliver `msg`. Returns the platform's id for the sent message
+    /// so the caller can target it later via `edit` (PR-2 wires this
+    /// through the StreamRenderer).
+    async fn send(&self, msg: &OutboundMessage) -> Result<SentMessage>;
+
     async fn recv(&self) -> Result<InboundMessage>;
 
-    /// Verify a platform-specific webhook request and return the parsed
-    /// `InboundMessage`. The default impl errors so platforms that don't
-    /// accept webhooks (loopback in production, future poll-only platforms)
-    /// don't have to implement it. Webhook handlers (`POST /webhook/:platform`)
-    /// pass the raw request headers + body so each platform can apply its own
-    /// HMAC scheme + payload schema. Uses `http::HeaderMap` (not
-    /// `axum::http::HeaderMap`) so this trait stays free of an axum dep —
-    /// `http` is a small standalone crate axum re-exports anyway.
+    /// Edit the text of an already-sent message. Default impl bails so
+    /// platforms that don't support edits can ignore this method.
+    /// Capability-discoverable via `capabilities().supports_edit`.
+    async fn edit(&self, _chat_id: &str, _message_id: &str, _text: &str) -> Result<()> {
+        anyhow::bail!("platform does not support edit")
+    }
+
+    /// Download a received attachment to a local path. Default impl
+    /// bails so platforms that don't host attachments (loopback today)
+    /// can ignore this method.
+    async fn download_attachment(&self, _att: &Attachment) -> Result<std::path::PathBuf> {
+        anyhow::bail!("platform does not support attachment download")
+    }
+
+    /// Declarative feature snapshot. Default = nothing supported.
+    /// Concrete platforms override.
+    fn capabilities(&self) -> PlatformCapabilities {
+        PlatformCapabilities::default()
+    }
+
     async fn verify_webhook(
         &self,
         _headers: &http::HeaderMap,
@@ -158,5 +175,59 @@ mod tests {
             caption: None,
         };
         assert_eq!(a.path, "/tmp/x.png");
+    }
+
+    struct StubPlatform;
+
+    #[async_trait::async_trait]
+    impl Platform for StubPlatform {
+        fn name(&self) -> &str {
+            "stub"
+        }
+        async fn start(&self) -> Result<()> {
+            Ok(())
+        }
+        async fn send(&self, _msg: &OutboundMessage) -> Result<SentMessage> {
+            Ok(SentMessage {
+                message_id: "stub-1".into(),
+            })
+        }
+        async fn recv(&self) -> Result<InboundMessage> {
+            anyhow::bail!("stub has no inbound")
+        }
+    }
+
+    #[tokio::test]
+    async fn default_edit_impl_returns_unsupported_error() {
+        let p = StubPlatform;
+        let err = p
+            .edit("c", "m", "x")
+            .await
+            .expect_err("default should bail");
+        assert!(err.to_string().contains("not support"));
+    }
+
+    #[tokio::test]
+    async fn default_download_attachment_returns_unsupported_error() {
+        let p = StubPlatform;
+        let att = Attachment {
+            url: None,
+            local_path: None,
+            mime: None,
+            kind: AttachmentKind::Other,
+            original_name: None,
+        };
+        let err = p
+            .download_attachment(&att)
+            .await
+            .expect_err("default should bail");
+        assert!(err.to_string().contains("not support"));
+    }
+
+    #[test]
+    fn default_capabilities_is_zero_features() {
+        let p = StubPlatform;
+        let caps = p.capabilities();
+        assert_eq!(caps, PlatformCapabilities::default());
     }
 }
