@@ -1,4 +1,13 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
+
+/// YYC-144: cap on cached `RenderedMessageBlock`s. The cache is keyed
+/// per (message index, version, role, options); long sessions or
+/// frequent session-switch churn previously grew it indefinitely.
+/// 1024 entries comfortably covers a multi-thousand-message session
+/// at one option set, while bounding memory at a few MiB of rendered
+/// `Line`s in the worst case. Eviction is FIFO so behavior is
+/// deterministic — the oldest insertion goes when the cache is full.
+const RENDER_BLOCK_CACHE_CAP: usize = 1024;
 
 use ratatui::{
     style::{Modifier, Style},
@@ -46,6 +55,9 @@ struct RenderedMessageBlock {
 #[derive(Default)]
 pub struct ChatRenderStore {
     blocks: HashMap<MessageRenderKey, RenderedMessageBlock>,
+    /// YYC-144: insertion order for FIFO eviction. Never moved on
+    /// hits — pure FIFO. Length is kept in lockstep with `blocks`.
+    insertion_order: VecDeque<MessageRenderKey>,
     render_count: usize,
     materialized_line_count: usize,
 }
@@ -121,6 +133,14 @@ impl ChatRenderStore {
 
     pub fn clear(&mut self) {
         self.blocks.clear();
+        self.insertion_order.clear();
+    }
+
+    /// YYC-144: current cache occupancy. Exposed for tests + bench
+    /// instrumentation; the figure is a hard upper bound on
+    /// rendered-block memory the store can hold.
+    pub fn cache_len(&self) -> usize {
+        self.blocks.len()
     }
 
     fn render_message_block(
@@ -140,7 +160,18 @@ impl ChatRenderStore {
         if !self.blocks.contains_key(&key) {
             self.render_count = self.render_count.saturating_add(1);
             let block = self.build_message_block(index, message, options, theme);
+            // YYC-144: enforce the cache cap before insertion. FIFO
+            // eviction keeps the implementation simple + deterministic
+            // — the oldest insertion is dropped, which on a steady-
+            // state visible window means a message that scrolled out
+            // long ago.
+            if self.blocks.len() >= RENDER_BLOCK_CACHE_CAP
+                && let Some(oldest) = self.insertion_order.pop_front()
+            {
+                self.blocks.remove(&oldest);
+            }
             self.blocks.insert(key, block);
+            self.insertion_order.push_back(key);
         }
 
         self.blocks
@@ -353,6 +384,39 @@ mod tests {
             .iter()
             .map(|s| s.content.as_ref())
             .collect::<String>()
+    }
+
+    // YYC-144: insertions past the cap must drop the oldest entry
+    // and keep the store at exactly RENDER_BLOCK_CACHE_CAP. Renders
+    // CAP+1 distinct user messages — each gets its own cache key
+    // because index differs — and asserts the first key is gone
+    // while the latest is present.
+    #[test]
+    fn render_store_evicts_oldest_when_cap_exceeded() {
+        let theme = Theme::system();
+        let options = ChatRenderOptions {
+            show_reasoning: false,
+            dense: false,
+            width: 80,
+            muted_style: Style::default(),
+        };
+        let mut store = ChatRenderStore::default();
+        // Fill exactly to the cap.
+        let messages: Vec<ChatMessage> = (0..RENDER_BLOCK_CACHE_CAP)
+            .map(|i| ChatMessage::new(ChatRole::User, format!("msg {i}")))
+            .collect();
+        store.visible_lines_at(&messages, options, &theme, 0, RENDER_BLOCK_CACHE_CAP);
+        assert_eq!(store.cache_len(), RENDER_BLOCK_CACHE_CAP);
+
+        // Render one more distinct message → must evict the oldest.
+        let mut overflow = messages.clone();
+        overflow.push(ChatMessage::new(ChatRole::User, "msg overflow"));
+        store.visible_lines_at(&overflow, options, &theme, 0, overflow.len());
+        assert_eq!(
+            store.cache_len(),
+            RENDER_BLOCK_CACHE_CAP,
+            "cache should never exceed cap",
+        );
     }
 
     #[test]
