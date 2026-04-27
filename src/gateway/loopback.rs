@@ -162,6 +162,7 @@ mod tests {
             attachments: vec![],
             reply_to: None,
             edit_target: None,
+            turn_id: None,
         };
         let m2 = OutboundMessage {
             text: "two".into(),
@@ -185,6 +186,7 @@ mod tests {
             attachments: vec![],
             reply_to: None,
             edit_target: None,
+            turn_id: None,
         };
         assert!(lp.send(&m).await.is_err());
         assert!(lp.send(&m).await.is_err());
@@ -203,6 +205,7 @@ mod tests {
             attachments: vec![],
             reply_to: None,
             edit_target: None,
+            turn_id: None,
         };
         let s1 = lp.send(&m).await.unwrap();
         let s2 = lp.send(&m).await.unwrap();

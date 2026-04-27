@@ -106,7 +106,11 @@ CREATE TABLE IF NOT EXISTS outbound_queue (
   -- OutboundDispatcher routes to Platform::edit instead of Platform::send.
   edit_target TEXT,
   -- Reply / thread target on the platform side.
-  reply_to TEXT
+  reply_to TEXT,
+  -- YYC-18 PR-2b: per-turn id used by RenderRegistry to scope
+  -- edit-in-place anchors. NULL for non-streaming rows
+  -- (CommandDispatcher replies, /v1/inbound webhooks).
+  turn_id TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_outbound_due ON outbound_queue(state, next_attempt_at);
 "#;
@@ -128,6 +132,8 @@ pub(in crate::memory) fn initialize_conn(conn: &Connection) -> Result<()> {
     // YYC-18 PR-2a: payload extensions for outbound + inbound queues.
     let _ = conn.execute("ALTER TABLE outbound_queue ADD COLUMN edit_target TEXT", []);
     let _ = conn.execute("ALTER TABLE outbound_queue ADD COLUMN reply_to TEXT", []);
+    // YYC-18 PR-2b: per-turn id column for streaming RenderKey routing.
+    let _ = conn.execute("ALTER TABLE outbound_queue ADD COLUMN turn_id TEXT", []);
     let _ = conn.execute(
         "ALTER TABLE inbound_queue ADD COLUMN attachments_json TEXT NOT NULL DEFAULT '[]'",
         [],

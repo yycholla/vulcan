@@ -101,6 +101,7 @@ impl StreamRenderer {
             attachments: Vec::new(),
             reply_to: None,
             edit_target,
+            turn_id: Some(self.key.turn_id.clone()),
         };
         self.outbound.enqueue(msg).await?;
         self.last_emit = Instant::now();

@@ -86,6 +86,7 @@ pub async fn process_one(
                         attachments: vec![],
                         reply_to: None,
                         edit_target: None,
+                        turn_id: None,
                     },
                 )
                 .await?;
