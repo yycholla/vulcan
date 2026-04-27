@@ -42,6 +42,9 @@ tokio = { version = "1", features = ["full"] }
 # while staying drop-in for guards that don't need to cross .await.
 parking_lot = "0.12"
 
+# Pattern-based secret redaction in provider wire-debug logs (YYC-135).
+regex = "1"
+
 # HTTP / LLM API
 reqwest = { version = "0.13", features = ["json", "stream"] }
 
