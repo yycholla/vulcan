@@ -27,6 +27,7 @@ pub mod queue;
 pub mod registry;
 pub mod render_registry;
 pub mod routes;
+pub mod scheduler;
 pub mod server;
 pub mod stream_render;
 #[cfg(feature = "telegram")]
@@ -89,16 +90,27 @@ where
         );
     }
     let registry = Arc::new(registry);
+    let scheduler_config = config.scheduler.clone();
     let agent_map = Arc::new(AgentMap::new(
         Arc::new(config),
         Duration::from_secs(gateway.idle_ttl_secs),
     ));
 
-    run_on_listener_with_parts(gateway, listener, shutdown, db, registry, agent_map).await
+    run_on_listener_with_parts(
+        gateway,
+        scheduler_config,
+        listener,
+        shutdown,
+        db,
+        registry,
+        agent_map,
+    )
+    .await
 }
 
 async fn run_on_listener_with_parts<S>(
     gateway: crate::config::GatewayConfig,
+    scheduler_config: crate::config::SchedulerConfig,
     listener: TcpListener,
     shutdown: S,
     db: DbPool,
@@ -159,6 +171,21 @@ where
     } else {
         None
     };
+    // YYC-17 PR-2: spawn the cron scheduler once the inbound queue
+    // exists. Validates jobs up front; configuration errors here
+    // bubble out before the worker pipeline starts so a bad cron
+    // expression can't slip past startup. The handle drops with
+    // the function scope so the loop is reaped on shutdown.
+    let scheduler_handle = if !scheduler_config.jobs.is_empty() {
+        let scheduler = scheduler::Scheduler::from_config(&scheduler_config, Arc::clone(&inbound))?;
+        if scheduler.enabled_jobs() > 0 {
+            Some(scheduler.spawn())
+        } else {
+            None
+        }
+    } else {
+        None
+    };
     // YYC-18 PR-2c: build the dispatcher once at startup from
     // Config.gateway.commands; the four builtins are pre-registered
     // by CommandDispatcher::new regardless of TOML contents.
@@ -190,6 +217,7 @@ where
         .context("gateway server failed");
 
     inbound_dispatcher.abort();
+    drop(scheduler_handle);
     if let Some(handle) = discord_dispatcher {
         handle.abort();
     }
@@ -432,6 +460,7 @@ mod tests {
         let handle = tokio::spawn(async move {
             run_on_listener_with_parts(
                 gateway,
+                crate::config::SchedulerConfig::default(),
                 listener,
                 async move {
                     let _ = shutdown_rx.await;
@@ -477,6 +506,7 @@ mod tests {
         let handle = tokio::spawn(async move {
             run_on_listener_with_parts(
                 gateway,
+                crate::config::SchedulerConfig::default(),
                 listener,
                 async move {
                     let _ = shutdown_rx.await;
@@ -576,6 +606,7 @@ mod tests {
         let handle = tokio::spawn(async move {
             run_on_listener_with_parts(
                 gateway,
+                crate::config::SchedulerConfig::default(),
                 listener,
                 async move {
                     let _ = shutdown_rx.await;
