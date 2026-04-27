@@ -352,6 +352,114 @@ fn reasoning_content_round_trips() {
     }
 }
 
+// YYC-148: append_messages must add only the new tail and leave
+// the autoincrement row IDs of prior messages untouched. A
+// regression that secretly DELETEd would surface here as
+// reassigned IDs after the second save.
+#[test]
+fn append_messages_preserves_prior_row_ids() {
+    let dir = TempDir::new().unwrap();
+    let store = store_in(&dir);
+    let id = uuid::Uuid::new_v4().to_string();
+    store
+        .append_messages(
+            &id,
+            &[Message::User {
+                content: "first".into(),
+            }],
+        )
+        .unwrap();
+    let initial_id: i64 = {
+        let conn = store.conn.lock();
+        conn.query_row(
+            "SELECT id FROM messages WHERE session_id = ?1 ORDER BY position",
+            params![id],
+            |row| row.get(0),
+        )
+        .unwrap()
+    };
+    store
+        .append_messages(
+            &id,
+            &[Message::Assistant {
+                content: Some("second".into()),
+                tool_calls: None,
+                reasoning_content: None,
+            }],
+        )
+        .unwrap();
+    let ids_after: Vec<i64> = {
+        let conn = store.conn.lock();
+        let mut stmt = conn
+            .prepare("SELECT id FROM messages WHERE session_id = ?1 ORDER BY position")
+            .unwrap();
+        let rows = stmt
+            .query_map(params![id], |row| row.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<i64>>>()
+            .unwrap();
+        rows
+    };
+    assert_eq!(
+        ids_after.len(),
+        2,
+        "append should produce 2 rows, got {ids_after:?}",
+    );
+    assert_eq!(
+        ids_after[0], initial_id,
+        "first message's row ID must survive the append",
+    );
+}
+
+// YYC-148: save_messages is the full-rewrite path and IS expected
+// to reissue row IDs (DELETE + re-INSERT). This test is a guard so
+// nobody quietly replaces save_messages with append-only semantics
+// and breaks the compaction contract.
+#[test]
+fn save_messages_does_replace_existing_rows() {
+    let dir = TempDir::new().unwrap();
+    let store = store_in(&dir);
+    let id = uuid::Uuid::new_v4().to_string();
+    store
+        .save_messages(
+            &id,
+            &[Message::User {
+                content: "v1".into(),
+            }],
+        )
+        .unwrap();
+    let initial_id: i64 = {
+        let conn = store.conn.lock();
+        conn.query_row(
+            "SELECT id FROM messages WHERE session_id = ?1",
+            params![id],
+            |row| row.get(0),
+        )
+        .unwrap()
+    };
+    store
+        .save_messages(
+            &id,
+            &[Message::User {
+                content: "v2".into(),
+            }],
+        )
+        .unwrap();
+    let post_id: i64 = {
+        let conn = store.conn.lock();
+        conn.query_row(
+            "SELECT id FROM messages WHERE session_id = ?1",
+            params![id],
+            |row| row.get(0),
+        )
+        .unwrap()
+    };
+    assert_ne!(
+        post_id, initial_id,
+        "save_messages should DELETE+INSERT — row ID must change",
+    );
+}
+
 // YYC-150: try_open_at must return an Err (not panic) when the DB
 // path can't be opened. Pointing at a nonexistent parent directory
 // triggers SQLite's open-with-create to fail; we assert the error
