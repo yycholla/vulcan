@@ -4,6 +4,7 @@ use std::time::Duration;
 
 use crate::config::Config;
 use crate::gateway::agent_map::AgentMap;
+use crate::gateway::commands::CommandDispatcher;
 use crate::gateway::discord::DiscordPlatform;
 use crate::gateway::lane::{LaneKey, LaneRouter, from_closure};
 use crate::gateway::loopback::LoopbackPlatform;
@@ -109,12 +110,17 @@ where
     } else {
         None
     };
+    // YYC-18 PR-2c: build the dispatcher once at startup from
+    // Config.gateway.commands; the four builtins are pre-registered
+    // by CommandDispatcher::new regardless of TOML contents.
+    let commands = Arc::new(CommandDispatcher::new(&gateway.commands));
     let inbound_dispatcher = spawn_inbound_dispatcher(
         Arc::clone(&inbound),
         Arc::clone(&outbound),
         Arc::clone(&agent_map),
         Arc::clone(&render_registry),
         Arc::clone(&registry),
+        Arc::clone(&commands),
     );
 
     let app = build_router(AppState {
@@ -150,6 +156,7 @@ fn spawn_inbound_dispatcher(
     agent_map: Arc<AgentMap>,
     render_registry: Arc<crate::gateway::render_registry::RenderRegistry>,
     platform_registry: Arc<PlatformRegistry>,
+    commands: Arc<CommandDispatcher>,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
         let handler_inbound = Arc::clone(&inbound);
@@ -157,12 +164,14 @@ fn spawn_inbound_dispatcher(
         let handler_agent_map = Arc::clone(&agent_map);
         let handler_render_registry = Arc::clone(&render_registry);
         let handler_platform_registry = Arc::clone(&platform_registry);
+        let handler_commands = Arc::clone(&commands);
         let handler = from_closure(move |_lane: LaneKey, row: InboundRow| {
             let inbound = Arc::clone(&handler_inbound);
             let outbound = Arc::clone(&handler_outbound);
             let agent_map = Arc::clone(&handler_agent_map);
             let render_registry = Arc::clone(&handler_render_registry);
             let platform_registry = Arc::clone(&handler_platform_registry);
+            let commands = Arc::clone(&handler_commands);
             async move {
                 // Pick capabilities from the registered platform; default
                 // (zero-feature) for an unknown platform name so the
@@ -179,6 +188,7 @@ fn spawn_inbound_dispatcher(
                     &outbound,
                     &render_registry,
                     caps,
+                    &commands,
                 )
                 .await
                 {

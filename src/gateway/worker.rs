@@ -11,11 +11,12 @@
 use std::sync::Arc;
 
 use crate::gateway::agent_map::AgentMap;
+use crate::gateway::commands::{CommandDispatcher, DispatchCtx};
 use crate::gateway::lane::LaneKey;
 use crate::gateway::queue::{InboundQueue, InboundRow, OutboundQueue};
 use crate::gateway::render_registry::{RenderKey, RenderRegistry};
 use crate::gateway::stream_render::StreamRenderer;
-use crate::platform::PlatformCapabilities;
+use crate::platform::{OutboundMessage, PlatformCapabilities};
 
 use futures_util::FutureExt;
 use std::panic::AssertUnwindSafe;
@@ -43,11 +44,55 @@ pub async fn process_one(
     outbound_queue: &Arc<OutboundQueue>,
     render_registry: &Arc<RenderRegistry>,
     platform_caps: PlatformCapabilities,
+    commands: &CommandDispatcher,
 ) -> anyhow::Result<()> {
     let lane = LaneKey {
         platform: row.platform.clone(),
         chat_id: row.chat_id.clone(),
     };
+
+    // YYC-18 PR-2c: route slash commands through CommandDispatcher
+    // first. On Some(reply), enqueue an atomic outbound row and mark
+    // inbound done in one transaction (no streaming, no edit-in-place
+    // — replies are short and final). On None, fall through to the
+    // streaming agent path below.
+    match commands
+        .dispatch(
+            &row.text,
+            DispatchCtx {
+                lane: &lane,
+                user_id: &row.user_id,
+                agent_map,
+                body: "",
+            },
+        )
+        .await
+    {
+        Ok(Some(reply)) => {
+            let id = row.id;
+            inbound_queue
+                .complete_with_outbound(
+                    id,
+                    OutboundMessage {
+                        platform: row.platform,
+                        chat_id: row.chat_id,
+                        text: reply,
+                        attachments: vec![],
+                        reply_to: None,
+                        edit_target: None,
+                        turn_id: None,
+                    },
+                )
+                .await?;
+            return Ok(());
+        }
+        Ok(None) => {}
+        Err(e) => {
+            let err_str = e.to_string();
+            inbound_queue.mark_failed(row.id, &err_str).await?;
+            return Err(e);
+        }
+    }
 
     let turn_id = Uuid::new_v4().to_string();
     let render_key = RenderKey {
@@ -184,6 +229,7 @@ mod tests {
     use crate::agent::Agent;
     use crate::config::Config;
     use crate::gateway::agent_map::{AgentBuilder, AgentMap};
+    use crate::gateway::commands::CommandDispatcher;
     use crate::gateway::queue::{InboundQueue, OutboundQueue};
     use crate::gateway::render_registry::RenderRegistry;
     use crate::hooks::HookRegistry;
@@ -193,6 +239,7 @@ mod tests {
     use crate::provider::{ChatResponse, LLMProvider, Message, StreamEvent, ToolDefinition};
     use crate::skills::SkillRegistry;
     use crate::tools::ToolRegistry;
+    use std::collections::HashMap;
 
     fn fresh_db() -> DbPool {
         crate::memory::in_memory_gateway_pool().expect("in-memory pool")
@@ -309,6 +356,7 @@ mod tests {
         let outbound = Arc::new(OutboundQueue::new(db.clone(), 5));
         let render_registry = Arc::new(RenderRegistry::new());
         let agent_map = agent_map_with_canned_reply("hi back");
+        let commands = CommandDispatcher::new(&HashMap::new());
 
         let id = inbound
             .enqueue(InboundMessage {
@@ -332,6 +380,7 @@ mod tests {
             &outbound,
             &render_registry,
             streaming_caps(),
+            &commands,
         )
         .await
         .unwrap();
@@ -363,6 +412,7 @@ mod tests {
         let outbound = Arc::new(OutboundQueue::new(db.clone(), 5));
         let render_registry = Arc::new(RenderRegistry::new());
         let agent_map = agent_map_with_panicking_provider();
+        let commands = CommandDispatcher::new(&HashMap::new());
 
         inbound
             .enqueue(InboundMessage {
@@ -385,6 +435,7 @@ mod tests {
             &outbound,
             &render_registry,
             streaming_caps(),
+            &commands,
         )
         .await;
         assert!(
@@ -445,6 +496,7 @@ mod tests {
             })
         });
         let agent_map = AgentMap::with_builder(test_config(), Duration::from_secs(60), builder);
+        let commands = CommandDispatcher::new(&HashMap::new());
 
         // First row: panics. process_one should propagate the panic AND
         // evict the lane.
@@ -468,6 +520,7 @@ mod tests {
             &outbound,
             &render_registry,
             streaming_caps(),
+            &commands,
         )
         .await;
         assert!(res.is_err());
@@ -504,6 +557,7 @@ mod tests {
             &outbound,
             &render_registry,
             streaming_caps(),
+            &commands,
         )
         .await
         .unwrap();
@@ -518,6 +572,60 @@ mod tests {
             calls.load(Ordering::SeqCst),
             2,
             "builder should have run twice — once for the panicking agent, once for the rebuild"
+        );
+    }
+
+    #[tokio::test]
+    async fn worker_routes_slash_help_through_dispatcher() {
+        // YYC-18 PR-2c: a `/`-prefixed inbound row that maps to a
+        // registered command produces an atomic outbound row (no
+        // streaming, no edit-in-place). The streaming agent path is
+        // bypassed entirely — turn_id stays None to mark the reply as
+        // single-shot for downstream renderers.
+        let db = fresh_db();
+        let inbound = InboundQueue::new(db.clone());
+        let outbound = Arc::new(OutboundQueue::new(db.clone(), 5));
+        let render_registry = Arc::new(RenderRegistry::new());
+        let agent_map = agent_map_with_canned_reply("unused");
+        let commands = CommandDispatcher::new(&HashMap::new());
+
+        inbound
+            .enqueue(InboundMessage {
+                platform: "loopback".into(),
+                chat_id: "c".into(),
+                user_id: "u".into(),
+                text: "/help".into(),
+                message_id: None,
+                reply_to: None,
+                attachments: vec![],
+            })
+            .await
+            .unwrap();
+        let row = inbound.claim_next().await.unwrap().expect("row");
+
+        process_one(
+            row,
+            &agent_map,
+            &inbound,
+            &outbound,
+            &render_registry,
+            PlatformCapabilities::default(),
+            &commands,
+        )
+        .await
+        .unwrap();
+
+        let reply = outbound
+            .claim_due(chrono::Utc::now().timestamp())
+            .await
+            .unwrap()
+            .expect("dispatcher reply enqueued");
+        assert!(reply.text.starts_with("Available commands:"));
+        assert!(reply.text.contains("/help"));
+        // Confirm the streaming machinery wasn't engaged.
+        assert!(
+            reply.turn_id.is_none(),
+            "command replies are atomic, not streamed"
         );
     }
 }
