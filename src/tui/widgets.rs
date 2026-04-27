@@ -46,7 +46,7 @@ pub fn frame(
         width: inner.width,
         height: 1,
     };
-    let bar_fg = accent.unwrap_or_else(|| theme.body_fg);
+    let bar_fg = accent.unwrap_or(theme.body_fg);
     let bar_style = Style::default().fg(bar_fg).add_modifier(Modifier::BOLD);
 
     let mut spans = vec![

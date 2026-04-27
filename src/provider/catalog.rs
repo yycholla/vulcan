@@ -327,8 +327,7 @@ fn host_slug(base_url: &str) -> String {
     base_url
         .replace("https://", "")
         .replace("http://", "")
-        .replace('/', "_")
-        .replace(':', "_")
+        .replace(['/', ':'], "_")
 }
 
 fn read_cache(base_url: &str, ttl: Duration) -> Option<Vec<ModelInfo>> {

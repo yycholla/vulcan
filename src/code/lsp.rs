@@ -192,18 +192,16 @@ impl LspServer {
                             }
                         } else if let Some(method) = msg.method.as_deref() {
                             if method == "textDocument/publishDiagnostics" {
-                                if let Some(params) = msg.params {
-                                    if let (Some(uri), Some(diags)) = (
+                                if let Some(params) = msg.params
+                                    && let (Some(uri), Some(diags)) = (
                                         params.get("uri").and_then(|v| v.as_str()),
                                         params.get("diagnostics"),
-                                    ) {
-                                        if let Ok(parsed) =
+                                    )
+                                        && let Ok(parsed) =
                                             serde_json::from_value::<Vec<Diagnostic>>(diags.clone())
                                         {
                                             diag_clone.lock().await.insert(uri.to_string(), parsed);
                                         }
-                                    }
-                                }
                             } else if method == "$/progress" {
                                 // YYC-72: rust-analyzer reports indexing
                                 // status via $/progress. Mark the server
@@ -213,8 +211,8 @@ impl LspServer {
                                 // counted as ready signals so we don't get
                                 // stuck on servers that don't publish a
                                 // dedicated indexing token.
-                                if let Some(params) = msg.params {
-                                    if let Some(value) = params.get("value") {
+                                if let Some(params) = msg.params
+                                    && let Some(value) = params.get("value") {
                                         let kind = value
                                             .get("kind")
                                             .and_then(|v| v.as_str())
@@ -225,7 +223,6 @@ impl LspServer {
                                             notify_clone.notify_waiters();
                                         }
                                     }
-                                }
                             }
                         }
                     }
@@ -320,7 +317,7 @@ impl LspServer {
                 })
             }
         })?;
-        Ok(serde_json::from_value(value).context("decode LSP response")?)
+        serde_json::from_value(value).context("decode LSP response")
     }
 
     /// Wait up to `timeout` for the server to publish an end-of-progress
@@ -445,7 +442,7 @@ where
         if n == 0 {
             return Ok(None);
         }
-        let trimmed = line.trim_end_matches(|c| c == '\r' || c == '\n');
+        let trimmed = line.trim_end_matches(['\r', '\n']);
         if trimmed.is_empty() {
             break;
         }

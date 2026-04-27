@@ -125,7 +125,7 @@ async fn streaming_and_buffered_paths_match() {
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
     let streamed = a2.run_prompt_stream("x", tx).await.unwrap();
     // Drain the channel.
-    while let Ok(_) = rx.try_recv() {}
+    while rx.try_recv().is_ok() {}
 
     assert_eq!(buffered, streamed);
     assert_eq!(buffered, "identical output");
@@ -188,11 +188,10 @@ async fn empty_terminal_response_after_tool_explains_why_streaming() {
     // The hint should also reach the TUI via a Text event.
     let mut saw_text_hint = false;
     while let Ok(ev) = rx.try_recv() {
-        if let crate::provider::StreamEvent::Text(t) = ev {
-            if t.contains("terminal turn") {
+        if let crate::provider::StreamEvent::Text(t) = ev
+            && t.contains("terminal turn") {
                 saw_text_hint = true;
             }
-        }
     }
     assert!(saw_text_hint, "TUI never saw the hint Text event");
 }

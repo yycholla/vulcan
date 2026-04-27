@@ -185,7 +185,7 @@ fn build_series_node(series: &str, leaves: &[(usize, Vec<String>)]) -> TreeNode 
 }
 
 fn tokenize(rest: &str) -> Vec<String> {
-    rest.split(|c: char| c == '-' || c == ':')
+    rest.split(['-', ':'])
         .filter(|s| !s.is_empty())
         .map(|s| s.to_string())
         .collect()

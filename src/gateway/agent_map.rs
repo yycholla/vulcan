@@ -269,11 +269,10 @@ pub(crate) async fn evict_idle(inner: &Arc<RwLock<HashMap<LaneKey, LaneEntry>>>,
                 // Re-check liveness — a concurrent get_or_spawn may have
                 // bumped last_activity between our snapshot and the write
                 // lock.
-                if now.duration_since(entry.last_activity) > ttl {
-                    if let Some(entry) = map.remove(lane) {
+                if now.duration_since(entry.last_activity) > ttl
+                    && let Some(entry) = map.remove(lane) {
                         taken.push((lane.clone(), entry));
                     }
-                }
             }
         }
         taken

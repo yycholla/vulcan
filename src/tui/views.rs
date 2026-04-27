@@ -167,8 +167,8 @@ fn build_chat_prefix_lines(app: &AppState) -> Vec<Line<'static>> {
 fn build_chat_suffix_lines(app: &AppState) -> Vec<Line<'static>> {
     let mut lines = Vec::new();
 
-    if let Some(p) = app.pending_pause.as_ref() {
-        if !p.options.is_empty() {
+    if let Some(p) = app.pending_pause.as_ref()
+        && !p.options.is_empty() {
             let mut pill_spans: Vec<Span<'static>> = Vec::new();
             pill_spans.push(Span::styled("▎ ", app.theme.user));
             for (i, opt) in p.options.iter().enumerate() {
@@ -187,7 +187,6 @@ fn build_chat_suffix_lines(app: &AppState) -> Vec<Line<'static>> {
             lines.push(Line::from(pill_spans));
             lines.push(Line::from(""));
         }
-    }
 
     if !app.queue.is_empty() {
         lines.push(Line::from(Span::styled(
@@ -611,14 +610,13 @@ fn tree_of_thought(f: &mut TuiFrame, area: Rect, app: &AppState) {
         format!("▎ {}", app.orchestration.active_task),
         app.theme.assistant,
     )));
-    if app.show_reasoning {
-        if let Some(reasoning) = app.latest_reasoning() {
+    if app.show_reasoning
+        && let Some(reasoning) = app.latest_reasoning() {
             lines.push(Line::from(""));
             for l in super::widgets::reasoning_lines(reasoning, false, &app.theme) {
                 lines.push(l);
             }
         }
-    }
     if let Some(content) = app.latest_agent_content() {
         lines.push(Line::from(""));
         for line in render_markdown(content, &app.theme) {
@@ -1103,6 +1101,11 @@ pub enum DiffKind {
     Ctx,
 }
 
+pub struct DiffLine {
+    pub text: String,
+    pub kind: DiffKind,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1123,9 +1126,4 @@ mod tests {
         assert_eq!(window.lines.len(), 5);
         assert!(window.total_lines > 5);
     }
-}
-
-pub struct DiffLine {
-    pub text: String,
-    pub kind: DiffKind,
 }

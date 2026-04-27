@@ -34,8 +34,8 @@ pub(in crate::agent) fn empty_terminal_message(
     if reasoning_len > 0 {
         parts.push(format!("reasoning trace was {reasoning_len} chars"));
     }
-    if let Some(u) = usage {
-        if max_context > 0
+    if let Some(u) = usage
+        && max_context > 0
             && (u.prompt_tokens as f64) >= NEAR_CONTEXT_LIMIT_RATIO * (max_context as f64)
         {
             parts.push(format!(
@@ -43,7 +43,6 @@ pub(in crate::agent) fn empty_terminal_message(
                 u.prompt_tokens, max_context
             ));
         }
-    }
     format!("_({} — terminal turn)_", parts.join("; "))
 }
 

@@ -34,7 +34,7 @@ impl ContextManager {
 
     /// Check if context should be compacted based on token usage
     pub fn should_compact(&self, messages: &[Message]) -> bool {
-        if !self.summary.is_some() && messages.len() > 50 {
+        if self.summary.is_none() && messages.len() > 50 {
             return true;
         }
 
