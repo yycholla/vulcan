@@ -9,7 +9,8 @@ pub mod graph;
 pub mod lsp;
 
 use std::path::Path;
-use std::sync::Mutex;
+
+use parking_lot::Mutex;
 use tree_sitter::{Language as TsLanguage, Parser as TsParser};
 
 /// Languages with first-class structural support. Extend by adding a
@@ -157,7 +158,7 @@ impl ParserCache {
             Language::Go => &self.go,
             Language::Json => &self.json,
         };
-        let mut guard = slot.lock().unwrap();
+        let mut guard = slot.lock();
         if guard.is_none() {
             let mut p = TsParser::new();
             p.set_language(&lang.grammar())
