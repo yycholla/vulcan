@@ -166,6 +166,9 @@ pub async fn run_tui(config: &Config, resume: ResumeTarget) -> Result<()> {
         app.model_label = a.active_model().to_string();
         app.token_max = a.max_context() as u32;
         app.provider_label = a.active_profile().map(str::to_string);
+        // YYC-207: share the agent's orchestration store so subagent
+        // tiles + tree nodes render real child runs as they happen.
+        app.orchestration_store = Some(a.orchestration());
     }
     events::refresh_sessions(&agent, &mut app).await;
 
