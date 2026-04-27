@@ -4704,7 +4704,6 @@ dependencies = [
  "tower",
  "tower-layer",
  "tower-service",
- "tracing",
 ]
 
 [[package]]
@@ -5088,7 +5087,6 @@ dependencies = [
  "toml",
  "toml_edit",
  "tower",
- "tower-http",
  "tracing",
  "tracing-subscriber",
  "tree-sitter",
