@@ -254,8 +254,11 @@ mod tests {
 
     #[tokio::test]
     async fn worker_panic_marks_inbound_failed() {
+        // YYC-137: with max_attempts=1, the first failure exhausts
+        // the retry budget and the row lands in 'dead' rather than
+        // looping back to 'pending'.
         let db = fresh_db();
-        let inbound = InboundQueue::new(db.clone());
+        let inbound = crate::gateway::queue::InboundQueue::with_policy(db.clone(), 1, 60);
         let outbound = OutboundQueue::new(db.clone(), 5);
         let agent_map = agent_map_with_panicking_provider();
 
@@ -276,8 +279,9 @@ mod tests {
             "process_one should propagate the panic as Err"
         );
 
-        // Inbound row should be in 'failed' state — claim_next returns None.
+        // Row exhausted retries → dead. Not claimable.
         assert!(inbound.claim_next().await.unwrap().is_none());
+        assert_eq!(inbound.count_dead().await.unwrap(), 1);
 
         // Outbound should be empty (no reply enqueued).
         assert!(
