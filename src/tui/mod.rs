@@ -779,6 +779,21 @@ pub async fn run_tui(config: &Config, resume: ResumeTarget) -> Result<()> {
             ev = key_rx.recv() => {
                 match ev {
                     Some(KeyEv::Press(event)) => {
+                        // YYC-124: bracketed-paste payload — terminals that
+                        // support CSI 200~/201~ deliver the whole pasted
+                        // buffer as one Event::Paste(String) instead of N
+                        // separate KeyCode::Char events. Append the chunk
+                        // to the input buffer in one shot; embedded
+                        // newlines stay literal so multiline pastes don't
+                        // submit a prompt per line. Skipped while a pause
+                        // overlay is active so the paste can't smuggle
+                        // text into the resume keystroke handler.
+                        if let Event::Paste(text) = &event {
+                            if app.pending_pause.is_none() {
+                                app.input.push_str(text);
+                            }
+                            continue;
+                        }
                         if let Event::Key(key) = event
                             && key.kind == KeyEventKind::Press {
                                 // ── If a pause is active, intercept the keys that
