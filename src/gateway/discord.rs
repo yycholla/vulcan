@@ -89,7 +89,7 @@ impl Platform for DiscordPlatform {
     }
 
     async fn send(&self, msg: &OutboundMessage) -> Result<crate::platform::SentMessage> {
-        use serenity::builder::CreateMessage;
+        use serenity::builder::{CreateAttachment, CreateMessage};
         use serenity::model::channel::MessageReference;
         use serenity::model::id::MessageId;
         let channel_id = ChannelId::new(Self::channel_id_from_chat(&msg.chat_id)?);
@@ -101,6 +101,17 @@ impl Platform for DiscordPlatform {
                     .with_context(|| format!("invalid Discord reply_to id '{reply_to}'"))?,
             );
             create = create.reference_message(MessageReference::from((channel_id, parent_id)));
+        }
+        for att in &msg.attachments {
+            let attach = CreateAttachment::path(&att.path)
+                .await
+                .with_context(|| format!("discord attachment '{}'", att.path.display()))?;
+            let attach = if let Some(caption) = &att.caption {
+                attach.description(caption.clone())
+            } else {
+                attach
+            };
+            create = create.add_file(attach);
         }
         let sent = channel_id
             .send_message(&self.http, create)
