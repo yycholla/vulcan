@@ -29,6 +29,8 @@ pub mod render_registry;
 pub mod routes;
 pub mod server;
 pub mod stream_render;
+#[cfg(feature = "telegram")]
+pub mod telegram;
 pub mod worker;
 
 pub async fn run(config: &Config, bind_override: Option<String>) -> Result<()> {
