@@ -29,8 +29,9 @@ use anyhow::{Context, Result};
 use chrono::Utc;
 use tokio::task::JoinHandle;
 
-use crate::config::{SchedulerConfig, SchedulerJobConfig};
+use crate::config::{OverlapPolicy, SchedulerConfig, SchedulerJobConfig};
 use crate::gateway::queue::InboundQueue;
+use crate::gateway::scheduler_store::SchedulerStore;
 use crate::platform::InboundMessage;
 
 /// Synthetic `user_id` stamped on scheduler firings so downstream
@@ -41,6 +42,7 @@ pub const SCHEDULER_USER_ID: &str = "scheduler";
 pub struct Scheduler {
     jobs: Vec<RunningJob>,
     inbound: Arc<InboundQueue>,
+    store: Option<SchedulerStore>,
 }
 
 #[derive(Clone)]
@@ -48,6 +50,14 @@ struct RunningJob {
     config: SchedulerJobConfig,
     schedule: cron::Schedule,
     tz: chrono_tz::Tz,
+    /// YYC-17 PR-3: in-process flag the overlap-policy gate
+    /// consults. Spawning the agent for a firing flips this to
+    /// true; the worker pipeline doesn't currently report
+    /// completion back, so for now the flag is cleared
+    /// immediately after enqueue. PR-C-4 will replace this with
+    /// a query against the inbound row's state so `Skip` /
+    /// `Replace` get teeth.
+    running: Arc<std::sync::atomic::AtomicBool>,
 }
 
 pub struct SchedulerHandle {
@@ -66,6 +76,17 @@ impl Scheduler {
     /// before we spawn anything. Disabled jobs are filtered here so
     /// the runtime loop only ever sees ones it should fire.
     pub fn from_config(config: &SchedulerConfig, inbound: Arc<InboundQueue>) -> Result<Self> {
+        Self::from_config_with_store(config, inbound, None)
+    }
+
+    /// YYC-17 PR-3: same as `from_config` but with an explicit
+    /// store handle. `None` skips persistence (used by tests that
+    /// don't want a SQLite pool).
+    pub fn from_config_with_store(
+        config: &SchedulerConfig,
+        inbound: Arc<InboundQueue>,
+        store: Option<SchedulerStore>,
+    ) -> Result<Self> {
         config.validate()?;
         let mut jobs = Vec::new();
         for job in config.jobs.iter().filter(|j| j.enabled) {
@@ -78,9 +99,14 @@ impl Scheduler {
                 config: job.clone(),
                 schedule,
                 tz,
+                running: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             });
         }
-        Ok(Self { jobs, inbound })
+        Ok(Self {
+            jobs,
+            inbound,
+            store,
+        })
     }
 
     /// Number of enabled jobs. Used by the gateway runtime to skip
@@ -140,9 +166,45 @@ impl Scheduler {
     }
 
     async fn fire(&mut self, idx: usize) {
+        use std::sync::atomic::Ordering;
         let job = &self.jobs[idx];
+        let now = Utc::now().timestamp();
+
+        // YYC-17 PR-3: overlap policy. Skip suppresses the firing
+        // when the job's running flag is set; Enqueue and Replace
+        // both proceed (Replace becomes meaningful in PR-C-4 once
+        // the scheduler can drop pending rows).
+        if job.config.overlap_policy == OverlapPolicy::Skip && job.running.load(Ordering::Acquire) {
+            tracing::warn!(
+                target: "gateway::scheduler",
+                job_id = %job.config.id,
+                job_name = %job.config.name,
+                "previous firing still active; skipping",
+            );
+            if let Some(store) = &self.store
+                && let Err(e) = store.record_skipped(&job.config.id, now)
+            {
+                tracing::warn!(
+                    target: "gateway::scheduler",
+                    job_id = %job.config.id,
+                    error = %e,
+                    "could not record skipped fire",
+                );
+            }
+            return;
+        }
+
+        job.running.store(true, Ordering::Release);
         let msg = build_inbound_message_for_job(&job.config);
-        match self.inbound.enqueue(msg).await {
+        let result = self.inbound.enqueue(msg).await;
+        // The inbound row is queued; the worker pipeline owns the
+        // run from here. Without a completion signal we clear the
+        // running flag immediately so subsequent fires aren't
+        // permanently suppressed. A real durable in-flight check
+        // ships in PR-C-4.
+        job.running.store(false, Ordering::Release);
+
+        match result {
             Ok(row_id) => {
                 tracing::info!(
                     target: "gateway::scheduler",
@@ -153,6 +215,16 @@ impl Scheduler {
                     row_id,
                     "scheduler firing enqueued",
                 );
+                if let Some(store) = &self.store
+                    && let Err(e) = store.record_enqueued(&job.config.id, now, row_id)
+                {
+                    tracing::warn!(
+                        target: "gateway::scheduler",
+                        job_id = %job.config.id,
+                        error = %e,
+                        "could not record enqueued fire",
+                    );
+                }
             }
             Err(e) => {
                 tracing::error!(
@@ -161,6 +233,17 @@ impl Scheduler {
                     error = %e,
                     "scheduler enqueue failed",
                 );
+                if let Some(store) = &self.store
+                    && let Err(store_err) =
+                        store.record_enqueue_failed(&job.config.id, now, &e.to_string())
+                {
+                    tracing::warn!(
+                        target: "gateway::scheduler",
+                        job_id = %job.config.id,
+                        error = %store_err,
+                        "could not record failed fire",
+                    );
+                }
             }
         }
     }
@@ -240,6 +323,49 @@ mod tests {
         config.jobs.push(j);
         let scheduler = Scheduler::from_config(&config, inbound).expect("ok");
         assert_eq!(scheduler.enabled_jobs(), 0);
+    }
+
+    // YYC-17 PR-3: a manual fire records to the store and enqueues
+    // an inbound row.
+    #[tokio::test]
+    async fn fire_records_enqueued_run() {
+        let pool = crate::memory::in_memory_gateway_pool().expect("pool");
+        let inbound = Arc::new(InboundQueue::new(pool.clone()));
+        let store = SchedulerStore::new(pool);
+        let mut config = SchedulerConfig::default();
+        config.jobs.push(job("fire-test", "0 8 * * * *"));
+        let mut scheduler =
+            Scheduler::from_config_with_store(&config, Arc::clone(&inbound), Some(store.clone()))
+                .expect("ok");
+        scheduler.fire(0).await;
+        let row = store.get("fire-test").unwrap().expect("row");
+        assert_eq!(row.last_status.as_deref(), Some("enqueued"));
+        assert_eq!(row.total_fires, 1);
+        assert!(row.last_inbound_id.is_some());
+    }
+
+    // YYC-17 PR-3: with overlap_policy = Skip, a second fire while
+    // the first is still flagged as running records as skipped.
+    #[tokio::test]
+    async fn fire_skip_policy_records_skipped() {
+        use std::sync::atomic::Ordering;
+        let pool = crate::memory::in_memory_gateway_pool().expect("pool");
+        let inbound = Arc::new(InboundQueue::new(pool.clone()));
+        let store = SchedulerStore::new(pool);
+        let mut config = SchedulerConfig::default();
+        let mut j = job("skip-test", "0 8 * * * *");
+        j.overlap_policy = OverlapPolicy::Skip;
+        config.jobs.push(j);
+        let mut scheduler =
+            Scheduler::from_config_with_store(&config, Arc::clone(&inbound), Some(store.clone()))
+                .expect("ok");
+        // Manually flip the running flag to simulate an in-flight run.
+        scheduler.jobs[0].running.store(true, Ordering::Release);
+        scheduler.fire(0).await;
+        let row = store.get("skip-test").unwrap().expect("row");
+        assert_eq!(row.last_status.as_deref(), Some("skipped"));
+        assert_eq!(row.skipped_fires, 1);
+        assert_eq!(row.total_fires, 1);
     }
 
     // YYC-17 PR-2: a configured + enabled job round-trips through
