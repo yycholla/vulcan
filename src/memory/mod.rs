@@ -191,13 +191,18 @@ impl SessionStore {
         Ok(Some(messages))
     }
 
-    /// Save the full message history for `session_id`. The session row is
+    /// Replace the full message history for `session_id`. The session row is
     /// upserted (`last_active` bumped); existing messages for the session are
-    /// deleted and replaced with `messages` — full-snapshot semantics matching
-    /// the per-prompt save the agent emits.
+    /// deleted and replaced with `messages` — O(n) in total history.
     ///
-    /// Prefer `append_messages` when only new messages need saving — this
-    /// does a full DELETE + re-INSERT which is O(n) in the total message count.
+    /// **Use only for intentional full rewrites** — compaction, sanitization,
+    /// or `Agent::replace_history`. Per-turn persistence MUST go through
+    /// `Agent::save_messages`, which routes growth-only saves to
+    /// `append_messages` and falls back to this method only when the
+    /// in-memory `messages` Vec has shrunk below the persisted snapshot
+    /// (the YYC-138 compaction defense). YYC-148 audit confirmed the
+    /// non-compaction call sites are tests; production hot paths take the
+    /// O(new messages) route via `append_messages`.
     pub fn save_messages(&self, session_id: &str, messages: &[Message]) -> Result<()> {
         let now = Utc::now().timestamp();
 
