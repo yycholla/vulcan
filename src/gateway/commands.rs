@@ -119,6 +119,10 @@ impl CommandDispatcher {
 
     /// Returns `Some(reply)` if `text` is a recognized slash command,
     /// `None` otherwise. Errors propagate (e.g., shell process panic).
+    /// Command names are matched case-insensitively (`/Help`, `/HELP`,
+    /// and `/help` all resolve the same builtin) — chat platforms
+    /// autocapitalize on mobile, and a case-sensitive miss would
+    /// silently route to the streaming agent.
     pub async fn dispatch(&self, text: &str, ctx: DispatchCtx<'_>) -> Result<Option<String>> {
         let stripped = match text.strip_prefix('/') {
             Some(rest) => rest.trim(),
@@ -128,7 +132,8 @@ impl CommandDispatcher {
             Some((n, b)) => (n, b.trim_start()),
             None => (stripped, ""),
         };
-        let Some(cmd) = self.commands.get(name) else {
+        let lower = name.to_ascii_lowercase();
+        let Some(cmd) = self.commands.get(&lower) else {
             return Ok(None);
         };
         let body_ctx = DispatchCtx { body, ..ctx };
@@ -202,6 +207,12 @@ impl CommandDispatcher {
 
 const SHELL_OUTPUT_CAP_BYTES: usize = 16 * 1024;
 
+/// SECURITY: `command` and `args` are sourced from operator config and
+/// executed verbatim via `TokioCommand::new` (no shell, no expansion).
+/// Inbound user text reaches the child only via stdin. Do NOT change
+/// this contract without re-evaluating injection — composing `command`
+/// or `args` from inbound text would let users execute arbitrary
+/// processes under the gateway daemon's privileges.
 async fn run_shell(
     command: &str,
     args: &[String],
@@ -242,7 +253,12 @@ async fn run_shell(
     };
     let mut stdout = String::from_utf8_lossy(&output.stdout).into_owned();
     if stdout.len() > SHELL_OUTPUT_CAP_BYTES {
-        stdout.truncate(SHELL_OUTPUT_CAP_BYTES);
+        // String::truncate panics if `n` lands mid-codepoint. UTF-8
+        // multibyte chars near the byte cap (e.g. a `ä` straddling
+        // byte 16384) would otherwise crash the worker. floor_char_boundary
+        // walks back to the nearest valid char boundary <= n.
+        let n = stdout.floor_char_boundary(SHELL_OUTPUT_CAP_BYTES);
+        stdout.truncate(n);
         stdout.push_str("\n…(truncated)");
     }
     if !output.status.success() {
@@ -331,5 +347,48 @@ mod tests {
         );
         let d = CommandDispatcher::new(&overrides);
         assert!(!d.commands.contains_key("nope"));
+    }
+
+    #[tokio::test]
+    async fn dispatch_is_case_insensitive_for_builtins() {
+        let d = CommandDispatcher::new(&empty_overrides());
+        let lane = LaneKey {
+            platform: "loopback".into(),
+            chat_id: "c".into(),
+        };
+        // Build a stand-in AgentMap; /help doesn't actually consult it,
+        // so we only need the type to match.
+        let cfg = std::sync::Arc::new(crate::config::Config::default());
+        let agent_map = AgentMap::new(cfg, std::time::Duration::from_secs(60));
+        let ctx = DispatchCtx {
+            lane: &lane,
+            user_id: "u",
+            agent_map: &agent_map,
+            body: "",
+        };
+        let reply = d
+            .dispatch("/HELP", ctx)
+            .await
+            .expect("dispatch ok")
+            .expect("uppercase /HELP should hit builtin /help");
+        assert!(reply.starts_with("Available commands:"));
+    }
+
+    #[tokio::test]
+    async fn dispatch_returns_none_for_non_slash_text() {
+        let d = CommandDispatcher::new(&empty_overrides());
+        let lane = LaneKey {
+            platform: "loopback".into(),
+            chat_id: "c".into(),
+        };
+        let cfg = std::sync::Arc::new(crate::config::Config::default());
+        let agent_map = AgentMap::new(cfg, std::time::Duration::from_secs(60));
+        let ctx = DispatchCtx {
+            lane: &lane,
+            user_id: "u",
+            agent_map: &agent_map,
+            body: "",
+        };
+        assert!(d.dispatch("hello world", ctx).await.unwrap().is_none());
     }
 }

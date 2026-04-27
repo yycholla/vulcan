@@ -627,5 +627,10 @@ mod tests {
             reply.turn_id.is_none(),
             "command replies are atomic, not streamed"
         );
+        // Inbound row was completed atomically alongside the outbound.
+        assert!(
+            inbound.claim_next().await.unwrap().is_none(),
+            "inbound row should be done after dispatch, not re-claimable"
+        );
     }
 }
