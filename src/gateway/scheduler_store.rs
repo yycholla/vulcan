@@ -49,7 +49,7 @@ impl ScheduledFireStatus {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct ScheduledRun {
     pub job_id: String,
     pub last_fired_at: Option<i64>,

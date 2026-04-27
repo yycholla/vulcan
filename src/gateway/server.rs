@@ -18,6 +18,15 @@ pub struct AppState {
     pub outbound: Arc<OutboundQueue>,
     pub registry: Arc<PlatformRegistry>,
     pub agent_map: Arc<AgentMap>,
+    /// YYC-17 PR-4: declared scheduler jobs (from `Config.scheduler`).
+    /// Empty when the gateway runs without the scheduler enabled.
+    /// Owned via `Arc` so the route handler can clone the slice
+    /// without copying job bodies.
+    pub scheduler_jobs: Arc<Vec<crate::config::SchedulerJobConfig>>,
+    /// YYC-17 PR-4: persistent run history. `None` when the
+    /// scheduler isn't enabled, so the `/v1/scheduler` endpoint
+    /// can answer with just the declared jobs and no run history.
+    pub scheduler_store: Option<crate::gateway::scheduler_store::SchedulerStore>,
 }
 
 /// Build the axum router. Public so tests can drive it via `tower::ServiceExt::oneshot`.
@@ -40,6 +49,10 @@ pub fn build_router(state: AppState) -> Router {
         .route(
             "/inbound",
             axum::routing::post(crate::gateway::routes::inbound::handle),
+        )
+        .route(
+            "/scheduler",
+            axum::routing::get(crate::gateway::routes::scheduler::handle),
         )
         .layer(axum::extract::DefaultBodyLimit::max(V1_BODY_LIMIT_BYTES))
         .layer(axum::middleware::from_fn_with_state(
@@ -120,6 +133,8 @@ mod tests {
             outbound: Arc::new(crate::gateway::queue::OutboundQueue::new(db.clone(), 5)),
             registry: Arc::new(crate::gateway::registry::PlatformRegistry::new()),
             agent_map: Arc::new(agent_map),
+            scheduler_jobs: Arc::new(Vec::new()),
+            scheduler_store: None,
         }
     }
 
