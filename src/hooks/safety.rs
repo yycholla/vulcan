@@ -8,7 +8,7 @@
 //! Scope of v1: shell commands only. The patterns are hard-coded; user
 //! customization will land when there's demand. See Linear YYC-26.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use parking_lot::Mutex;
 
@@ -18,32 +18,44 @@ use serde_json::Value;
 use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
 
+use crate::config::{DangerousCommandPolicy, DangerousCommandsConfig};
 use crate::pause::{AgentPause, AgentResume, OptionKind, PauseKind, PauseOption, PauseSender};
 
 use super::{HookHandler, HookOutcome};
 
 pub struct SafetyHook {
     approved: Mutex<HashSet<String>>,
+    /// Per-session usage count keyed by canonical command (YYC-130
+    /// follow-up). When the count for an approved command exceeds
+    /// `policy.quota_per_session`, the hook re-prompts as if the
+    /// approval entry had expired. `0` quota disables the cap.
+    usage: Mutex<HashMap<String, u32>>,
     pause_tx: Option<PauseSender>,
+    policy: DangerousCommandsConfig,
 }
 
 impl SafetyHook {
     /// Construct without an interactive pause channel. Blocked commands stay
     /// blocked — there's no path back to the user. Suitable for CLI one-shot.
     pub fn new() -> Self {
-        Self {
-            approved: Mutex::new(HashSet::new()),
-            pause_tx: None,
-        }
+        Self::with_config(None, DangerousCommandsConfig::default())
     }
 
     /// Construct with a pause channel. When a dangerous command is matched,
     /// the hook emits an `AgentPause::SafetyApproval` and awaits the user's
     /// response before deciding to block or allow.
     pub fn with_pause_emitter(pause_tx: PauseSender) -> Self {
+        Self::with_config(Some(pause_tx), DangerousCommandsConfig::default())
+    }
+
+    /// Construct with both a pause channel (or none) and an explicit
+    /// policy/quota configuration (YYC-130 follow-up).
+    pub fn with_config(pause_tx: Option<PauseSender>, policy: DangerousCommandsConfig) -> Self {
         Self {
             approved: Mutex::new(HashSet::new()),
-            pause_tx: Some(pause_tx),
+            usage: Mutex::new(HashMap::new()),
+            pause_tx,
+            policy,
         }
     }
 
@@ -58,6 +70,39 @@ impl SafetyHook {
         self.approved
             .lock()
             .contains(&canonical_command_key(command))
+    }
+
+    /// Bump the per-session usage counter for `command`. Returns the new
+    /// count. The counter is keyed by canonical form so quoting / spacing
+    /// variants share one budget.
+    fn record_usage(&self, command: &str) -> u32 {
+        let key = canonical_command_key(command);
+        let mut map = self.usage.lock();
+        let entry = map.entry(key).or_insert(0);
+        *entry = entry.saturating_add(1);
+        *entry
+    }
+
+    /// True when the per-session quota is finite and `record_usage` would
+    /// push the count past it. Caller advances the counter only after the
+    /// command is actually being allowed through, so a re-prompt resets
+    /// the counter (via `forget`) without bumping it.
+    fn quota_exhausted(&self, command: &str) -> bool {
+        let limit = self.policy.quota_per_session;
+        if limit == 0 {
+            return false;
+        }
+        let key = canonical_command_key(command);
+        self.usage.lock().get(&key).copied().unwrap_or(0) >= limit
+    }
+
+    /// Clear the cache + usage counter for `command`. Used after the
+    /// quota expires to make the next user prompt feel like a fresh
+    /// approval.
+    fn forget(&self, command: &str) {
+        let key = canonical_command_key(command);
+        self.approved.lock().remove(&key);
+        self.usage.lock().remove(&key);
     }
 }
 
@@ -118,9 +163,49 @@ impl HookHandler for SafetyHook {
             None => return Ok(HookOutcome::Continue),
         };
 
+        // YYC-130 follow-up: policy lets users opt out of prompting.
+        // `Allow` lets every dangerous match through (still warn-logged
+        // so it shows up in the audit trail). `Block` short-circuits
+        // before the approval cache so even remembered commands stop.
+        match self.policy.policy {
+            DangerousCommandPolicy::Allow => {
+                tracing::warn!(
+                    "safety-gate: dangerous_commands.policy = allow — letting '{command}' run ({reason})"
+                );
+                return Ok(HookOutcome::Continue);
+            }
+            DangerousCommandPolicy::Block => {
+                tracing::warn!(
+                    "safety-gate: dangerous_commands.policy = block — '{command}' rejected ({reason})"
+                );
+                return Ok(HookOutcome::Block {
+                    reason: format!(
+                        "{reason} (config policy = block — ask the user to flip dangerous_commands.policy if this is intentional)"
+                    ),
+                });
+            }
+            DangerousCommandPolicy::Prompt => {}
+        }
+
         if self.is_approved(command) {
-            tracing::info!("safety-gate: '{command}' approved earlier this session, allowing");
-            return Ok(HookOutcome::Continue);
+            // YYC-130 follow-up: per-session quota. Once the
+            // approved-and-remembered cache entry has been used past the
+            // configured cap, drop it and fall through to a fresh
+            // prompt. quota = 0 disables the cap entirely (legacy
+            // behavior).
+            if self.quota_exhausted(command) {
+                tracing::info!(
+                    "safety-gate: quota exhausted for '{command}' (limit {}); re-prompting",
+                    self.policy.quota_per_session,
+                );
+                self.forget(command);
+            } else {
+                let count = self.record_usage(command);
+                tracing::info!(
+                    "safety-gate: '{command}' approved earlier this session, allowing (use {count})"
+                );
+                return Ok(HookOutcome::Continue);
+            }
         }
 
         // If a pause emitter is wired up, ask the user. Otherwise fall back to
@@ -821,7 +906,7 @@ mod tests {
         // Different target paths must produce different keys so
         // approving a scoped delete doesn't authorize a root delete.
         assert_ne!(
-            canonical_command_key("rm -rf /tmp/build"),
+            canonical_command_key("rm -rf /etc/old"),
             canonical_command_key("rm -rf /"),
         );
         assert_ne!(
@@ -918,5 +1003,112 @@ mod tests {
             .await
             .unwrap();
         assert!(matches!(outcome, HookOutcome::Continue));
+    }
+
+    // ── YYC-130 follow-up: policy + per-session quota ───────────────────
+
+    #[tokio::test]
+    async fn policy_block_rejects_even_remembered_commands() {
+        // policy = block: dangerous patterns are hard-blocked regardless
+        // of the approval cache. Useful for unattended / CI runs.
+        let hook = SafetyHook::with_config(
+            None,
+            DangerousCommandsConfig {
+                policy: DangerousCommandPolicy::Block,
+                quota_per_session: 0,
+            },
+        );
+        hook.approve("rm -rf /"); // pre-seed the cache
+
+        let args = serde_json::json!({ "command": "rm -rf /" });
+        let outcome = hook
+            .before_tool_call("bash", &args, CancellationToken::new())
+            .await
+            .unwrap();
+        assert!(
+            matches!(outcome, HookOutcome::Block { reason } if reason.contains("policy = block"))
+        );
+    }
+
+    #[tokio::test]
+    async fn policy_allow_lets_dangerous_commands_run_without_prompt() {
+        // policy = allow: matcher fires (and warn-logs), but the call
+        // is allowed through with no pause emitter required. **Not**
+        // recommended — surface area for the docs.
+        let hook = SafetyHook::with_config(
+            None,
+            DangerousCommandsConfig {
+                policy: DangerousCommandPolicy::Allow,
+                quota_per_session: 0,
+            },
+        );
+        let args = serde_json::json!({ "command": "rm -rf /" });
+        let outcome = hook
+            .before_tool_call("bash", &args, CancellationToken::new())
+            .await
+            .unwrap();
+        assert!(matches!(outcome, HookOutcome::Continue));
+    }
+
+    #[tokio::test]
+    async fn quota_reprompts_after_cap_is_reached() {
+        // Quota = 2: the first two fires of an approved command run;
+        // the third fire finds the entry, sees the quota is exhausted,
+        // forgets it, and falls through to the prompt path. With no
+        // pause emitter that path hard-blocks — proving the cache
+        // entry was actually dropped.
+        let hook = SafetyHook::with_config(
+            None,
+            DangerousCommandsConfig {
+                policy: DangerousCommandPolicy::Prompt,
+                quota_per_session: 2,
+            },
+        );
+        hook.approve("rm -rf /etc/old");
+
+        let args = serde_json::json!({ "command": "rm -rf /etc/old" });
+
+        for run in 1..=2 {
+            let outcome = hook
+                .before_tool_call("bash", &args, CancellationToken::new())
+                .await
+                .unwrap();
+            assert!(
+                matches!(outcome, HookOutcome::Continue),
+                "run {run} should still be within quota"
+            );
+        }
+
+        let third = hook
+            .before_tool_call("bash", &args, CancellationToken::new())
+            .await
+            .unwrap();
+        assert!(
+            matches!(third, HookOutcome::Block { .. }),
+            "third run should re-prompt and (with no pause emitter) block"
+        );
+    }
+
+    #[tokio::test]
+    async fn quota_zero_disables_cap() {
+        // quota_per_session = 0 mirrors the legacy behavior: once
+        // approved, runs unlimited.
+        let hook = SafetyHook::with_config(
+            None,
+            DangerousCommandsConfig {
+                policy: DangerousCommandPolicy::Prompt,
+                quota_per_session: 0,
+            },
+        );
+        hook.approve("rm -rf /etc/old");
+
+        let args = serde_json::json!({ "command": "rm -rf /etc/old" });
+        for _ in 0..10 {
+            let outcome = hook
+                .before_tool_call("bash", &args, CancellationToken::new())
+                .await
+                .unwrap();
+            assert!(matches!(outcome, HookOutcome::Continue));
+        }
     }
 }

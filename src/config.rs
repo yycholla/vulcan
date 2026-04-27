@@ -266,6 +266,57 @@ pub struct ToolsConfig {
     /// way entirely.
     #[serde(default)]
     pub native_enforcement: NativeEnforcement,
+    /// Policy + quota for commands that match a SafetyHook dangerous
+    /// pattern (YYC-130 follow-up). Default: `policy = "prompt"` and
+    /// `quota_per_session = 5` — match the existing prompt-then-allow
+    /// flow, with a fresh per-session cap on how many times an
+    /// approved-and-remembered dangerous command can fire before the
+    /// hook re-prompts.
+    #[serde(default)]
+    pub dangerous_commands: DangerousCommandsConfig,
+}
+
+/// Approval-flow policy for SafetyHook (YYC-130 follow-up).
+///
+/// * `Prompt` — pause and ask the user via the existing pause channel
+///   (matches the legacy behavior). When no pause channel is wired
+///   (CLI one-shot), falls through to a hard block.
+/// * `Block`  — never prompt; always hard-block any dangerous command.
+///   Useful for unattended runs / CI / production.
+/// * `Allow`  — never prompt and never block. Effectively disables the
+///   safety hook for dangerous patterns. **Not recommended.**
+#[derive(Debug, Deserialize, Clone, Copy, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum DangerousCommandPolicy {
+    #[default]
+    Prompt,
+    Block,
+    Allow,
+}
+
+#[derive(Debug, Deserialize, Clone, Copy)]
+pub struct DangerousCommandsConfig {
+    #[serde(default)]
+    pub policy: DangerousCommandPolicy,
+    /// Per-session usage cap for any single approved-and-remembered
+    /// dangerous command. After this many fires the SafetyHook
+    /// re-prompts as if the cache entry had expired. 0 disables the
+    /// cap (legacy behavior — once approved, runs unlimited).
+    #[serde(default = "default_dangerous_quota")]
+    pub quota_per_session: u32,
+}
+
+fn default_dangerous_quota() -> u32 {
+    5
+}
+
+impl Default for DangerousCommandsConfig {
+    fn default() -> Self {
+        Self {
+            policy: DangerousCommandPolicy::default(),
+            quota_per_session: default_dangerous_quota(),
+        }
+    }
 }
 
 /// Native-tool redirect aggressiveness.
