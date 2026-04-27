@@ -154,6 +154,34 @@ impl ContextManager {
     }
 
     fn estimate_tokens(&self, messages: &[Message]) -> usize {
+        // YYC-129 perf: BPE encoding the full history on every turn is
+        // O(N²) over a long session. For `should_compact`'s purposes we
+        // only need precision near the trigger threshold — well below
+        // it, a coarse bytes/3 upper bound is enough to short-circuit
+        // and skip the BPE call entirely.
+        let total_bytes: usize = messages
+            .iter()
+            .map(|m| match m {
+                Message::User { content } => content.len(),
+                Message::Assistant { content, .. } => {
+                    content.as_ref().map(|s| s.len()).unwrap_or(0)
+                }
+                Message::Tool { content, .. } => content.len(),
+                Message::System { content } => content.len(),
+            })
+            .sum::<usize>()
+            + messages.len(); // +1 byte per separator
+        let cheap_estimate = total_bytes / 3 + 1;
+
+        // Threshold for "near the limit" — if the cheap upper bound is
+        // less than half of the trigger ratio's token budget, we're
+        // comfortably below and a precise count would only confirm it.
+        let trigger_tokens = (self.max_context as f64 * self.trigger_ratio) as usize;
+        if cheap_estimate < trigger_tokens / 2 {
+            return cheap_estimate;
+        }
+
+        // Within striking distance — pay for real BPE precision.
         let text: String = messages
             .iter()
             .map(|m| match m {
