@@ -11,7 +11,7 @@ use crate::memory::SessionStore;
 use crate::pause::PauseSender;
 use crate::prompt_builder::PromptBuilder;
 use crate::provider::openai::OpenAIProvider;
-use crate::provider::{LLMProvider, Message, StreamEvent};
+use crate::provider::{ChatResponse, LLMProvider, Message, StreamEvent, ToolCall, ToolDefinition};
 use crate::skills::SkillRegistry;
 use crate::tools::{ToolRegistry, ToolResult};
 use anyhow::{Context, Result};
@@ -116,6 +116,11 @@ pub struct ModelSelection {
     pub model: crate::provider::catalog::ModelInfo,
     pub max_context: usize,
     pub pricing: Option<crate::provider::catalog::Pricing>,
+}
+
+struct StreamTurn {
+    messages: Vec<Message>,
+    tool_defs: Vec<ToolDefinition>,
 }
 
 impl Agent {
@@ -807,34 +812,10 @@ impl Agent {
         ui_tx: mpsc::UnboundedSender<StreamEvent>,
         cancel: CancellationToken,
     ) -> Result<String> {
-        // Mirror the external token onto `self.turn_cancel` so internal
-        // tool dispatch / hook plumbing that still references `self.turn_cancel`
-        // sees the cancellation. The external token is the source of truth.
-        self.turn_cancel = cancel.clone();
-
-        let system = self
-            .prompt_builder
-            .build_system_prompt_with_context(&self.tools, Some(&self.tool_context));
-        let tool_defs = self
-            .tools
-            .definitions_with_context(Some(&self.tool_context));
-        let mut messages = vec![Message::System { content: system }];
-
-        if let Some(history) = self.memory.load_history(&self.session_id)? {
-            for msg in history {
-                messages.push(msg);
-            }
-        }
-
-        messages.push(Message::User {
-            content: input.to_string(),
-        });
-
-        // YYC-106: persist the user message immediately so a later cancel,
-        // tool-loop early exit, or process kill doesn't strand the prompt.
-        // save_messages tracks last_saved_count and appends only the new tail,
-        // so this is cheap.
-        self.save_messages(&messages)?;
+        let StreamTurn {
+            mut messages,
+            tool_defs,
+        } = self.prepare_stream_turn(input, cancel.clone()).await?;
 
         let mut full_response = String::new();
 
@@ -855,38 +836,8 @@ impl Agent {
                 return Ok("Cancelled".to_string());
             }
 
-            // YYC-105: same compaction discipline as run_prompt — when the
-            // accumulated history would push the next request past the
-            // configured trigger ratio, summarize older turns and replace
-            // them with a single system primer. Without this, small-context
-            // models (llama-cpp Q2_0 quants, etc.) silently truncate the
-            // request and behave as if the session has no history.
-            if self.context.should_compact(&messages) {
-                match self.context.compact(&messages) {
-                    Ok(summary) => {
-                        let kept_count = messages.len();
-                        messages = vec![
-                            Message::System {
-                                content: format!("Previous conversation context:\n{summary}"),
-                            },
-                            Message::User {
-                                content: input.to_string(),
-                            },
-                        ];
-                        let _ = ui_tx.send(StreamEvent::Text(format!(
-                            "_(compacted {kept_count} earlier turns into a summary to fit context)_\n"
-                        )));
-                        tracing::info!(
-                            "agent iteration {iteration}: compacted {kept_count} prior messages"
-                        );
-                    }
-                    Err(e) => {
-                        tracing::warn!(
-                            "agent iteration {iteration}: compaction failed: {e} (continuing with full history)"
-                        );
-                    }
-                }
-            }
+            self.compact_stream_messages_if_needed(&mut messages, input, &ui_tx, iteration)
+                .await;
 
             tracing::info!(
                 "agent iteration {iteration} starting (messages={})",
@@ -899,76 +850,9 @@ impl Agent {
                 .apply_before_prompt(&messages, cancel.clone())
                 .await;
 
-            let (inner_tx, mut inner_rx) = mpsc::unbounded_channel::<StreamEvent>();
-            let (priv_tx, mut priv_rx) = mpsc::unbounded_channel::<StreamEvent>();
-
-            let ui_tx_clone = ui_tx.clone();
-            tokio::spawn(async move {
-                while let Some(ev) = inner_rx.recv().await {
-                    match &ev {
-                        StreamEvent::Text(_) => {
-                            let _ = ui_tx_clone.send(ev);
-                        }
-                        StreamEvent::Done(_) | StreamEvent::Error(_) => {
-                            let _ = priv_tx.send(ev);
-                            break;
-                        }
-                        _ => {
-                            let _ = ui_tx_clone.send(ev);
-                        }
-                    }
-                }
-            });
-
-            if let Err(e) = self
-                .provider
-                .chat_stream(&outgoing, &tool_defs, inner_tx, cancel.clone())
-                .await
-            {
-                // Surface provider failures to the TUI rather than dropping
-                // the channel silently. ProviderError carries actionable hints
-                // via its Display impl; if the error chain has one (most
-                // common case), use that — otherwise fall back to the raw
-                // anyhow chain.
-                let user_message = e
-                    .downcast_ref::<crate::provider::ProviderError>()
-                    .map(|pe| pe.to_string())
-                    .unwrap_or_else(|| format!("{e}"));
-                tracing::error!("agent iteration {iteration}: chat_stream failed: {user_message}");
-                let _ = ui_tx.send(StreamEvent::Error(user_message.clone()));
-                let _ = ui_tx.send(StreamEvent::Done(crate::provider::ChatResponse {
-                    content: Some(format!("⚠ {user_message}")),
-                    tool_calls: None,
-                    usage: None,
-                    finish_reason: Some("error".into()),
-                    reasoning_content: None,
-                }));
-                return Err(e);
-            }
-
-            let mut final_response: Option<crate::provider::ChatResponse> = None;
-            while let Some(event) = priv_rx.recv().await {
-                match event {
-                    StreamEvent::Done(resp) => {
-                        final_response = Some(resp);
-                        break;
-                    }
-                    StreamEvent::Error(e) => {
-                        return Err(anyhow::anyhow!("{e}"));
-                    }
-                    _ => {}
-                }
-            }
-
-            let response = match final_response {
-                Some(r) => r,
-                None => {
-                    let msg = "Stream ended without Done event";
-                    tracing::error!("agent iteration {iteration}: {msg}");
-                    let _ = ui_tx.send(StreamEvent::Error(msg.into()));
-                    return Err(anyhow::anyhow!(msg));
-                }
-            };
+            let response = self
+                .collect_stream_response(&outgoing, &tool_defs, &ui_tx, cancel.clone(), iteration)
+                .await?;
 
             // YYC-105: feed usage into the context manager so future
             // iterations' should_compact() see realistic numbers.
@@ -999,60 +883,9 @@ impl Agent {
                     reasoning_content: response.reasoning_content.clone(),
                 });
 
-                // YYC-34: dispatch all calls concurrently. ToolCallStart events
-                // fire synchronously up front so the TUI shows every in-flight
-                // tool immediately; ToolCallEnd fires from inside each future
-                // as it completes (so they may arrive out of order — that's the
-                // point). `join_all` preserves order for the message vector
-                // so tool_call_id alignment stays deterministic.
-                for tc in tool_calls {
-                    // YYC-74: derive a one-line args summary so the TUI's
-                    // tool-card has structured context to show.
-                    let args_summary =
-                        summarize_tool_args(&tc.function.name, &tc.function.arguments);
-                    let _ = ui_tx.send(StreamEvent::ToolCallStart {
-                        id: tc.id.clone(),
-                        name: tc.function.name.clone(),
-                        args_summary,
-                    });
-                }
-                let this: &Self = self;
-                let dispatches = tool_calls.iter().map(|tc| {
-                    let id = tc.id.clone();
-                    let name = tc.function.name.clone();
-                    let args = tc.function.arguments.clone();
-                    let cancel = cancel.clone();
-                    let ui_tx = ui_tx.clone();
-                    async move {
-                        tracing::info!("Executing tool: {name} (call {id})");
-                        let started = std::time::Instant::now();
-                        let result = this.dispatch_tool(&name, &args, cancel).await;
-                        let elapsed_ms = started.elapsed().as_millis() as u64;
-                        let ok = !result.is_error;
-                        // YYC-74: truncated output preview + meta line.
-                        // YYC-78: elided line count for the auto-collapse
-                        // "N more lines" indicator.
-                        // Tools like write_file/edit_file populate
-                        // `display_preview` with a real diff; prefer it
-                        // over the LLM-facing terse `output`.
-                        let preview_source =
-                            result.display_preview.as_deref().unwrap_or(&result.output);
-                        let output_preview = preview_output(preview_source);
-                        let result_meta = summarize_tool_result(&name, &result.output);
-                        let elided = elided_lines(preview_source, output_preview.as_deref());
-                        let _ = ui_tx.send(StreamEvent::ToolCallEnd {
-                            id: id.clone(),
-                            name: name.clone(),
-                            ok,
-                            output_preview,
-                            result_meta,
-                            elided_lines: elided,
-                            elapsed_ms,
-                        });
-                        (id, result)
-                    }
-                });
-                let results = futures_util::future::join_all(dispatches).await;
+                let results = self
+                    .execute_stream_tool_calls(tool_calls, &ui_tx, cancel.clone())
+                    .await;
                 for (id, result) in results {
                     messages.push(Message::Tool {
                         tool_call_id: id,
@@ -1138,6 +971,229 @@ impl Agent {
             reasoning_content: None,
         }));
         Ok("Agent reached maximum iteration limit.".to_string())
+    }
+
+    async fn prepare_stream_turn(
+        &mut self,
+        input: &str,
+        cancel: CancellationToken,
+    ) -> Result<StreamTurn> {
+        // Mirror the external token onto `self.turn_cancel` so internal
+        // tool dispatch / hook plumbing that still references `self.turn_cancel`
+        // sees the cancellation. The external token is the source of truth.
+        self.turn_cancel = cancel;
+
+        let system = self
+            .prompt_builder
+            .build_system_prompt_with_context(&self.tools, Some(&self.tool_context));
+        let tool_defs = self
+            .tools
+            .definitions_with_context(Some(&self.tool_context));
+        let mut messages = vec![Message::System { content: system }];
+
+        if let Some(history) = self.memory.load_history(&self.session_id)? {
+            for msg in history {
+                messages.push(msg);
+            }
+        }
+
+        messages.push(Message::User {
+            content: input.to_string(),
+        });
+
+        // YYC-106: persist the user message immediately so a later cancel,
+        // tool-loop early exit, or process kill doesn't strand the prompt.
+        // save_messages tracks last_saved_count and appends only the new tail,
+        // so this is cheap.
+        self.save_messages(&messages)?;
+
+        Ok(StreamTurn {
+            messages,
+            tool_defs,
+        })
+    }
+
+    async fn compact_stream_messages_if_needed(
+        &mut self,
+        messages: &mut Vec<Message>,
+        input: &str,
+        ui_tx: &mpsc::UnboundedSender<StreamEvent>,
+        iteration: usize,
+    ) {
+        // YYC-105: same compaction discipline as run_prompt — when the
+        // accumulated history would push the next request past the
+        // configured trigger ratio, summarize older turns and replace
+        // them with a single system primer. Without this, small-context
+        // models (llama-cpp Q2_0 quants, etc.) silently truncate the
+        // request and behave as if the session has no history.
+        if !self.context.should_compact(messages) {
+            return;
+        }
+
+        match self.context.compact(messages) {
+            Ok(summary) => {
+                let kept_count = messages.len();
+                *messages = vec![
+                    Message::System {
+                        content: format!("Previous conversation context:\n{summary}"),
+                    },
+                    Message::User {
+                        content: input.to_string(),
+                    },
+                ];
+                let _ = ui_tx.send(StreamEvent::Text(format!(
+                    "_(compacted {kept_count} earlier turns into a summary to fit context)_\n"
+                )));
+                tracing::info!(
+                    "agent iteration {iteration}: compacted {kept_count} prior messages"
+                );
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "agent iteration {iteration}: compaction failed: {e} (continuing with full history)"
+                );
+            }
+        }
+    }
+
+    async fn collect_stream_response(
+        &self,
+        outgoing: &[Message],
+        tool_defs: &[ToolDefinition],
+        ui_tx: &mpsc::UnboundedSender<StreamEvent>,
+        cancel: CancellationToken,
+        iteration: usize,
+    ) -> Result<ChatResponse> {
+        let (inner_tx, mut inner_rx) = mpsc::unbounded_channel::<StreamEvent>();
+        let (priv_tx, mut priv_rx) = mpsc::unbounded_channel::<StreamEvent>();
+
+        let ui_tx_clone = ui_tx.clone();
+        tokio::spawn(async move {
+            while let Some(ev) = inner_rx.recv().await {
+                match &ev {
+                    StreamEvent::Text(_) => {
+                        let _ = ui_tx_clone.send(ev);
+                    }
+                    StreamEvent::Done(_) | StreamEvent::Error(_) => {
+                        let _ = priv_tx.send(ev);
+                        break;
+                    }
+                    _ => {
+                        let _ = ui_tx_clone.send(ev);
+                    }
+                }
+            }
+        });
+
+        if let Err(e) = self
+            .provider
+            .chat_stream(outgoing, tool_defs, inner_tx, cancel)
+            .await
+        {
+            // Surface provider failures to the TUI rather than dropping
+            // the channel silently. ProviderError carries actionable hints
+            // via its Display impl; if the error chain has one (most
+            // common case), use that — otherwise fall back to the raw
+            // anyhow chain.
+            let user_message = e
+                .downcast_ref::<crate::provider::ProviderError>()
+                .map(|pe| pe.to_string())
+                .unwrap_or_else(|| format!("{e}"));
+            tracing::error!("agent iteration {iteration}: chat_stream failed: {user_message}");
+            let _ = ui_tx.send(StreamEvent::Error(user_message.clone()));
+            let _ = ui_tx.send(StreamEvent::Done(ChatResponse {
+                content: Some(format!("⚠ {user_message}")),
+                tool_calls: None,
+                usage: None,
+                finish_reason: Some("error".into()),
+                reasoning_content: None,
+            }));
+            return Err(e);
+        }
+
+        let mut final_response: Option<ChatResponse> = None;
+        while let Some(event) = priv_rx.recv().await {
+            match event {
+                StreamEvent::Done(resp) => {
+                    final_response = Some(resp);
+                    break;
+                }
+                StreamEvent::Error(e) => {
+                    return Err(anyhow::anyhow!("{e}"));
+                }
+                _ => {}
+            }
+        }
+
+        match final_response {
+            Some(r) => Ok(r),
+            None => {
+                let msg = "Stream ended without Done event";
+                tracing::error!("agent iteration {iteration}: {msg}");
+                let _ = ui_tx.send(StreamEvent::Error(msg.into()));
+                Err(anyhow::anyhow!(msg))
+            }
+        }
+    }
+
+    async fn execute_stream_tool_calls(
+        &self,
+        tool_calls: &[ToolCall],
+        ui_tx: &mpsc::UnboundedSender<StreamEvent>,
+        cancel: CancellationToken,
+    ) -> Vec<(String, ToolResult)> {
+        // YYC-34: dispatch all calls concurrently. ToolCallStart events fire
+        // synchronously up front so the TUI shows every in-flight tool
+        // immediately; ToolCallEnd fires from inside each future as it
+        // completes (so they may arrive out of order — that's the point).
+        // `join_all` preserves order for the message vector so tool_call_id
+        // alignment stays deterministic.
+        for tc in tool_calls {
+            // YYC-74: derive a one-line args summary so the TUI's tool-card
+            // has structured context to show.
+            let args_summary = summarize_tool_args(&tc.function.name, &tc.function.arguments);
+            let _ = ui_tx.send(StreamEvent::ToolCallStart {
+                id: tc.id.clone(),
+                name: tc.function.name.clone(),
+                args_summary,
+            });
+        }
+
+        let dispatches = tool_calls.iter().map(|tc| {
+            let id = tc.id.clone();
+            let name = tc.function.name.clone();
+            let args = tc.function.arguments.clone();
+            let cancel = cancel.clone();
+            let ui_tx = ui_tx.clone();
+            async move {
+                tracing::info!("Executing tool: {name} (call {id})");
+                let started = std::time::Instant::now();
+                let result = self.dispatch_tool(&name, &args, cancel).await;
+                let elapsed_ms = started.elapsed().as_millis() as u64;
+                let ok = !result.is_error;
+                // YYC-74: truncated output preview + meta line.
+                // YYC-78: elided line count for the auto-collapse
+                // "N more lines" indicator.
+                // Tools like write_file/edit_file populate
+                // `display_preview` with a real diff; prefer it
+                // over the LLM-facing terse `output`.
+                let preview_source = result.display_preview.as_deref().unwrap_or(&result.output);
+                let output_preview = preview_output(preview_source);
+                let result_meta = summarize_tool_result(&name, &result.output);
+                let elided = elided_lines(preview_source, output_preview.as_deref());
+                let _ = ui_tx.send(StreamEvent::ToolCallEnd {
+                    id: id.clone(),
+                    name: name.clone(),
+                    ok,
+                    output_preview,
+                    result_meta,
+                    elided_lines: elided,
+                    elapsed_ms,
+                });
+                (id, result)
+            }
+        });
+        futures_util::future::join_all(dispatches).await
     }
 
     /// Resume a previous session by ID. Swaps `self.session_id` to the
@@ -1645,6 +1701,133 @@ mod tests {
 
         assert_eq!(buffered, streamed);
         assert_eq!(buffered, "identical output");
+    }
+
+    #[tokio::test]
+    async fn prepare_stream_turn_builds_prompt_and_persists_user_message() {
+        let (mut agent, _mock) = agent_with_mock();
+        let cancel = CancellationToken::new();
+
+        let turn = agent
+            .prepare_stream_turn("stream this", cancel.clone())
+            .await
+            .unwrap();
+
+        cancel.cancel();
+        assert!(agent.turn_cancel.is_cancelled());
+        assert!(matches!(turn.messages[0], Message::System { .. }));
+        assert!(matches!(
+            turn.messages.last(),
+            Some(Message::User { content }) if content == "stream this"
+        ));
+        assert_eq!(agent.last_saved_count, turn.messages.len());
+        assert!(!turn.tool_defs.is_empty());
+    }
+
+    #[tokio::test]
+    async fn compact_stream_messages_if_needed_replaces_history_and_emits_note() {
+        let (mut agent, _mock) = agent_with_mock();
+        agent.context = ContextManager::new(10);
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut messages = vec![
+            Message::System {
+                content: "system".into(),
+            },
+            Message::User {
+                content: "old prompt".into(),
+            },
+            Message::Assistant {
+                content: Some("old answer".into()),
+                tool_calls: None,
+                reasoning_content: None,
+            },
+        ];
+
+        agent
+            .compact_stream_messages_if_needed(&mut messages, "new prompt", &tx, 0)
+            .await;
+
+        assert_eq!(messages.len(), 2);
+        assert!(matches!(
+            &messages[0],
+            Message::System { content } if content.starts_with("Previous conversation context:")
+        ));
+        assert!(matches!(
+            &messages[1],
+            Message::User { content } if content == "new prompt"
+        ));
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(StreamEvent::Text(note)) if note.contains("compacted")
+        ));
+    }
+
+    #[tokio::test]
+    async fn collect_stream_response_forwards_text_and_returns_done() {
+        let (agent, mock) = agent_with_mock();
+        mock.enqueue_text("streamed text");
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let messages = vec![Message::User {
+            content: "x".into(),
+        }];
+
+        let response = agent
+            .collect_stream_response(&messages, &[], &tx, CancellationToken::new(), 0)
+            .await
+            .unwrap();
+
+        assert_eq!(response.content.as_deref(), Some("streamed text"));
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(StreamEvent::Text(text)) if text == "streamed text"
+        ));
+    }
+
+    #[tokio::test]
+    async fn execute_stream_tool_calls_emits_events_and_preserves_result_order() {
+        let (agent, _mock) = agent_with_mock();
+        let calls = vec![
+            crate::provider::ToolCall {
+                id: "call_a".into(),
+                call_type: "function".into(),
+                function: crate::provider::ToolCallFunction {
+                    name: "read_file".into(),
+                    arguments: serde_json::json!({"path": "/tmp/nope-a"}).to_string(),
+                },
+            },
+            crate::provider::ToolCall {
+                id: "call_b".into(),
+                call_type: "function".into(),
+                function: crate::provider::ToolCallFunction {
+                    name: "read_file".into(),
+                    arguments: serde_json::json!({"path": "/tmp/nope-b"}).to_string(),
+                },
+            },
+        ];
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+
+        let results = agent
+            .execute_stream_tool_calls(&calls, &tx, CancellationToken::new())
+            .await;
+
+        assert_eq!(
+            results
+                .iter()
+                .map(|(id, _)| id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["call_a", "call_b"]
+        );
+        let mut starts = 0;
+        let mut ends = 0;
+        while let Ok(event) = rx.try_recv() {
+            match event {
+                StreamEvent::ToolCallStart { .. } => starts += 1,
+                StreamEvent::ToolCallEnd { .. } => ends += 1,
+                other => panic!("unexpected event: {other:?}"),
+            }
+        }
+        assert_eq!(starts, 2);
+        assert_eq!(ends, 2);
     }
 
     #[tokio::test]
