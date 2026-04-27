@@ -152,9 +152,17 @@ pub(super) async fn handle_stream_event(
             }
             app.note_done();
             refresh_sessions(agent, app).await;
-            // YYC-61: drain one queued prompt per turn end. Subsequent queued
-            // prompts ride the next Done event in the same way.
-            if let Some(next) = app.queue.pop_front() {
+            // YYC-125: drain ALL queued steers at turn end as a single
+            // batched prompt. Multiple mid-turn submissions land as one
+            // combined user message rather than dripping one prompt per
+            // turn. /queue deferrals (deferred_queue) drain strictly
+            // after the steer batch — and only one per Done — so user
+            // intent is preserved.
+            if !app.queue.is_empty() {
+                let parts: Vec<String> = app.queue.drain(..).collect();
+                let batched = parts.join("\n\n");
+                submit_prompt(app, agent, stream_tx, batched);
+            } else if let Some(next) = app.deferred_queue.pop_front() {
                 submit_prompt(app, agent, stream_tx, next);
             }
         }
