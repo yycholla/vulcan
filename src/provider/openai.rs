@@ -602,6 +602,10 @@ impl LLMProvider for OpenAIProvider {
         // Read the HTTP response as a byte stream — chunks arrive as the LLM generates
         let mut stream = response.bytes_stream();
         let mut buf = String::new();
+        // YYC-134: incremental decoder so multi-byte UTF-8 sequences split
+        // across chunk boundaries (CJK, emoji, accented Latin) reassemble
+        // correctly instead of decaying to U+FFFD pairs.
+        let mut decoder = Utf8StreamDecoder::new();
 
         use futures_util::StreamExt;
         loop {
@@ -614,7 +618,12 @@ impl LLMProvider for OpenAIProvider {
                 },
             };
             let chunk = chunk_result.context("Failed to read stream chunk")?;
-            let chunk_str = String::from_utf8_lossy(&chunk);
+            let chunk_str = decoder.decode(&chunk);
+            if chunk_str.is_empty() {
+                // All buffered bytes are still inside a partial UTF-8
+                // sequence — wait for the next chunk before processing.
+                continue;
+            }
             if let Some(raw) = raw_stream.as_mut() {
                 raw.push_str(&chunk_str);
             }
@@ -661,6 +670,47 @@ impl LLMProvider for OpenAIProvider {
                 }
             }
         }
+        // YYC-134: drain any trailing bytes still buffered in the UTF-8
+        // decoder — typically empty unless the stream closed mid-sequence.
+        let utf8_tail = decoder.flush();
+        if !utf8_tail.is_empty() {
+            if let Some(raw) = raw_stream.as_mut() {
+                raw.push_str(&utf8_tail);
+            }
+            buf.push_str(&utf8_tail);
+        }
+        // Process any final newline-terminated lines that arrived with the
+        // tail flush. A residual buf without a newline is dropped — SSE
+        // events are line-delimited, so a trailing partial is meaningless.
+        while let Some(newline) = buf.find('\n') {
+            let line = buf[..newline].to_string();
+            buf = buf[newline + 1..].to_string();
+            let prev_content_len = content.len();
+            let prev_reasoning_len = reasoning.len();
+            Self::parse_line(
+                &line,
+                &mut content,
+                &mut reasoning,
+                &mut tool_calls,
+                &mut usage,
+                &mut finish_reason,
+            );
+            let raw_content_delta = content[prev_content_len..].to_string();
+            content.truncate(prev_content_len);
+            let sanitized = think.feed(&raw_content_delta);
+            content.push_str(&sanitized.text);
+            let native_reasoning_delta = reasoning[prev_reasoning_len..].to_string();
+            reasoning.push_str(&sanitized.reasoning);
+            if !sanitized.text.is_empty() {
+                let _ = tx.send(StreamEvent::Text(sanitized.text));
+            }
+            let mut combined_reasoning = native_reasoning_delta;
+            combined_reasoning.push_str(&sanitized.reasoning);
+            if !combined_reasoning.trim().is_empty() {
+                let _ = tx.send(StreamEvent::Reasoning(combined_reasoning));
+            }
+        }
+
         // Drain any pending partial-tag buffer left at stream close.
         let leftover = think.flush();
         if !leftover.text.is_empty() {
@@ -736,6 +786,80 @@ fn truncate(s: &str, max: usize) -> String {
         let mut out: String = s.chars().take(max).collect();
         out.push('…');
         out
+    }
+}
+
+/// Incremental UTF-8 decoder for the SSE byte stream (YYC-134).
+///
+/// `String::from_utf8_lossy(chunk)` corrupts multi-byte sequences that
+/// straddle a chunk boundary: the partial leading bytes get replaced
+/// with `U+FFFD`, then the trailing continuation bytes also become
+/// `U+FFFD` on the next call. CJK / emoji / accented Latin in streamed
+/// responses silently rot.
+///
+/// This decoder buffers raw bytes between calls and only emits
+/// characters whose full UTF-8 sequence is in hand. Genuinely invalid
+/// bytes (not just incomplete trailing sequences) are replaced with
+/// `U+FFFD` exactly once, matching `from_utf8_lossy` semantics for the
+/// non-boundary case.
+struct Utf8StreamDecoder {
+    leftover: Vec<u8>,
+}
+
+impl Utf8StreamDecoder {
+    fn new() -> Self {
+        Self {
+            leftover: Vec::new(),
+        }
+    }
+
+    /// Append `chunk` to the buffer and return everything decoded so far
+    /// that ends on a complete UTF-8 sequence. Trailing partial sequences
+    /// remain buffered for the next call.
+    fn decode(&mut self, chunk: &[u8]) -> String {
+        self.leftover.extend_from_slice(chunk);
+        let mut out = String::with_capacity(self.leftover.len());
+        loop {
+            match std::str::from_utf8(&self.leftover) {
+                Ok(s) => {
+                    out.push_str(s);
+                    self.leftover.clear();
+                    return out;
+                }
+                Err(e) => {
+                    let valid = e.valid_up_to();
+                    if valid > 0 {
+                        // SAFETY: Utf8Error promises [..valid] is valid UTF-8.
+                        let s = std::str::from_utf8(&self.leftover[..valid]).unwrap();
+                        out.push_str(s);
+                    }
+                    match e.error_len() {
+                        None => {
+                            // Incomplete trailing sequence — keep it for next chunk.
+                            self.leftover.drain(..valid);
+                            return out;
+                        }
+                        Some(n) => {
+                            // Genuinely invalid byte(s) — emit one replacement
+                            // char and skip past them, then keep decoding.
+                            out.push('\u{FFFD}');
+                            self.leftover.drain(..valid + n);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Final drain at end-of-stream. Anything left is necessarily an
+    /// incomplete sequence — surface it lossily so the caller doesn't
+    /// silently lose tail bytes.
+    fn flush(self) -> String {
+        if self.leftover.is_empty() {
+            String::new()
+        } else {
+            String::from_utf8_lossy(&self.leftover).into_owned()
+        }
     }
 }
 
@@ -1017,5 +1141,80 @@ data: [DONE]
         assert!((8000..10000).contains(&d4), "got {d4}");
         assert!((16000..20000).contains(&d5), "got {d5}");
         assert!((16000..20000).contains(&d6), "got {d6} (should be capped)");
+    }
+
+    #[test]
+    fn utf8_decoder_passes_through_complete_ascii() {
+        let mut d = Utf8StreamDecoder::new();
+        assert_eq!(d.decode(b"hello world"), "hello world");
+    }
+
+    #[test]
+    fn utf8_decoder_reassembles_two_byte_sequence_split_across_chunks() {
+        // 'é' = 0xC3 0xA9 — split between leading and continuation byte.
+        let mut d = Utf8StreamDecoder::new();
+        let first = d.decode(&[0xC3]);
+        assert_eq!(first, "", "leading byte must not emit U+FFFD");
+        let second = d.decode(&[0xA9]);
+        assert_eq!(second, "é");
+    }
+
+    #[test]
+    fn utf8_decoder_reassembles_three_byte_cjk_at_every_split() {
+        // '你' = E4 BD A0
+        for split in 1..=2 {
+            let bytes = [0xE4, 0xBD, 0xA0];
+            let mut d = Utf8StreamDecoder::new();
+            let head = d.decode(&bytes[..split]);
+            assert_eq!(head, "", "split={split} leading bytes leaked");
+            let tail = d.decode(&bytes[split..]);
+            assert_eq!(tail, "你", "split={split} reassembly failed");
+        }
+    }
+
+    #[test]
+    fn utf8_decoder_reassembles_four_byte_emoji_at_every_split() {
+        // '🦀' = F0 9F A6 80
+        let bytes = [0xF0, 0x9F, 0xA6, 0x80];
+        for split in 1..=3 {
+            let mut d = Utf8StreamDecoder::new();
+            let head = d.decode(&bytes[..split]);
+            assert_eq!(head, "", "split={split} leading bytes leaked");
+            let tail = d.decode(&bytes[split..]);
+            assert_eq!(tail, "🦀", "split={split} reassembly failed");
+        }
+    }
+
+    #[test]
+    fn utf8_decoder_emits_replacement_for_genuinely_invalid_bytes() {
+        // 0xFF is never a valid UTF-8 leading byte.
+        let mut d = Utf8StreamDecoder::new();
+        let s = d.decode(&[b'a', 0xFF, b'b']);
+        // Matches from_utf8_lossy semantics for the non-boundary case.
+        assert_eq!(s, "a\u{FFFD}b");
+    }
+
+    #[test]
+    fn utf8_decoder_handles_chunked_mix_of_ascii_and_multibyte() {
+        // Simulate a realistic SSE stream: ASCII, partial CJK split across
+        // two reads, more ASCII.
+        let mut d = Utf8StreamDecoder::new();
+        let mut out = String::new();
+        // "data: 你" with 你 = E4 BD A0, splitting after the first byte.
+        out.push_str(&d.decode(b"data: \xE4"));
+        out.push_str(&d.decode(b"\xBD\xA0\n"));
+        out.push_str(&d.decode(b"next\n"));
+        assert_eq!(out, "data: 你\nnext\n");
+    }
+
+    #[test]
+    fn utf8_decoder_flush_surfaces_dangling_partial_lossily() {
+        // Stream ends mid-sequence — flush returns U+FFFD rather than
+        // silently swallowing the trailing bytes.
+        let mut d = Utf8StreamDecoder::new();
+        let mid = d.decode(&[0xE4, 0xBD]); // 2 of 3 bytes of '你'
+        assert_eq!(mid, "");
+        let tail = d.flush();
+        assert!(tail.contains('\u{FFFD}'));
     }
 }
