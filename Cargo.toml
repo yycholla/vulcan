@@ -62,6 +62,13 @@ reqwest = { version = "0.13", features = ["json", "stream"] }
 # IPv4-mapped IPv6 addresses.
 url = "2"
 
+# Cron expression parsing for the scheduled-task runtime (YYC-17).
+# Pure-Rust parser; we drive the schedule on top of tokio's own
+# timer rather than pulling in `tokio-cron-scheduler` so the
+# scheduler shares lifecycle + persistence with the gateway pieces.
+cron = "0.15"
+chrono-tz = "0.10"
+
 # Async trait support (needed for dyn-compatible tool/provider traits)
 async-trait = "0.1"
 

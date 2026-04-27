@@ -183,6 +183,117 @@ pub struct Config {
     /// the system prompt and are visible to the model).
     #[serde(default)]
     pub recall: RecallConfig,
+
+    /// YYC-17: scheduled jobs the gateway scheduler enqueues into
+    /// the inbound queue at their cron firing times. Empty in the
+    /// default config; jobs are parsed but their semantics are
+    /// validated lazily so the rest of the runtime is unaffected.
+    #[serde(default)]
+    pub scheduler: SchedulerConfig,
+}
+
+/// YYC-17: top-level scheduler configuration. Each job entry
+/// declares a cron expression, a target platform/lane, and the
+/// prompt to fire on schedule. Jobs run only when the gateway is
+/// enabled; the TUI / one-shot paths ignore them.
+#[derive(Debug, Deserialize, Clone, Default)]
+pub struct SchedulerConfig {
+    #[serde(default)]
+    pub jobs: Vec<SchedulerJobConfig>,
+}
+
+/// YYC-17: declarative job spec. `id` is operator-supplied so jobs
+/// survive config edits/reorders; `name` is the human label that
+/// shows up in tracing. The cron expression is parsed at startup
+/// and any failure surfaces as a hard validation error before the
+/// gateway binds a listener.
+#[derive(Debug, Deserialize, Clone)]
+pub struct SchedulerJobConfig {
+    pub id: String,
+    #[serde(default)]
+    pub name: String,
+    #[serde(default = "default_scheduler_job_enabled")]
+    pub enabled: bool,
+    pub cron: String,
+    #[serde(default = "default_scheduler_job_timezone")]
+    pub timezone: String,
+    pub platform: String,
+    pub lane: String,
+    pub prompt: String,
+    /// Hard wall-clock cap on a single job run, in seconds. `None`
+    /// means no cap; the run finishes whenever the agent finishes.
+    #[serde(default)]
+    pub max_runtime_secs: Option<u64>,
+    /// Policy when a job's previous run is still active when its
+    /// next firing arrives. Default `skip` matches the design doc
+    /// recommendation.
+    #[serde(default)]
+    pub overlap_policy: OverlapPolicy,
+}
+
+/// YYC-17: how the scheduler should handle a firing whose previous
+/// run is still active.
+#[derive(Debug, Deserialize, Clone, Copy, PartialEq, Eq, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum OverlapPolicy {
+    /// Skip the new firing, leave the previous run alone.
+    #[default]
+    Skip,
+    /// Enqueue anyway — both runs proceed in parallel.
+    Enqueue,
+    /// Drop any pending firings and replace with the new one.
+    Replace,
+}
+
+fn default_scheduler_job_enabled() -> bool {
+    true
+}
+
+fn default_scheduler_job_timezone() -> String {
+    "UTC".into()
+}
+
+impl SchedulerConfig {
+    /// YYC-17: validate every job's cron expression and timezone
+    /// before the gateway runtime touches them. Returns the first
+    /// actionable error so operators see the bad job by id.
+    pub fn validate(&self) -> Result<()> {
+        for job in &self.jobs {
+            job.validate()
+                .with_context(|| format!("scheduler job '{}'", job.id))?;
+        }
+        Ok(())
+    }
+}
+
+impl SchedulerJobConfig {
+    /// YYC-17: surface bad cron expressions, unknown timezones,
+    /// empty platform/lane/prompt, and zero max_runtime_secs as
+    /// hard validation errors.
+    pub fn validate(&self) -> Result<()> {
+        use std::str::FromStr;
+        if self.id.trim().is_empty() {
+            anyhow::bail!("id is required");
+        }
+        if self.platform.trim().is_empty() {
+            anyhow::bail!("platform is required");
+        }
+        if self.lane.trim().is_empty() {
+            anyhow::bail!("lane is required");
+        }
+        if self.prompt.trim().is_empty() {
+            anyhow::bail!("prompt is required");
+        }
+        // cron 0.15: parses 6- or 7-field expressions (with seconds).
+        cron::Schedule::from_str(&self.cron)
+            .with_context(|| format!("invalid cron expression `{}`", self.cron))?;
+        chrono_tz::Tz::from_str(&self.timezone)
+            .map_err(|e| anyhow::anyhow!("invalid timezone `{}`: {e}", self.timezone))?;
+        if matches!(self.max_runtime_secs, Some(0)) {
+            anyhow::bail!("max_runtime_secs must be > 0 when set");
+        }
+        Ok(())
+    }
 }
 
 /// Auto-recall config (YYC-42). Drives the `RecallHook` BeforePrompt
@@ -769,6 +880,7 @@ impl Default for Config {
             gateway: None,
             keybinds: KeybindsConfig::default(),
             recall: RecallConfig::default(),
+            scheduler: SchedulerConfig::default(),
         }
     }
 }
@@ -854,6 +966,7 @@ impl Config {
             "gateway",
             "keybinds",
             "recall",
+            "scheduler",
         ];
         let Ok(value) = toml::from_str::<toml::Value>(raw) else {
             return Vec::new();
@@ -1187,6 +1300,110 @@ toggle_tools = "F2"
 
         assert!(ProviderDebugMode::Wire.logs_wire());
         assert!(ProviderDebugMode::Wire.logs_tool_fallback());
+    }
+
+    fn sample_job(id: &str, cron: &str) -> SchedulerJobConfig {
+        SchedulerJobConfig {
+            id: id.into(),
+            name: "test".into(),
+            enabled: true,
+            cron: cron.into(),
+            timezone: "UTC".into(),
+            platform: "loopback".into(),
+            lane: "c1".into(),
+            prompt: "do thing".into(),
+            max_runtime_secs: None,
+            overlap_policy: OverlapPolicy::Skip,
+        }
+    }
+
+    // YYC-17: well-formed jobs validate cleanly.
+    #[test]
+    fn scheduler_job_validate_accepts_minimal() {
+        sample_job("daily", "0 8 * * * *").validate().expect("ok");
+    }
+
+    // YYC-17: bad cron expression bubbles up with the offending input.
+    #[test]
+    fn scheduler_job_validate_rejects_bad_cron() {
+        let mut job = sample_job("bad", "obviously not a cron");
+        let err = job.validate().expect_err("bad cron must error");
+        assert!(format!("{err:#}").contains("invalid cron expression"));
+        // Whitespace cron also rejected (parser treats it as empty).
+        job.cron = "   ".into();
+        assert!(job.validate().is_err());
+    }
+
+    // YYC-17: unknown timezone surfaces a typed error.
+    #[test]
+    fn scheduler_job_validate_rejects_unknown_timezone() {
+        let mut job = sample_job("tz", "0 8 * * * *");
+        job.timezone = "Mars/Olympus_Mons".into();
+        let err = job.validate().expect_err("bad tz");
+        assert!(format!("{err:#}").contains("invalid timezone"));
+    }
+
+    // YYC-17: required fields cannot be empty.
+    #[test]
+    fn scheduler_job_validate_requires_non_empty_fields() {
+        let mut job = sample_job("ok", "0 8 * * * *");
+        job.id = "".into();
+        assert!(job.validate().is_err());
+        let mut job = sample_job("ok", "0 8 * * * *");
+        job.platform = "".into();
+        assert!(job.validate().is_err());
+        let mut job = sample_job("ok", "0 8 * * * *");
+        job.lane = "".into();
+        assert!(job.validate().is_err());
+        let mut job = sample_job("ok", "0 8 * * * *");
+        job.prompt = "".into();
+        assert!(job.validate().is_err());
+    }
+
+    // YYC-17: max_runtime_secs = 0 is meaningless.
+    #[test]
+    fn scheduler_job_validate_rejects_zero_runtime_cap() {
+        let mut job = sample_job("ok", "0 8 * * * *");
+        job.max_runtime_secs = Some(0);
+        assert!(job.validate().is_err());
+    }
+
+    // YYC-17: parse a [[scheduler.jobs]] block from TOML and round-
+    // trip through validate.
+    #[test]
+    fn scheduler_section_parses_from_toml() {
+        let toml = r#"
+            [[scheduler.jobs]]
+            id = "daily-summary"
+            cron = "0 8 * * * *"
+            platform = "telegram"
+            lane = "personal"
+            prompt = "Summarize yesterday's work."
+        "#;
+        let cfg: Config = toml::from_str(toml).expect("parse");
+        assert_eq!(cfg.scheduler.jobs.len(), 1);
+        let job = &cfg.scheduler.jobs[0];
+        assert_eq!(job.id, "daily-summary");
+        assert!(job.enabled);
+        assert_eq!(job.timezone, "UTC");
+        assert_eq!(job.overlap_policy, OverlapPolicy::Skip);
+        cfg.scheduler.validate().expect("validate ok");
+    }
+
+    // YYC-17: overlap_policy parses kebab-case variants.
+    #[test]
+    fn scheduler_overlap_policy_parses_kebab_case() {
+        let toml = r#"
+            [[scheduler.jobs]]
+            id = "j"
+            cron = "0 * * * * *"
+            platform = "p"
+            lane = "l"
+            prompt = "x"
+            overlap_policy = "replace"
+        "#;
+        let cfg: Config = toml::from_str(toml).expect("parse");
+        assert_eq!(cfg.scheduler.jobs[0].overlap_policy, OverlapPolicy::Replace);
     }
 
     // YYC-156: stale backup files are pruned by retention age.
