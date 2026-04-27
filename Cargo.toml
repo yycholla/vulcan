@@ -171,6 +171,9 @@ tempfile = "3.27.0"
 divan = "0.1"
 hdrhistogram = "7"
 tokio = { version = "1", features = ["full", "test-util"] }
+# Snapshot testing for prompt builder + TUI render output (YYC follow-up).
+# Pinned to crates.io latest stable; default features sufficient.
+insta = "1.47.2"
 
 [[bench]]
 name = "tui_render"
