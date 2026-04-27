@@ -227,6 +227,7 @@ pub mod file;
 pub mod git;
 pub mod lsp;
 pub mod shell;
+pub mod spawn;
 pub mod web;
 
 /// Compact record of the most recent file-edit operation (YYC-66).
@@ -370,6 +371,23 @@ impl ToolRegistry {
 
     pub fn register(&mut self, tool: Arc<dyn Tool>) {
         self.tools.insert(tool.name().to_string(), tool);
+    }
+
+    /// YYC-82: keep only tools whose name appears in `allowed`.
+    /// Used by `spawn_subagent` to scope the child agent's tool
+    /// access. Tools not present in the parent registry are
+    /// silently ignored — the caller can reconcile by checking
+    /// `definitions()` afterwards if it cares.
+    pub fn retain_only(&mut self, allowed: &[String]) {
+        let drop_keys: Vec<String> = self
+            .tools
+            .keys()
+            .filter(|k| !allowed.iter().any(|a| a == *k))
+            .cloned()
+            .collect();
+        for k in drop_keys {
+            self.tools.remove(&k);
+        }
     }
 
     /// YYC-107: drop tools whose `is_relevant(ctx)` returns false.

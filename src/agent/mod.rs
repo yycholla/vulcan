@@ -259,6 +259,15 @@ impl Agent {
             )));
         }
 
+        // YYC-82: spawn_subagent tool. Holds a clone of the parent
+        // config so child agents can be built with the same provider
+        // wiring. Default tool allowlist is read-only (see
+        // `tools::spawn::default_allowed_tools`).
+        let config_arc = Arc::new(config.clone());
+        tools.register(Arc::new(crate::tools::spawn::SpawnSubagentTool::new(
+            Arc::clone(&config_arc),
+        )));
+
         // YYC-48: register embedding tools when [embeddings] is
         // enabled. The index opens its own SQLite store; failure is
         // logged but non-fatal — the agent still has every other tool.
@@ -414,6 +423,22 @@ impl Agent {
     /// Bypasses env-derived config so tests don't need a real API key and uses
     /// an in-memory session store.
     #[doc(hidden)]
+    /// YYC-82: prune the agent's tool registry to the supplied
+    /// allowlist. Called by `SpawnSubagentTool` after building a
+    /// child agent so the child can't reach tools the parent
+    /// didn't authorize. Tools not in the parent registry are
+    /// silently ignored.
+    pub fn restrict_tools(&mut self, allowed: &[String]) {
+        self.tools.retain_only(allowed);
+    }
+
+    /// YYC-82: how many agent-loop iterations this Agent has run
+    /// so far. Used by `SpawnSubagentTool` to report the child's
+    /// budget usage back to the parent.
+    pub fn iterations(&self) -> u32 {
+        self.turns
+    }
+
     pub fn for_test(
         provider: Box<dyn LLMProvider>,
         tools: ToolRegistry,
