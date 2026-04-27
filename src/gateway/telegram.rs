@@ -227,6 +227,82 @@ impl TelegramPlatform {
         Self::inbound_from_update(&typed, allowed)
     }
 
+    /// Dispatch a single `OutboundAttachment` to the kind-specific
+    /// send_* endpoint. Returns the platform's id for the sent
+    /// message - the caller chains the first id into SentMessage so
+    /// StreamRenderer's edit-in-place anchors target the right
+    /// message.
+    async fn send_attachment(
+        &self,
+        chat_id: ChatId,
+        att: &crate::platform::OutboundAttachment,
+        caption: Option<String>,
+        reply: Option<ReplyParameters>,
+    ) -> Result<String> {
+        use teloxide_core::payloads::{
+            SendAudioSetters, SendDocumentSetters, SendPhotoSetters, SendVideoSetters,
+            SendVoiceSetters,
+        };
+        use teloxide_core::types::InputFile;
+        let file = InputFile::file(&att.path);
+        let sent = match att.kind {
+            AttachmentKind::Image => {
+                let mut req = self.bot.send_photo(chat_id, file);
+                if let Some(c) = caption {
+                    req = req.caption(c);
+                }
+                if let Some(rp) = reply {
+                    req = req.reply_parameters(rp);
+                }
+                req.await.context("telegram send_photo failed")?
+            }
+            AttachmentKind::Voice => {
+                let mut req = self.bot.send_voice(chat_id, file);
+                if let Some(c) = caption {
+                    req = req.caption(c);
+                }
+                if let Some(rp) = reply {
+                    req = req.reply_parameters(rp);
+                }
+                req.await.context("telegram send_voice failed")?
+            }
+            AttachmentKind::Video => {
+                let mut req = self.bot.send_video(chat_id, file);
+                if let Some(c) = caption {
+                    req = req.caption(c);
+                }
+                if let Some(rp) = reply {
+                    req = req.reply_parameters(rp);
+                }
+                req.await.context("telegram send_video failed")?
+            }
+            AttachmentKind::Audio => {
+                let mut req = self.bot.send_audio(chat_id, file);
+                if let Some(c) = caption {
+                    req = req.caption(c);
+                }
+                if let Some(rp) = reply {
+                    req = req.reply_parameters(rp);
+                }
+                req.await.context("telegram send_audio failed")?
+            }
+            // Document / Sticker / Other -> send_document. Telegram has
+            // no generic "any blob" endpoint; send_document accepts
+            // arbitrary file types.
+            AttachmentKind::Document | AttachmentKind::Sticker | AttachmentKind::Other => {
+                let mut req = self.bot.send_document(chat_id, file);
+                if let Some(c) = caption {
+                    req = req.caption(c);
+                }
+                if let Some(rp) = reply {
+                    req = req.reply_parameters(rp);
+                }
+                req.await.context("telegram send_document failed")?
+            }
+        };
+        Ok(sent.id.0.to_string())
+    }
+
     fn chat_id_from_chat(chat: &str) -> Result<ChatId> {
         chat.parse::<i64>()
             .map(ChatId)
@@ -281,14 +357,53 @@ impl Platform for TelegramPlatform {
     async fn send(&self, msg: &OutboundMessage) -> Result<SentMessage> {
         use teloxide_core::payloads::SendMessageSetters;
         let chat_id = Self::chat_id_from_chat(&msg.chat_id)?;
-        let mut req = self.bot.send_message(chat_id, msg.text.clone());
-        if let Some(reply_to) = &msg.reply_to {
+        let reply_params = if let Some(reply_to) = &msg.reply_to {
             let reply_id = Self::message_id_from_str(reply_to)?;
-            req = req.reply_parameters(ReplyParameters::new(reply_id));
+            Some(ReplyParameters::new(reply_id))
+        } else {
+            None
+        };
+
+        // Telegram doesn't combine text + multiple media in a single
+        // send the way Discord does. Strategy:
+        //   * No attachments -> send_message (text only).
+        //   * Attachments    -> send the first attachment with msg.text
+        //                       as its caption (or the attachment's own
+        //                       caption when msg.text is empty). Any
+        //                       remaining attachments fire as separate
+        //                       follow-up messages with their own
+        //                       captions.
+        // SentMessage carries the id of the FIRST sent message - that's
+        // the anchor StreamRenderer/edit-in-place will target.
+        if msg.attachments.is_empty() {
+            let mut req = self.bot.send_message(chat_id, msg.text.clone());
+            if let Some(rp) = reply_params {
+                req = req.reply_parameters(rp);
+            }
+            let sent = req.await.context("telegram send_message failed")?;
+            return Ok(SentMessage {
+                message_id: sent.id.0.to_string(),
+            });
         }
-        let sent = req.await.context("telegram send_message failed")?;
+
+        let mut iter = msg.attachments.iter();
+        let first = iter.next().expect("non-empty checked above");
+        let first_caption = if msg.text.is_empty() {
+            first.caption.clone()
+        } else {
+            Some(msg.text.clone())
+        };
+        let first_id = self
+            .send_attachment(chat_id, first, first_caption, reply_params)
+            .await?;
+        for att in iter {
+            let _ = self
+                .send_attachment(chat_id, att, att.caption.clone(), None)
+                .await
+                .context("telegram follow-up attachment send failed")?;
+        }
         Ok(SentMessage {
-            message_id: sent.id.0.to_string(),
+            message_id: first_id,
         })
     }
 
