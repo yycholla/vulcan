@@ -23,6 +23,7 @@ mod dispatch;
 mod provider;
 mod run;
 mod session;
+mod skills;
 
 #[cfg(test)]
 mod tests;
@@ -113,6 +114,11 @@ pub struct Agent {
     /// Workspace context probed at session start (YYC-107). Used to
     /// filter the tool registry and feed dynamic tool descriptions.
     pub(in crate::agent) tool_context: crate::tools::ToolContext,
+    /// YYC-20: when true, after a 5+ iteration turn the agent asks
+    /// the active provider to summarize the turn as a draft skill
+    /// and writes it under `<skills_dir>/_pending/`. Off by default
+    /// (`config.auto_create_skills`).
+    pub(in crate::agent) auto_create_skills: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -355,6 +361,7 @@ impl Agent {
             last_saved_count: 0,
             tool_context,
             max_iterations: max_iterations.unwrap_or(config.provider.max_iterations),
+            auto_create_skills: config.auto_create_skills,
         })
     }
 
@@ -424,6 +431,7 @@ impl Agent {
             tool_context: crate::tools::ToolContext::probe(
                 std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")),
             ),
+            auto_create_skills: false,
         }
     }
 
