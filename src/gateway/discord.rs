@@ -31,12 +31,17 @@ impl DiscordPlatform {
     fn inbound_from_message_parts(
         channel_id: u64,
         user_id: u64,
+        message_id: u64,
         author_is_bot: bool,
         content: &str,
         allow_bots: bool,
+        reply_to: Option<u64>,
+        attachments: Vec<crate::platform::Attachment>,
     ) -> Option<InboundMessage> {
         let text = content.trim();
-        if text.is_empty() || (author_is_bot && !allow_bots) {
+        // Allow empty text when there's at least one attachment — sending
+        // an image-only message is normal Discord usage.
+        if (text.is_empty() && attachments.is_empty()) || (author_is_bot && !allow_bots) {
             return None;
         }
 
@@ -45,10 +50,31 @@ impl DiscordPlatform {
             chat_id: channel_id.to_string(),
             user_id: user_id.to_string(),
             text: text.to_string(),
-            message_id: None,
-            reply_to: None,
-            attachments: vec![],
+            message_id: Some(message_id.to_string()),
+            reply_to: reply_to.map(|r| r.to_string()),
+            attachments,
         })
+    }
+
+    fn map_attachment(att: &serenity::model::channel::Attachment) -> crate::platform::Attachment {
+        use crate::platform::{Attachment, AttachmentKind};
+        let kind = att
+            .content_type
+            .as_deref()
+            .map(|mime| match mime.split('/').next().unwrap_or("") {
+                "image" => AttachmentKind::Image,
+                "video" => AttachmentKind::Video,
+                "audio" => AttachmentKind::Audio,
+                _ => AttachmentKind::Document,
+            })
+            .unwrap_or(AttachmentKind::Other);
+        Attachment {
+            url: Some(att.url.clone()),
+            local_path: None,
+            mime: att.content_type.clone(),
+            kind,
+            original_name: Some(att.filename.clone()),
+        }
     }
 
     fn channel_id_from_chat(chat_id: &str) -> Result<u64> {
@@ -163,12 +189,21 @@ struct DiscordEventHandler {
 #[serenity::async_trait]
 impl EventHandler for DiscordEventHandler {
     async fn message(&self, _ctx: SerenityContext, msg: Message) {
+        let attachments = msg
+            .attachments
+            .iter()
+            .map(DiscordPlatform::map_attachment)
+            .collect();
+        let reply_to = msg.referenced_message.as_ref().map(|m| m.id.get());
         let Some(inbound) = DiscordPlatform::inbound_from_message_parts(
             msg.channel_id.get(),
             msg.author.id.get(),
+            msg.id.get(),
             msg.author.bot,
             &msg.content,
             self.allow_bots,
+            reply_to,
+            attachments,
         ) else {
             return;
         };
@@ -208,32 +243,156 @@ mod tests {
 
     #[test]
     fn inbound_from_message_parts_uses_channel_as_chat_id() {
-        let inbound =
-            DiscordPlatform::inbound_from_message_parts(42, 7, false, "hello vulcan", false)
-                .expect("message should be accepted");
+        let inbound = DiscordPlatform::inbound_from_message_parts(
+            42,
+            7,
+            100,
+            false,
+            "hello vulcan",
+            false,
+            None,
+            vec![],
+        )
+        .expect("message should be accepted");
 
         assert_eq!(inbound.platform, "discord");
         assert_eq!(inbound.chat_id, "42");
         assert_eq!(inbound.user_id, "7");
         assert_eq!(inbound.text, "hello vulcan");
+        assert_eq!(inbound.message_id.as_deref(), Some("100"));
     }
 
     #[test]
     fn inbound_from_message_parts_ignores_bots_by_default() {
-        let inbound = DiscordPlatform::inbound_from_message_parts(42, 7, true, "bot noise", false);
+        let inbound = DiscordPlatform::inbound_from_message_parts(
+            42,
+            7,
+            100,
+            true,
+            "bot noise",
+            false,
+            None,
+            vec![],
+        );
         assert!(inbound.is_none());
     }
 
     #[test]
     fn inbound_from_message_parts_can_allow_bots() {
-        let inbound = DiscordPlatform::inbound_from_message_parts(42, 7, true, "bot relay", true);
+        let inbound = DiscordPlatform::inbound_from_message_parts(
+            42,
+            7,
+            100,
+            true,
+            "bot relay",
+            true,
+            None,
+            vec![],
+        );
         assert!(inbound.is_some());
     }
 
     #[test]
     fn inbound_from_message_parts_ignores_empty_text() {
-        let inbound = DiscordPlatform::inbound_from_message_parts(42, 7, false, "   ", false);
+        let inbound = DiscordPlatform::inbound_from_message_parts(
+            42,
+            7,
+            100,
+            false,
+            "   ",
+            false,
+            None,
+            vec![],
+        );
         assert!(inbound.is_none());
+    }
+
+    #[test]
+    fn inbound_from_message_parts_carries_typed_attachments() {
+        use crate::platform::{Attachment, AttachmentKind};
+        let att = Attachment {
+            url: Some("https://cdn.discord/foo.png".into()),
+            local_path: None,
+            mime: Some("image/png".into()),
+            kind: AttachmentKind::Image,
+            original_name: Some("foo.png".into()),
+        };
+        let inb = DiscordPlatform::inbound_from_message_parts(
+            42,
+            7,
+            100,
+            false,
+            "look at this",
+            false,
+            None,
+            vec![att],
+        )
+        .expect("accepted");
+        assert_eq!(inb.attachments.len(), 1);
+        assert_eq!(inb.attachments[0].kind, AttachmentKind::Image);
+    }
+
+    #[test]
+    fn inbound_from_message_parts_accepts_empty_text_with_attachment() {
+        use crate::platform::{Attachment, AttachmentKind};
+        let att = Attachment {
+            url: Some("https://cdn.discord/foo.png".into()),
+            local_path: None,
+            mime: Some("image/png".into()),
+            kind: AttachmentKind::Image,
+            original_name: Some("foo.png".into()),
+        };
+        let inb = DiscordPlatform::inbound_from_message_parts(
+            42,
+            7,
+            100,
+            false,
+            "   ",
+            false,
+            None,
+            vec![att],
+        );
+        assert!(inb.is_some(), "image-only message must not be dropped");
+    }
+
+    #[test]
+    fn inbound_from_message_parts_propagates_reply_to() {
+        let inb = DiscordPlatform::inbound_from_message_parts(
+            42,
+            7,
+            100,
+            false,
+            "reply",
+            false,
+            Some(99),
+            vec![],
+        )
+        .expect("accepted");
+        assert_eq!(inb.reply_to.as_deref(), Some("99"));
+    }
+
+    #[test]
+    fn map_attachment_classifies_kind_from_mime() {
+        use serenity::model::channel::Attachment as SerenityAtt;
+        // Serenity's Attachment has many fields with no public ctor;
+        // construct via JSON deserialize. Required fields per the
+        // Serenity 0.12 struct: id, filename, proxy_url, size, url
+        // (description, height, width, content_type, duration_secs are
+        // Option, and waveform/ephemeral default).
+        let json = serde_json::json!({
+            "id": "1",
+            "filename": "x.png",
+            "size": 0,
+            "url": "https://cdn.discord/x.png",
+            "proxy_url": "https://cdn.discord/x.png",
+            "content_type": "image/png",
+        });
+        let serenity_att: SerenityAtt = serde_json::from_value(json).expect("att deser");
+        let mapped = DiscordPlatform::map_attachment(&serenity_att);
+        assert_eq!(mapped.kind, crate::platform::AttachmentKind::Image);
+        assert_eq!(mapped.mime.as_deref(), Some("image/png"));
+        assert_eq!(mapped.original_name.as_deref(), Some("x.png"));
+        assert_eq!(mapped.url.as_deref(), Some("https://cdn.discord/x.png"));
     }
 
     #[test]
