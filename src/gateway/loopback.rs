@@ -6,6 +6,7 @@ use anyhow::Result;
 use hmac::{Hmac, Mac};
 use sha2::Sha256;
 use tokio::sync::Mutex;
+use uuid::Uuid;
 
 use crate::platform::{InboundMessage, OutboundMessage, Platform};
 
@@ -81,7 +82,7 @@ impl Platform for LoopbackPlatform {
         }
         self.recorded.lock().await.push(msg.clone());
         Ok(crate::platform::SentMessage {
-            message_id: uuid::Uuid::new_v4().to_string(),
+            message_id: Uuid::new_v4().to_string(),
         })
     }
 

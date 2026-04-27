@@ -78,9 +78,12 @@ pub struct Attachment {
 
 /// An attachment to send. `OutboundMessage` will gain a `Vec<Self>`
 /// in PR-2 once StreamRenderer wires media into the outbound pipeline.
+/// `path` is the local file to upload — `PathBuf` matches what
+/// `Platform::download_attachment` returns so a roundtrip
+/// (receive → re-send) is friction-free.
 #[derive(Debug, Clone)]
 pub struct OutboundAttachment {
-    pub path: String,
+    pub path: std::path::PathBuf,
     pub kind: AttachmentKind,
     pub caption: Option<String>,
 }
@@ -170,11 +173,11 @@ mod tests {
     #[test]
     fn outbound_attachment_carries_path_and_kind() {
         let a = OutboundAttachment {
-            path: "/tmp/x.png".into(),
+            path: std::path::PathBuf::from("/tmp/x.png"),
             kind: AttachmentKind::Image,
             caption: None,
         };
-        assert_eq!(a.path, "/tmp/x.png");
+        assert_eq!(a.path, std::path::PathBuf::from("/tmp/x.png"));
     }
 
     struct StubPlatform;
