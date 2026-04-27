@@ -26,6 +26,7 @@ pub mod registry;
 pub mod render_registry;
 pub mod routes;
 pub mod server;
+pub mod stream_render;
 pub mod worker;
 
 pub async fn run(config: &Config, bind_override: Option<String>) -> Result<()> {
