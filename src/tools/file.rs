@@ -9,6 +9,13 @@ use tokio_util::sync::CancellationToken;
 
 pub struct ReadFile;
 
+/// YYC-159: cap on the in-memory file load. Files larger than this
+/// surface a truncated/too-large response without ever calling
+/// `read_to_string`, so the agent can't OOM the host while pulling
+/// in a multi-GB log or binary. Sized generously (50 MiB) so any
+/// realistic source file or text dump still passes.
+const READ_FILE_MAX_BYTES: u64 = 50 * 1024 * 1024;
+
 #[async_trait]
 impl Tool for ReadFile {
     fn name(&self) -> &str {
@@ -34,6 +41,22 @@ impl Tool for ReadFile {
             .ok_or_else(|| anyhow::anyhow!("path required"))?;
         let offset = params["offset"].as_i64().unwrap_or(1);
         let limit = params["limit"].as_i64().unwrap_or(500);
+
+        // YYC-159: preflight the file size so multi-GB inputs are
+        // refused before they hit `read_to_string` and OOM the host.
+        // Returning a structured "too large" message keeps the
+        // contract identical for callers — they get a string back —
+        // and lets the agent retry with a narrower scope (grep, head,
+        // a different file) instead of crashing.
+        let metadata = tokio::fs::metadata(path).await?;
+        let size = metadata.len();
+        if size > READ_FILE_MAX_BYTES {
+            let mib = size as f64 / (1024.0 * 1024.0);
+            let cap_mib = READ_FILE_MAX_BYTES as f64 / (1024.0 * 1024.0);
+            return Ok(ToolResult::ok(format!(
+                "File is {size} bytes ({mib:.1} MiB), which exceeds the read_file cap of {cap_mib:.0} MiB. Use grep/ripgrep for searching huge files, or split the read across smaller files."
+            )));
+        }
 
         let content = tokio::fs::read_to_string(path).await?;
         let lines: Vec<&str> = content.lines().collect();
@@ -596,6 +619,62 @@ mod tests {
         assert_eq!(diff.path, path_str);
         assert_eq!(diff.before, "old contents");
         assert_eq!(diff.after, "new contents");
+    }
+
+    // YYC-159: small files keep working — preflight only blocks
+    // pathological sizes.
+    #[tokio::test]
+    async fn read_file_returns_lines_for_small_file() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("small.txt");
+        std::fs::write(&path, "alpha\nbeta\ngamma\n").unwrap();
+        let result = ReadFile
+            .call(
+                json!({"path": path.to_string_lossy(), "offset": 1, "limit": 10}),
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+        assert!(!result.is_error, "{}", result.output);
+        assert!(result.output.contains("alpha"));
+        assert!(result.output.contains("3/3 lines shown"));
+    }
+
+    // YYC-159: a file larger than the cap must NOT be loaded into
+    // memory. Uses `set_len` to make a sparse file so the test
+    // doesn't actually allocate 60 MiB on disk; the OS reports the
+    // length, our preflight short-circuits, and `read_to_string` is
+    // never reached.
+    #[tokio::test]
+    async fn read_file_refuses_files_over_cap_without_loading() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("huge.bin");
+        let f = std::fs::File::create(&path).unwrap();
+        // 60 MiB sparse — above READ_FILE_MAX_BYTES (50 MiB). No data
+        // is actually written, so the test does not allocate or read
+        // 60 MiB even if the preflight regresses (it would error on
+        // invalid UTF-8 instead of OOMing).
+        f.set_len(60 * 1024 * 1024).unwrap();
+        drop(f);
+
+        let result = ReadFile
+            .call(
+                json!({"path": path.to_string_lossy(), "offset": 1, "limit": 10}),
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+        assert!(!result.is_error, "{}", result.output);
+        assert!(
+            result.output.contains("exceeds the read_file cap"),
+            "expected too-large message, got: {}",
+            result.output
+        );
+        assert!(
+            result.output.contains("MiB"),
+            "expected size in message: {}",
+            result.output
+        );
     }
 
     #[tokio::test]
