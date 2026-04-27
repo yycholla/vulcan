@@ -245,6 +245,47 @@ pub struct GatewayConfig {
     pub commands: HashMap<String, CommandConfig>,
 }
 
+impl GatewayConfig {
+    /// YYC-145: validate required fields before the gateway binds a
+    /// listener or opens a database. Returns the first actionable error
+    /// found; callers should surface the message verbatim.
+    pub fn validate(&self) -> Result<()> {
+        if self.api_token.trim().is_empty() {
+            anyhow::bail!(
+                "[gateway] api_token is empty; set a non-empty bearer token in config.toml"
+            );
+        }
+        if self.bind.trim().is_empty() {
+            anyhow::bail!("[gateway] bind is empty; set e.g. bind = \"127.0.0.1:7777\"");
+        }
+        if self.idle_ttl_secs == 0 {
+            anyhow::bail!("[gateway] idle_ttl_secs must be > 0");
+        }
+        if self.max_concurrent_lanes == 0 {
+            anyhow::bail!("[gateway] max_concurrent_lanes must be > 0");
+        }
+        if self.outbound_max_attempts == 0 {
+            anyhow::bail!("[gateway] outbound_max_attempts must be > 0");
+        }
+        if self.discord.enabled && self.discord.bot_token.trim().is_empty() {
+            anyhow::bail!(
+                "[gateway.discord] enabled = true but bot_token is empty; set bot_token or disable"
+            );
+        }
+        if self.telegram.enabled {
+            if self.telegram.bot_token.trim().is_empty() {
+                anyhow::bail!(
+                    "[gateway.telegram] enabled = true but bot_token is empty; set bot_token or disable"
+                );
+            }
+            if self.telegram.poll_interval_secs > 50 {
+                anyhow::bail!("[gateway.telegram] poll_interval_secs must be <= 50 (Telegram cap)");
+            }
+        }
+        Ok(())
+    }
+}
+
 /// YYC-18 PR-2c: per-command configuration. Tagged via
 /// `serde(tag = "kind")` so a TOML entry reads naturally:
 ///
@@ -1004,6 +1045,75 @@ toggle_tools = "F2"
         assert!(discord.enabled);
         assert_eq!(discord.bot_token, "discord-token");
         assert!(!discord.allow_bots);
+    }
+
+    fn gateway_with_token(token: &str) -> GatewayConfig {
+        GatewayConfig {
+            bind: "127.0.0.1:7777".into(),
+            api_token: token.into(),
+            idle_ttl_secs: 1800,
+            max_concurrent_lanes: 64,
+            outbound_max_attempts: 5,
+            discord: DiscordConfig::default(),
+            telegram: TelegramConfig::default(),
+            commands: HashMap::new(),
+        }
+    }
+
+    #[test]
+    fn gateway_validate_accepts_minimal_config() {
+        gateway_with_token("token").validate().expect("ok");
+    }
+
+    #[test]
+    fn gateway_validate_rejects_empty_api_token() {
+        let err = gateway_with_token("").validate().expect_err("empty token");
+        assert!(err.to_string().contains("api_token"), "msg: {err}");
+    }
+
+    #[test]
+    fn gateway_validate_rejects_whitespace_api_token() {
+        let err = gateway_with_token("  ").validate().expect_err("ws token");
+        assert!(err.to_string().contains("api_token"), "msg: {err}");
+    }
+
+    #[test]
+    fn gateway_validate_rejects_zero_numeric_fields() {
+        let mut g = gateway_with_token("token");
+        g.idle_ttl_secs = 0;
+        assert!(g.validate().is_err());
+        let mut g = gateway_with_token("token");
+        g.max_concurrent_lanes = 0;
+        assert!(g.validate().is_err());
+        let mut g = gateway_with_token("token");
+        g.outbound_max_attempts = 0;
+        assert!(g.validate().is_err());
+    }
+
+    #[test]
+    fn gateway_validate_rejects_discord_enabled_without_token() {
+        let mut g = gateway_with_token("token");
+        g.discord.enabled = true;
+        let err = g.validate().expect_err("discord token missing");
+        assert!(err.to_string().contains("bot_token"), "msg: {err}");
+    }
+
+    #[test]
+    fn gateway_validate_rejects_telegram_enabled_without_token() {
+        let mut g = gateway_with_token("token");
+        g.telegram.enabled = true;
+        let err = g.validate().expect_err("telegram token missing");
+        assert!(err.to_string().contains("bot_token"), "msg: {err}");
+    }
+
+    #[test]
+    fn gateway_validate_rejects_telegram_poll_interval_over_cap() {
+        let mut g = gateway_with_token("token");
+        g.telegram.enabled = true;
+        g.telegram.bot_token = "tg".into();
+        g.telegram.poll_interval_secs = 60;
+        let err = g.validate().expect_err("poll interval cap");
+        assert!(err.to_string().contains("poll_interval_secs"), "msg: {err}");
     }
 
     #[test]

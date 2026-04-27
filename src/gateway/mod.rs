@@ -34,6 +34,14 @@ pub mod telegram;
 pub mod worker;
 
 pub async fn run(config: &Config, bind_override: Option<String>) -> Result<()> {
+    // YYC-145: validate required gateway config before opening any
+    // socket. A missing api_token or empty connector token here would
+    // otherwise leak a bound listener before run_on_listener noticed.
+    let gateway = config
+        .gateway
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("missing [gateway] config; set api_token before running"))?;
+    gateway.validate()?;
     let bind = bind_addr(config, bind_override)?;
     let listener = TcpListener::bind(&bind)
         .await
@@ -49,6 +57,10 @@ where
         .gateway
         .clone()
         .ok_or_else(|| anyhow::anyhow!("missing [gateway] config; set api_token before running"))?;
+    // YYC-145: validate again on the test path. `run` already calls
+    // this, but tests drive `run_on_listener` directly with a
+    // pre-bound listener and would otherwise skip the check.
+    gateway.validate()?;
 
     let db = crate::memory::open_gateway_pool()?;
     let mut registry = PlatformRegistry::new();
@@ -371,6 +383,30 @@ mod tests {
             Duration::from_secs(1800),
             builder,
         ))
+    }
+
+    // YYC-145: empty api_token must error before bind so no socket leaks.
+    #[tokio::test]
+    async fn run_errors_before_bind_when_api_token_empty() {
+        let mut config = config_with_gateway();
+        config.gateway.as_mut().expect("gateway").api_token = String::new();
+        let err = run(&config, Some("127.0.0.1:0".into()))
+            .await
+            .expect_err("validation must fail");
+        assert!(err.to_string().contains("api_token"), "msg: {err}");
+    }
+
+    // YYC-145: same for the test entry point — pre-bound listener must
+    // still validate so a stray test config can't bypass the check.
+    #[tokio::test]
+    async fn run_on_listener_errors_when_api_token_empty() {
+        let mut config = config_with_gateway();
+        config.gateway.as_mut().expect("gateway").api_token = String::new();
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let err = run_on_listener(config, listener, async {})
+            .await
+            .expect_err("validation must fail");
+        assert!(err.to_string().contains("api_token"), "msg: {err}");
     }
 
     #[tokio::test]
