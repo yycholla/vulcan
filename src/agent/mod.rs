@@ -137,12 +137,18 @@ impl Agent {
             supports_json_mode,
         )?;
 
+        // YYC-116: probe cwd once at agent startup; thread it through to
+        // the LSP manager, the tool registry, and (downstream) the
+        // embedding index. Replaces three separate current_dir() calls.
+        let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+
         let diff_sink = crate::tools::new_diff_sink();
-        let lsp_manager = Arc::new(crate::code::lsp::LspManager::new(
-            std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")),
-        ));
-        let mut tools =
-            ToolRegistry::new_with_diff_and_lsp(Some(diff_sink.clone()), Some(lsp_manager.clone()));
+        let lsp_manager = Arc::new(crate::code::lsp::LspManager::new(cwd.clone()));
+        let mut tools = ToolRegistry::new_with_diff_and_lsp(
+            Some(diff_sink.clone()),
+            Some(lsp_manager.clone()),
+            cwd.clone(),
+        );
 
         // YYC-81: ask_user is only useful in interactive (TUI) mode.
         // Register it whenever a pause channel is wired; it self-
@@ -165,9 +171,8 @@ impl Agent {
         // logged but non-fatal — the agent still has every other tool.
         if config.embeddings.enabled {
             let parser_cache = Arc::new(crate::code::ParserCache::new());
-            let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
             match crate::code::embed::EmbeddingIndex::open(
-                cwd,
+                cwd.clone(),
                 parser_cache,
                 config.embeddings.clone(),
                 config.provider.base_url.clone(),
