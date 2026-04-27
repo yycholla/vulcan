@@ -135,20 +135,8 @@ impl Agent {
             tracing::debug!("Agent iteration {iteration}");
 
             if self.context.should_compact(&messages) {
-                let summary = self.context.compact(&messages)?;
-                messages = vec![
-                    Message::System {
-                        content: format!("Previous conversation context:\n{summary}"),
-                    },
-                    Message::User {
-                        content: input.to_string(),
-                    },
-                ];
-                // YYC-138: replace the persisted snapshot atomically so
-                // the next save_messages doesn't slice the wrong tail and
-                // leave orphan Tool rows pointing at a tool_calls
-                // Assistant turn that's no longer in history.
-                self.replace_history(&messages)?;
+                self.compact_buffered_messages_if_possible(&mut messages, cancel.clone())
+                    .await;
             }
 
             if cancel.is_cancelled() {
@@ -501,52 +489,93 @@ impl Agent {
     pub(in crate::agent) async fn compact_stream_messages_if_needed(
         &mut self,
         messages: &mut Vec<Message>,
-        input: &str,
+        _input: &str,
         ui_tx: &mpsc::UnboundedSender<StreamEvent>,
         iteration: usize,
     ) {
-        // YYC-105: same compaction discipline as run_prompt — when the
-        // accumulated history would push the next request past the
-        // configured trigger ratio, summarize older turns and replace
-        // them with a single system primer. Without this, small-context
-        // models (llama-cpp Q2_0 quants, etc.) silently truncate the
-        // request and behave as if the session has no history.
+        // YYC-105 + YYC-128: when the accumulated history would push the next
+        // request past the configured trigger ratio, ask the provider to
+        // summarize the older turns and splice the summary in place of them.
+        // Without this, small-context models (llama-cpp Q2_0 quants, etc.)
+        // silently truncate the request and behave as if the session has no
+        // history.
         if !self.context.should_compact(messages) {
             return;
         }
 
-        match self.context.compact(messages) {
-            Ok(summary) => {
-                let kept_count = messages.len();
-                *messages = vec![
-                    Message::System {
-                        content: format!("Previous conversation context:\n{summary}"),
-                    },
-                    Message::User {
-                        content: input.to_string(),
-                    },
-                ];
-                // YYC-138: align the persisted snapshot with the in-memory
-                // reset so the next append doesn't orphan Tool rows from
-                // the pre-compaction history.
-                if let Err(e) = self.replace_history(messages) {
-                    tracing::warn!(
-                        "agent iteration {iteration}: failed to replace persisted history after compaction: {e}"
-                    );
-                }
-                let _ = ui_tx.send(StreamEvent::Text(format!(
-                    "_(compacted {kept_count} earlier turns into a summary to fit context)_\n"
-                )));
-                tracing::info!(
-                    "agent iteration {iteration}: compacted {kept_count} prior messages"
-                );
-            }
-            Err(e) => {
-                tracing::warn!(
-                    "agent iteration {iteration}: compaction failed: {e} (continuing with full history)"
-                );
-            }
+        let pre_count = messages.len();
+        let cancel = self.turn_cancel.clone();
+        let compacted = self
+            .compact_buffered_messages_if_possible(messages, cancel)
+            .await;
+        if compacted {
+            let kept_count = pre_count.saturating_sub(messages.len()).max(1);
+            let _ = ui_tx.send(StreamEvent::Text(format!(
+                "_(compacted {kept_count} earlier turns into a summary to fit context)_\n"
+            )));
+            tracing::info!("agent iteration {iteration}: compacted {kept_count} prior messages");
+        } else {
+            tracing::warn!(
+                "agent iteration {iteration}: compaction skipped (no safe split or summarizer call failed)"
+            );
         }
+    }
+
+    /// Summarize an older slice of `messages` via a provider call and splice
+    /// the summary in place of the slice. Preserves the leading System
+    /// prompt and the trailing window past the safe split index.
+    ///
+    /// Returns `true` when the buffer was actually rewritten — caller can use
+    /// that to surface a UX note. Returns `false` when:
+    /// - no User-message boundary exists in the trailing window, or
+    /// - the summarizer call returns an empty body / errors.
+    ///
+    /// Failures are logged at warn level and the buffer is left untouched
+    /// so the agent can continue with the full history (the next provider
+    /// call may simply fail with a context-overflow error, which is still
+    /// strictly better than silently losing the entire session — YYC-128).
+    pub(in crate::agent) async fn compact_buffered_messages_if_possible(
+        &mut self,
+        messages: &mut Vec<Message>,
+        cancel: CancellationToken,
+    ) -> bool {
+        use crate::context::ContextManager;
+
+        let split = match self.context.safe_split_index(messages) {
+            Some(i) if i > 1 => i, // need at least one message to summarize
+            _ => return false,
+        };
+
+        let request = ContextManager::summarization_request(&messages[1..split]);
+        let response = match self.provider.chat(&request, &[], cancel).await {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::warn!("compaction summarizer call failed: {e}");
+                return false;
+            }
+        };
+        let summary = response.content.unwrap_or_default();
+        if summary.trim().is_empty() {
+            tracing::warn!("compaction summarizer returned empty body");
+            return false;
+        }
+
+        let mut new_messages = Vec::with_capacity(messages.len() - split + 2);
+        new_messages.push(messages[0].clone());
+        new_messages.push(Message::System {
+            content: format!("Summary of earlier conversation:\n{summary}"),
+        });
+        new_messages.extend(messages[split..].iter().cloned());
+        *messages = new_messages;
+
+        self.context.install_summary(summary);
+        // YYC-138: persist the rewritten snapshot atomically so the next
+        // save_messages append doesn't orphan Tool rows from the dropped
+        // pre-summary slice.
+        if let Err(e) = self.replace_history(messages) {
+            tracing::warn!("failed to replace persisted history after compaction: {e}");
+        }
+        true
     }
 
     pub(in crate::agent) async fn collect_stream_response(
