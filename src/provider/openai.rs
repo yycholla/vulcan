@@ -533,6 +533,19 @@ impl LLMProvider for OpenAIProvider {
             );
         }
 
+        // YYC-103: extract any inline `<think>…</think>` blocks from the
+        // accumulated content and route them to the reasoning trace.
+        let mut sanitizer = crate::provider::think_sanitizer::ThinkSanitizer::new();
+        let sanitized = sanitizer.feed(&content);
+        let tail = sanitizer.flush();
+        content = format!("{}{}", sanitized.text, tail.text);
+        if !sanitized.reasoning.is_empty() {
+            reasoning.push_str(&sanitized.reasoning);
+        }
+        if !tail.reasoning.is_empty() {
+            reasoning.push_str(&tail.reasoning);
+        }
+
         let inferred_tool_calls = if tool_calls.is_empty() {
             infer_content_tool_calls(&content, tools)
         } else {
@@ -582,6 +595,9 @@ impl LLMProvider for OpenAIProvider {
         let mut usage: Option<Usage> = None;
         let mut finish_reason: Option<String> = None;
         let mut raw_stream = self.debug_mode.logs_wire().then(String::new);
+        // YYC-103: split inline `<think>` blocks out of the visible content
+        // stream as they arrive.
+        let mut think = crate::provider::think_sanitizer::ThinkSanitizer::new();
 
         // Read the HTTP response as a byte stream — chunks arrive as the LLM generates
         let mut stream = response.bytes_stream();
@@ -620,16 +636,40 @@ impl LLMProvider for OpenAIProvider {
                     &mut finish_reason,
                 );
 
-                // Send any new content/reasoning deltas through the channel.
-                if content.len() > prev_content_len {
-                    let delta = &content[prev_content_len..];
-                    let _ = tx.send(StreamEvent::Text(delta.to_string()));
+                // YYC-103: run the just-appended content delta through
+                // the think-tag sanitizer so `<think>…</think>` blocks
+                // route to the reasoning channel instead of leaking
+                // into chat. Native reasoning_content (DeepSeek /
+                // OpenRouter) still flows through unchanged.
+                let raw_content_delta = content[prev_content_len..].to_string();
+                content.truncate(prev_content_len);
+                let sanitized = think.feed(&raw_content_delta);
+                content.push_str(&sanitized.text);
+                let native_reasoning_delta = reasoning[prev_reasoning_len..].to_string();
+                reasoning.push_str(&sanitized.reasoning);
+
+                if !sanitized.text.is_empty() {
+                    let _ = tx.send(StreamEvent::Text(sanitized.text));
                 }
-                if reasoning.len() > prev_reasoning_len {
-                    let delta = &reasoning[prev_reasoning_len..];
-                    let _ = tx.send(StreamEvent::Reasoning(delta.to_string()));
+                let mut combined_reasoning = native_reasoning_delta;
+                combined_reasoning.push_str(&sanitized.reasoning);
+                // YYC-103: empty `<think></think>` blocks stream `\n` or
+                // whitespace; suppress those so a stub THINKING header
+                // doesn't get inserted between text segments.
+                if !combined_reasoning.trim().is_empty() {
+                    let _ = tx.send(StreamEvent::Reasoning(combined_reasoning));
                 }
             }
+        }
+        // Drain any pending partial-tag buffer left at stream close.
+        let leftover = think.flush();
+        if !leftover.text.is_empty() {
+            content.push_str(&leftover.text);
+            let _ = tx.send(StreamEvent::Text(leftover.text));
+        }
+        if !leftover.reasoning.trim().is_empty() {
+            reasoning.push_str(&leftover.reasoning);
+            let _ = tx.send(StreamEvent::Reasoning(leftover.reasoning));
         }
 
         if let Some(raw) = raw_stream.as_ref() {

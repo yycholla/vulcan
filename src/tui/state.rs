@@ -219,20 +219,41 @@ impl ChatMessage {
     }
 
     /// Append a text chunk to the segment timeline, coalescing with the
-    /// trailing segment if it's also text.
+    /// trailing segment if it's also text. Leading whitespace on a fresh
+    /// text segment (start of message, or after a tool/reasoning break)
+    /// is stripped so models that emit `\n\n` preambles don't render
+    /// gaps before the visible body.
     pub fn append_text(&mut self, chunk: &str) {
         match self.segments.last_mut() {
-            Some(MessageSegment::Text(t)) => t.push_str(chunk),
-            _ => self.segments.push(MessageSegment::Text(chunk.to_string())),
+            Some(MessageSegment::Text(t)) => {
+                t.push_str(chunk);
+                self.bump_render_version();
+            }
+            _ => {
+                let trimmed = chunk.trim_start_matches(|c: char| c == '\n' || c == '\r');
+                if trimmed.is_empty() {
+                    return;
+                }
+                self.segments
+                    .push(MessageSegment::Text(trimmed.to_string()));
+                self.bump_render_version();
+            }
         }
-        self.bump_render_version();
     }
 
     /// Append a reasoning chunk to the segment timeline, coalescing with the
     /// trailing segment if it's also reasoning. New tool calls or text break
     /// the run, so subsequent reasoning starts a fresh segment — that's the
     /// whole point of YYC-71.
+    ///
+    /// Whitespace-only chunks are dropped so empty `<think></think>` blocks
+    /// from local providers (YYC-103) don't create empty reasoning segments
+    /// that the renderer would later show as a stub THINKING header
+    /// between adjacent text deltas.
     pub fn append_reasoning(&mut self, chunk: &str) {
+        if chunk.trim().is_empty() {
+            return;
+        }
         match self.segments.last_mut() {
             Some(MessageSegment::Reasoning(r)) => r.push_str(chunk),
             _ => self
@@ -516,6 +537,11 @@ pub struct AppState {
 
     cursor: Cell<(u16, u16)>,
     pub model_label: String,
+    /// Cancel token for the in-flight agent turn (YYC-105). Held outside
+    /// the agent mutex so the Ctrl+C handler can fire it without
+    /// blocking on the lock that the prompt task is holding for the
+    /// duration of the stream. `None` when no turn is in flight.
+    pub current_turn_cancel: Option<tokio_util::sync::CancellationToken>,
     /// Active named provider profile, if any (YYC-96). `None` means the
     /// session is running on the legacy unnamed `[provider]` block —
     /// `model_status()` omits the prefix in that case.
@@ -665,6 +691,7 @@ impl AppState {
             cursor: Cell::new((0, 0)),
             model_label,
             provider_label: None,
+            current_turn_cancel: None,
             prompt_tokens_total: 0,
             completion_tokens_total: 0,
             prompt_tokens_last: 0,

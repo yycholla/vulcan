@@ -235,7 +235,14 @@ fn push_visible_fixed_lines(
 fn single_stack(f: &mut TuiFrame, area: Rect, app: &AppState) {
     let layout = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Min(5), Constraint::Length(3)])
+        .constraints([
+            Constraint::Min(5),
+            Constraint::Length(super::widgets::prompt_row_height(
+                &app.input,
+                area.width,
+                app.mode_label(),
+            )),
+        ])
         .split(area);
 
     let inner = frame(
@@ -281,7 +288,14 @@ fn split_sessions(f: &mut TuiFrame, area: Rect, app: &AppState) {
     let outer = frame(f, area, app.view.title(), Some("5 sess · 2 live"), None, &app.theme);
     let v = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Min(5), Constraint::Length(3)])
+        .constraints([
+            Constraint::Min(5),
+            Constraint::Length(super::widgets::prompt_row_height(
+                &app.input,
+                area.width,
+                app.mode_label(),
+            )),
+        ])
         .split(outer);
 
     let h = Layout::default()
@@ -449,7 +463,14 @@ fn tiled_mesh(f: &mut TuiFrame, area: Rect, app: &AppState) {
     let outer = frame(f, area, app.view.title(), Some(&status), None, &app.theme);
     let v = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Min(5), Constraint::Length(3)])
+        .constraints([
+            Constraint::Min(5),
+            Constraint::Length(super::widgets::prompt_row_height(
+                &app.input,
+                area.width,
+                app.mode_label(),
+            )),
+        ])
         .split(outer);
 
     let rows = Layout::default()
@@ -541,7 +562,14 @@ fn tree_of_thought(f: &mut TuiFrame, area: Rect, app: &AppState) {
     let outer = frame(f, area, app.view.title(), Some(&summary), None, &app.theme);
     let v = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Min(5), Constraint::Length(3)])
+        .constraints([
+            Constraint::Min(5),
+            Constraint::Length(super::widgets::prompt_row_height(
+                &app.input,
+                area.width,
+                app.mode_label(),
+            )),
+        ])
         .split(outer);
     let h = Layout::default()
         .direction(Direction::Horizontal)
@@ -656,7 +684,11 @@ fn trading_floor(f: &mut TuiFrame, area: Rect, app: &AppState) {
         .constraints([
             Constraint::Min(8),    // grid
             Constraint::Length(1), // ticker
-            Constraint::Length(3), // prompt row
+            Constraint::Length(super::widgets::prompt_row_height(
+                &app.input,
+                area.width,
+                app.mode_label(),
+            )), // prompt row (YYC-104: wraps with input)
         ])
         .split(outer);
 
