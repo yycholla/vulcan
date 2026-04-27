@@ -202,12 +202,20 @@ impl Tool for SpawnSubagentTool {
         // YYC-208: fork a child cancellation token from the parent's
         // so cancelling the parent turn aborts the child's loop.
         // `child_token` cancels when the parent's token cancels and
-        // can also be cancelled independently for a future
-        // per-child kill action.
+        // can also be cancelled independently — which YYC-209
+        // hands to the orchestration store so a TUI kill action
+        // can target this specific child by id.
         let child_cancel = cancel.child_token();
+        self.orchestration
+            .register_cancel_handle(child_id, child_cancel.clone());
         let run_result = child
             .run_prompt_with_cancel(&task, child_cancel.clone())
             .await;
+        // YYC-209: child run finished one way or another; drop the
+        // handle so the store's cancel map only carries live
+        // children. Done before the cancellation check below so
+        // even the cancelled-by-parent path forgets the handle.
+        self.orchestration.forget_cancel_handle(child_id);
         let iterations = child.iterations();
         // If parent cancelled, mark Cancelled regardless of how the
         // child's run_prompt happened to surface — its Err shape on
