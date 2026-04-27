@@ -53,7 +53,7 @@ fn empty_terminal_message(
 pub(crate) fn sanitize_orphan_tool_messages(messages: &mut Vec<Message>) -> usize {
     use std::collections::HashSet;
     let mut active_call_ids: HashSet<String> = HashSet::new();
-    let mut to_drop = Vec::new();
+    let mut drop_indices: HashSet<usize> = HashSet::new();
     for (idx, msg) in messages.iter().enumerate() {
         match msg {
             Message::Assistant {
@@ -70,16 +70,23 @@ pub(crate) fn sanitize_orphan_tool_messages(messages: &mut Vec<Message>) -> usiz
             }
             Message::Tool { tool_call_id, .. } => {
                 if !active_call_ids.contains(tool_call_id) {
-                    to_drop.push(idx);
+                    drop_indices.insert(idx);
                 }
             }
             _ => {}
         }
     }
-    let dropped = to_drop.len();
-    for idx in to_drop.into_iter().rev() {
-        messages.remove(idx);
-    }
+    let dropped = drop_indices.len();
+    // Single-pass O(n) removal: `retain` shifts each kept element at most
+    // once. The previous `Vec::remove(idx)` in reverse was O(n) per drop,
+    // i.e. O(n²) when many orphans land in the same history (e.g. a
+    // truncated long tool-using turn replayed at session resume).
+    let mut idx = 0usize;
+    messages.retain(|_| {
+        let keep = !drop_indices.contains(&idx);
+        idx += 1;
+        keep
+    });
     dropped
 }
 
