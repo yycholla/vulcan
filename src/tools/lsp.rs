@@ -8,8 +8,9 @@
 
 use crate::code::Language;
 use crate::code::lsp::{
-    LspManager, diagnostics_for, find_references, goto_definition, hover, implementation,
-    type_definition, workspace_symbol,
+    LspManager, call_hierarchy_incoming, call_hierarchy_outgoing, diagnostics_for, find_references,
+    goto_definition, hover, implementation, prepare_call_hierarchy, type_definition,
+    workspace_symbol,
 };
 use crate::tools::{Tool, ToolResult};
 use anyhow::Result;
@@ -335,6 +336,132 @@ impl Tool for ImplementationTool {
             Err(e) => return Ok(ToolResult::err(format!("{e}"))),
         };
         let payload = json!({ "implementations": locs });
+        Ok(ToolResult::ok(serde_json::to_string_pretty(&payload)?))
+    }
+}
+
+#[derive(Clone)]
+pub struct CallHierarchyTool {
+    manager: Arc<LspManager>,
+}
+
+impl CallHierarchyTool {
+    pub fn new(manager: Arc<LspManager>) -> Self {
+        Self { manager }
+    }
+}
+
+#[async_trait]
+impl Tool for CallHierarchyTool {
+    fn name(&self) -> &str {
+        "call_hierarchy"
+    }
+    fn description(&self) -> &str {
+        "Find functions that call (`incoming`) or are called by (`outgoing`) the symbol at file:line:col. Stricter than find_references — type uses and imports don't show up here. Returns each call's name + file + line + container."
+    }
+    fn schema(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "path": { "type": "string" },
+                "line": { "type": "integer", "description": "1-indexed source line" },
+                "character": { "type": "integer", "description": "0-indexed column" },
+                "direction": {
+                    "type": "string",
+                    "enum": ["incoming", "outgoing"],
+                    "description": "`incoming` lists callers; `outgoing` lists callees."
+                }
+            },
+            "required": ["path", "line", "character", "direction"]
+        })
+    }
+    async fn call(&self, params: Value, _cancel: CancellationToken) -> Result<ToolResult> {
+        let path = params["path"]
+            .as_str()
+            .ok_or_else(|| anyhow::anyhow!("path required"))?;
+        let line = params["line"]
+            .as_u64()
+            .ok_or_else(|| anyhow::anyhow!("line required"))?;
+        let character = params["character"].as_u64().unwrap_or(0);
+        let direction = params["direction"]
+            .as_str()
+            .ok_or_else(|| anyhow::anyhow!("direction required"))?;
+        if direction != "incoming" && direction != "outgoing" {
+            return Ok(ToolResult::err(format!(
+                "direction must be \"incoming\" or \"outgoing\"; got `{direction}`",
+            )));
+        }
+        let lang = match lang_for(path) {
+            Ok(l) => l,
+            Err(e) => return Ok(ToolResult::err(e.to_string())),
+        };
+        let server = match self.manager.server(lang).await {
+            Ok(s) => s,
+            Err(e) => {
+                return Ok(ToolResult::err(format!(
+                    "LSP unavailable for {}: {e}",
+                    lang.name()
+                )));
+            }
+        };
+        let pb = PathBuf::from(path);
+        let line0 = (line as u32).saturating_sub(1);
+        let items = match prepare_call_hierarchy(&server, &pb, line0, character as u32).await {
+            Ok(items) => items,
+            Err(e) => return Ok(ToolResult::err(format!("{e}"))),
+        };
+        if items.is_empty() {
+            let payload = json!({
+                "direction": direction,
+                "calls": [],
+                "note": "No callable symbol at this position.",
+            });
+            return Ok(ToolResult::ok(serde_json::to_string_pretty(&payload)?));
+        }
+        // The spec returns a `Vec` because some servers resolve a
+        // position to multiple callable items (overloads). Expand
+        // each into its own incoming/outgoing query and concatenate.
+        let mut hits: Vec<Value> = Vec::new();
+        for item in items {
+            if direction == "incoming" {
+                let calls = match call_hierarchy_incoming(&server, item).await {
+                    Ok(c) => c,
+                    Err(e) => return Ok(ToolResult::err(format!("{e}"))),
+                };
+                for call in calls {
+                    let from = call.from;
+                    hits.push(json!({
+                        "name": from.name,
+                        "kind": format!("{:?}", from.kind),
+                        "container": from.detail,
+                        "file": from.uri.path().as_str(),
+                        "line": from.range.start.line + 1,
+                        "call_sites": call.from_ranges.len(),
+                    }));
+                }
+            } else {
+                let calls = match call_hierarchy_outgoing(&server, item).await {
+                    Ok(c) => c,
+                    Err(e) => return Ok(ToolResult::err(format!("{e}"))),
+                };
+                for call in calls {
+                    let to = call.to;
+                    hits.push(json!({
+                        "name": to.name,
+                        "kind": format!("{:?}", to.kind),
+                        "container": to.detail,
+                        "file": to.uri.path().as_str(),
+                        "line": to.range.start.line + 1,
+                        "call_sites": call.from_ranges.len(),
+                    }));
+                }
+            }
+        }
+        let payload = json!({
+            "direction": direction,
+            "count": hits.len(),
+            "calls": hits,
+        });
         Ok(ToolResult::ok(serde_json::to_string_pretty(&payload)?))
     }
 }

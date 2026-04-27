@@ -338,6 +338,8 @@ impl ToolRegistry {
         // YYC-202: type-of-expression + trait/interface implementation lookup.
         registry.register(Arc::new(lsp::TypeDefinitionTool::new(lsp_mgr.clone())));
         registry.register(Arc::new(lsp::ImplementationTool::new(lsp_mgr.clone())));
+        // YYC-203: incoming/outgoing call hierarchy.
+        registry.register(Arc::new(lsp::CallHierarchyTool::new(lsp_mgr.clone())));
         // YYC-49: AST-aware structural edits.
         registry.register(Arc::new(code_edit::ReplaceFunctionBodyTool));
         registry.register(Arc::new(code_edit::RenameSymbolTool::new(lsp_mgr)));
