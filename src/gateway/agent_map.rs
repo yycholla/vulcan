@@ -210,6 +210,18 @@ impl AgentMap {
         Arc::clone(&self.inner)
     }
 
+    /// Force-remove the entry for `lane` so the next `get_or_spawn` builds
+    /// a fresh Agent. Used by the worker when a panic during run_prompt
+    /// leaves the Agent in an unknown state — its hooks, message buffer,
+    /// and tool registry can all be mid-mutation, so the safe move is to
+    /// drop the whole instance and start over (YYC-133).
+    ///
+    /// No-op when the lane has no entry. Returns whether an entry was
+    /// removed so the caller can log appropriately.
+    pub async fn evict(&self, lane: &LaneKey) -> bool {
+        self.inner.write().await.remove(lane).is_some()
+    }
+
     /// Spawn a background task that periodically evicts lanes idle longer
     /// than `self.idle_ttl`. The returned `EvictorHandle` aborts the loop on
     /// drop, so callers don't need to remember to call `.abort()` on shutdown.
