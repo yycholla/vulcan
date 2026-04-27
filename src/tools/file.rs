@@ -249,15 +249,21 @@ impl Tool for WriteFile {
         tokio::fs::write(path, content).await?;
         let bytes = content.len();
 
+        // YYC-66 / YYC-131: build the diff record once, then attach it
+        // to BOTH the global sink (TUI's last-write panel) and this
+        // call's ToolResult (per-call AfterToolCall hook input).
+        // Without the per-call attachment, concurrent dispatch could
+        // overwrite the sink before DiagnosticsHook sees the matching
+        // entry.
+        let diff = crate::tools::EditDiff {
+            path: path.to_string(),
+            tool: "write_file".into(),
+            before: crate::tools::snippet(&before, 6, 800),
+            after: crate::tools::snippet(content, 6, 800),
+            at: chrono::Local::now(),
+        };
         if let Some(sink) = &self.diff_sink {
-            let diff = crate::tools::EditDiff {
-                path: path.to_string(),
-                tool: "write_file".into(),
-                before: crate::tools::snippet(&before, 6, 800),
-                after: crate::tools::snippet(content, 6, 800),
-                at: chrono::Local::now(),
-            };
-            *sink.lock() = Some(diff);
+            *sink.lock() = Some(diff.clone());
         }
 
         // YYC-bonus: surface a real diff in the card preview without
@@ -268,7 +274,9 @@ impl Tool for WriteFile {
             format!("MODIFIED · {path}")
         };
         let display = diff_preview(&before, content, &label);
-        Ok(ToolResult::ok(format!("Wrote {bytes} bytes to {path}")).with_display_preview(display))
+        Ok(ToolResult::ok(format!("Wrote {bytes} bytes to {path}"))
+            .with_display_preview(display)
+            .with_edit_diff(diff))
     }
 }
 
@@ -431,17 +439,20 @@ impl Tool for PatchFile {
         tokio::fs::write(path, &new_content).await?;
         let replaces = accepted_offsets.len();
 
-        // YYC-66: capture the before/after snippets so the TUI diff pane
-        // shows actual edited text rather than demo data.
+        // YYC-66 / YYC-131: build the diff once, attach to both the
+        // global sink (TUI's last-write panel) and this call's
+        // ToolResult (per-call AfterToolCall hook input). Per-call
+        // attachment is what lets DiagnosticsHook react to the right
+        // file under concurrent dispatch.
+        let diff = crate::tools::EditDiff {
+            path: path.to_string(),
+            tool: "edit_file".into(),
+            before: crate::tools::snippet(old, 6, 800),
+            after: crate::tools::snippet(new, 6, 800),
+            at: chrono::Local::now(),
+        };
         if let Some(sink) = &self.diff_sink {
-            let diff = crate::tools::EditDiff {
-                path: path.to_string(),
-                tool: "edit_file".into(),
-                before: crate::tools::snippet(old, 6, 800),
-                after: crate::tools::snippet(new, 6, 800),
-                at: chrono::Local::now(),
-            };
-            *sink.lock() = Some(diff);
+            *sink.lock() = Some(diff.clone());
         }
 
         // YYC-bonus: render a Claude Code-style diff in the card.
@@ -451,7 +462,9 @@ impl Tool for PatchFile {
         } else {
             format!("Applied {replaces} of {total} hunk(s) in {path} (others rejected).")
         };
-        Ok(ToolResult::ok(msg).with_display_preview(display))
+        Ok(ToolResult::ok(msg)
+            .with_display_preview(display)
+            .with_edit_diff(diff))
     }
 }
 
@@ -635,6 +648,108 @@ mod tests {
         assert_eq!(diff.tool, "edit_file");
         assert_eq!(diff.before, "1");
         assert_eq!(diff.after, "42");
+    }
+
+    // ── YYC-131: per-call edit_diff travels with ToolResult ─────────────
+
+    #[tokio::test]
+    async fn write_file_attaches_per_call_edit_diff_to_tool_result() {
+        // Per-call diff lives on ToolResult so AfterToolCall hooks can
+        // see *this* call's edit even when the global sink races under
+        // concurrent dispatch (YYC-131).
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("a.txt");
+        let path_str = path.to_string_lossy().to_string();
+
+        let sink = crate::tools::new_diff_sink();
+        let tool = WriteFile::new(Some(sink.clone()));
+        let result = tool
+            .call(
+                json!({"path": path_str.clone(), "content": "hello"}),
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+
+        let diff = result.edit_diff.expect("ToolResult.edit_diff populated");
+        assert_eq!(diff.tool, "write_file");
+        assert_eq!(diff.path, path_str);
+        assert_eq!(diff.after, "hello");
+    }
+
+    #[tokio::test]
+    async fn patch_file_attaches_per_call_edit_diff_to_tool_result() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("a.rs");
+        let path_str = path.to_string_lossy().to_string();
+        std::fs::write(&path, "fn foo() { 1 }\n").unwrap();
+
+        let sink = crate::tools::new_diff_sink();
+        let tool = PatchFile::new(Some(sink.clone()));
+        let result = tool
+            .call(
+                json!({"path": path_str.clone(), "old_string": "1", "new_string": "42"}),
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+
+        let diff = result.edit_diff.expect("ToolResult.edit_diff populated");
+        assert_eq!(diff.tool, "edit_file");
+        assert_eq!(diff.path, path_str);
+        assert_eq!(diff.before, "1");
+        assert_eq!(diff.after, "42");
+    }
+
+    #[tokio::test]
+    async fn concurrent_writes_to_different_paths_each_carry_their_own_diff() {
+        // YYC-131 acceptance pin: concurrent dispatch where two
+        // write_file calls hit the global sink near-simultaneously
+        // would have produced one ToolResult with the *other* file's
+        // diff under the old single-slot scheme. With per-call
+        // attachment, each ToolResult carries its own diff regardless
+        // of sink ordering.
+        let dir = tempdir().unwrap();
+        let path_a = dir.path().join("a.txt").to_string_lossy().to_string();
+        let path_b = dir.path().join("b.txt").to_string_lossy().to_string();
+
+        let sink = crate::tools::new_diff_sink();
+        let tool = std::sync::Arc::new(WriteFile::new(Some(sink.clone())));
+
+        let ta = {
+            let tool = tool.clone();
+            let path = path_a.clone();
+            tokio::spawn(async move {
+                tool.call(
+                    json!({"path": path, "content": "AAA"}),
+                    CancellationToken::new(),
+                )
+                .await
+            })
+        };
+        let tb = {
+            let tool = tool.clone();
+            let path = path_b.clone();
+            tokio::spawn(async move {
+                tool.call(
+                    json!({"path": path, "content": "BBB"}),
+                    CancellationToken::new(),
+                )
+                .await
+            })
+        };
+        let (ra, rb) = tokio::join!(ta, tb);
+        let ra = ra.unwrap().unwrap();
+        let rb = rb.unwrap().unwrap();
+
+        // Each ToolResult carries the diff for its own path — never
+        // the other's.
+        let da = ra.edit_diff.expect("call A should carry its own edit_diff");
+        let db = rb.edit_diff.expect("call B should carry its own edit_diff");
+        assert_eq!(da.path, path_a, "call A diff path mismatch");
+        assert_eq!(db.path, path_b, "call B diff path mismatch");
+        assert_eq!(da.after, "AAA");
+        assert_eq!(db.after, "BBB");
     }
 
     #[test]

@@ -910,6 +910,7 @@ fn format_command_result(exit_code: i32, success: bool, stdout: &str, stderr: &s
         media: Vec::new(),
         is_error: !success,
         display_preview: None,
+        edit_diff: None,
     }
 }
 
