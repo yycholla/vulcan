@@ -32,6 +32,9 @@ gateway = [
     "dep:r2d2",
     "dep:r2d2_sqlite",
 ]
+# Telegram connector (YYC-18 PR-3). Gated separately from `gateway` so
+# operators who only need Discord don't pay the teloxide-core dep cost.
+telegram = ["gateway", "dep:teloxide-core"]
 
 [dependencies]
 # Async runtime
@@ -128,6 +131,12 @@ subtle = { version = "2.6.1", optional = true }
 hmac = { version = "0.12.1", optional = true }
 sha2 = { version = "0.10.9", optional = true }
 serenity = { version = "0.12", default-features = false, features = ["client", "gateway", "http", "model", "rustls_backend"], optional = true }
+# Telegram Bot API client + types. We use teloxide-core (HTTP + types
+# only) rather than full teloxide so the dispatcher framework's macro
+# DSL doesn't infect the build. Long-poll + webhook are driven by our
+# own gateway plumbing. Pinned to 0.13.0 (latest stable on crates.io
+# 2026-04-27); `rustls` feature reuses our existing rustls TLS stack.
+teloxide-core = { version = "0.13.0", default-features = false, features = ["rustls"], optional = true }
 # Connection pool for the gateway daemon's SQLite store (YYC-113). Replaces
 # the global Arc<Mutex<Connection>> that serialized every concurrent agent
 # lane through one lock. Versions verified at crates.io latest stable.

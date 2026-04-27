@@ -29,6 +29,8 @@ pub mod render_registry;
 pub mod routes;
 pub mod server;
 pub mod stream_render;
+#[cfg(feature = "telegram")]
+pub mod telegram;
 pub mod worker;
 
 pub async fn run(config: &Config, bind_override: Option<String>) -> Result<()> {
@@ -55,6 +57,23 @@ where
         registry.register(
             "discord",
             Arc::new(DiscordPlatform::new(&gateway.discord.bot_token)?),
+        );
+    }
+    #[cfg(feature = "telegram")]
+    if gateway.telegram.enabled {
+        use crate::gateway::telegram::TelegramPlatform;
+        let webhook_secret = if gateway.telegram.webhook_secret.is_empty() {
+            None
+        } else {
+            Some(gateway.telegram.webhook_secret.clone())
+        };
+        registry.register(
+            "telegram",
+            Arc::new(TelegramPlatform::new(
+                gateway.telegram.bot_token.clone(),
+                gateway.telegram.allowed_chat_ids.clone(),
+                webhook_secret,
+            )?),
         );
     }
     let registry = Arc::new(registry);
@@ -110,6 +129,21 @@ where
     } else {
         None
     };
+    // YYC-18 PR-3: Telegram long-poll runs alongside the Axum server.
+    // Mirrors Discord's enable-and-spawn pattern, gated on the
+    // `telegram` cargo feature so default builds stay free of
+    // teloxide-core.
+    #[cfg(feature = "telegram")]
+    let telegram_dispatcher = if gateway.telegram.enabled {
+        Some(crate::gateway::telegram::TelegramPlatform::spawn_long_poll(
+            gateway.telegram.bot_token.clone(),
+            gateway.telegram.allowed_chat_ids.clone(),
+            gateway.telegram.poll_interval_secs,
+            Arc::clone(&inbound),
+        )?)
+    } else {
+        None
+    };
     // YYC-18 PR-2c: build the dispatcher once at startup from
     // Config.gateway.commands; the four builtins are pre-registered
     // by CommandDispatcher::new regardless of TOML contents.
@@ -142,6 +176,10 @@ where
 
     inbound_dispatcher.abort();
     if let Some(handle) = discord_dispatcher {
+        handle.abort();
+    }
+    #[cfg(feature = "telegram")]
+    if let Some(handle) = telegram_dispatcher {
         handle.abort();
     }
     drop(outbound_dispatcher);
@@ -274,6 +312,7 @@ mod tests {
             max_concurrent_lanes: 64,
             outbound_max_attempts: 5,
             discord: crate::config::DiscordConfig::default(),
+            telegram: crate::config::TelegramConfig::default(),
             commands: std::collections::HashMap::new(),
         });
         config
