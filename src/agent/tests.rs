@@ -292,41 +292,94 @@ async fn prepare_stream_turn_builds_prompt_and_persists_user_message() {
 }
 
 #[tokio::test]
-async fn compact_stream_messages_if_needed_replaces_history_and_emits_note() {
-    let (mut agent, _mock) = agent_with_mock();
+async fn compact_stream_messages_if_needed_replaces_history_with_summary_and_keeps_recent_window() {
+    // YYC-128: real compaction calls the provider to summarize the older
+    // slice, splices the summary in place of it, and preserves the recent
+    // window verbatim — including the new user prompt.
+    let (mut agent, mock) = agent_with_mock();
     agent.context = ContextManager::new(10);
+    // Summarizer call returns this body — the new System message should
+    // contain it and not the legacy "Previous conversation context:" stub.
+    mock.enqueue_text("- user wanted X done\n- file /tmp/foo.txt was created");
+
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-    let mut messages = vec![
-        Message::System {
-            content: "system".into(),
-        },
-        Message::User {
-            content: "old prompt".into(),
-        },
-        Message::Assistant {
-            content: Some("old answer".into()),
+    let mut messages = vec![Message::System {
+        content: "system".into(),
+    }];
+    // Build 8 (User, Assistant) turns so the keep_recent=6 window leaves
+    // older content to summarize.
+    for i in 0..8 {
+        messages.push(Message::User {
+            content: format!("turn {i} user"),
+        });
+        messages.push(Message::Assistant {
+            content: Some(format!("turn {i} answer")),
             tool_calls: None,
             reasoning_content: None,
-        },
-    ];
+        });
+    }
+    messages.push(Message::User {
+        content: "new prompt".into(),
+    });
+    let pre_len = messages.len();
 
     agent
         .compact_stream_messages_if_needed(&mut messages, "new prompt", &tx, 0)
         .await;
 
-    assert_eq!(messages.len(), 2);
+    // History was actually rewritten.
+    assert!(messages.len() < pre_len);
+    // First message stays the original System prompt.
+    assert!(matches!(&messages[0], Message::System { content } if content == "system"));
+    // Second message is the inserted summary System block.
+    match &messages[1] {
+        Message::System { content } => {
+            assert!(content.starts_with("Summary of earlier conversation:"));
+            assert!(content.contains("/tmp/foo.txt"));
+        }
+        other => panic!("expected summary System, got {other:?}"),
+    }
+    // Recent window preserved verbatim — the new user prompt is still last.
     assert!(matches!(
-        &messages[0],
-        Message::System { content } if content.starts_with("Previous conversation context:")
+        messages.last(),
+        Some(Message::User { content }) if content == "new prompt"
     ));
-    assert!(matches!(
-        &messages[1],
-        Message::User { content } if content == "new prompt"
-    ));
+    // UX note emitted to the stream.
     assert!(matches!(
         rx.try_recv(),
         Ok(StreamEvent::Text(note)) if note.contains("compacted")
     ));
+}
+
+#[tokio::test]
+async fn compact_skips_when_no_user_boundary_in_recent_window() {
+    // No User in the trailing window (mid tool-loop): compaction must be a
+    // no-op so we don't break the tool_calls/Tool wire invariant.
+    let (mut agent, _mock) = agent_with_mock();
+    agent.context = ContextManager::new(10);
+    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    let original = vec![
+        Message::System {
+            content: "system".into(),
+        },
+        Message::Assistant {
+            content: Some("a".repeat(200)),
+            tool_calls: None,
+            reasoning_content: None,
+        },
+        Message::Assistant {
+            content: Some("b".repeat(200)),
+            tool_calls: None,
+            reasoning_content: None,
+        },
+    ];
+    let mut messages = original.clone();
+
+    agent
+        .compact_stream_messages_if_needed(&mut messages, "x", &tx, 0)
+        .await;
+
+    assert_eq!(messages.len(), original.len());
 }
 
 #[tokio::test]
