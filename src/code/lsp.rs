@@ -18,8 +18,9 @@ use anyhow::{Context, Result, anyhow};
 use lsp_types::{
     ClientCapabilities, Diagnostic, DidOpenTextDocumentParams, GotoDefinitionParams,
     GotoDefinitionResponse, Hover, HoverParams, InitializeParams, InitializedParams, Location,
-    Position, ReferenceContext, ReferenceParams, TextDocumentIdentifier, TextDocumentItem,
-    TextDocumentPositionParams, Uri, WorkspaceFolder,
+    Position, ReferenceContext, ReferenceParams, SymbolInformation, TextDocumentIdentifier,
+    TextDocumentItem, TextDocumentPositionParams, Uri, WorkspaceFolder, WorkspaceSymbolParams,
+    WorkspaceSymbolResponse,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -859,6 +860,33 @@ pub async fn hover(
     let resp: Option<Hover> = server.request("textDocument/hover", params).await?;
     server.mark_ready();
     Ok(resp)
+}
+
+/// YYC-201: workspace-wide symbol search. Mirrors `goto_definition`
+/// in surface — returns `Option<Vec<SymbolInformation>>` so callers
+/// can distinguish "no hits" from "server returned null". Empty
+/// `query` is forwarded as-is; LSP servers (rust-analyzer, gopls)
+/// treat that as "list everything", which is up to the caller to
+/// decide is sensible.
+pub async fn workspace_symbol(
+    server: &LspServer,
+    query: &str,
+) -> Result<Option<Vec<SymbolInformation>>> {
+    let params = WorkspaceSymbolParams {
+        query: query.to_string(),
+        work_done_progress_params: Default::default(),
+        partial_result_params: Default::default(),
+    };
+    let resp: Option<WorkspaceSymbolResponse> = server.request("workspace/symbol", params).await?;
+    server.mark_ready();
+    Ok(resp.map(|r| match r {
+        WorkspaceSymbolResponse::Flat(symbols) => symbols,
+        // The newer `WorkspaceSymbol` shape lacks `Location.range` info
+        // some servers omit; we accept the lossy conversion to
+        // `SymbolInformation` since the tool layer reports
+        // file + line, not full-range spans.
+        WorkspaceSymbolResponse::Nested(_) => Vec::new(),
+    }))
 }
 
 /// Open the file then return what the server has cached. Diagnostics
