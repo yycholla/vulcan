@@ -10,20 +10,22 @@
 //!     via `subtle`. The /webhook/:platform route is shared with
 //!     other platforms.
 //!
-//! Both paths normalize through `inbound_from_value` (serde_json
-//! Update shape parser) -> `inbound_from_update_parts` (parts +
-//! allow-list filter) so the shape and filter logic lives in one
-//! place. Live HTTP path is exercised by integration tests / manual
-//! smoke; the parsing helpers are unit-tested.
+//! Both paths normalize through `inbound_from_update_parts` (parts +
+//! allow-list filter) so the filter logic lives in one place. The
+//! long-poll path uses `inbound_from_update` (typed `Update`) and the
+//! webhook path uses `inbound_from_value` (serde_json `Value`, since
+//! the body arrives as bytes). Live HTTP path is exercised by
+//! integration tests / manual smoke; the parsing helpers are
+//! unit-tested.
 
 use std::collections::HashSet;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use teloxide_core::{
-    Bot,
+    ApiError, Bot, RequestError,
     prelude::Requester,
-    types::{ChatId, MessageId, ReplyParameters},
+    types::{ChatId, MessageId, ReplyParameters, Update, UpdateKind},
 };
 use tokio::task::JoinHandle;
 
@@ -89,10 +91,32 @@ impl TelegramPlatform {
         })
     }
 
+    /// Walk a typed `Update` (from `Bot::get_updates`) into the parts
+    /// `inbound_from_update_parts` consumes. Long-poll path uses this
+    /// rather than a `to_value` round trip — cheaper and type-safe.
+    /// Webhook path stays on `inbound_from_value` because the body
+    /// arrives as bytes.
+    pub(crate) fn inbound_from_update(
+        update: &Update,
+        allowed: &Option<HashSet<i64>>,
+    ) -> Option<InboundMessage> {
+        let m = match &update.kind {
+            UpdateKind::Message(m) | UpdateKind::EditedMessage(m) => m,
+            _ => return None,
+        };
+        let chat_id = m.chat.id.0;
+        let user_id = m.from.as_ref()?.id.0;
+        let message_id = m.id.0;
+        let text = m.text()?;
+        let reply_to = m.reply_to_message().map(|r| r.id.0);
+        Self::inbound_from_update_parts(chat_id, user_id, message_id, text, reply_to, allowed)
+    }
+
     /// Pull (chat_id, user_id, message_id, text, reply_to) out of a
     /// `serde_json::Value`-shaped Update and forward to
-    /// `inbound_from_update_parts`. Used by both webhook and long-poll
-    /// paths so JSON-shape parsing lives in one place.
+    /// `inbound_from_update_parts`. Used by the webhook path (body
+    /// arrives as bytes); long-poll uses `inbound_from_update` against
+    /// the typed `Update` instead.
     pub(crate) fn inbound_from_value(
         update: &serde_json::Value,
         allowed: &Option<HashSet<i64>>,
@@ -181,14 +205,13 @@ impl Platform for TelegramPlatform {
         let chat = Self::chat_id_from_chat(chat_id)?;
         let id = Self::message_id_from_str(message_id)?;
         let result = self.bot.edit_message_text(chat, id, text.to_string()).await;
-        if let Err(err) = &result {
-            // Telegram returns 400 "message is not modified" when the
-            // new text matches the existing text byte-for-byte. That's
-            // an idempotency win on our side, not a failure to surface.
-            let s = err.to_string();
-            if s.contains("message is not modified") {
-                return Ok(());
-            }
+        // Telegram returns 400 "message is not modified" when the new text
+        // matches the existing text byte-for-byte. That's an idempotency
+        // win on our side, not a failure to surface. Match the typed
+        // ApiError variant so unrelated errors (network, JSON, etc.) can
+        // never trip this branch.
+        if let Err(RequestError::Api(ApiError::MessageNotModified)) = &result {
+            return Ok(());
         }
         result
             .map(|_| ())
@@ -249,23 +272,13 @@ async fn run_long_poll(
         match req.await {
             Ok(updates) => {
                 for u in updates {
-                    // UpdateId is u32; cast saturating to i32 because the
-                    // GetUpdates `offset` parameter is i32. Telegram's
+                    // UpdateId is u32; the GetUpdates `offset` parameter is
+                    // i32. `try_from` converts cleanly when in range and
+                    // saturates to i32::MAX otherwise, then +1. Telegram's
                     // update ids are monotonically increasing but bounded
                     // well below i32::MAX in practice.
-                    offset = (u.id.0 as i32).saturating_add(1);
-                    let val = match serde_json::to_value(&u) {
-                        Ok(v) => v,
-                        Err(e) => {
-                            tracing::warn!(
-                                target: "gateway::telegram",
-                                error = %e,
-                                "could not serialize Update to value",
-                            );
-                            continue;
-                        }
-                    };
-                    let Some(inb) = TelegramPlatform::inbound_from_value(&val, &allowed) else {
+                    offset = i32::try_from(u.id.0).unwrap_or(i32::MAX).saturating_add(1);
+                    let Some(inb) = TelegramPlatform::inbound_from_update(&u, &allowed) else {
                         continue;
                     };
                     if let Err(e) = inbound.enqueue(inb).await {
@@ -407,5 +420,136 @@ mod tests {
         assert_eq!(inb.text, "hello bot");
         assert_eq!(inb.chat_id, "42");
         assert_eq!(inb.message_id.as_deref(), Some("100"));
+    }
+
+    /// Typed-Update sibling of `inbound_from_value_extracts_text_message`.
+    /// Constructs a real `teloxide_core::types::Update` via JSON round
+    /// trip (its derived Deserialize is the supported public API for
+    /// fixture construction) and asserts the typed walker pulls the
+    /// same parts the JSON walker does.
+    #[test]
+    fn inbound_from_update_extracts_text_message() {
+        let json = r#"{
+            "update_id": 1,
+            "message": {
+                "message_id": 100,
+                "from": {
+                    "id": 7,
+                    "is_bot": false,
+                    "first_name": "tester"
+                },
+                "chat": {
+                    "id": 42,
+                    "first_name": "tester",
+                    "type": "private"
+                },
+                "date": 1700000000,
+                "text": "hello bot"
+            }
+        }"#;
+        let update: teloxide_core::types::Update =
+            serde_json::from_str(json).expect("deserialize Update");
+        let inb = TelegramPlatform::inbound_from_update(&update, &allowed(&[])).expect("parse");
+        assert_eq!(inb.text, "hello bot");
+        assert_eq!(inb.chat_id, "42");
+        assert_eq!(inb.user_id, "7");
+        assert_eq!(inb.message_id.as_deref(), Some("100"));
+    }
+
+    /// Typed-error path for "message is not modified": construct a
+    /// `RequestError::Api(ApiError::MessageNotModified)` directly (the
+    /// teloxide-core 0.13 variants we matched on at the call site) and
+    /// confirm the discriminant pattern matches it. We can't easily
+    /// drive `TelegramPlatform::edit` to return this without a live
+    /// network round trip, but matching the pattern here is enough to
+    /// catch a future teloxide-core rename.
+    #[test]
+    fn typed_message_not_modified_pattern_matches() {
+        let err: Result<(), RequestError> = Err(RequestError::Api(ApiError::MessageNotModified));
+        let swallowed = matches!(&err, Err(RequestError::Api(ApiError::MessageNotModified)));
+        assert!(
+            swallowed,
+            "expected typed MessageNotModified pattern to match"
+        );
+    }
+
+    fn webhook_body() -> Vec<u8> {
+        serde_json::to_vec(&serde_json::json!({
+            "update_id": 1,
+            "message": {
+                "message_id": 100,
+                "from": { "id": 7 },
+                "chat": { "id": 42 },
+                "text": "hi via webhook",
+            },
+        }))
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn verify_webhook_accepts_matching_secret() {
+        let p = TelegramPlatform::new("123:abc", vec![], Some("s3cret".into())).expect("ctor");
+        let mut headers = http::HeaderMap::new();
+        headers.insert(
+            "x-telegram-bot-api-secret-token",
+            http::HeaderValue::from_static("s3cret"),
+        );
+        let inb = p
+            .verify_webhook(&headers, &webhook_body())
+            .await
+            .expect("accepted");
+        assert_eq!(inb.text, "hi via webhook");
+        assert_eq!(inb.chat_id, "42");
+    }
+
+    #[tokio::test]
+    async fn verify_webhook_rejects_mismatched_secret() {
+        let p = TelegramPlatform::new("123:abc", vec![], Some("s3cret".into())).expect("ctor");
+        let mut headers = http::HeaderMap::new();
+        headers.insert(
+            "x-telegram-bot-api-secret-token",
+            http::HeaderValue::from_static("wrong"),
+        );
+        let err = p
+            .verify_webhook(&headers, &webhook_body())
+            .await
+            .expect_err("must reject");
+        assert!(
+            err.to_string().contains("invalid webhook secret"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn verify_webhook_rejects_missing_header() {
+        let p = TelegramPlatform::new("123:abc", vec![], Some("s3cret".into())).expect("ctor");
+        let headers = http::HeaderMap::new();
+        let err = p
+            .verify_webhook(&headers, &webhook_body())
+            .await
+            .expect_err("must reject");
+        assert!(
+            err.to_string()
+                .contains("missing X-Telegram-Bot-Api-Secret-Token"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn verify_webhook_rejects_when_not_configured() {
+        let p = TelegramPlatform::new("123:abc", vec![], None).expect("ctor");
+        let mut headers = http::HeaderMap::new();
+        headers.insert(
+            "x-telegram-bot-api-secret-token",
+            http::HeaderValue::from_static("anything"),
+        );
+        let err = p
+            .verify_webhook(&headers, &webhook_body())
+            .await
+            .expect_err("must reject");
+        assert!(
+            err.to_string().contains("webhook not configured"),
+            "unexpected error: {err}"
+        );
     }
 }
