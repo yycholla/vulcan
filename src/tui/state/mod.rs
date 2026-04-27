@@ -143,9 +143,15 @@ pub struct AppState {
     /// Diff render style (YYC-77). Toggled via `/diff-style`.
     pub diff_style: DiffStyle,
     /// Pending prompts submitted while the agent was busy (YYC-61).
-    /// Drained one-at-a-time from the front when each turn completes.
+    /// Per YYC-125, plain-text submissions during an agent turn act as
+    /// "steers": they queue here and the entire batch fires as one
+    /// combined user message at the next turn-end Done event.
     /// In-memory only — never persisted to sessions.db.
     pub queue: VecDeque<String>,
+    /// Explicit `/queue <msg>` deferrals (YYC-125). Strict FIFO post-
+    /// turn drain — one message per Done event, after the steer batch
+    /// has flushed.
+    pub deferred_queue: VecDeque<String>,
     pub show_reasoning: bool,
     pub session_label: String,
 
@@ -317,6 +323,7 @@ impl AppState {
             prompt_mode: PromptMode::Insert,
             diff_style: DiffStyle::default(),
             queue: VecDeque::new(),
+            deferred_queue: VecDeque::new(),
             show_reasoning: true,
             session_label: "new session".into(),
 

@@ -1017,14 +1017,25 @@ pub async fn run_tui(config: &Config, resume: ResumeTarget) -> Result<()> {
                                             });
                                             continue;
                                         }
-                                        // YYC-61: plain text during busy → queue.
+                                        // YYC-61 → YYC-125: plain text during busy queues
+                                        // as a "steer" — drained as a single batched
+                                        // prompt at the next turn-end Done. Use /queue
+                                        // for explicit FIFO post-turn scheduling.
                                         if !app.input.is_empty()
                                             && app.thinking
                                             && !is_slash
                                         {
                                             let msg = app.input.trim().to_string();
                                             if !msg.is_empty() {
-                                                app.queue.push_back(msg);
+                                                app.queue.push_back(msg.clone());
+                                                app.messages.push(ChatMessage {
+                                                    role: ChatRole::System,
+                                                    content: format!(
+                                                        "Steered (#{} pending): {msg}",
+                                                        app.queue.len()
+                                                    ),
+                                                    ..Default::default()
+                                                });
                                             }
                                             app.input.clear();
                                             app.slash_menu_selection = 0;
@@ -1119,6 +1130,36 @@ pub async fn run_tui(config: &Config, resume: ResumeTarget) -> Result<()> {
                                                         events::refresh_sessions(&agent, &mut app).await;
                                                         app.show_session_picker = true;
                                                         app.session_picker_selection = 0;
+                                                        continue;
+                                                    }
+                                                    s if s.starts_with("queue ") => {
+                                                        // YYC-125: defer until after the steer batch.
+                                                        let body = s[6..].trim();
+                                                        if body.is_empty() {
+                                                            app.messages.push(ChatMessage {
+                                                                role: ChatRole::System,
+                                                                content: "Usage: /queue <msg> — schedules a prompt to run after the next turn ends and any pending steers flush.".into(),
+                                                                ..Default::default()
+                                                            });
+                                                            continue;
+                                                        }
+                                                        app.deferred_queue.push_back(body.to_string());
+                                                        app.messages.push(ChatMessage {
+                                                            role: ChatRole::System,
+                                                            content: format!(
+                                                                "Queued (#{}, deferred): {body}",
+                                                                app.deferred_queue.len()
+                                                            ),
+                                                            ..Default::default()
+                                                        });
+                                                        continue;
+                                                    }
+                                                    "queue" => {
+                                                        app.messages.push(ChatMessage {
+                                                            role: ChatRole::System,
+                                                            content: "Usage: /queue <msg> — schedules a prompt to run after the next turn ends and any pending steers flush.".into(),
+                                                            ..Default::default()
+                                                        });
                                                         continue;
                                                     }
                                                     s if s.starts_with("search ") => {
