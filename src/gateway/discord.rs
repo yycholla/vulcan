@@ -140,6 +140,49 @@ impl DiscordPlatform {
         }
     }
 
+    /// YYC-19: Discord's hard character cap on a single message.
+    /// 2000 is the standard tier limit; nitro raises it but we
+    /// always target the conservative bound. Outbound text longer
+    /// than this is split via `split_for_discord` and delivered as
+    /// a sequence of follow-up messages on the same channel.
+    pub(crate) const DISCORD_MAX_CHARS: usize = 2000;
+
+    /// YYC-19: split `text` into Discord-sized chunks. Each chunk
+    /// is at most `DISCORD_MAX_CHARS` characters (counted as
+    /// codepoints, not bytes — multibyte UTF-8 stays whole).
+    /// Splits prefer newline boundaries, then space boundaries,
+    /// then a hard char-index cut.
+    pub(crate) fn split_for_discord(text: &str) -> Vec<String> {
+        if text.chars().count() <= Self::DISCORD_MAX_CHARS {
+            return vec![text.to_string()];
+        }
+        let mut out: Vec<String> = Vec::new();
+        let mut remaining = text;
+        while !remaining.is_empty() {
+            if remaining.chars().count() <= Self::DISCORD_MAX_CHARS {
+                out.push(remaining.to_string());
+                break;
+            }
+            // Byte index of the (DISCORD_MAX_CHARS)-th codepoint.
+            let split_byte = remaining
+                .char_indices()
+                .nth(Self::DISCORD_MAX_CHARS)
+                .map(|(idx, _)| idx)
+                .unwrap_or(remaining.len());
+            let head = &remaining[..split_byte];
+            // Prefer to cut at a newline; fall back to last space;
+            // last resort is the hard char-index split.
+            let take_to = head
+                .rfind('\n')
+                .map(|i| i + 1)
+                .or_else(|| head.rfind(' ').map(|i| i + 1))
+                .unwrap_or(split_byte);
+            out.push(remaining[..take_to].to_string());
+            remaining = &remaining[take_to..];
+        }
+        out
+    }
+
     fn channel_id_from_chat(chat_id: &str) -> Result<u64> {
         chat_id
             .parse::<u64>()
@@ -194,7 +237,15 @@ impl Platform for DiscordPlatform {
         use serenity::model::channel::MessageReference;
         use serenity::model::id::MessageId;
         let channel_id = ChannelId::new(Self::channel_id_from_chat(&msg.chat_id)?);
-        let mut create = CreateMessage::new().content(&msg.text);
+        // YYC-19: Discord caps each message at 2000 characters.
+        // Long replies are split; the first chunk carries the reply
+        // context and any attachments, follow-ups are plain text on
+        // the same channel. The returned message_id refers to the
+        // first chunk so subsequent edits target a stable anchor.
+        let mut chunks = Self::split_for_discord(&msg.text).into_iter();
+        let first = chunks.next().unwrap_or_default();
+
+        let mut create = CreateMessage::new().content(first);
         if let Some(reply_to) = &msg.reply_to {
             let parent_id = MessageId::new(
                 reply_to
@@ -218,8 +269,23 @@ impl Platform for DiscordPlatform {
             .send_message(&self.http, create)
             .await
             .context("discord send_message failed")?;
+        let first_id = sent.id.get().to_string();
+
+        for follow in chunks {
+            let create = CreateMessage::new().content(follow);
+            if let Err(e) = channel_id.send_message(&self.http, create).await {
+                tracing::warn!(
+                    target: "gateway::discord",
+                    error = %e,
+                    chat_id = %msg.chat_id,
+                    "follow-up Discord chunk failed; remaining text dropped",
+                );
+                break;
+            }
+        }
+
         Ok(crate::platform::SentMessage {
-            message_id: sent.id.get().to_string(),
+            message_id: first_id,
         })
     }
 
@@ -542,6 +608,68 @@ mod tests {
             None,
             &[],
         ));
+    }
+
+    // YYC-19: text under the cap returns one chunk verbatim.
+    #[test]
+    fn split_for_discord_short_text_is_single_chunk() {
+        let chunks = DiscordPlatform::split_for_discord("hello world");
+        assert_eq!(chunks, vec!["hello world".to_string()]);
+    }
+
+    // YYC-19: text exactly at the cap is one chunk (boundary).
+    #[test]
+    fn split_for_discord_exactly_at_cap_is_one_chunk() {
+        let s = "x".repeat(DiscordPlatform::DISCORD_MAX_CHARS);
+        let chunks = DiscordPlatform::split_for_discord(&s);
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(
+            chunks[0].chars().count(),
+            DiscordPlatform::DISCORD_MAX_CHARS
+        );
+    }
+
+    // YYC-19: text over the cap splits into multiple chunks; each
+    // chunk respects the char cap.
+    #[test]
+    fn split_for_discord_long_text_chunks_respect_cap() {
+        let s = "abc\n".repeat(800); // 3200 chars
+        let chunks = DiscordPlatform::split_for_discord(&s);
+        assert!(chunks.len() >= 2, "got {} chunks", chunks.len());
+        for chunk in &chunks {
+            assert!(
+                chunk.chars().count() <= DiscordPlatform::DISCORD_MAX_CHARS,
+                "chunk over cap: {}",
+                chunk.chars().count(),
+            );
+        }
+        // Round-trip: rejoining the chunks recovers the original.
+        let joined: String = chunks.into_iter().collect();
+        assert_eq!(joined, s);
+    }
+
+    // YYC-19: chunk boundaries prefer newlines over hard cuts.
+    #[test]
+    fn split_for_discord_prefers_newline_boundary() {
+        let mut s = "a".repeat(1990);
+        s.push('\n');
+        s.push_str(&"b".repeat(20));
+        let chunks = DiscordPlatform::split_for_discord(&s);
+        assert!(chunks.len() >= 2);
+        assert!(
+            chunks[0].ends_with('\n'),
+            "first chunk should end at the newline, got: {:?}",
+            &chunks[0][chunks[0].len().saturating_sub(5)..],
+        );
+    }
+
+    // YYC-19: multibyte UTF-8 is counted as codepoints, not bytes,
+    // so a chunk doesn't slice through a 4-byte emoji.
+    #[test]
+    fn split_for_discord_counts_codepoints_not_bytes() {
+        let s = "🌊".repeat(1500); // 1500 codepoints, 6000 bytes
+        let chunks = DiscordPlatform::split_for_discord(&s);
+        assert_eq!(chunks.len(), 1, "1500 codepoints fits under the 2000 cap");
     }
 
     // YYC-19: when both filters set, both must match.
