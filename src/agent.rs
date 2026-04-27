@@ -32,10 +32,7 @@ fn is_local_base_url(base_url: &str) -> bool {
         .split_once("://")
         .map(|(_, rest)| rest)
         .unwrap_or(&lower);
-    let host = host_port
-        .split(['/', '?'])
-        .next()
-        .unwrap_or("");
+    let host = host_port.split(['/', '?']).next().unwrap_or("");
     let host = host
         .strip_prefix('[')
         .and_then(|h| h.split_once(']').map(|(host, _)| host))
@@ -970,8 +967,7 @@ impl Agent {
                         iteration,
                         tool_calls_total,
                         reasoning_len,
-                        prompt_tokens =
-                            last_usage.as_ref().map(|u| u.prompt_tokens).unwrap_or(0),
+                        prompt_tokens = last_usage.as_ref().map(|u| u.prompt_tokens).unwrap_or(0),
                         max_context = max_ctx,
                         "agent: model returned empty content with no tool calls",
                     );

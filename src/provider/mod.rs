@@ -167,13 +167,13 @@ fn extract_error_message(body: &str) -> Option<String> {
             .and_then(|md| md.get("raw"))
             .and_then(|r| r.as_str())
             && let Ok(inner) = serde_json::from_str::<serde_json::Value>(raw)
-                && let Some(inner_m) = inner
-                    .get("error")
-                    .and_then(|e| e.get("message"))
-                    .and_then(|m| m.as_str())
-                {
-                    return Some(inner_m.to_string());
-                }
+            && let Some(inner_m) = inner
+                .get("error")
+                .and_then(|e| e.get("message"))
+                .and_then(|m| m.as_str())
+        {
+            return Some(inner_m.to_string());
+        }
         return Some(m.to_string());
     }
     // Some providers (Anthropic) put it at top level

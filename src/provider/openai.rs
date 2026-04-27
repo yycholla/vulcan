@@ -216,9 +216,10 @@ impl OpenAIProvider {
                                         });
                                     }
                                     if let Some(id) = tc.get("id").and_then(|i| i.as_str())
-                                        && !id.is_empty() {
-                                            tool_calls[idx].id.push_str(id);
-                                        }
+                                        && !id.is_empty()
+                                    {
+                                        tool_calls[idx].id.push_str(id);
+                                    }
                                     if let Some(func) = tc.get("function") {
                                         if let Some(name) =
                                             func.get("name").and_then(|n| n.as_str())
@@ -236,22 +237,25 @@ impl OpenAIProvider {
                         }
                     }
                     if let Some(reason) = choice["finish_reason"].as_str()
-                        && !reason.is_empty() && reason != "null" {
-                            *finish_reason = Some(reason.to_string());
-                        }
+                        && !reason.is_empty()
+                        && reason != "null"
+                    {
+                        *finish_reason = Some(reason.to_string());
+                    }
                 }
             }
             if let Some(u) = chunk.get("usage")
                 && let (Some(prompt), Some(completion)) = (
                     u.get("prompt_tokens").and_then(|v| v.as_u64()),
                     u.get("completion_tokens").and_then(|v| v.as_u64()),
-                ) {
-                    *usage = Some(Usage {
-                        prompt_tokens: prompt as usize,
-                        completion_tokens: completion as usize,
-                        total_tokens: (prompt + completion) as usize,
-                    });
-                }
+                )
+            {
+                *usage = Some(Usage {
+                    prompt_tokens: prompt as usize,
+                    completion_tokens: completion as usize,
+                    total_tokens: (prompt + completion) as usize,
+                });
+            }
         }
     }
 }
@@ -470,21 +474,21 @@ fn infer_content_tool_calls(content: &str, tools: &[ToolDefinition]) -> Option<V
                 .or_else(|| obj.get("tool"))
                 .or_else(|| obj.get("tool_name"))
                 .and_then(|v| v.as_str())
-            {
-                let arguments = if let Some(s) = arguments.as_str() {
-                    s.to_string()
-                } else {
-                    serde_json::to_string(arguments).ok()?
-                };
-                return Some(vec![ToolCall {
-                    id: "fallback_tool_call_0".into(),
-                    call_type: "function".into(),
-                    function: crate::provider::ToolCallFunction {
-                        name: name.to_string(),
-                        arguments,
-                    },
-                }]);
-            }
+        {
+            let arguments = if let Some(s) = arguments.as_str() {
+                s.to_string()
+            } else {
+                serde_json::to_string(arguments).ok()?
+            };
+            return Some(vec![ToolCall {
+                id: "fallback_tool_call_0".into(),
+                call_type: "function".into(),
+                function: crate::provider::ToolCallFunction {
+                    name: name.to_string(),
+                    arguments,
+                },
+            }]);
+        }
     }
 
     infer_bare_object_tool_call(&value, tools).map(|tc| vec![tc])

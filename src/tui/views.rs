@@ -168,25 +168,26 @@ fn build_chat_suffix_lines(app: &AppState) -> Vec<Line<'static>> {
     let mut lines = Vec::new();
 
     if let Some(p) = app.pending_pause.as_ref()
-        && !p.options.is_empty() {
-            let mut pill_spans: Vec<Span<'static>> = Vec::new();
-            pill_spans.push(Span::styled("▎ ", app.theme.user));
-            for (i, opt) in p.options.iter().enumerate() {
-                if i > 0 {
-                    pill_spans.push(Span::raw("  "));
-                }
-                let color = match opt.kind {
-                    crate::pause::OptionKind::Primary => Palette::BLUE,
-                    crate::pause::OptionKind::Neutral => app.theme.body_fg,
-                    crate::pause::OptionKind::Destructive => Palette::RED,
-                };
-                let filled = matches!(opt.kind, crate::pause::OptionKind::Primary);
-                let label = format!("[{}] {}", opt.key, opt.label);
-                pill_spans.push(super::widgets::pill(&label, color, filled));
+        && !p.options.is_empty()
+    {
+        let mut pill_spans: Vec<Span<'static>> = Vec::new();
+        pill_spans.push(Span::styled("▎ ", app.theme.user));
+        for (i, opt) in p.options.iter().enumerate() {
+            if i > 0 {
+                pill_spans.push(Span::raw("  "));
             }
-            lines.push(Line::from(pill_spans));
-            lines.push(Line::from(""));
+            let color = match opt.kind {
+                crate::pause::OptionKind::Primary => Palette::BLUE,
+                crate::pause::OptionKind::Neutral => app.theme.body_fg,
+                crate::pause::OptionKind::Destructive => Palette::RED,
+            };
+            let filled = matches!(opt.kind, crate::pause::OptionKind::Primary);
+            let label = format!("[{}] {}", opt.key, opt.label);
+            pill_spans.push(super::widgets::pill(&label, color, filled));
         }
+        lines.push(Line::from(pill_spans));
+        lines.push(Line::from(""));
+    }
 
     if !app.queue.is_empty() {
         lines.push(Line::from(Span::styled(
@@ -639,12 +640,13 @@ fn tree_of_thought(f: &mut TuiFrame, area: Rect, app: &AppState) {
         app.theme.assistant,
     )));
     if app.show_reasoning
-        && let Some(reasoning) = app.latest_reasoning() {
-            lines.push(Line::from(""));
-            for l in super::widgets::reasoning_lines(reasoning, false, &app.theme, area.width) {
-                lines.push(l);
-            }
+        && let Some(reasoning) = app.latest_reasoning()
+    {
+        lines.push(Line::from(""));
+        for l in super::widgets::reasoning_lines(reasoning, false, &app.theme, area.width) {
+            lines.push(l);
         }
+    }
     if let Some(content) = app.latest_agent_content() {
         lines.push(Line::from(""));
         for line in render_markdown(content, &app.theme) {

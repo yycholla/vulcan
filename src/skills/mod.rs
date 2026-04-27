@@ -51,9 +51,10 @@ impl SkillRegistry {
             let entry = entry?;
             let path = entry.path();
             if path.extension().is_some_and(|e| e == "md")
-                && let Some(skill) = Self::load_skill(&path)? {
-                    skills.push(skill);
-                }
+                && let Some(skill) = Self::load_skill(&path)?
+            {
+                skills.push(skill);
+            }
         }
 
         self.skills = skills;
@@ -143,9 +144,10 @@ impl SkillRegistry {
     fn strip_frontmatter(content: &str) -> String {
         let content = content.trim();
         if content.starts_with("---")
-            && let Some(end) = content[3..].find("\n---") {
-                return content[3 + end + 5..].trim().to_string();
-            }
+            && let Some(end) = content[3..].find("\n---")
+        {
+            return content[3 + end + 5..].trim().to_string();
+        }
         content.to_string()
     }
 

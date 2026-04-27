@@ -34,10 +34,10 @@ mod schema;
 #[cfg(test)]
 mod tests;
 
-#[cfg(feature = "gateway")]
-pub(crate) use schema::{DbPool, open_gateway_pool};
 #[cfg(all(test, feature = "gateway"))]
 pub(crate) use schema::in_memory_gateway_pool;
+#[cfg(feature = "gateway")]
+pub(crate) use schema::{DbPool, open_gateway_pool};
 
 use codec::{decode_message, encode_message};
 use schema::{initialize_conn, upsert_session_metadata, upsert_session_provider_profile};
@@ -406,4 +406,3 @@ impl Default for SessionStore {
         Self::new()
     }
 }
-

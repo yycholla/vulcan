@@ -73,10 +73,7 @@ mod tests {
         AppState {
             api_token: Arc::new("secret".into()),
             inbound: Arc::new(crate::gateway::queue::InboundQueue::new(db.clone())),
-            outbound: Arc::new(crate::gateway::queue::OutboundQueue::new(
-                db.clone(),
-                5,
-            )),
+            outbound: Arc::new(crate::gateway::queue::OutboundQueue::new(db.clone(), 5)),
             registry: Arc::new(registry),
             agent_map: Arc::new(agent_map),
         }

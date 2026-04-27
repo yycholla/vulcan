@@ -366,9 +366,7 @@ impl HookRegistry {
                 // capacity / dependency problem. Count them separately so
                 // metrics surfaces (and `failure_metrics()`) can branch on
                 // the failure mode rather than just "something went wrong".
-                self.failure_metrics
-                    .errors
-                    .fetch_add(1, Ordering::Relaxed);
+                self.failure_metrics.errors.fetch_add(1, Ordering::Relaxed);
                 tracing::warn!(
                     handler = h.name(),
                     failure = "error",
@@ -530,9 +528,7 @@ mod tests {
         // outcome (the loop is unaffected), but the counters differ so
         // metrics surfaces can branch on the failure mode.
         let mut reg = HookRegistry::new().with_timeout(std::time::Duration::from_millis(50));
-        let slow = Arc::new(
-            Probe::new("slow", 10, HookOutcome::Continue).slow(500),
-        );
+        let slow = Arc::new(Probe::new("slow", 10, HookOutcome::Continue).slow(500));
         let crashed = Arc::new(Probe::new("crashed", 20, HookOutcome::Continue).errors());
         reg.register(slow);
         reg.register(crashed);
@@ -542,7 +538,10 @@ mod tests {
             .await;
 
         let counts = reg.failure_metrics();
-        assert_eq!(counts.timeouts, 1, "timeout should bump the timeout counter");
+        assert_eq!(
+            counts.timeouts, 1,
+            "timeout should bump the timeout counter"
+        );
         assert_eq!(counts.errors, 1, "error should bump the error counter");
 
         // Second invocation accumulates rather than resets.

@@ -484,9 +484,10 @@ fn has_dangerous_rm_target(tokens: &[String]) -> bool {
             return true;
         }
         if let Some(h) = &home
-            && (trimmed == h || trimmed.starts_with(&format!("{h}/"))) {
-                return false; // home subdir = ok
-            }
+            && (trimmed == h || trimmed.starts_with(&format!("{h}/")))
+        {
+            return false; // home subdir = ok
+        }
         false
     })
 }

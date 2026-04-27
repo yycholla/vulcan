@@ -322,15 +322,13 @@ fn extract_host(base_url: &str) -> &str {
     let s = base_url.trim();
     let after_scheme = s.split_once("://").map(|(_, rest)| rest).unwrap_or(s);
     // Strip path/query: everything before the first '/' (or '?').
-    let host_port = after_scheme
-        .split(['/', '?'])
-        .next()
-        .unwrap_or("");
+    let host_port = after_scheme.split(['/', '?']).next().unwrap_or("");
     // IPv6 in brackets: [::1]:8080.
     if let Some(rest) = host_port.strip_prefix('[')
-        && let Some(end) = rest.find(']') {
-            return &rest[..end];
-        }
+        && let Some(end) = rest.find(']')
+    {
+        return &rest[..end];
+    }
     // Strip :port for IPv4 / hostname.
     host_port.split(':').next().unwrap_or("")
 }

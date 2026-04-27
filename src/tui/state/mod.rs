@@ -394,28 +394,29 @@ impl AppState {
     pub fn tool_log_view(&self, max: usize) -> Vec<ToolLogRow> {
         if let Some(buf) = &self.audit_log
             && let Ok(buf) = buf.lock()
-                && !buf.is_empty() {
-                    return buf
-                        .iter()
-                        .rev()
-                        .take(max)
-                        .map(|e| {
-                            let kind_marker = match e.kind {
-                                AuditKind::Started => "●",
-                                AuditKind::Ok => "✓",
-                                AuditKind::Err => "✗",
-                            };
-                            ToolLogRow {
-                                time: e.time.with_timezone(&Local).format("%H:%M:%S").to_string(),
-                                actor: short_tool(&e.tool),
-                                msg: format!("{} {}", kind_marker, e.detail),
-                            }
-                        })
-                        .collect::<Vec<_>>()
-                        .into_iter()
-                        .rev()
-                        .collect();
-                }
+            && !buf.is_empty()
+        {
+            return buf
+                .iter()
+                .rev()
+                .take(max)
+                .map(|e| {
+                    let kind_marker = match e.kind {
+                        AuditKind::Started => "●",
+                        AuditKind::Ok => "✓",
+                        AuditKind::Err => "✗",
+                    };
+                    ToolLogRow {
+                        time: e.time.with_timezone(&Local).format("%H:%M:%S").to_string(),
+                        actor: short_tool(&e.tool),
+                        msg: format!("{} {}", kind_marker, e.detail),
+                    }
+                })
+                .collect::<Vec<_>>()
+                .into_iter()
+                .rev()
+                .collect();
+        }
         demo_tool_log()
     }
 

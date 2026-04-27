@@ -77,9 +77,10 @@ fn find_function_body_range(
             }
         }
         if let (Some(n), Some(range)) = (name_text, body_range)
-            && n == symbol {
-                return Ok(Some(range));
-            }
+            && n == symbol
+        {
+            return Ok(Some(range));
+        }
     }
     Ok(None)
 }

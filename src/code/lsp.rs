@@ -197,11 +197,11 @@ impl LspServer {
                                         params.get("uri").and_then(|v| v.as_str()),
                                         params.get("diagnostics"),
                                     )
-                                        && let Ok(parsed) =
-                                            serde_json::from_value::<Vec<Diagnostic>>(diags.clone())
-                                        {
-                                            diag_clone.lock().await.insert(uri.to_string(), parsed);
-                                        }
+                                    && let Ok(parsed) =
+                                        serde_json::from_value::<Vec<Diagnostic>>(diags.clone())
+                                {
+                                    diag_clone.lock().await.insert(uri.to_string(), parsed);
+                                }
                             } else if method == "$/progress" {
                                 // YYC-72: rust-analyzer reports indexing
                                 // status via $/progress. Mark the server
@@ -212,17 +212,14 @@ impl LspServer {
                                 // stuck on servers that don't publish a
                                 // dedicated indexing token.
                                 if let Some(params) = msg.params
-                                    && let Some(value) = params.get("value") {
-                                        let kind = value
-                                            .get("kind")
-                                            .and_then(|v| v.as_str())
-                                            .unwrap_or("");
-                                        if kind == "end"
-                                            && !ready_clone.swap(true, Ordering::SeqCst)
-                                        {
-                                            notify_clone.notify_waiters();
-                                        }
+                                    && let Some(value) = params.get("value")
+                                {
+                                    let kind =
+                                        value.get("kind").and_then(|v| v.as_str()).unwrap_or("");
+                                    if kind == "end" && !ready_clone.swap(true, Ordering::SeqCst) {
+                                        notify_clone.notify_waiters();
                                     }
+                                }
                             }
                         }
                     }

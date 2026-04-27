@@ -112,7 +112,9 @@ pub(crate) fn open_gateway_pool() -> Result<DbPool> {
     let pool = r2d2::Pool::builder()
         .build(manager)
         .with_context(|| format!("Failed to build gateway DB pool at {}", path.display()))?;
-    let conn = pool.get().context("Failed to check out a connection for schema init")?;
+    let conn = pool
+        .get()
+        .context("Failed to check out a connection for schema init")?;
     initialize_conn(&conn).context("Failed to initialize session DB schema")?;
     Ok(pool)
 }

@@ -7,8 +7,8 @@
 
 use anyhow::{Context, Result};
 
-use super::openai::OpenAIProvider;
 use super::LLMProvider;
+use super::openai::OpenAIProvider;
 use crate::config::ProviderConfig;
 
 /// Builds an [`LLMProvider`] for a configured provider profile.
@@ -105,6 +105,9 @@ mod tests {
             .expect("unknown provider type should error");
         let msg = err.to_string();
         assert!(msg.contains("anthropic-native"), "got {msg:?}");
-        assert!(msg.contains("openai"), "should list supported types: {msg:?}");
+        assert!(
+            msg.contains("openai"),
+            "should list supported types: {msg:?}"
+        );
     }
 }

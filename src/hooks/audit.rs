@@ -173,9 +173,10 @@ impl HookHandler for AuditHook {
         // YYC-88: count every bash invocation, classifying by whether
         // it would have been redirected to a native tool.
         if tool == "bash"
-            && let Some(cmd) = args.get("command").and_then(|v| v.as_str()) {
-                self.record_bash(cmd);
-            }
+            && let Some(cmd) = args.get("command").and_then(|v| v.as_str())
+        {
+            self.record_bash(cmd);
+        }
         Ok(HookOutcome::Continue)
     }
 

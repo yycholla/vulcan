@@ -190,15 +190,17 @@ impl ChatMessage {
                 elapsed_ms: em,
                 ..
             } = seg
-                && n == name && matches!(status, ToolStatus::InProgress) {
-                    *status = ToolStatus::Done(ok);
-                    *op = output_preview;
-                    *rm = result_meta;
-                    *el = elided_lines;
-                    *em = elapsed_ms;
-                    self.bump_render_version();
-                    return;
-                }
+                && n == name
+                && matches!(status, ToolStatus::InProgress)
+            {
+                *status = ToolStatus::Done(ok);
+                *op = output_preview;
+                *rm = result_meta;
+                *el = elided_lines;
+                *em = elapsed_ms;
+                self.bump_render_version();
+                return;
+            }
         }
     }
 }

@@ -366,23 +366,24 @@ async fn handle_stream_event(
     match ev {
         StreamEvent::Text(chunk) => {
             if let Some(last) = app.messages.last_mut()
-                && matches!(last.role, ChatRole::Agent) {
-                    // Append to both the segment timeline (the YYC-71
-                    // ordered renderer) and the legacy `content` field
-                    // (kept so other code that peeks at .content keeps working).
-                    last.append_text(&chunk);
-                    // Strip leading whitespace so models that emit `\n\n`
-                    // preambles don't render gaps before the visible body
-                    // when the renderer falls back to `content`.
-                    if last.content.is_empty() {
-                        let trimmed = chunk.trim_start_matches(|c: char| {
-                            c == '\n' || c == '\r' || c == ' ' || c == '\t'
-                        });
-                        last.content.push_str(trimmed);
-                    } else {
-                        last.content.push_str(&chunk);
-                    }
+                && matches!(last.role, ChatRole::Agent)
+            {
+                // Append to both the segment timeline (the YYC-71
+                // ordered renderer) and the legacy `content` field
+                // (kept so other code that peeks at .content keeps working).
+                last.append_text(&chunk);
+                // Strip leading whitespace so models that emit `\n\n`
+                // preambles don't render gaps before the visible body
+                // when the renderer falls back to `content`.
+                if last.content.is_empty() {
+                    let trimmed = chunk.trim_start_matches(|c: char| {
+                        c == '\n' || c == '\r' || c == ' ' || c == '\t'
+                    });
+                    last.content.push_str(trimmed);
+                } else {
+                    last.content.push_str(&chunk);
                 }
+            }
         }
         StreamEvent::Reasoning(chunk) => {
             // Per-token reasoning trace from thinking-mode models. Push to
@@ -390,10 +391,11 @@ async fn handle_stream_event(
             // render order; also append to the legacy `reasoning` field so
             // latest_reasoning() etc. continue to work.
             if let Some(last) = app.messages.last_mut()
-                && matches!(last.role, ChatRole::Agent) {
-                    last.append_reasoning(&chunk);
-                    last.reasoning.push_str(&chunk);
-                }
+                && matches!(last.role, ChatRole::Agent)
+            {
+                last.append_reasoning(&chunk);
+                last.reasoning.push_str(&chunk);
+            }
             app.note_reasoning();
         }
         StreamEvent::Done(resp) => {
@@ -420,9 +422,10 @@ async fn handle_stream_event(
         }
         StreamEvent::Error(e) => {
             if let Some(last) = app.messages.last_mut()
-                && last.content.is_empty() {
-                    last.set_content(format!("⚠ Error: {e}"));
-                }
+                && last.content.is_empty()
+            {
+                last.set_content(format!("⚠ Error: {e}"));
+            }
             app.thinking = false;
             app.current_turn_cancel = None;
             // YYC-67: record provider-level error for telemetry.
@@ -436,9 +439,10 @@ async fn handle_stream_event(
             // (interleaved with reasoning/text). YYC-74: carry the args
             // summary so the card has structured context.
             if let Some(last) = app.messages.last_mut()
-                && matches!(last.role, ChatRole::Agent) {
-                    last.push_tool_start_with(name.clone(), args_summary);
-                }
+                && matches!(last.role, ChatRole::Agent)
+            {
+                last.push_tool_start_with(name.clone(), args_summary);
+            }
             app.note_tool_start(&name);
         }
         StreamEvent::ToolCallEnd {
@@ -451,19 +455,20 @@ async fn handle_stream_event(
             ..
         } => {
             if let Some(last) = app.messages.last_mut()
-                && matches!(last.role, ChatRole::Agent) {
-                    // YYC-74: stamp preview + meta + timing onto the matching
-                    // segment for the card. YYC-78: stash elided count for the
-                    // collapse footer.
-                    last.finish_tool_with(
-                        &name,
-                        ok,
-                        output_preview,
-                        result_meta,
-                        elided_lines,
-                        Some(elapsed_ms),
-                    );
-                }
+                && matches!(last.role, ChatRole::Agent)
+            {
+                // YYC-74: stamp preview + meta + timing onto the matching
+                // segment for the card. YYC-78: stash elided count for the
+                // collapse footer.
+                last.finish_tool_with(
+                    &name,
+                    ok,
+                    output_preview,
+                    result_meta,
+                    elided_lines,
+                    Some(elapsed_ms),
+                );
+            }
             // YYC-67: tool call telemetry.
             app.tool_calls_total = app.tool_calls_total.saturating_add(1);
             if !ok {

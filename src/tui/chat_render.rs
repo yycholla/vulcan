@@ -205,9 +205,10 @@ impl ChatRenderStore {
                 if lines.len() > segment_lines_before {
                     let kind = segment.kind_label();
                     if let Some(prev) = prev_emitted_kind
-                        && prev != kind {
-                            lines.insert(segment_lines_before, Line::from(""));
-                        }
+                        && prev != kind
+                    {
+                        lines.insert(segment_lines_before, Line::from(""));
+                    }
                     prev_emitted_kind = Some(kind);
                 }
             }

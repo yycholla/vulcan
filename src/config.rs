@@ -249,8 +249,7 @@ pub struct ProviderConfig {
     pub max_iterations: u32,
 }
 
-#[derive(Debug, Deserialize, Clone)]
-#[derive(Default)]
+#[derive(Debug, Deserialize, Clone, Default)]
 pub struct ToolsConfig {
     /// Enable dangerous tools (file overwrite, shell exec) without confirmation.
     /// Legacy alias — when true, the `approval.default` falls back to
@@ -342,7 +341,6 @@ impl Default for ProviderConfig {
         }
     }
 }
-
 
 impl Default for CompactionConfig {
     fn default() -> Self {
@@ -440,9 +438,10 @@ impl Config {
         // Repo-relative fallback for cargo-run dev workflows.
         let proj = std::env::current_dir().ok();
         if let Some(dir) = proj
-            && dir.join("config.toml").exists() {
-                return Self::load_from_dir(&dir);
-            }
+            && dir.join("config.toml").exists()
+        {
+            return Self::load_from_dir(&dir);
+        }
 
         tracing::info!(
             "No config found at ~/.vulcan/ or ./config.toml — using defaults. \
