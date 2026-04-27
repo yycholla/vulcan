@@ -400,6 +400,19 @@ impl SessionStore {
         Ok(hits)
     }
 
+    /// **Test-only.** Build a `SessionStore` backed by SQLite's
+    /// `:memory:` database — every byte written here is **lost when
+    /// the process exits**. The function exists so unit tests can
+    /// exercise the CRUD surface without touching `~/.vulcan/`; it
+    /// must not be used as a production fallback. Production code
+    /// paths should call `try_new` (or, in the panic-acceptable
+    /// CLI path, `new`) so failures surface a real DB error
+    /// instead of silently routing turn history into a volatile
+    /// store (YYC-158).
+    ///
+    /// `#[doc(hidden)]` keeps it off the public docs page; the
+    /// audit in YYC-158 confirmed every caller is in a test or
+    /// `Agent::for_test` test helper.
     #[doc(hidden)]
     pub fn in_memory() -> Self {
         let conn = Connection::open_in_memory().expect("open in-memory session DB");
