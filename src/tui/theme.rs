@@ -39,7 +39,9 @@ pub fn muted() -> Style {
 
 /// Inset trace style (reasoning, side rails).
 pub fn faint_bg() -> Style {
-    Style::default().fg(Palette::MUTED).add_modifier(Modifier::ITALIC)
+    Style::default()
+        .fg(Palette::MUTED)
+        .add_modifier(Modifier::ITALIC)
 }
 
 /// Centralized style table — one entry per theming role.
@@ -89,9 +91,7 @@ impl Theme {
             "dracula" => Self::dracula(),
             "system" => Self::system(),
             other => {
-                tracing::warn!(
-                    "unknown theme '{other}', falling back to 'system'"
-                );
+                tracing::warn!("unknown theme '{other}', falling back to 'system'");
                 Self::system()
             }
         }
@@ -124,7 +124,9 @@ impl Theme {
             heading_6: bold,
             code_block: Style::default(),
             inline_code: Style::default().fg(Color::Cyan),
-            link: Style::default().fg(Color::Blue).add_modifier(Modifier::UNDERLINED),
+            link: Style::default()
+                .fg(Color::Blue)
+                .add_modifier(Modifier::UNDERLINED),
             blockquote: italic,
             list_marker: Style::default().fg(Color::Yellow),
             strikethrough: Style::default().add_modifier(Modifier::CROSSED_OUT),
@@ -147,7 +149,9 @@ impl Theme {
             system: Style::default().fg(Palette::BLUE),
             tool_call: Style::default().fg(Palette::YELLOW),
             tool_result: Style::default().fg(Palette::GREEN),
-            error: Style::default().fg(Palette::RED).add_modifier(Modifier::BOLD),
+            error: Style::default()
+                .fg(Palette::RED)
+                .add_modifier(Modifier::BOLD),
             success: Style::default().fg(Palette::GREEN),
             muted: Style::default().fg(Palette::MUTED),
             accent: Style::default().fg(Palette::RED),
@@ -161,7 +165,9 @@ impl Theme {
             heading_6: bold,
             code_block: body,
             inline_code: Style::default().fg(Palette::RED),
-            link: Style::default().fg(Palette::BLUE).add_modifier(Modifier::UNDERLINED),
+            link: Style::default()
+                .fg(Palette::BLUE)
+                .add_modifier(Modifier::UNDERLINED),
             blockquote: italic,
             list_marker: Style::default().fg(Palette::BLUE),
             strikethrough: body.add_modifier(Modifier::CROSSED_OUT),

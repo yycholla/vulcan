@@ -102,8 +102,7 @@ impl AuditHook {
     /// without reaching back through `Agent`.
     pub fn with_bash_counters(capacity: usize) -> (Arc<Self>, AuditBuffer, BashCountsHandle) {
         let buf: AuditBuffer = Arc::new(Mutex::new(VecDeque::with_capacity(capacity)));
-        let bash_counts: BashCountsHandle =
-            Arc::new(Mutex::new(BashRedirectCounts::default()));
+        let bash_counts: BashCountsHandle = Arc::new(Mutex::new(BashRedirectCounts::default()));
         let hook = Arc::new(Self {
             buf: buf.clone(),
             capacity,
@@ -254,7 +253,11 @@ mod tests {
     async fn non_bash_tools_dont_touch_redirect_counter() {
         let (hook, _buf, counts) = AuditHook::with_bash_counters(64);
         let _ = hook
-            .before_tool_call("read_file", &json!({"path": "/tmp/x"}), CancellationToken::new())
+            .before_tool_call(
+                "read_file",
+                &json!({"path": "/tmp/x"}),
+                CancellationToken::new(),
+            )
             .await;
         let snap = counts.lock().unwrap().clone();
         assert_eq!(snap, BashRedirectCounts::default());
@@ -278,10 +281,12 @@ mod tests {
             legitimate: 2,
             by_category: BTreeMap::new(),
         };
-        assert!(only_legit
-            .summary_line()
-            .unwrap()
-            .contains("0 redirects, 2 legitimate"));
+        assert!(
+            only_legit
+                .summary_line()
+                .unwrap()
+                .contains("0 redirects, 2 legitimate")
+        );
     }
 
     #[test]

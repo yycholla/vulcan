@@ -100,7 +100,13 @@ fn measure_once(
 ) -> SingleRun {
     let before = store.render_count();
     let start = Instant::now();
-    let window = store.visible_lines_at(messages, options, &Theme::system(), scroll, usize::from(height));
+    let window = store.visible_lines_at(
+        messages,
+        options,
+        &Theme::system(),
+        scroll,
+        usize::from(height),
+    );
     let elapsed = start.elapsed();
 
     SingleRun {

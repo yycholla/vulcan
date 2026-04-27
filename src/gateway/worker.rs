@@ -52,18 +52,23 @@ pub async fn process_one(
             .map(|s| (*s).to_string())
             .or_else(|| payload.downcast_ref::<String>().cloned())
             .unwrap_or_else(|| "<non-string panic payload>".to_string());
-        Err(anyhow::anyhow!("agent panicked while running prompt: {msg}"))
+        Err(anyhow::anyhow!(
+            "agent panicked while running prompt: {msg}"
+        ))
     });
 
     match result {
         Ok(reply) => {
             inbound_queue
-                .complete_with_outbound(row.id, OutboundMessage {
-                    platform: row.platform,
-                    chat_id: row.chat_id,
-                    text: reply,
-                    attachments: vec![],
-                })
+                .complete_with_outbound(
+                    row.id,
+                    OutboundMessage {
+                        platform: row.platform,
+                        chat_id: row.chat_id,
+                        text: reply,
+                        attachments: vec![],
+                    },
+                )
                 .await?;
             Ok(())
         }
@@ -219,7 +224,9 @@ mod tests {
         let row = inbound.claim_next().await.unwrap().expect("row");
         assert_eq!(row.id, id);
 
-        process_one(row, &agent_map, &inbound, &outbound).await.unwrap();
+        process_one(row, &agent_map, &inbound, &outbound)
+            .await
+            .unwrap();
 
         let row = outbound
             .claim_due(chrono::Utc::now().timestamp())
@@ -250,7 +257,10 @@ mod tests {
         let row = inbound.claim_next().await.unwrap().expect("row");
 
         let res = process_one(row, &agent_map, &inbound, &outbound).await;
-        assert!(res.is_err(), "process_one should propagate the panic as Err");
+        assert!(
+            res.is_err(),
+            "process_one should propagate the panic as Err"
+        );
 
         // Inbound row should be in 'failed' state — claim_next returns None.
         assert!(inbound.claim_next().await.unwrap().is_none());

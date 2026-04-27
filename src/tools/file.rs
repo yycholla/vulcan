@@ -1,6 +1,4 @@
-use crate::pause::{
-    AgentPause, AgentResume, DiffScrubHunk, PauseKind, PauseSender,
-};
+use crate::pause::{AgentPause, AgentResume, DiffScrubHunk, PauseKind, PauseSender};
 use crate::tools::{Tool, ToolResult};
 use anyhow::Result;
 use async_trait::async_trait;
@@ -89,10 +87,7 @@ impl Tool for ListFiles {
             .and_then(|v| v.as_str())
             .unwrap_or(".")
             .to_string();
-        let depth = params
-            .get("depth")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(2) as usize;
+        let depth = params.get("depth").and_then(|v| v.as_u64()).unwrap_or(2) as usize;
         let include_hidden = params
             .get("include_hidden")
             .and_then(|v| v.as_bool())
@@ -273,8 +268,7 @@ impl Tool for WriteFile {
             format!("MODIFIED · {path}")
         };
         let display = diff_preview(&before, content, &label);
-        Ok(ToolResult::ok(format!("Wrote {bytes} bytes to {path}"))
-            .with_display_preview(display))
+        Ok(ToolResult::ok(format!("Wrote {bytes} bytes to {path}")).with_display_preview(display))
     }
 }
 
@@ -455,9 +449,7 @@ impl Tool for PatchFile {
         let msg = if total == replaces {
             format!("Replaced {replaces} occurrence(s) in {path}")
         } else {
-            format!(
-                "Applied {replaces} of {total} hunk(s) in {path} (others rejected)."
-            )
+            format!("Applied {replaces} of {total} hunk(s) in {path} (others rejected).")
         };
         Ok(ToolResult::ok(msg).with_display_preview(display))
     }
@@ -480,12 +472,7 @@ fn collect_match_offsets(haystack: &str, needle: &str) -> Vec<usize> {
     out
 }
 
-fn apply_accepted_hunks(
-    content: &str,
-    old: &str,
-    new: &str,
-    accepted_offsets: &[usize],
-) -> String {
+fn apply_accepted_hunks(content: &str, old: &str, new: &str, accepted_offsets: &[usize]) -> String {
     if accepted_offsets.is_empty() {
         return content.to_string();
     }

@@ -214,8 +214,11 @@ pub fn add(args: AddArgs, dir: &Path) -> Result<()> {
     let mut model = args.model.clone();
     let mut disable_catalog = args.disable_catalog;
     if let Some(preset_key) = &args.preset {
-        let preset = lookup_preset(preset_key)
-            .ok_or_else(|| anyhow!("unknown preset '{preset_key}'. Run `vulcan provider presets` to see the catalog."))?;
+        let preset = lookup_preset(preset_key).ok_or_else(|| {
+            anyhow!(
+                "unknown preset '{preset_key}'. Run `vulcan provider presets` to see the catalog."
+            )
+        })?;
         base_url.get_or_insert_with(|| preset.base_url.to_string());
         model.get_or_insert_with(|| preset.model.to_string());
         if !disable_catalog {
@@ -224,8 +227,8 @@ pub fn add(args: AddArgs, dir: &Path) -> Result<()> {
     }
     let base_url = base_url
         .ok_or_else(|| anyhow!("--base-url required (or use --preset <key> to inherit one)"))?;
-    let model = model
-        .ok_or_else(|| anyhow!("--model required (or use --preset <key> to inherit one)"))?;
+    let model =
+        model.ok_or_else(|| anyhow!("--model required (or use --preset <key> to inherit one)"))?;
 
     let providers_path = dir.join("providers.toml");
     let mut doc = read_or_init_doc(&providers_path)?;
@@ -255,18 +258,16 @@ pub fn add(args: AddArgs, dir: &Path) -> Result<()> {
     doc.insert(&args.name, Item::Table(entry));
 
     write_doc(&providers_path, &doc)?;
-    println!(
-        "Wrote [{}] to {}",
-        args.name,
-        providers_path.display()
-    );
+    println!("Wrote [{}] to {}", args.name, providers_path.display());
     println!("Use `/provider {}` in the TUI to switch.", args.name);
     Ok(())
 }
 
 fn remove(args: RemoveArgs, dir: &Path) -> Result<()> {
     if args.name.eq_ignore_ascii_case("default") {
-        bail!("'default' refers to the legacy [provider] block in config.toml — edit that file directly.");
+        bail!(
+            "'default' refers to the legacy [provider] block in config.toml — edit that file directly."
+        );
     }
     let providers_path = dir.join("providers.toml");
     if !providers_path.exists() {
@@ -284,11 +285,7 @@ fn remove(args: RemoveArgs, dir: &Path) -> Result<()> {
         );
     }
     write_doc(&providers_path, &doc)?;
-    println!(
-        "Removed [{}] from {}",
-        args.name,
-        providers_path.display()
-    );
+    println!("Removed [{}] from {}", args.name, providers_path.display());
     Ok(())
 }
 
@@ -321,7 +318,12 @@ mod tests {
     fn presets_catalog_has_expected_minimum() {
         let keys: Vec<_> = presets().iter().map(|p| p.key).collect();
         for must in [
-            "openrouter", "openai", "anthropic", "ollama", "groq", "deepseek",
+            "openrouter",
+            "openai",
+            "anthropic",
+            "ollama",
+            "groq",
+            "deepseek",
         ] {
             assert!(keys.contains(&must), "preset {must} missing from catalog");
         }
@@ -346,8 +348,7 @@ mod tests {
         )
         .unwrap();
 
-        let providers_raw =
-            std::fs::read_to_string(dir.path().join("providers.toml")).unwrap();
+        let providers_raw = std::fs::read_to_string(dir.path().join("providers.toml")).unwrap();
         assert!(providers_raw.contains("[local]"));
         assert!(providers_raw.contains("base_url = \"http://localhost:11434/v1\""));
         assert!(providers_raw.contains("disable_catalog = true"));
@@ -367,8 +368,7 @@ mod tests {
             dir.path(),
         )
         .unwrap();
-        let providers_raw =
-            std::fs::read_to_string(dir.path().join("providers.toml")).unwrap();
+        let providers_raw = std::fs::read_to_string(dir.path().join("providers.toml")).unwrap();
         assert!(!providers_raw.contains("[local]"));
     }
 

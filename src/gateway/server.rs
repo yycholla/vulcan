@@ -56,8 +56,9 @@ pub fn build_router(state: AppState) -> Router {
         // is per-platform HMAC, not the daemon's API token.
         .route(
             "/webhook/{platform}",
-            axum::routing::post(crate::gateway::routes::webhook::handle)
-                .layer(axum::extract::DefaultBodyLimit::max(WEBHOOK_BODY_LIMIT_BYTES)),
+            axum::routing::post(crate::gateway::routes::webhook::handle).layer(
+                axum::extract::DefaultBodyLimit::max(WEBHOOK_BODY_LIMIT_BYTES),
+            ),
         )
         .nest("/v1", v1)
         .with_state(state)
@@ -119,7 +120,10 @@ mod tests {
         AppState {
             api_token: Arc::new(token.into()),
             inbound: Arc::new(crate::gateway::queue::InboundQueue::new(Arc::clone(&db))),
-            outbound: Arc::new(crate::gateway::queue::OutboundQueue::new(Arc::clone(&db), 5)),
+            outbound: Arc::new(crate::gateway::queue::OutboundQueue::new(
+                Arc::clone(&db),
+                5,
+            )),
             registry: Arc::new(crate::gateway::registry::PlatformRegistry::new()),
             agent_map: Arc::new(agent_map),
         }

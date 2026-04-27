@@ -236,7 +236,11 @@ fn format_provider_list(config: &Config, active: Option<&str>) -> String {
     names.sort();
     for name in names {
         let cfg = &config.providers[name];
-        let marker = if active == Some(name.as_str()) { "*" } else { " " };
+        let marker = if active == Some(name.as_str()) {
+            "*"
+        } else {
+            " "
+        };
         out.push_str(&format!(
             "\n  {marker} {name} · {} · {}",
             cfg.base_url, cfg.model,
@@ -368,7 +372,9 @@ async fn handle_stream_event(
                     // preambles don't render gaps before the visible body
                     // when the renderer falls back to `content`.
                     if last.content.is_empty() {
-                        let trimmed = chunk.trim_start_matches(|c: char| c == '\n' || c == '\r' || c == ' ' || c == '\t');
+                        let trimmed = chunk.trim_start_matches(|c: char| {
+                            c == '\n' || c == '\r' || c == ' ' || c == '\t'
+                        });
                         last.content.push_str(trimmed);
                     } else {
                         last.content.push_str(&chunk);
@@ -2092,10 +2098,7 @@ fn draw_session_picker(f: &mut ratatui::Frame, area: Rect, app: &AppState) {
                 Span::styled(format!("{:<12}", short_id(&s.id)), name_style),
                 Span::styled(format!("{:>4}m", s.message_count), theme.muted),
                 Span::styled(format!("  {} ", dt), theme.muted),
-                Span::styled(
-                    status_label,
-                    status_style.add_modifier(Modifier::BOLD),
-                ),
+                Span::styled(status_label, status_style.add_modifier(Modifier::BOLD)),
             ]));
 
             if let Some(preview) = &s.preview {
@@ -2248,12 +2251,8 @@ async fn open_unified_picker(
     let mut trees_by_key: HashMap<String, crate::tui::model_picker::ModelTree> = HashMap::new();
     for (key_opt, label) in keys.iter().zip(labels.iter()) {
         let cache_key = key_opt.clone().unwrap_or_else(|| "default".into());
-        let models = items_by_key
-            .get(&cache_key)
-            .cloned()
-            .unwrap_or_default();
-        let tree =
-            crate::tui::model_picker::build_model_tree(label, &models);
+        let models = items_by_key.get(&cache_key).cloned().unwrap_or_default();
+        let tree = crate::tui::model_picker::build_model_tree(label, &models);
         trees_by_key.insert(cache_key, tree);
     }
 
@@ -2326,7 +2325,12 @@ fn draw_provider_picker(f: &mut ratatui::Frame, area: Rect, app: &AppState) {
     let height = (rows + 5).min(area.height.saturating_sub(2));
     let x = area.x + (area.width.saturating_sub(width)) / 2;
     let y = area.y + (area.height.saturating_sub(height)) / 2;
-    let box_area = Rect { x, y, width, height };
+    let box_area = Rect {
+        x,
+        y,
+        width,
+        height,
+    };
     if box_area.height < 4 {
         return;
     }
@@ -2401,7 +2405,12 @@ fn draw_diff_scrubber(f: &mut ratatui::Frame, area: Rect, app: &AppState) {
     let height = (total * 4 + 8).min(area.height.saturating_sub(2));
     let x = area.x + (area.width.saturating_sub(width)) / 2;
     let y = area.y + (area.height.saturating_sub(height)) / 2;
-    let box_area = Rect { x, y, width, height };
+    let box_area = Rect {
+        x,
+        y,
+        width,
+        height,
+    };
     if box_area.height < 6 {
         return;
     }
@@ -2434,11 +2443,7 @@ fn draw_diff_scrubber(f: &mut ratatui::Frame, area: Rect, app: &AppState) {
         .min(app.scrubber_hunks.len().saturating_sub(1));
     for (i, hunk) in app.scrubber_hunks.iter().enumerate() {
         let is_active = i == active;
-        let accepted = app
-            .scrubber_accepted
-            .get(i)
-            .copied()
-            .unwrap_or(true);
+        let accepted = app.scrubber_accepted.get(i).copied().unwrap_or(true);
         let marker = if is_active { "▸ " } else { "  " };
         let state = if accepted { "[✓]" } else { "[ ]" };
         let header = format!(
@@ -2457,14 +2462,26 @@ fn draw_diff_scrubber(f: &mut ratatui::Frame, area: Rect, app: &AppState) {
         lines.push(Line::from(Span::styled(header, header_style)));
         for before in &hunk.before_lines {
             lines.push(Line::from(vec![
-                Span::styled("    - ", Style::default().fg(crate::tui::theme::Palette::RED)),
-                Span::styled(before.clone(), Style::default().fg(crate::tui::theme::Palette::RED)),
+                Span::styled(
+                    "    - ",
+                    Style::default().fg(crate::tui::theme::Palette::RED),
+                ),
+                Span::styled(
+                    before.clone(),
+                    Style::default().fg(crate::tui::theme::Palette::RED),
+                ),
             ]));
         }
         for after in &hunk.after_lines {
             lines.push(Line::from(vec![
-                Span::styled("    + ", Style::default().fg(crate::tui::theme::Palette::GREEN)),
-                Span::styled(after.clone(), Style::default().fg(crate::tui::theme::Palette::GREEN)),
+                Span::styled(
+                    "    + ",
+                    Style::default().fg(crate::tui::theme::Palette::GREEN),
+                ),
+                Span::styled(
+                    after.clone(),
+                    Style::default().fg(crate::tui::theme::Palette::GREEN),
+                ),
             ]));
         }
         lines.push(Line::from(""));

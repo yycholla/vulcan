@@ -188,11 +188,7 @@ fn db_path_for(workspace_root: &Path) -> Result<PathBuf> {
     Ok(home.join("code_graph").join(format!("{key}.db")))
 }
 
-fn extract_symbols(
-    parsers: &ParserCache,
-    lang: Language,
-    source: &str,
-) -> Result<Vec<SymbolRow>> {
+fn extract_symbols(parsers: &ParserCache, lang: Language, source: &str) -> Result<Vec<SymbolRow>> {
     let query_text = lang.outline_query();
     if query_text.is_empty() {
         return Ok(Vec::new());
@@ -209,8 +205,7 @@ fn extract_symbols(
             Language::Go => tree_sitter_go::LANGUAGE.into(),
             Language::Json => return Ok(Vec::new()),
         };
-        let query = Query::new(&grammar, query_text)
-            .map_err(|e| anyhow::anyhow!("query: {e}"))?;
+        let query = Query::new(&grammar, query_text).map_err(|e| anyhow::anyhow!("query: {e}"))?;
         let name_idx = query.capture_index_for_name("name");
         let mut cursor = QueryCursor::new();
         let mut iter = cursor.matches(&query, tree.root_node(), source.as_bytes());

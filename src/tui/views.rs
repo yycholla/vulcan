@@ -285,7 +285,14 @@ fn single_stack(f: &mut TuiFrame, area: Rect, app: &AppState) {
 // ─── 02 SPLIT SESSIONS ──────────────────────────────────────────────────
 
 fn split_sessions(f: &mut TuiFrame, area: Rect, app: &AppState) {
-    let outer = frame(f, area, app.view.title(), Some("5 sess · 2 live"), None, &app.theme);
+    let outer = frame(
+        f,
+        area,
+        app.view.title(),
+        Some("5 sess · 2 live"),
+        None,
+        &app.theme,
+    );
     let v = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -622,7 +629,12 @@ fn tree_of_thought(f: &mut TuiFrame, area: Rect, app: &AppState) {
     // Right: focused stream
     let focus_inner = section_header(f, h[1], "focused stream", Some(Palette::YELLOW));
     let mut lines = Vec::new();
-    lines.push(message_header("orchestrator", tree_accent_fg, Some("root"), &app.theme));
+    lines.push(message_header(
+        "orchestrator",
+        tree_accent_fg,
+        Some("root"),
+        &app.theme,
+    ));
     lines.push(Line::from(Span::styled(
         format!("▎ {}", app.orchestration.active_task),
         app.theme.assistant,
@@ -802,7 +814,9 @@ fn trading_floor(f: &mut TuiFrame, area: Rect, app: &AppState) {
         lines.push(Line::from(vec![
             Span::styled(
                 bar,
-                Style::default().fg(floor_accent_fg).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(floor_accent_fg)
+                    .add_modifier(Modifier::BOLD),
             ),
             Span::styled(" █ ", status_style),
             Span::styled(format!("{:<14}", s.label), app.theme.assistant),

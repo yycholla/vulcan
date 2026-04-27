@@ -197,10 +197,7 @@ mod tests {
             Language::from_path(&PathBuf::from("a/b.tsx")),
             Some(Language::TypeScript)
         );
-        assert_eq!(
-            Language::from_path(&PathBuf::from("a/b.unknown")),
-            None
-        );
+        assert_eq!(Language::from_path(&PathBuf::from("a/b.unknown")), None);
     }
 
     #[test]

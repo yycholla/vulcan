@@ -107,10 +107,15 @@ impl ThinkSanitizer {
 enum TagMatch {
     /// Full tag consumed. `start` = byte offset of `<`. `end` = byte
     /// offset just past `>`.
-    Full { start: usize, end: usize },
+    Full {
+        start: usize,
+        end: usize,
+    },
     /// A `<` was found but the rest of the buffer is too short to
     /// disambiguate. `start` = byte offset of the `<`.
-    Partial { start: usize },
+    Partial {
+        start: usize,
+    },
     None,
 }
 
