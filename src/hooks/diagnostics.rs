@@ -65,7 +65,7 @@ impl HookHandler for DiagnosticsHook {
             return Ok(HookOutcome::Continue);
         }
 
-        let edit = match self.diff_sink.lock().unwrap().clone() {
+        let edit = match self.diff_sink.lock().clone() {
             Some(d) => d,
             None => return Ok(HookOutcome::Continue),
         };

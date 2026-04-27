@@ -10,7 +10,9 @@
 //! needle.
 
 use std::collections::{BTreeMap, VecDeque};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+
+use parking_lot::Mutex;
 
 use anyhow::Result;
 use chrono::{DateTime, Utc};
@@ -114,32 +116,27 @@ impl AuditHook {
     /// Snapshot the current bash-redirect counts. Useful in tests; the
     /// TUI consumes the live handle directly.
     pub fn bash_counts_snapshot(&self) -> BashRedirectCounts {
-        self.bash_counts
-            .lock()
-            .map(|c| c.clone())
-            .unwrap_or_default()
+        self.bash_counts.lock().clone()
     }
 
     fn push(&self, entry: AuditEntry) {
-        if let Ok(mut buf) = self.buf.lock() {
-            if buf.len() >= self.capacity {
-                buf.pop_front();
-            }
-            buf.push_back(entry);
+        let mut buf = self.buf.lock();
+        if buf.len() >= self.capacity {
+            buf.pop_front();
         }
+        buf.push_back(entry);
     }
 
     fn record_bash(&self, command: &str) {
         let category = match_native_category(command);
-        if let Ok(mut counts) = self.bash_counts.lock() {
-            counts.total = counts.total.saturating_add(1);
-            match category {
-                Some(cat) => {
-                    *counts.by_category.entry(cat.to_string()).or_insert(0) += 1;
-                }
-                None => {
-                    counts.legitimate = counts.legitimate.saturating_add(1);
-                }
+        let mut counts = self.bash_counts.lock();
+        counts.total = counts.total.saturating_add(1);
+        match category {
+            Some(cat) => {
+                *counts.by_category.entry(cat.to_string()).or_insert(0) += 1;
+            }
+            None => {
+                counts.legitimate = counts.legitimate.saturating_add(1);
             }
         }
     }
@@ -240,7 +237,7 @@ mod tests {
         // Unrelated command — also legitimate.
         run_bash(&hook, "npm install").await;
 
-        let snap = counts.lock().unwrap().clone();
+        let snap = counts.lock().clone();
         assert_eq!(snap.total, 6);
         assert_eq!(snap.redirected(), 4);
         assert_eq!(snap.legitimate, 2);
@@ -259,7 +256,7 @@ mod tests {
                 CancellationToken::new(),
             )
             .await;
-        let snap = counts.lock().unwrap().clone();
+        let snap = counts.lock().clone();
         assert_eq!(snap, BashRedirectCounts::default());
     }
 
