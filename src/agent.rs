@@ -11,7 +11,9 @@ use crate::memory::SessionStore;
 use crate::pause::PauseSender;
 use crate::prompt_builder::PromptBuilder;
 use crate::provider::factory::{DefaultProviderFactory, ProviderFactory};
-use crate::provider::{ChatResponse, LLMProvider, Message, StreamEvent, ToolCall, ToolDefinition};
+use crate::provider::{
+    ChatResponse, LLMProvider, Message, StreamEvent, ToolCall, ToolDefinition, Usage,
+};
 use crate::skills::SkillRegistry;
 use crate::tools::{ToolRegistry, ToolResult};
 use anyhow::Result;
@@ -829,6 +831,10 @@ impl Agent {
         } = self.prepare_stream_turn(input, cancel.clone()).await?;
 
         let mut full_response = String::new();
+        // YYC-104: track tool calls + last usage across iterations so the
+        // empty-terminal-turn message can describe what happened.
+        let mut tool_calls_total: usize = 0;
+        let mut last_usage: Option<Usage> = None;
 
         let max_iter = if self.max_iterations > 0 {
             self.max_iterations as usize
@@ -870,6 +876,7 @@ impl Agent {
             if let Some(usage) = &response.usage {
                 self.context
                     .record_usage(usage.prompt_tokens, usage.completion_tokens);
+                last_usage = Some(usage.clone());
             }
 
             tracing::info!(
@@ -888,6 +895,7 @@ impl Agent {
             }
 
             if let Some(tool_calls) = &response.tool_calls {
+                tool_calls_total = tool_calls_total.saturating_add(tool_calls.len());
                 messages.push(Message::Assistant {
                     content: response.content.clone(),
                     tool_calls: Some(tool_calls.clone()),
@@ -944,16 +952,31 @@ impl Agent {
                     self.skills.try_auto_create(input, &full_response)?;
                 }
 
-                // If the model returned an empty response, surface it via a
-                // synthetic Text event so the user sees *something* rather
-                // than the chat appearing frozen on the previous marker.
+                // YYC-104: empty terminal turn — surface a structured hint
+                // (iteration, tool count, reasoning length, context-limit
+                // status) so the user can tell *why* the loop ended rather
+                // than seeing a bare placeholder.
                 if full_response.is_empty() {
-                    tracing::warn!(
-                        "agent iteration {iteration}: model returned empty content with no tool calls"
+                    let reasoning_len = reasoning.as_deref().map(str::len).unwrap_or(0);
+                    let max_ctx = self.provider.max_context();
+                    let hint = empty_terminal_message(
+                        iteration,
+                        tool_calls_total,
+                        reasoning_len,
+                        last_usage.as_ref(),
+                        max_ctx,
                     );
-                    let _ = ui_tx.send(StreamEvent::Text(
-                        "_(model returned empty response)_".into(),
-                    ));
+                    tracing::warn!(
+                        iteration,
+                        tool_calls_total,
+                        reasoning_len,
+                        prompt_tokens =
+                            last_usage.as_ref().map(|u| u.prompt_tokens).unwrap_or(0),
+                        max_context = max_ctx,
+                        "agent: model returned empty content with no tool calls",
+                    );
+                    full_response = hint.clone();
+                    let _ = ui_tx.send(StreamEvent::Text(hint));
                 }
 
                 let _ = ui_tx.send(StreamEvent::Done(crate::provider::ChatResponse {
@@ -1335,6 +1358,44 @@ impl Agent {
 /// `Message::Tool { content }`. Media references are inlined as `[media: ...]`
 /// markers since the OpenAI tool message format only carries a single text
 /// field.
+/// Threshold for "near context limit" hint on empty terminal turns.
+/// Picked low enough that a llama-cpp Q2_0 model that's about to drop
+/// history still triggers it before the loop exits silently (YYC-104).
+const NEAR_CONTEXT_LIMIT_RATIO: f64 = 0.95;
+
+/// Compose the user-facing message for an empty terminal turn (YYC-104).
+/// Replaces the bare `_(model returned empty response)_` placeholder so the
+/// user can tell *why* the loop ended: how many tools ran, whether the
+/// model emitted a reasoning trace that got stripped, and whether the
+/// prompt was up against the context window.
+fn empty_terminal_message(
+    iteration: usize,
+    tool_calls_total: usize,
+    reasoning_len: usize,
+    usage: Option<&Usage>,
+    max_context: usize,
+) -> String {
+    let mut parts = vec![format!(
+        "model returned empty response after {} tool call{} on iteration {}",
+        tool_calls_total,
+        if tool_calls_total == 1 { "" } else { "s" },
+        iteration,
+    )];
+    if reasoning_len > 0 {
+        parts.push(format!("reasoning trace was {reasoning_len} chars"));
+    }
+    if let Some(u) = usage
+        && max_context > 0
+        && (u.prompt_tokens as f64) >= NEAR_CONTEXT_LIMIT_RATIO * (max_context as f64)
+    {
+        parts.push(format!(
+            "prompt at {}/{} tokens (near context limit)",
+            u.prompt_tokens, max_context
+        ));
+    }
+    format!("_({} — terminal turn)_", parts.join("; "))
+}
+
 fn flatten_for_message(result: ToolResult) -> String {
     if result.media.is_empty() {
         return result.output;
