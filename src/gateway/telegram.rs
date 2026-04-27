@@ -213,18 +213,18 @@ impl TelegramPlatform {
     /// typed `Update` deserializer so media extraction stays in one
     /// place (`inbound_from_update` / `attachments_from_message`).
     /// If the body isn't a parseable Update we drop it via `None`.
-    pub(crate) fn inbound_from_value(
-        update: &serde_json::Value,
+    ///
+    /// Takes raw bytes — webhook handlers call this with the request
+    /// body directly. teloxide-core 0.13's `UpdateKind` Deserialize
+    /// visitor uses `next_key::<&str>()` and falls back to
+    /// `Error(Value)` when driven from `serde_json::Value`'s owned-
+    /// String keys, so we deserialize from `&[u8]` once and avoid the
+    /// double round-trip through Value.
+    pub(crate) fn inbound_from_webhook_body(
+        body: &[u8],
         allowed: &Option<HashSet<i64>>,
     ) -> Option<InboundMessage> {
-        // teloxide-core 0.13's `UpdateKind` Deserialize visitor uses
-        // `next_key::<&str>()` first, which fails on `serde_json::Value`
-        // (its keys are owned `String`s) — the visitor then falls into
-        // `Error(Value)` and our match drops the update. Round-trip
-        // through bytes (`to_vec` + `from_slice`) sidesteps the issue
-        // and gives us a "real" deserializer driving the visitor.
-        let bytes = serde_json::to_vec(update).ok()?;
-        let typed: Update = serde_json::from_slice(&bytes).ok()?;
+        let typed: Update = serde_json::from_slice(body).ok()?;
         Self::inbound_from_update(&typed, allowed)
     }
 
@@ -357,6 +357,14 @@ impl Platform for TelegramPlatform {
 
     async fn send(&self, msg: &OutboundMessage) -> Result<SentMessage> {
         use teloxide_core::payloads::SendMessageSetters;
+        // Telegram rejects send_message with empty text, so harden the
+        // contract upfront. StreamRenderer / OutboundDispatcher already
+        // short-circuits empty buffers, but a future caller bypassing
+        // them would otherwise see a generic "send_message failed"
+        // anyhow chain instead of an actionable error.
+        if msg.attachments.is_empty() && msg.text.trim().is_empty() {
+            anyhow::bail!("telegram send: empty text and no attachments");
+        }
         let chat_id = Self::chat_id_from_chat(&msg.chat_id)?;
         let reply_params = if let Some(reply_to) = &msg.reply_to {
             let reply_id = Self::message_id_from_str(reply_to)?;
@@ -507,9 +515,7 @@ impl Platform for TelegramPlatform {
         if provided.as_bytes().ct_eq(expected.as_bytes()).unwrap_u8() == 0 {
             anyhow::bail!("invalid webhook secret");
         }
-        let update: serde_json::Value = serde_json::from_slice(body)
-            .map_err(|e| anyhow::anyhow!("invalid Update JSON: {e}"))?;
-        Self::inbound_from_value(&update, &self.allowed_chat_ids)
+        Self::inbound_from_webhook_body(body, &self.allowed_chat_ids)
             .ok_or_else(|| anyhow::anyhow!("Update did not parse to a usable InboundMessage"))
     }
 
@@ -735,24 +741,59 @@ mod tests {
     }
 
     #[test]
-    fn inbound_from_value_extracts_text_message() {
-        // PR-3b: inbound_from_value now deserializes into a typed
-        // `Update`, so the fixture must be a complete Update shape
-        // (update_id, full from, chat.type, date).
-        let update = serde_json::json!({
+    fn inbound_from_webhook_body_extracts_text_message() {
+        // PR-3b: inbound_from_webhook_body deserializes raw bytes
+        // straight into a typed `Update` — fixture must be a complete
+        // Update shape (update_id, full from, chat.type, date).
+        let body = br#"{
             "update_id": 1,
             "message": {
                 "message_id": 100,
                 "from": { "id": 7, "is_bot": false, "first_name": "tester" },
                 "chat": { "id": 42, "first_name": "tester", "type": "private" },
                 "date": 1700000000,
-                "text": "hello bot",
-            },
-        });
-        let inb = TelegramPlatform::inbound_from_value(&update, &allowed(&[])).expect("parse");
+                "text": "hello bot"
+            }
+        }"#;
+        let inb = TelegramPlatform::inbound_from_webhook_body(body, &allowed(&[])).expect("parse");
         assert_eq!(inb.text, "hello bot");
         assert_eq!(inb.chat_id, "42");
         assert_eq!(inb.message_id.as_deref(), Some("100"));
+    }
+
+    #[test]
+    fn inbound_from_webhook_body_extracts_photo_attachment() {
+        // PR-3b: webhook bodies carrying photo media route through the
+        // typed Update walker — the file_id of the largest PhotoSize
+        // lands in Attachment.url, mime is "image/jpeg" (Telegram
+        // doesn't expose actual mime per PhotoSize), kind is Image.
+        let body = br#"{
+            "update_id": 2,
+            "message": {
+                "message_id": 200,
+                "from": { "id": 7, "is_bot": false, "first_name": "tester" },
+                "chat": { "id": 42, "first_name": "tester", "type": "private" },
+                "date": 1700000000,
+                "photo": [
+                    { "file_id": "small", "file_unique_id": "u1", "width": 90,  "height": 90,  "file_size": 100 },
+                    { "file_id": "large", "file_unique_id": "u2", "width": 800, "height": 800, "file_size": 9999 }
+                ]
+            }
+        }"#;
+        let inb = TelegramPlatform::inbound_from_webhook_body(body, &allowed(&[]))
+            .expect("photo-only message should parse");
+        assert_eq!(inb.text, "");
+        assert_eq!(inb.attachments.len(), 1);
+        assert_eq!(
+            inb.attachments[0].url.as_deref(),
+            Some("large"),
+            "largest PhotoSize wins",
+        );
+        assert_eq!(
+            inb.attachments[0].kind,
+            crate::platform::AttachmentKind::Image
+        );
+        assert_eq!(inb.attachments[0].mime.as_deref(), Some("image/jpeg"));
     }
 
     /// Typed-Update sibling of `inbound_from_value_extracts_text_message`.
@@ -885,6 +926,30 @@ mod tests {
             .expect_err("must reject");
         assert!(
             err.to_string().contains("webhook not configured"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn send_rejects_empty_text_and_no_attachments() {
+        // Defensive contract: Telegram rejects send_message with empty
+        // text. Caller (StreamRenderer / OutboundDispatcher) already
+        // short-circuits empty buffers, but the platform shouldn't
+        // surface a generic "send_message failed" anyhow chain when a
+        // future caller bypasses them.
+        let p = TelegramPlatform::new("123:abc", vec![], None).expect("ctor");
+        let msg = OutboundMessage {
+            platform: "telegram".into(),
+            chat_id: "42".into(),
+            text: "   ".into(),
+            attachments: vec![],
+            reply_to: None,
+            edit_target: None,
+            turn_id: None,
+        };
+        let err = p.send(&msg).await.expect_err("empty send must bail");
+        assert!(
+            err.to_string().contains("empty text and no attachments"),
             "unexpected error: {err}"
         );
     }
