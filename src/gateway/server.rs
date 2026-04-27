@@ -96,21 +96,18 @@ async fn bearer_auth(
 mod tests {
     use super::*;
     use std::sync::Arc;
-    use std::sync::Mutex as StdMutex;
     use std::time::Duration;
 
     use axum::body::Body;
     use axum::http::{Request, StatusCode};
-    use rusqlite::Connection;
     use tower::ServiceExt;
 
     use crate::config::Config;
     use crate::gateway::agent_map::AgentMap;
+    use crate::memory::DbPool;
 
-    fn fresh_db() -> Arc<StdMutex<Connection>> {
-        let c = Connection::open_in_memory().expect("open mem db");
-        crate::memory::initialize_test_conn(&c).expect("schema");
-        Arc::new(StdMutex::new(c))
+    fn fresh_db() -> DbPool {
+        crate::memory::in_memory_gateway_pool().expect("in-memory pool")
     }
 
     fn test_app_state(token: &str) -> AppState {
@@ -119,11 +116,8 @@ mod tests {
         let db = fresh_db();
         AppState {
             api_token: Arc::new(token.into()),
-            inbound: Arc::new(crate::gateway::queue::InboundQueue::new(Arc::clone(&db))),
-            outbound: Arc::new(crate::gateway::queue::OutboundQueue::new(
-                Arc::clone(&db),
-                5,
-            )),
+            inbound: Arc::new(crate::gateway::queue::InboundQueue::new(db.clone())),
+            outbound: Arc::new(crate::gateway::queue::OutboundQueue::new(db.clone(), 5)),
             registry: Arc::new(crate::gateway::registry::PlatformRegistry::new()),
             agent_map: Arc::new(agent_map),
         }

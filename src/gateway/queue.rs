@@ -1,12 +1,11 @@
-use std::sync::{Arc, Mutex};
-
 use anyhow::{Result, anyhow};
-use rusqlite::{Connection, params};
+use rusqlite::params;
 
+use crate::memory::DbPool;
 use crate::platform::{InboundMessage, OutboundMessage};
 
 pub struct InboundQueue {
-    conn: Arc<Mutex<Connection>>,
+    conn: DbPool,
 }
 
 #[derive(Debug, Clone)]
@@ -21,12 +20,15 @@ pub struct InboundRow {
 }
 
 impl InboundQueue {
-    pub fn new(conn: Arc<Mutex<Connection>>) -> Self {
+    pub fn new(conn: DbPool) -> Self {
         Self { conn }
     }
 
     pub async fn enqueue(&self, msg: InboundMessage) -> Result<i64> {
-        let conn = self.conn.lock().map_err(|_| anyhow!("queue DB poisoned"))?;
+        let conn = self
+            .conn
+            .get()
+            .map_err(|e| anyhow!("queue DB pool checkout: {e}"))?;
         let now = chrono::Utc::now().timestamp();
         conn.execute(
             "INSERT INTO inbound_queue (platform, chat_id, user_id, text, received_at, state) \
@@ -37,7 +39,10 @@ impl InboundQueue {
     }
 
     pub async fn claim_next(&self) -> Result<Option<InboundRow>> {
-        let conn = self.conn.lock().map_err(|_| anyhow!("queue DB poisoned"))?;
+        let conn = self
+            .conn
+            .get()
+            .map_err(|e| anyhow!("queue DB pool checkout: {e}"))?;
         // RETURNING (SQLite >= 3.35) makes the claim a single atomic statement.
         let mut stmt = conn.prepare(
             "UPDATE inbound_queue \
@@ -63,13 +68,19 @@ impl InboundQueue {
     }
 
     pub async fn mark_done(&self, id: i64) -> Result<()> {
-        let conn = self.conn.lock().map_err(|_| anyhow!("queue DB poisoned"))?;
+        let conn = self
+            .conn
+            .get()
+            .map_err(|e| anyhow!("queue DB pool checkout: {e}"))?;
         conn.execute("DELETE FROM inbound_queue WHERE id = ?1", params![id])?;
         Ok(())
     }
 
     pub async fn complete_with_outbound(&self, id: i64, msg: OutboundMessage) -> Result<i64> {
-        let mut conn = self.conn.lock().map_err(|_| anyhow!("queue DB poisoned"))?;
+        let mut conn = self
+            .conn
+            .get()
+            .map_err(|e| anyhow!("queue DB pool checkout: {e}"))?;
         let tx = conn.transaction()?;
         let now = chrono::Utc::now().timestamp();
         let attachments_json = serde_json::to_string(&msg.attachments)?;
@@ -86,7 +97,10 @@ impl InboundQueue {
     }
 
     pub async fn mark_failed(&self, id: i64, error: &str) -> Result<()> {
-        let conn = self.conn.lock().map_err(|_| anyhow!("queue DB poisoned"))?;
+        let conn = self
+            .conn
+            .get()
+            .map_err(|e| anyhow!("queue DB pool checkout: {e}"))?;
         // inbound_queue has no last_error column; narrate via tracing instead.
         tracing::warn!(target: "gateway::queue", id, error, "inbound message marked failed");
         conn.execute(
@@ -97,7 +111,10 @@ impl InboundQueue {
     }
 
     pub async fn recover_processing(&self) -> Result<usize> {
-        let conn = self.conn.lock().map_err(|_| anyhow!("queue DB poisoned"))?;
+        let conn = self
+            .conn
+            .get()
+            .map_err(|e| anyhow!("queue DB pool checkout: {e}"))?;
         let n = conn.execute(
             "UPDATE inbound_queue SET state='pending' WHERE state='processing'",
             [],
@@ -107,7 +124,7 @@ impl InboundQueue {
 }
 
 pub struct OutboundQueue {
-    conn: Arc<Mutex<Connection>>,
+    conn: DbPool,
     max_attempts: u32,
 }
 
@@ -133,12 +150,15 @@ fn outbound_backoff_secs(attempts: i64) -> i64 {
 }
 
 impl OutboundQueue {
-    pub fn new(conn: Arc<Mutex<Connection>>, max_attempts: u32) -> Self {
+    pub fn new(conn: DbPool, max_attempts: u32) -> Self {
         Self { conn, max_attempts }
     }
 
     pub async fn enqueue(&self, msg: OutboundMessage) -> Result<i64> {
-        let conn = self.conn.lock().map_err(|_| anyhow!("queue DB poisoned"))?;
+        let conn = self
+            .conn
+            .get()
+            .map_err(|e| anyhow!("queue DB pool checkout: {e}"))?;
         let now = chrono::Utc::now().timestamp();
         let attachments_json = serde_json::to_string(&msg.attachments)?;
         conn.execute(
@@ -151,7 +171,10 @@ impl OutboundQueue {
     }
 
     pub async fn claim_due(&self, now: i64) -> Result<Option<OutboundRow>> {
-        let conn = self.conn.lock().map_err(|_| anyhow!("queue DB poisoned"))?;
+        let conn = self
+            .conn
+            .get()
+            .map_err(|e| anyhow!("queue DB pool checkout: {e}"))?;
         let mut stmt = conn.prepare(
             "UPDATE outbound_queue \
              SET state='sending', attempts = attempts + 1 \
@@ -183,7 +206,10 @@ impl OutboundQueue {
     }
 
     pub async fn mark_done(&self, id: i64) -> Result<()> {
-        let conn = self.conn.lock().map_err(|_| anyhow!("queue DB poisoned"))?;
+        let conn = self
+            .conn
+            .get()
+            .map_err(|e| anyhow!("queue DB pool checkout: {e}"))?;
         conn.execute("DELETE FROM outbound_queue WHERE id = ?1", params![id])?;
         Ok(())
     }
@@ -198,7 +224,10 @@ impl OutboundQueue {
         };
         let next_at = now + outbound_backoff_secs(row.attempts);
         {
-            let conn = self.conn.lock().map_err(|_| anyhow!("queue DB poisoned"))?;
+            let conn = self
+                .conn
+                .get()
+                .map_err(|e| anyhow!("queue DB pool checkout: {e}"))?;
             conn.execute(
                 "UPDATE outbound_queue \
                  SET state = ?1, next_attempt_at = ?2, last_error = ?3 \
@@ -211,7 +240,10 @@ impl OutboundQueue {
     }
 
     pub async fn recover_sending(&self) -> Result<usize> {
-        let conn = self.conn.lock().map_err(|_| anyhow!("queue DB poisoned"))?;
+        let conn = self
+            .conn
+            .get()
+            .map_err(|e| anyhow!("queue DB pool checkout: {e}"))?;
         let n = conn.execute(
             "UPDATE outbound_queue SET state='pending' WHERE state='sending'",
             [],
@@ -220,7 +252,10 @@ impl OutboundQueue {
     }
 
     pub async fn peek(&self, id: i64) -> Result<OutboundRow> {
-        let conn = self.conn.lock().map_err(|_| anyhow!("queue DB poisoned"))?;
+        let conn = self
+            .conn
+            .get()
+            .map_err(|e| anyhow!("queue DB pool checkout: {e}"))?;
         let mut stmt = conn.prepare(
             "SELECT id, platform, chat_id, text, attachments_json, enqueued_at, \
                     next_attempt_at, attempts, state, last_error \
@@ -252,10 +287,8 @@ impl OutboundQueue {
 mod tests {
     use super::*;
 
-    fn test_conn() -> Arc<Mutex<Connection>> {
-        let conn = Connection::open_in_memory().expect("open mem db");
-        crate::memory::initialize_test_conn(&conn).expect("schema");
-        Arc::new(Mutex::new(conn))
+    fn test_conn() -> DbPool {
+        crate::memory::in_memory_gateway_pool().expect("in-memory pool")
     }
 
     fn sample_msg() -> InboundMessage {
@@ -326,7 +359,7 @@ mod tests {
     #[tokio::test]
     async fn outbound_mark_done_deletes() {
         let conn = test_conn();
-        let q = OutboundQueue::new(Arc::clone(&conn), 5);
+        let q = OutboundQueue::new(conn.clone(), 5);
         let id = q.enqueue(sample_out_msg()).await.unwrap();
         let _ = q.claim_due(chrono::Utc::now().timestamp()).await.unwrap();
         q.mark_done(id).await.unwrap();
@@ -336,7 +369,7 @@ mod tests {
     #[tokio::test]
     async fn outbound_recover_sending_resets_to_pending() {
         let conn = test_conn();
-        let q = OutboundQueue::new(Arc::clone(&conn), 5);
+        let q = OutboundQueue::new(conn.clone(), 5);
         q.enqueue(sample_out_msg()).await.unwrap();
         let _ = q.claim_due(chrono::Utc::now().timestamp()).await.unwrap();
         drop(q);
@@ -365,7 +398,7 @@ mod tests {
     #[tokio::test]
     async fn outbound_claim_due_skips_future_rows() {
         let conn = test_conn();
-        let q = OutboundQueue::new(Arc::clone(&conn), 5);
+        let q = OutboundQueue::new(conn.clone(), 5);
         let id = q.enqueue(sample_out_msg()).await.unwrap();
         let _ = q.claim_due(chrono::Utc::now().timestamp()).await.unwrap();
         q.mark_failed(id, "nope").await.unwrap();
@@ -410,11 +443,11 @@ mod tests {
     #[tokio::test]
     async fn mark_done_deletes_row() {
         let conn = test_conn();
-        let q = InboundQueue::new(Arc::clone(&conn));
+        let q = InboundQueue::new(conn.clone());
         let id = q.enqueue(sample_msg()).await.unwrap();
         let _ = q.claim_next().await.unwrap();
         q.mark_done(id).await.unwrap();
-        let conn = conn.lock().expect("lock test conn");
+        let conn = conn.get().expect("get test conn");
         let exists: i64 = conn
             .query_row(
                 "SELECT count(*) FROM inbound_queue WHERE id = ?1",
@@ -437,7 +470,7 @@ mod tests {
     #[tokio::test]
     async fn recover_processing_resets_to_pending() {
         let conn = test_conn();
-        let q = InboundQueue::new(Arc::clone(&conn));
+        let q = InboundQueue::new(conn.clone());
         q.enqueue(sample_msg()).await.unwrap();
         let _ = q.claim_next().await.unwrap();
         drop(q);
@@ -450,8 +483,8 @@ mod tests {
     #[tokio::test]
     async fn complete_with_outbound_enqueues_reply_and_deletes_inbound_atomically() {
         let conn = test_conn();
-        let inbound = InboundQueue::new(Arc::clone(&conn));
-        let outbound = OutboundQueue::new(Arc::clone(&conn), 5);
+        let inbound = InboundQueue::new(conn.clone());
+        let outbound = OutboundQueue::new(conn.clone(), 5);
         let id = inbound.enqueue(sample_msg()).await.unwrap();
         let row = inbound.claim_next().await.unwrap().expect("row");
         assert_eq!(row.id, id);

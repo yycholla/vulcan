@@ -17,14 +17,12 @@ pub async fn handle(State(state): State<AppState>) -> Json<serde_json::Value> {
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
-    use std::sync::Mutex as StdMutex;
     use std::time::{Duration, Instant};
 
     use anyhow::Result;
     use async_trait::async_trait;
     use axum::body::{Body, to_bytes};
     use axum::http::{Request, StatusCode};
-    use rusqlite::Connection;
     use tokio_util::sync::CancellationToken;
     use tower::ServiceExt;
 
@@ -36,15 +34,14 @@ mod tests {
     use crate::gateway::server::{AppState, build_router};
     use crate::hooks::HookRegistry;
     use crate::hooks::audit::AuditHook;
+    use crate::memory::DbPool;
     use crate::provider::mock::MockProvider;
     use crate::provider::{ChatResponse, LLMProvider, Message, StreamEvent, ToolDefinition};
     use crate::skills::SkillRegistry;
     use crate::tools::ToolRegistry;
 
-    fn fresh_db() -> Arc<StdMutex<Connection>> {
-        let c = Connection::open_in_memory().expect("open mem db");
-        crate::memory::initialize_test_conn(&c).expect("schema");
-        Arc::new(StdMutex::new(c))
+    fn fresh_db() -> DbPool {
+        crate::memory::in_memory_gateway_pool().expect("in-memory pool")
     }
 
     fn empty_skills() -> Arc<SkillRegistry> {
@@ -95,16 +92,13 @@ mod tests {
         )))
     }
 
-    fn build_app_state(db: Arc<StdMutex<Connection>>) -> AppState {
+    fn build_app_state(db: DbPool) -> AppState {
         let config = Arc::new(Config::default());
         let agent_map = AgentMap::new(config, Duration::from_secs(60));
         AppState {
             api_token: Arc::new("secret".into()),
-            inbound: Arc::new(crate::gateway::queue::InboundQueue::new(Arc::clone(&db))),
-            outbound: Arc::new(crate::gateway::queue::OutboundQueue::new(
-                Arc::clone(&db),
-                5,
-            )),
+            inbound: Arc::new(crate::gateway::queue::InboundQueue::new(db.clone())),
+            outbound: Arc::new(crate::gateway::queue::OutboundQueue::new(db.clone(), 5)),
             registry: Arc::new(PlatformRegistry::new()),
             agent_map: Arc::new(agent_map),
         }
@@ -113,7 +107,7 @@ mod tests {
     #[tokio::test]
     async fn get_lanes_lists_active_lanes() {
         let db = fresh_db();
-        let state = build_app_state(Arc::clone(&db));
+        let state = build_app_state(db.clone());
 
         let now = Instant::now();
         let lane_a = LaneKey {

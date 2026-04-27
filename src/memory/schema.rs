@@ -5,12 +5,17 @@
 //! (YYC-111).
 
 #[cfg(feature = "gateway")]
-use std::sync::{Arc, Mutex};
-
-#[cfg(feature = "gateway")]
 use anyhow::Context;
 use anyhow::Result;
 use rusqlite::{Connection, params};
+
+/// Connection pool used by the gateway daemon (YYC-113). Replaces the
+/// previous `Arc<Mutex<Connection>>` that serialized every gateway worker
+/// through one lock. r2d2 hands each caller its own pooled connection;
+/// SQLite handles concurrent readers + a single writer cleanly with WAL
+/// mode (already set in `SCHEMA`).
+#[cfg(feature = "gateway")]
+pub type DbPool = r2d2::Pool<r2d2_sqlite::SqliteConnectionManager>;
 
 pub(in crate::memory) const SCHEMA: &str = r#"
 PRAGMA foreign_keys = ON;
@@ -98,20 +103,34 @@ pub(in crate::memory) fn initialize_conn(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
-#[cfg(all(test, feature = "gateway"))]
-pub(crate) fn initialize_test_conn(conn: &Connection) -> Result<()> {
-    initialize_conn(conn)
-}
-
 #[cfg(feature = "gateway")]
-pub(crate) fn open_gateway_connection() -> Result<Arc<Mutex<Connection>>> {
+pub(crate) fn open_gateway_pool() -> Result<DbPool> {
     let dir = crate::config::vulcan_home();
     std::fs::create_dir_all(&dir).ok();
     let path = dir.join("sessions.db");
-    let conn = Connection::open(&path)
-        .with_context(|| format!("Failed to open session DB at {}", path.display()))?;
+    let manager = r2d2_sqlite::SqliteConnectionManager::file(&path);
+    let pool = r2d2::Pool::builder()
+        .build(manager)
+        .with_context(|| format!("Failed to build gateway DB pool at {}", path.display()))?;
+    let conn = pool.get().context("Failed to check out a connection for schema init")?;
     initialize_conn(&conn).context("Failed to initialize session DB schema")?;
-    Ok(Arc::new(Mutex::new(conn)))
+    Ok(pool)
+}
+
+/// Build an in-memory pool for tests. Single connection so all checkouts
+/// share state (a fresh `:memory:` per checkout would lose every prior
+/// write). Consumers that need a multi-connection pool should use
+/// `open_gateway_pool` against a temp file.
+#[cfg(all(test, feature = "gateway"))]
+pub(crate) fn in_memory_gateway_pool() -> Result<DbPool> {
+    let manager = r2d2_sqlite::SqliteConnectionManager::memory();
+    let pool = r2d2::Pool::builder()
+        .max_size(1)
+        .build(manager)
+        .context("build in-memory gateway DB pool")?;
+    let conn = pool.get().context("get conn from in-memory gateway pool")?;
+    initialize_conn(&conn).context("initialize in-memory gateway DB schema")?;
+    Ok(pool)
 }
 
 pub(in crate::memory) fn upsert_session_metadata(

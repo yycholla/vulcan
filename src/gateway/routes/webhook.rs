@@ -46,21 +46,18 @@ pub async fn handle(
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
-    use std::sync::Mutex as StdMutex;
 
     use axum::body::Body;
     use axum::http::{Request, StatusCode};
-    use rusqlite::Connection;
     use tower::ServiceExt;
 
     use crate::gateway::loopback::LoopbackPlatform;
     use crate::gateway::registry::PlatformRegistry;
     use crate::gateway::server::{AppState, build_router};
+    use crate::memory::DbPool;
 
-    fn fresh_db() -> Arc<StdMutex<Connection>> {
-        let c = Connection::open_in_memory().expect("open mem db");
-        crate::memory::initialize_test_conn(&c).expect("schema");
-        Arc::new(StdMutex::new(c))
+    fn fresh_db() -> DbPool {
+        crate::memory::in_memory_gateway_pool().expect("in-memory pool")
     }
 
     fn sign_loopback(secret: &str, body: &[u8]) -> String {
@@ -72,17 +69,14 @@ mod tests {
         bytes.iter().map(|b| format!("{b:02x}")).collect()
     }
 
-    fn app_state_with(registry: PlatformRegistry, db: Arc<StdMutex<Connection>>) -> AppState {
+    fn app_state_with(registry: PlatformRegistry, db: DbPool) -> AppState {
         let config = Arc::new(crate::config::Config::default());
         let agent_map =
             crate::gateway::agent_map::AgentMap::new(config, std::time::Duration::from_secs(60));
         AppState {
             api_token: Arc::new("secret".into()),
-            inbound: Arc::new(crate::gateway::queue::InboundQueue::new(Arc::clone(&db))),
-            outbound: Arc::new(crate::gateway::queue::OutboundQueue::new(
-                Arc::clone(&db),
-                5,
-            )),
+            inbound: Arc::new(crate::gateway::queue::InboundQueue::new(db.clone())),
+            outbound: Arc::new(crate::gateway::queue::OutboundQueue::new(db.clone(), 5)),
             registry: Arc::new(registry),
             agent_map: Arc::new(agent_map),
         }
@@ -94,7 +88,7 @@ mod tests {
         let mut reg = PlatformRegistry::new();
         let lp = Arc::new(LoopbackPlatform::with_webhook_secret("hush"));
         reg.register("loopback", lp.clone());
-        let state = app_state_with(reg, Arc::clone(&db));
+        let state = app_state_with(reg, db.clone());
         let inbound_q = Arc::clone(&state.inbound);
         let app = build_router(state);
 
