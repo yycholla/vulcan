@@ -25,13 +25,14 @@ use anyhow::{Context, Result};
 use teloxide_core::{
     ApiError, Bot, RequestError,
     prelude::Requester,
-    types::{ChatId, MessageId, ReplyParameters, Update, UpdateKind},
+    types::{ChatId, FileId, MessageId, ReplyParameters, Update, UpdateKind},
 };
 use tokio::task::JoinHandle;
 
 use crate::gateway::queue::InboundQueue;
 use crate::platform::{
-    InboundMessage, OutboundMessage, Platform, PlatformCapabilities, SentMessage,
+    Attachment, AttachmentKind, InboundMessage, OutboundMessage, Platform, PlatformCapabilities,
+    SentMessage,
 };
 
 #[derive(Debug, Clone)]
@@ -59,20 +60,102 @@ impl TelegramPlatform {
         })
     }
 
+    /// Pick the largest `PhotoSize` from the slice. Telegram returns
+    /// multiple sizes per photo; the last is conventionally the
+    /// largest, but `max_by_key` on the byte size is the robust pick.
+    fn largest_photo_size(
+        sizes: &[teloxide_core::types::PhotoSize],
+    ) -> Option<&teloxide_core::types::PhotoSize> {
+        sizes.iter().max_by_key(|p| p.file.size)
+    }
+
+    /// Extract attachments from a typed `Message`. At most one
+    /// attachment per Message — Telegram doesn't multi-attach in one
+    /// message the way Discord does. Order: photo → document → voice
+    /// → video → audio → sticker.
+    ///
+    /// **Telegram-specific contract:** `Attachment.url` carries the
+    /// opaque `file_id`, NOT a CDN URL. Telegram has no public CDN —
+    /// `download_attachment` resolves the file_id via `bot.get_file`
+    /// and streams the body. Discord stores real HTTPS URLs in the
+    /// same field; same shape, platform-specific interpretation.
+    fn attachments_from_message(msg: &teloxide_core::types::Message) -> Vec<Attachment> {
+        use teloxide_core::types::{MediaKind, MessageKind};
+        let common = match &msg.kind {
+            MessageKind::Common(c) => c,
+            _ => return Vec::new(),
+        };
+        let att = match &common.media_kind {
+            MediaKind::Photo(p) => {
+                let Some(largest) = Self::largest_photo_size(&p.photo) else {
+                    return Vec::new();
+                };
+                Attachment {
+                    url: Some(largest.file.id.0.clone()),
+                    local_path: None,
+                    mime: Some("image/jpeg".into()),
+                    kind: AttachmentKind::Image,
+                    original_name: None,
+                }
+            }
+            MediaKind::Document(d) => Attachment {
+                url: Some(d.document.file.id.0.clone()),
+                local_path: None,
+                mime: d.document.mime_type.as_ref().map(|m| m.to_string()),
+                kind: AttachmentKind::Document,
+                original_name: d.document.file_name.clone(),
+            },
+            MediaKind::Voice(v) => Attachment {
+                url: Some(v.voice.file.id.0.clone()),
+                local_path: None,
+                mime: v.voice.mime_type.as_ref().map(|m| m.to_string()),
+                kind: AttachmentKind::Voice,
+                original_name: None,
+            },
+            MediaKind::Video(v) => Attachment {
+                url: Some(v.video.file.id.0.clone()),
+                local_path: None,
+                mime: v.video.mime_type.as_ref().map(|m| m.to_string()),
+                kind: AttachmentKind::Video,
+                original_name: v.video.file_name.clone(),
+            },
+            MediaKind::Audio(a) => Attachment {
+                url: Some(a.audio.file.id.0.clone()),
+                local_path: None,
+                mime: a.audio.mime_type.as_ref().map(|m| m.to_string()),
+                kind: AttachmentKind::Audio,
+                original_name: a.audio.file_name.clone(),
+            },
+            MediaKind::Sticker(s) => Attachment {
+                url: Some(s.sticker.file.id.0.clone()),
+                local_path: None,
+                mime: None,
+                kind: AttachmentKind::Sticker,
+                original_name: None,
+            },
+            _ => return Vec::new(),
+        };
+        vec![att]
+    }
+
     /// Build an InboundMessage from a Telegram Update's pieces. Centralized
     /// so the long-poll and webhook paths can share parsing + the
     /// allow-list filter. Returns None when the message should be
-    /// dropped (allow-list miss, empty text).
+    /// dropped (allow-list miss, no content).
     pub(crate) fn inbound_from_update_parts(
         chat_id: i64,
         user_id: u64,
         message_id: i32,
         text: &str,
         reply_to: Option<i32>,
+        attachments: Vec<Attachment>,
         allowed: &Option<HashSet<i64>>,
     ) -> Option<InboundMessage> {
         let trimmed = text.trim();
-        if trimmed.is_empty() {
+        // Allow empty text when there's at least one attachment — sending
+        // an image-only message is normal Telegram usage. Mirrors the
+        // PR-4 Discord behavior.
+        if trimmed.is_empty() && attachments.is_empty() {
             return None;
         }
         if let Some(set) = allowed
@@ -87,15 +170,16 @@ impl TelegramPlatform {
             text: trimmed.to_string(),
             message_id: Some(message_id.to_string()),
             reply_to: reply_to.map(|r| r.to_string()),
-            attachments: Vec::new(),
+            attachments,
         })
     }
 
     /// Walk a typed `Update` (from `Bot::get_updates`) into the parts
     /// `inbound_from_update_parts` consumes. Long-poll path uses this
     /// rather than a `to_value` round trip — cheaper and type-safe.
-    /// Webhook path stays on `inbound_from_value` because the body
-    /// arrives as bytes.
+    /// Webhook path also routes through this (after typed
+    /// deserialization in `inbound_from_value`) so media extraction
+    /// lives in one place.
     pub(crate) fn inbound_from_update(
         update: &Update,
         allowed: &Option<HashSet<i64>>,
@@ -107,33 +191,40 @@ impl TelegramPlatform {
         let chat_id = m.chat.id.0;
         let user_id = m.from.as_ref()?.id.0;
         let message_id = m.id.0;
-        let text = m.text()?;
+        // `Message::text()` returns `None` for media-only messages
+        // (no caption AND no plain text). Default to "" so the
+        // attachments-only path passes through `inbound_from_update_parts`.
+        let text = m.text().unwrap_or("");
         let reply_to = m.reply_to_message().map(|r| r.id.0);
-        Self::inbound_from_update_parts(chat_id, user_id, message_id, text, reply_to, allowed)
+        let attachments = Self::attachments_from_message(m);
+        Self::inbound_from_update_parts(
+            chat_id,
+            user_id,
+            message_id,
+            text,
+            reply_to,
+            attachments,
+            allowed,
+        )
     }
 
-    /// Pull (chat_id, user_id, message_id, text, reply_to) out of a
-    /// `serde_json::Value`-shaped Update and forward to
-    /// `inbound_from_update_parts`. Used by the webhook path (body
-    /// arrives as bytes); long-poll uses `inbound_from_update` against
-    /// the typed `Update` instead.
+    /// Webhook path: bytes arrive as JSON. PR-3b routes through the
+    /// typed `Update` deserializer so media extraction stays in one
+    /// place (`inbound_from_update` / `attachments_from_message`).
+    /// If the body isn't a parseable Update we drop it via `None`.
     pub(crate) fn inbound_from_value(
         update: &serde_json::Value,
         allowed: &Option<HashSet<i64>>,
     ) -> Option<InboundMessage> {
-        let msg = update
-            .get("message")
-            .or_else(|| update.get("edited_message"))?;
-        let chat_id = msg.get("chat")?.get("id")?.as_i64()?;
-        let user_id = msg.get("from")?.get("id")?.as_u64()?;
-        let message_id = msg.get("message_id")?.as_i64()? as i32;
-        let text = msg.get("text")?.as_str()?;
-        let reply_to = msg
-            .get("reply_to_message")
-            .and_then(|r| r.get("message_id"))
-            .and_then(|v| v.as_i64())
-            .map(|n| n as i32);
-        Self::inbound_from_update_parts(chat_id, user_id, message_id, text, reply_to, allowed)
+        // teloxide-core 0.13's `UpdateKind` Deserialize visitor uses
+        // `next_key::<&str>()` first, which fails on `serde_json::Value`
+        // (its keys are owned `String`s) — the visitor then falls into
+        // `Error(Value)` and our match drops the update. Round-trip
+        // through bytes (`to_vec` + `from_slice`) sidesteps the issue
+        // and gives us a "real" deserializer driving the visitor.
+        let bytes = serde_json::to_vec(update).ok()?;
+        let typed: Update = serde_json::from_slice(&bytes).ok()?;
+        Self::inbound_from_update(&typed, allowed)
     }
 
     fn chat_id_from_chat(chat: &str) -> Result<ChatId> {
@@ -316,15 +407,23 @@ mod tests {
 
     #[test]
     fn inbound_parts_uses_chat_as_chat_id_and_carries_message_id() {
-        let inb =
-            TelegramPlatform::inbound_from_update_parts(42, 7, 100, "hello", None, &allowed(&[]))
-                .expect("accepted");
+        let inb = TelegramPlatform::inbound_from_update_parts(
+            42,
+            7,
+            100,
+            "hello",
+            None,
+            vec![],
+            &allowed(&[]),
+        )
+        .expect("accepted");
         assert_eq!(inb.platform, "telegram");
         assert_eq!(inb.chat_id, "42");
         assert_eq!(inb.user_id, "7");
         assert_eq!(inb.message_id.as_deref(), Some("100"));
         assert!(inb.reply_to.is_none());
         assert_eq!(inb.text, "hello");
+        assert!(inb.attachments.is_empty());
     }
 
     #[test]
@@ -335,6 +434,7 @@ mod tests {
             100,
             "in a group",
             None,
+            vec![],
             &allowed(&[]),
         )
         .expect("accepted");
@@ -349,6 +449,7 @@ mod tests {
             100,
             "thread reply",
             Some(99),
+            vec![],
             &allowed(&[]),
         )
         .expect("accepted");
@@ -357,8 +458,15 @@ mod tests {
 
     #[test]
     fn inbound_parts_drops_empty_text() {
-        let inb =
-            TelegramPlatform::inbound_from_update_parts(42, 7, 100, "   ", None, &allowed(&[]));
+        let inb = TelegramPlatform::inbound_from_update_parts(
+            42,
+            7,
+            100,
+            "   ",
+            None,
+            vec![],
+            &allowed(&[]),
+        );
         assert!(inb.is_none());
     }
 
@@ -370,6 +478,7 @@ mod tests {
             100,
             "hi",
             None,
+            vec![],
             &allowed(&[99, 100]),
         );
         assert!(inb.is_none());
@@ -383,9 +492,49 @@ mod tests {
             100,
             "hi",
             None,
+            vec![],
             &allowed(&[42, 99]),
         );
         assert!(inb.is_some());
+    }
+
+    #[test]
+    fn inbound_parts_accepts_empty_text_with_attachment() {
+        let att = Attachment {
+            url: Some("file_id_xyz".into()),
+            local_path: None,
+            mime: Some("image/jpeg".into()),
+            kind: AttachmentKind::Image,
+            original_name: None,
+        };
+        let inb = TelegramPlatform::inbound_from_update_parts(
+            42,
+            7,
+            100,
+            "",
+            None,
+            vec![att],
+            &allowed(&[]),
+        )
+        .expect("photo-only message should pass");
+        assert_eq!(inb.text, "");
+        assert_eq!(inb.attachments.len(), 1);
+        assert_eq!(inb.attachments[0].kind, AttachmentKind::Image);
+        assert_eq!(inb.attachments[0].url.as_deref(), Some("file_id_xyz"));
+    }
+
+    #[test]
+    fn inbound_parts_drops_when_text_empty_and_no_attachments() {
+        let inb = TelegramPlatform::inbound_from_update_parts(
+            42,
+            7,
+            100,
+            "",
+            None,
+            vec![],
+            &allowed(&[]),
+        );
+        assert!(inb.is_none());
     }
 
     #[test]
@@ -407,12 +556,16 @@ mod tests {
 
     #[test]
     fn inbound_from_value_extracts_text_message() {
+        // PR-3b: inbound_from_value now deserializes into a typed
+        // `Update`, so the fixture must be a complete Update shape
+        // (update_id, full from, chat.type, date).
         let update = serde_json::json!({
             "update_id": 1,
             "message": {
                 "message_id": 100,
-                "from": { "id": 7 },
-                "chat": { "id": 42 },
+                "from": { "id": 7, "is_bot": false, "first_name": "tester" },
+                "chat": { "id": 42, "first_name": "tester", "type": "private" },
+                "date": 1700000000,
                 "text": "hello bot",
             },
         });
@@ -474,12 +627,15 @@ mod tests {
     }
 
     fn webhook_body() -> Vec<u8> {
+        // PR-3b: must be a complete Update shape so the typed
+        // deserializer in `inbound_from_value` accepts it.
         serde_json::to_vec(&serde_json::json!({
             "update_id": 1,
             "message": {
                 "message_id": 100,
-                "from": { "id": 7 },
-                "chat": { "id": 42 },
+                "from": { "id": 7, "is_bot": false, "first_name": "tester" },
+                "chat": { "id": 42, "first_name": "tester", "type": "private" },
+                "date": 1700000000,
                 "text": "hi via webhook",
             },
         }))
