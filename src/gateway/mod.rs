@@ -11,8 +11,8 @@ use crate::gateway::outbound::OutboundDispatcher;
 use crate::gateway::queue::{InboundQueue, InboundRow, OutboundQueue};
 use crate::gateway::registry::PlatformRegistry;
 use crate::gateway::server::{AppState, build_router};
+use crate::memory::DbPool;
 use anyhow::{Context, Result};
-use rusqlite::Connection;
 use tokio::net::TcpListener;
 use tokio::task::JoinHandle;
 
@@ -44,7 +44,7 @@ where
         .clone()
         .ok_or_else(|| anyhow::anyhow!("missing [gateway] config; set api_token before running"))?;
 
-    let db = crate::memory::open_gateway_connection()?;
+    let db = crate::memory::open_gateway_pool()?;
     let mut registry = PlatformRegistry::new();
     registry.register("loopback", Arc::new(LoopbackPlatform::default()));
     if gateway.discord.enabled {
@@ -66,16 +66,16 @@ async fn run_on_listener_with_parts<S>(
     gateway: crate::config::GatewayConfig,
     listener: TcpListener,
     shutdown: S,
-    db: Arc<std::sync::Mutex<Connection>>,
+    db: DbPool,
     registry: Arc<PlatformRegistry>,
     agent_map: Arc<AgentMap>,
 ) -> Result<()>
 where
     S: Future<Output = ()> + Send + 'static,
 {
-    let inbound = Arc::new(InboundQueue::new(Arc::clone(&db)));
+    let inbound = Arc::new(InboundQueue::new(db.clone()));
     let outbound = Arc::new(OutboundQueue::new(
-        Arc::clone(&db),
+        db.clone(),
         gateway.outbound_max_attempts,
     ));
 
@@ -217,8 +217,6 @@ mod tests {
     use crate::skills::SkillRegistry;
     use crate::tools::ToolRegistry;
     use async_trait::async_trait;
-    use rusqlite::Connection;
-    use std::sync::Mutex as StdMutex;
     use tokio::sync::oneshot;
     use tokio_util::sync::CancellationToken;
 
@@ -237,10 +235,8 @@ mod tests {
         config
     }
 
-    fn fresh_db() -> Arc<StdMutex<Connection>> {
-        let conn = Connection::open_in_memory().expect("open mem db");
-        crate::memory::initialize_test_conn(&conn).expect("schema");
-        Arc::new(StdMutex::new(conn))
+    fn fresh_db() -> DbPool {
+        crate::memory::in_memory_gateway_pool().expect("in-memory pool")
     }
 
     fn empty_skills() -> Arc<SkillRegistry> {
@@ -414,7 +410,7 @@ mod tests {
         let config = config_with_gateway();
         let gateway = config.gateway.clone().expect("gateway config");
         let db = fresh_db();
-        let inbound = InboundQueue::new(Arc::clone(&db));
+        let inbound = InboundQueue::new(db.clone());
         inbound
             .enqueue(crate::platform::InboundMessage {
                 platform: "loopback".into(),

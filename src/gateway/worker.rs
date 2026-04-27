@@ -84,12 +84,10 @@ pub async fn process_one(
 mod tests {
     use super::*;
     use std::sync::Arc;
-    use std::sync::Mutex as StdMutex;
     use std::time::Duration;
 
     use anyhow::Result;
     use async_trait::async_trait;
-    use rusqlite::Connection;
     use tokio_util::sync::CancellationToken;
 
     use crate::agent::Agent;
@@ -97,16 +95,15 @@ mod tests {
     use crate::gateway::agent_map::{AgentBuilder, AgentMap};
     use crate::gateway::queue::{InboundQueue, OutboundQueue};
     use crate::hooks::HookRegistry;
+    use crate::memory::DbPool;
     use crate::platform::InboundMessage;
     use crate::provider::mock::MockProvider;
     use crate::provider::{ChatResponse, LLMProvider, Message, StreamEvent, ToolDefinition};
     use crate::skills::SkillRegistry;
     use crate::tools::ToolRegistry;
 
-    fn fresh_db() -> Arc<StdMutex<Connection>> {
-        let c = Connection::open_in_memory().expect("open mem db");
-        crate::memory::initialize_test_conn(&c).expect("schema");
-        Arc::new(StdMutex::new(c))
+    fn fresh_db() -> DbPool {
+        crate::memory::in_memory_gateway_pool().expect("in-memory pool")
     }
 
     fn empty_skills() -> Arc<SkillRegistry> {
@@ -208,8 +205,8 @@ mod tests {
     #[tokio::test]
     async fn worker_runs_agent_and_enqueues_reply() {
         let db = fresh_db();
-        let inbound = InboundQueue::new(Arc::clone(&db));
-        let outbound = OutboundQueue::new(Arc::clone(&db), 5);
+        let inbound = InboundQueue::new(db.clone());
+        let outbound = OutboundQueue::new(db.clone(), 5);
         let agent_map = agent_map_with_canned_reply("hi back");
 
         let id = inbound
@@ -241,8 +238,8 @@ mod tests {
     #[tokio::test]
     async fn worker_panic_marks_inbound_failed() {
         let db = fresh_db();
-        let inbound = InboundQueue::new(Arc::clone(&db));
-        let outbound = OutboundQueue::new(Arc::clone(&db), 5);
+        let inbound = InboundQueue::new(db.clone());
+        let outbound = OutboundQueue::new(db.clone(), 5);
         let agent_map = agent_map_with_panicking_provider();
 
         inbound

@@ -49,24 +49,21 @@ pub async fn handle(
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
-    use std::sync::Mutex as StdMutex;
 
     use axum::body::Body;
     use axum::http::{Request, StatusCode};
-    use rusqlite::Connection;
     use tower::ServiceExt;
 
     use crate::gateway::loopback::LoopbackPlatform;
     use crate::gateway::registry::PlatformRegistry;
     use crate::gateway::server::{AppState, build_router};
+    use crate::memory::DbPool;
 
-    fn fresh_db() -> Arc<StdMutex<Connection>> {
-        let c = Connection::open_in_memory().expect("open mem db");
-        crate::memory::initialize_test_conn(&c).expect("schema");
-        Arc::new(StdMutex::new(c))
+    fn fresh_db() -> DbPool {
+        crate::memory::in_memory_gateway_pool().expect("in-memory pool")
     }
 
-    fn app_state_with(registry: PlatformRegistry, db: Arc<StdMutex<Connection>>) -> AppState {
+    fn app_state_with(registry: PlatformRegistry, db: DbPool) -> AppState {
         // Build an AppState pointing at the given db + registry. Use
         // Config::default() and an AgentMap::new — neither is exercised
         // by /v1/inbound (it just enqueues), so that's fine.
@@ -75,9 +72,9 @@ mod tests {
             crate::gateway::agent_map::AgentMap::new(config, std::time::Duration::from_secs(60));
         AppState {
             api_token: Arc::new("secret".into()),
-            inbound: Arc::new(crate::gateway::queue::InboundQueue::new(Arc::clone(&db))),
+            inbound: Arc::new(crate::gateway::queue::InboundQueue::new(db.clone())),
             outbound: Arc::new(crate::gateway::queue::OutboundQueue::new(
-                Arc::clone(&db),
+                db.clone(),
                 5,
             )),
             registry: Arc::new(registry),
@@ -104,7 +101,7 @@ mod tests {
     #[tokio::test]
     async fn post_inbound_enqueues_and_returns_id() {
         let db = fresh_db();
-        let state = app_state_with(registry_with_loopback(), Arc::clone(&db));
+        let state = app_state_with(registry_with_loopback(), db.clone());
         let inbound_q = Arc::clone(&state.inbound);
         let app = build_router(state);
 
@@ -177,23 +174,22 @@ mod tests {
 
     #[tokio::test]
     async fn post_inbound_db_error_returns_503() {
-        // Force the inbound enqueue to fail. Approach: open a FRESH in-memory
-        // connection that has NOT had the schema applied, so the INSERT into
-        // `inbound_queue` errors with "no such table".
-        let unschemed = Arc::new(StdMutex::new(
-            Connection::open_in_memory().expect("open mem db"),
-        ));
+        // Force the inbound enqueue to fail. Approach: build a pool against a
+        // FRESH in-memory connection that has NOT had the schema applied, so
+        // the INSERT into `inbound_queue` errors with "no such table".
+        let unschemed: DbPool = r2d2::Pool::builder()
+            .max_size(1)
+            .build(r2d2_sqlite::SqliteConnectionManager::memory())
+            .expect("unschemed in-memory pool");
         // Build the state pointing at the unschemed db.
         let config = Arc::new(crate::config::Config::default());
         let agent_map =
             crate::gateway::agent_map::AgentMap::new(config, std::time::Duration::from_secs(60));
         let state = AppState {
             api_token: Arc::new("secret".into()),
-            inbound: Arc::new(crate::gateway::queue::InboundQueue::new(Arc::clone(
-                &unschemed,
-            ))),
+            inbound: Arc::new(crate::gateway::queue::InboundQueue::new(unschemed.clone())),
             outbound: Arc::new(crate::gateway::queue::OutboundQueue::new(
-                Arc::clone(&unschemed),
+                unschemed.clone(),
                 5,
             )),
             registry: Arc::new(registry_with_loopback()),

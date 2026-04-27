@@ -107,20 +107,16 @@ async fn drain_due(queue: &OutboundQueue, registry: &PlatformRegistry) -> anyhow
 mod tests {
     use super::*;
     use std::sync::Arc;
-    use std::sync::Mutex as StdMutex;
     use std::time::Duration;
-
-    use rusqlite::Connection;
 
     use crate::gateway::loopback::LoopbackPlatform;
     use crate::gateway::queue::OutboundQueue;
     use crate::gateway::registry::PlatformRegistry;
+    use crate::memory::DbPool;
     use crate::platform::OutboundMessage;
 
-    fn fresh_db() -> Arc<StdMutex<Connection>> {
-        let c = Connection::open_in_memory().expect("open mem db");
-        crate::memory::initialize_test_conn(&c).expect("schema");
-        Arc::new(StdMutex::new(c))
+    fn fresh_db() -> DbPool {
+        crate::memory::in_memory_gateway_pool().expect("in-memory pool")
     }
 
     fn out_msg(text: &str) -> OutboundMessage {
@@ -161,7 +157,7 @@ mod tests {
     #[tokio::test]
     async fn failed_send_retries_after_backoff() {
         let db = fresh_db();
-        let q = Arc::new(OutboundQueue::new(Arc::clone(&db), 5));
+        let q = Arc::new(OutboundQueue::new(db.clone(), 5));
         let lp = Arc::new(LoopbackPlatform::failing_first(2));
         let mut reg = PlatformRegistry::new();
         reg.register("loopback", lp.clone());
@@ -180,7 +176,7 @@ mod tests {
         let mut ok = false;
         for _ in 0..40 {
             {
-                let conn = db.lock().expect("lock");
+                let conn = db.get().expect("checkout");
                 let now = chrono::Utc::now().timestamp();
                 let _ = conn.execute(
                     "UPDATE outbound_queue SET next_attempt_at = ?1 WHERE id = ?2 AND state = 'pending'",

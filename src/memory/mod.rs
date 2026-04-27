@@ -35,9 +35,9 @@ mod schema;
 mod tests;
 
 #[cfg(feature = "gateway")]
-pub(crate) use schema::open_gateway_connection;
+pub(crate) use schema::{DbPool, open_gateway_pool};
 #[cfg(all(test, feature = "gateway"))]
-pub(crate) use schema::initialize_test_conn;
+pub(crate) use schema::in_memory_gateway_pool;
 
 use codec::{decode_message, encode_message};
 use schema::{initialize_conn, upsert_session_metadata, upsert_session_provider_profile};
