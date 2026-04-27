@@ -168,6 +168,47 @@ impl Platform for DiscordPlatform {
         anyhow::bail!("discord receives messages through the Serenity gateway task")
     }
 
+    async fn download_attachment(
+        &self,
+        att: &crate::platform::Attachment,
+    ) -> Result<std::path::PathBuf> {
+        use std::io::Write;
+        let url = att
+            .url
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("attachment has no URL"))?;
+        let resp = reqwest::get(url)
+            .await
+            .with_context(|| format!("fetch {url}"))?
+            .error_for_status()
+            .with_context(|| format!("non-2xx fetching {url}"))?;
+        let bytes = resp.bytes().await.context("read attachment body")?;
+
+        let dir = crate::config::vulcan_home()
+            .join("attachments")
+            .join("discord");
+        std::fs::create_dir_all(&dir).context("create attachments dir")?;
+        let filename = att
+            .original_name
+            .clone()
+            .unwrap_or_else(|| format!("att-{}.bin", uuid::Uuid::new_v4()));
+        // Strip any path separators — file came from the network.
+        let filename = std::path::Path::new(&filename)
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("attachment")
+            .to_string();
+        let path = dir.join(&filename);
+        let mut f =
+            std::fs::File::create(&path).with_context(|| format!("create {}", path.display()))?;
+        f.write_all(&bytes)
+            .with_context(|| format!("write {}", path.display()))?;
+        // Best-effort sync; ignore failure so a flaky fsync doesn't
+        // bubble up to the agent.
+        f.sync_all().ok();
+        Ok(path)
+    }
+
     fn capabilities(&self) -> crate::platform::PlatformCapabilities {
         // PR-4 flips edit + media + threads on. edit_min_interval_ms = 200ms
         // gives headroom under Discord's 5/5s edit floor.
