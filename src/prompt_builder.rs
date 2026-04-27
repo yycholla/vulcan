@@ -5,6 +5,16 @@ pub struct PromptBuilder;
 
 impl PromptBuilder {
     pub fn build_system_prompt(&self, tools: &ToolRegistry) -> String {
+        let cwd = std::env::current_dir()
+            .ok()
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|| "(unknown)".into());
+        let env_section = format!(
+            "## Environment\n\
+             - working directory: `{cwd}`\n\
+             - bash and other shell commands run in this directory unless `workdir` is supplied.\n"
+        );
+
         let tool_section = format!(
             "## Available Tools\n\
              You have access to the following tools. When you need to perform an action, \
@@ -33,6 +43,7 @@ impl PromptBuilder {
         format!(
             "You are Vulcan, a Rust AI agent. You help with coding, research, \
              file management, and automation.\n\n\
+             {env_section}\n\
              ## Guidelines\n\
              - Be concise and precise\n\
              - When working on multi-step tasks, use tools iteratively — one tool call at a time\n\

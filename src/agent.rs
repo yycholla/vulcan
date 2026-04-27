@@ -657,6 +657,10 @@ impl Agent {
             content: input.to_string(),
         });
 
+        // YYC-106: persist the user message immediately (mirrors the streaming
+        // path) so a non-terminal exit doesn't leave the turn unrecorded.
+        self.save_messages(&messages)?;
+
         let max_iter = if self.max_iterations > 0 {
             self.max_iterations as usize
         } else {
@@ -730,6 +734,13 @@ impl Agent {
                         content: flatten_for_message(result),
                     });
                 }
+                // YYC-106: persist the assistant turn + tool results before
+                // the next iteration. Without this, an early loop exit
+                // (cancel, max_iter, model returning empty without matching
+                // the terminal branch) loses everything since the start of
+                // the turn — next prompt resumes with stale history and
+                // the agent appears to "forget".
+                self.save_messages(&messages)?;
             } else {
                 let text = response.content.unwrap_or_default();
                 let reasoning = response.reasoning_content.clone();
@@ -801,6 +812,12 @@ impl Agent {
             content: input.to_string(),
         });
 
+        // YYC-106: persist the user message immediately so a later cancel,
+        // tool-loop early exit, or process kill doesn't strand the prompt.
+        // save_messages tracks last_saved_count and appends only the new tail,
+        // so this is cheap.
+        self.save_messages(&messages)?;
+
         let mut full_response = String::new();
 
         let max_iter = if self.max_iterations > 0 {
@@ -818,6 +835,39 @@ impl Agent {
                     reasoning_content: None,
                 }));
                 return Ok("Cancelled".to_string());
+            }
+
+            // YYC-105: same compaction discipline as run_prompt — when the
+            // accumulated history would push the next request past the
+            // configured trigger ratio, summarize older turns and replace
+            // them with a single system primer. Without this, small-context
+            // models (llama-cpp Q2_0 quants, etc.) silently truncate the
+            // request and behave as if the session has no history.
+            if self.context.should_compact(&messages) {
+                match self.context.compact(&messages) {
+                    Ok(summary) => {
+                        let kept_count = messages.len();
+                        messages = vec![
+                            Message::System {
+                                content: format!("Previous conversation context:\n{summary}"),
+                            },
+                            Message::User {
+                                content: input.to_string(),
+                            },
+                        ];
+                        let _ = ui_tx.send(StreamEvent::Text(format!(
+                            "_(compacted {kept_count} earlier turns into a summary to fit context)_\n"
+                        )));
+                        tracing::info!(
+                            "agent iteration {iteration}: compacted {kept_count} prior messages"
+                        );
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            "agent iteration {iteration}: compaction failed: {e} (continuing with full history)"
+                        );
+                    }
+                }
             }
 
             tracing::info!(
@@ -901,6 +951,13 @@ impl Agent {
                     return Err(anyhow::anyhow!(msg));
                 }
             };
+
+            // YYC-105: feed usage into the context manager so future
+            // iterations' should_compact() see realistic numbers.
+            if let Some(usage) = &response.usage {
+                self.context
+                    .record_usage(usage.prompt_tokens, usage.completion_tokens);
+            }
 
             tracing::info!(
                 "agent iteration {iteration}: response content_len={}, tool_calls={}, reasoning_len={}",
@@ -986,6 +1043,13 @@ impl Agent {
                         content: flatten_for_message(result),
                     });
                 }
+                // YYC-106: persist the assistant turn + tool results before
+                // the next iteration. Without this, an early loop exit
+                // (cancel, max_iter, model returning empty without matching
+                // the terminal branch) loses everything since the start of
+                // the turn — next prompt resumes with stale history and
+                // the agent appears to "forget".
+                self.save_messages(&messages)?;
             } else {
                 let reasoning = response.reasoning_content.clone();
 

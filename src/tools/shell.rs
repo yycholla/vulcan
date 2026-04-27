@@ -360,9 +360,16 @@ impl Tool for BashTool {
         cmd.arg("-c").arg(command);
         cmd.kill_on_drop(true);
 
-        if let Some(dir) = workdir {
-            cmd.current_dir(dir);
-        }
+        // Always pin cwd explicitly. Without this the spawn inherits
+        // whatever ambient cwd the runtime had — which can drift, and
+        // some shells/profiles end up resolving to $HOME. workdir param
+        // wins; otherwise fall back to the agent's cwd captured up
+        // front (process current_dir at the time of the call).
+        let resolved_cwd = workdir
+            .map(PathBuf::from)
+            .or_else(|| std::env::current_dir().ok())
+            .unwrap_or_else(|| PathBuf::from("."));
+        cmd.current_dir(resolved_cwd);
 
         let output = tokio::select! {
             biased;
@@ -660,11 +667,15 @@ async fn run_one_shot_pty(
         .context("Failed to create PTY pair")?;
 
     let mut cmd = CommandBuilder::new("bash");
-    cmd.arg("-lc");
+    // `-c` (not `-lc`) so the shell's login profile doesn't `cd $HOME`
+    // out from under the caller's intended workdir.
+    cmd.arg("-c");
     cmd.arg(command);
-    if let Some(dir) = workdir {
-        cmd.cwd(PathBuf::from(dir));
-    }
+    let resolved_cwd = workdir
+        .map(PathBuf::from)
+        .or_else(|| std::env::current_dir().ok())
+        .unwrap_or_else(|| PathBuf::from("."));
+    cmd.cwd(resolved_cwd);
 
     let mut child = pair
         .slave
