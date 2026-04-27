@@ -351,3 +351,69 @@ fn reasoning_content_round_trips() {
         other => panic!("expected Assistant, got {other:?}"),
     }
 }
+
+// YYC-149: every connection used by SessionStore should have the
+// 5-second busy_timeout applied so a contended writer doesn't fail
+// immediately with SQLITE_BUSY and pin a tokio worker thread.
+#[test]
+fn session_store_connection_has_busy_timeout() {
+    let dir = TempDir::new().unwrap();
+    let store = store_in(&dir);
+    let conn = store.conn.lock();
+    let timeout: i64 = conn
+        .query_row("PRAGMA busy_timeout", [], |row| row.get(0))
+        .expect("query busy_timeout");
+    assert_eq!(timeout, 5_000, "expected 5000ms busy_timeout");
+}
+
+// YYC-149: a writer holding a transaction must not lock out a
+// second writer immediately. The busy_timeout absorbs short
+// contention. Spawns a thread that holds a write transaction for a
+// brief moment, kicks off a competing write on the main thread,
+// and asserts it succeeds — without the timeout this would return
+// SQLITE_BUSY synchronously.
+#[test]
+fn busy_timeout_absorbs_short_writer_contention() {
+    use std::sync::{Arc, Barrier};
+    use std::thread;
+    use std::time::Duration;
+
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("contend.db");
+    let primary = Connection::open(&path).unwrap();
+    initialize_conn(&primary).unwrap();
+    drop(primary);
+
+    let path_thread = path.clone();
+    let barrier = Arc::new(Barrier::new(2));
+    let barrier_thread = Arc::clone(&barrier);
+    let holder = thread::spawn(move || {
+        let mut conn = Connection::open(&path_thread).unwrap();
+        initialize_conn(&conn).unwrap();
+        let tx = conn.transaction().unwrap();
+        tx.execute(
+            "INSERT INTO sessions (id, created_at, last_active) VALUES ('hold', 0, 0)",
+            [],
+        )
+        .unwrap();
+        // Signal the contender to attempt its write, then hold the
+        // transaction briefly so the other thread has to wait inside
+        // busy_timeout.
+        barrier_thread.wait();
+        thread::sleep(Duration::from_millis(150));
+        tx.commit().unwrap();
+    });
+
+    barrier.wait();
+    let conn = Connection::open(&path).unwrap();
+    initialize_conn(&conn).unwrap();
+    let result = conn.execute(
+        "INSERT INTO sessions (id, created_at, last_active) VALUES ('contender', 0, 0)",
+        [],
+    );
+    holder.join().unwrap();
+    assert!(
+        result.is_ok(),
+        "busy_timeout should absorb short writer contention; got {result:?}",
+    );
+}

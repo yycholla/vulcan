@@ -42,6 +42,19 @@ pub(crate) use schema::{DbPool, open_gateway_pool};
 use codec::{decode_message, encode_message};
 use schema::{initialize_conn, upsert_session_metadata, upsert_session_provider_profile};
 
+/// Persistent session storage.
+///
+/// CRUD methods are synchronous and run rusqlite operations behind a
+/// `parking_lot::Mutex`. Every connection is initialized with a
+/// 5-second `busy_timeout` (YYC-149) so transient WAL contention or
+/// brief writer overlap does not surface `SQLITE_BUSY` immediately —
+/// the writer waits up to 5s before failing rather than pinning the
+/// caller's tokio worker thread on a synchronous error retry loop.
+///
+/// Heavier write paths could be moved to `tokio::task::spawn_blocking`
+/// in the future if profiling shows the agent loop awaiting the mutex
+/// for measurable time, but the busy_timeout fix lands the immediate
+/// safety net without churning the call sites.
 pub struct SessionStore {
     conn: Mutex<Connection>,
 }

@@ -508,6 +508,20 @@ mod tests {
         crate::memory::in_memory_gateway_pool().expect("in-memory pool")
     }
 
+    // YYC-149: every checkout from the gateway pool must inherit the
+    // busy_timeout. r2d2's `with_init` runs once per fresh
+    // connection; this test guards against a future regression where
+    // the customizer is dropped or inadvertently bypassed.
+    #[test]
+    fn gateway_pool_checkout_has_busy_timeout() {
+        let pool = test_conn();
+        let conn = pool.get().expect("checkout");
+        let timeout: i64 = conn
+            .query_row("PRAGMA busy_timeout", [], |row| row.get(0))
+            .expect("query busy_timeout");
+        assert_eq!(timeout, 5_000);
+    }
+
     fn sample_msg() -> InboundMessage {
         InboundMessage {
             platform: "loopback".into(),
