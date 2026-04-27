@@ -80,6 +80,32 @@ impl DiscordPlatform {
         true
     }
 
+    /// YYC-19: mention gate. Returns true when the bot should
+    /// respond. Configurable via `require_mention`. DMs (no
+    /// guild_id) always pass because addressing the bot in a DM is
+    /// already a mention. In guild channels with `require_mention =
+    /// true`, the message must mention the bot's user id.
+    pub(crate) fn passes_mention_filter(
+        guild_id: Option<u64>,
+        require_mention: bool,
+        bot_user_id: Option<u64>,
+        mentioned_user_ids: &[u64],
+    ) -> bool {
+        if !require_mention {
+            return true;
+        }
+        if guild_id.is_none() {
+            return true;
+        }
+        match bot_user_id {
+            Some(bot_id) => mentioned_user_ids.iter().any(|id| *id == bot_id),
+            // YYC-19: if we couldn't determine the bot's user id
+            // at startup, fail open — better to over-respond than
+            // silently lock the bot out of every channel.
+            None => true,
+        }
+    }
+
     fn map_attachment(att: &serenity::model::channel::Attachment) -> crate::platform::Attachment {
         use crate::platform::{Attachment, AttachmentKind};
         // Robust MIME-prefix classifier: handle parameters
@@ -125,6 +151,7 @@ impl DiscordPlatform {
         allow_bots: bool,
         allowed_guild_ids: Vec<u64>,
         allowed_channel_ids: Vec<u64>,
+        require_mention: bool,
         inbound: Arc<InboundQueue>,
     ) -> Result<JoinHandle<()>> {
         Self::validate_bot_token(&bot_token)?;
@@ -134,6 +161,7 @@ impl DiscordPlatform {
                 allow_bots,
                 allowed_guild_ids,
                 allowed_channel_ids,
+                require_mention,
                 inbound,
             )
             .await
@@ -300,6 +328,14 @@ struct DiscordEventHandler {
     allowed_guild_ids: Vec<u64>,
     /// YYC-19: channel allowlist. Empty = open (default).
     allowed_channel_ids: Vec<u64>,
+    /// YYC-19: when true, only respond in guild channels when
+    /// mentioned. DMs always pass.
+    require_mention: bool,
+    /// YYC-19: bot's own user id, fetched once at gateway startup
+    /// via `Http::get_current_user`. `None` falls open on the
+    /// mention filter so a transient API hiccup doesn't lock the
+    /// bot out of every channel.
+    bot_user_id: Option<u64>,
 }
 
 #[serenity::async_trait]
@@ -314,6 +350,18 @@ impl EventHandler for DiscordEventHandler {
             msg.channel_id.get(),
             &self.allowed_guild_ids,
             &self.allowed_channel_ids,
+        ) {
+            return;
+        }
+        // YYC-19: in guild channels, optionally require an explicit
+        // bot mention before responding. Stops the bot from chiming
+        // in on every public-channel message.
+        let mentioned: Vec<u64> = msg.mentions.iter().map(|u| u.id.get()).collect();
+        if !DiscordPlatform::passes_mention_filter(
+            msg.guild_id.map(|g| g.get()),
+            self.require_mention,
+            self.bot_user_id,
+            &mentioned,
         ) {
             return;
         }
@@ -347,8 +395,23 @@ async fn run_gateway_client(
     allow_bots: bool,
     allowed_guild_ids: Vec<u64>,
     allowed_channel_ids: Vec<u64>,
+    require_mention: bool,
     inbound: Arc<InboundQueue>,
 ) -> Result<()> {
+    // YYC-19: fetch the bot's own user id once at startup so the
+    // mention filter can compare against it without a per-message
+    // round trip. `None` on failure leaves the filter open.
+    let bot_user_id = match Http::new(&bot_token).get_current_user().await {
+        Ok(user) => Some(user.id.get()),
+        Err(e) => {
+            tracing::warn!(
+                target: "gateway::discord",
+                error = %e,
+                "could not fetch Discord bot user id; require_mention will fail open",
+            );
+            None
+        }
+    };
     let intents = GatewayIntents::GUILD_MESSAGES
         | GatewayIntents::DIRECT_MESSAGES
         | GatewayIntents::MESSAGE_CONTENT;
@@ -357,6 +420,8 @@ async fn run_gateway_client(
         allow_bots,
         allowed_guild_ids,
         allowed_channel_ids,
+        require_mention,
+        bot_user_id,
     };
     let mut client = Client::builder(&bot_token, intents)
         .event_handler(handler)
@@ -417,6 +482,65 @@ mod tests {
             100,
             &[],
             &[100, 200],
+        ));
+    }
+
+    // YYC-19: require_mention=false is a no-op (default).
+    #[test]
+    fn passes_mention_filter_open_by_default() {
+        assert!(DiscordPlatform::passes_mention_filter(
+            Some(1),
+            false,
+            Some(99),
+            &[]
+        ));
+        assert!(DiscordPlatform::passes_mention_filter(
+            None,
+            false,
+            Some(99),
+            &[]
+        ));
+    }
+
+    // YYC-19: in DMs, require_mention is bypassed because the DM
+    // itself is the addressing.
+    #[test]
+    fn passes_mention_filter_dms_always_pass() {
+        assert!(DiscordPlatform::passes_mention_filter(
+            None,
+            true,
+            Some(99),
+            &[]
+        ));
+    }
+
+    // YYC-19: in guild channels with require_mention, only messages
+    // that mention the bot pass.
+    #[test]
+    fn passes_mention_filter_guild_requires_mention() {
+        assert!(!DiscordPlatform::passes_mention_filter(
+            Some(1),
+            true,
+            Some(99),
+            &[42, 7], // bot id 99 not mentioned
+        ));
+        assert!(DiscordPlatform::passes_mention_filter(
+            Some(1),
+            true,
+            Some(99),
+            &[7, 99, 42],
+        ));
+    }
+
+    // YYC-19: missing bot_user_id (startup fetch failed) falls open
+    // so a transient API hiccup doesn't lock the bot out.
+    #[test]
+    fn passes_mention_filter_falls_open_when_bot_id_unknown() {
+        assert!(DiscordPlatform::passes_mention_filter(
+            Some(1),
+            true,
+            None,
+            &[],
         ));
     }
 

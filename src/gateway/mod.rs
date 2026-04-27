@@ -138,6 +138,7 @@ where
             gateway.discord.allow_bots,
             gateway.discord.allowed_guild_ids.clone(),
             gateway.discord.allowed_channel_ids.clone(),
+            gateway.discord.require_mention,
             Arc::clone(&inbound),
         )?)
     } else {

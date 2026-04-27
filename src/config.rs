@@ -406,6 +406,12 @@ pub struct DiscordConfig {
     /// filters must pass.
     #[serde(default)]
     pub allowed_channel_ids: Vec<u64>,
+    /// YYC-19: when true, in guild channels (not DMs) the bot only
+    /// responds to messages that mention it. Prevents the bot from
+    /// reacting to every message in busy channels. DMs always pass —
+    /// addressing the bot in a DM IS the mention.
+    #[serde(default)]
+    pub require_mention: bool,
 }
 
 /// YYC-18 PR-3: Telegram connector configuration.
