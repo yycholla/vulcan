@@ -674,6 +674,16 @@ impl Agent {
                 messages.push(msg);
             }
         }
+        // YYC-138: orphan Tool rows from a truncated previous turn would
+        // make the provider reject this request with "Tool message must
+        // follow tool_calls". Drop them on read; surface a warning so
+        // the underlying truncation can still be diagnosed.
+        let dropped = sanitize_orphan_tool_messages(&mut messages);
+        if dropped > 0 {
+            tracing::warn!("agent: dropped {dropped} orphan Tool message(s) from loaded history");
+            // Persist the cleaned snapshot so subsequent loads start clean.
+            self.replace_history(&messages)?;
+        }
         self.last_saved_count = messages.len();
 
         messages.push(Message::User {
@@ -702,6 +712,11 @@ impl Agent {
                         content: input.to_string(),
                     },
                 ];
+                // YYC-138: replace the persisted snapshot atomically so
+                // the next save_messages doesn't slice the wrong tail and
+                // leave orphan Tool rows pointing at a tool_calls
+                // Assistant turn that's no longer in history.
+                self.replace_history(&messages)?;
             }
 
             if cancel.is_cancelled() {
@@ -1026,6 +1041,13 @@ impl Agent {
                 messages.push(msg);
             }
         }
+        // YYC-138: heal any orphan Tool rows persisted from a previously
+        // truncated turn before the provider sees them.
+        let dropped = sanitize_orphan_tool_messages(&mut messages);
+        if dropped > 0 {
+            tracing::warn!("agent: dropped {dropped} orphan Tool message(s) from loaded history");
+            self.replace_history(&messages)?;
+        }
         self.last_saved_count = messages.len();
 
         messages.push(Message::User {
@@ -1072,6 +1094,14 @@ impl Agent {
                         content: input.to_string(),
                     },
                 ];
+                // YYC-138: align the persisted snapshot with the in-memory
+                // reset so the next append doesn't orphan Tool rows from
+                // the pre-compaction history.
+                if let Err(e) = self.replace_history(messages) {
+                    tracing::warn!(
+                        "agent iteration {iteration}: failed to replace persisted history after compaction: {e}"
+                    );
+                }
                 let _ = ui_tx.send(StreamEvent::Text(format!(
                     "_(compacted {kept_count} earlier turns into a summary to fit context)_\n"
                 )));
@@ -1277,9 +1307,22 @@ impl Agent {
     /// Save only new messages since the last save, avoiding the O(n) DELETE +
     /// re-INSERT that `save_messages` does. Tracks `last_saved_count` so
     /// subsequent calls only persist `messages[last_saved_count..]`.
+    ///
+    /// YYC-138: when compaction rewrites the in-memory `messages` Vec in
+    /// place (replacing N old entries with a 2-entry summary), this
+    /// method's `messages.len()` shrinks below `self.last_saved_count`.
+    /// In that case we *replace* the persisted snapshot wholesale —
+    /// otherwise the next `>` append would slice the wrong tail and
+    /// orphan Tool rows from the pre-compaction history, which the
+    /// provider rejects on the next turn ("Tool message must follow
+    /// Assistant tool_calls"). Use [`Self::replace_history`] for the
+    /// explicit reset call sites; this auto-detect is a defense.
     pub fn save_messages(&mut self, messages: &[Message]) -> Result<()> {
         let new_count = messages.len();
-        if new_count > self.last_saved_count {
+        if new_count < self.last_saved_count {
+            self.memory.save_messages(&self.session_id, messages)?;
+            self.last_saved_count = new_count;
+        } else if new_count > self.last_saved_count {
             let to_save = &messages[self.last_saved_count..];
             self.memory.append_messages(&self.session_id, to_save)?;
             self.last_saved_count = new_count;
@@ -1287,6 +1330,62 @@ impl Agent {
         Ok(())
     }
 
+    /// Replace the persisted history for the active session with the
+    /// supplied `messages` snapshot and reset the incremental save
+    /// cursor. Use this after compaction or any other in-place rewrite
+    /// so subsequent `save_messages` calls append on top of the new
+    /// truncated history rather than leaving orphan Tool rows behind
+    /// (YYC-138).
+    pub fn replace_history(&mut self, messages: &[Message]) -> Result<()> {
+        self.memory.save_messages(&self.session_id, messages)?;
+        self.last_saved_count = messages.len();
+        Ok(())
+    }
+}
+
+/// Drop `Message::Tool` entries whose `tool_call_id` doesn't match any
+/// `tool_call` in the most recent preceding `Message::Assistant`. The
+/// OpenAI-compat provider rejects the wire payload otherwise — a saved
+/// session whose tool sequence got truncated mid-turn (cancel, panic,
+/// pre-fix compaction) leaves orphan Tool rows that fail the next call
+/// with "Tool message must follow tool_calls" (YYC-138).
+///
+/// Returns the number of orphan rows dropped so callers can tracing::warn.
+pub(crate) fn sanitize_orphan_tool_messages(messages: &mut Vec<Message>) -> usize {
+    use std::collections::HashSet;
+    let mut active_call_ids: HashSet<String> = HashSet::new();
+    let mut to_drop = Vec::new();
+    for (idx, msg) in messages.iter().enumerate() {
+        match msg {
+            Message::Assistant {
+                tool_calls: Some(tcs),
+                ..
+            } if !tcs.is_empty() => {
+                active_call_ids = tcs.iter().map(|tc| tc.id.clone()).collect();
+            }
+            Message::Assistant { .. } => {
+                // No tool_calls (or an empty vec — same on the wire).
+                // Any Tool message after this is an orphan until the
+                // next Assistant turn that calls tools.
+                active_call_ids.clear();
+            }
+            Message::Tool { tool_call_id, .. } => {
+                if !active_call_ids.contains(tool_call_id) {
+                    to_drop.push(idx);
+                }
+            }
+            _ => {}
+        }
+    }
+    let dropped = to_drop.len();
+    for idx in to_drop.into_iter().rev() {
+        messages.remove(idx);
+    }
+    dropped
+}
+
+#[allow(dead_code)] // re-export shape kept stable for future external uses
+impl Agent {
     /// Dispatch a single tool call, running BeforeToolCall + AfterToolCall
     /// hooks around it. Returns the result flattened to the `String` payload
     /// expected by `Message::Tool` (media references inlined as `[media: ...]`
@@ -1661,6 +1760,125 @@ mod tests {
         Arc::new(SkillRegistry::new(&std::path::PathBuf::from(
             "/tmp/vulcan-test-skills-nonexistent",
         )))
+    }
+
+    fn asst_with_tool_calls(ids: &[&str]) -> Message {
+        Message::Assistant {
+            content: None,
+            tool_calls: Some(
+                ids.iter()
+                    .map(|id| crate::provider::ToolCall {
+                        id: (*id).into(),
+                        call_type: "function".into(),
+                        function: crate::provider::ToolCallFunction {
+                            name: "noop".into(),
+                            arguments: "{}".into(),
+                        },
+                    })
+                    .collect(),
+            ),
+            reasoning_content: None,
+        }
+    }
+
+    fn tool_msg(id: &str) -> Message {
+        Message::Tool {
+            tool_call_id: id.into(),
+            content: "ok".into(),
+        }
+    }
+
+    #[test]
+    fn sanitize_drops_orphan_tool_with_no_preceding_assistant() {
+        // YYC-138: Tool message with no Assistant tool_calls before it
+        // is the failure mode the provider rejects with "Tool must
+        // follow tool_calls". The sanitizer should drop it.
+        let mut messages = vec![
+            Message::User {
+                content: "hello".into(),
+            },
+            tool_msg("orphan_id"),
+            Message::User {
+                content: "next".into(),
+            },
+        ];
+        let dropped = sanitize_orphan_tool_messages(&mut messages);
+        assert_eq!(dropped, 1);
+        assert_eq!(messages.len(), 2);
+        assert!(matches!(messages[0], Message::User { .. }));
+        assert!(matches!(messages[1], Message::User { .. }));
+    }
+
+    #[test]
+    fn sanitize_keeps_tool_with_matching_assistant_tool_calls() {
+        let mut messages = vec![
+            Message::User {
+                content: "go".into(),
+            },
+            asst_with_tool_calls(&["call_1"]),
+            tool_msg("call_1"),
+            Message::Assistant {
+                content: Some("done".into()),
+                tool_calls: None,
+                reasoning_content: None,
+            },
+        ];
+        let dropped = sanitize_orphan_tool_messages(&mut messages);
+        assert_eq!(dropped, 0);
+        assert_eq!(messages.len(), 4);
+    }
+
+    #[test]
+    fn sanitize_drops_tool_after_no_tool_calls_assistant() {
+        // Asst without tool_calls should clear the active set, so a
+        // following Tool with the previous turn's id is still an
+        // orphan.
+        let mut messages = vec![
+            asst_with_tool_calls(&["call_1"]),
+            tool_msg("call_1"),
+            Message::Assistant {
+                content: Some("text only".into()),
+                tool_calls: None,
+                reasoning_content: None,
+            },
+            tool_msg("call_1"),
+        ];
+        let dropped = sanitize_orphan_tool_messages(&mut messages);
+        assert_eq!(dropped, 1);
+        assert!(matches!(messages.last(), Some(Message::Assistant { .. })));
+    }
+
+    #[test]
+    fn sanitize_treats_empty_tool_calls_as_no_calls() {
+        // Some providers return tool_calls: [] when the model meant to
+        // emit none. Same effect on the wire as None — Tool messages
+        // following are orphans.
+        let mut messages = vec![
+            Message::Assistant {
+                content: None,
+                tool_calls: Some(vec![]),
+                reasoning_content: None,
+            },
+            tool_msg("call_1"),
+        ];
+        let dropped = sanitize_orphan_tool_messages(&mut messages);
+        assert_eq!(dropped, 1);
+        assert_eq!(messages.len(), 1);
+    }
+
+    #[test]
+    fn sanitize_handles_multiple_tool_calls_in_one_assistant_turn() {
+        let mut messages = vec![
+            asst_with_tool_calls(&["a", "b", "c"]),
+            tool_msg("a"),
+            tool_msg("c"),
+            tool_msg("b"),
+            tool_msg("d"), // orphan — not in the active set
+        ];
+        let dropped = sanitize_orphan_tool_messages(&mut messages);
+        assert_eq!(dropped, 1);
+        // a, c, b survive (order preserved); d dropped.
+        assert_eq!(messages.len(), 4);
     }
 
     /// Build an Agent with a MockProvider and minimal setup. Returns the agent
