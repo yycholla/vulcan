@@ -89,14 +89,42 @@ impl Platform for DiscordPlatform {
     }
 
     async fn send(&self, msg: &OutboundMessage) -> Result<crate::platform::SentMessage> {
+        use serenity::builder::CreateMessage;
+        use serenity::model::channel::MessageReference;
+        use serenity::model::id::MessageId;
         let channel_id = ChannelId::new(Self::channel_id_from_chat(&msg.chat_id)?);
+        let mut create = CreateMessage::new().content(&msg.text);
+        if let Some(reply_to) = &msg.reply_to {
+            let parent_id = MessageId::new(
+                reply_to
+                    .parse::<u64>()
+                    .with_context(|| format!("invalid Discord reply_to id '{reply_to}'"))?,
+            );
+            create = create.reference_message(MessageReference::from((channel_id, parent_id)));
+        }
         let sent = channel_id
-            .say(&self.http, &msg.text)
+            .send_message(&self.http, create)
             .await
-            .context("discord send failed")?;
+            .context("discord send_message failed")?;
         Ok(crate::platform::SentMessage {
             message_id: sent.id.get().to_string(),
         })
+    }
+
+    async fn edit(&self, chat_id: &str, message_id: &str, text: &str) -> Result<()> {
+        use serenity::builder::EditMessage;
+        use serenity::model::id::MessageId;
+        let channel_id = ChannelId::new(Self::channel_id_from_chat(chat_id)?);
+        let message_id = MessageId::new(
+            message_id
+                .parse::<u64>()
+                .with_context(|| format!("invalid Discord message_id '{message_id}'"))?,
+        );
+        channel_id
+            .edit_message(&self.http, message_id, EditMessage::new().content(text))
+            .await
+            .context("discord edit_message failed")?;
+        Ok(())
     }
 
     async fn recv(&self) -> Result<InboundMessage> {
@@ -104,9 +132,15 @@ impl Platform for DiscordPlatform {
     }
 
     fn capabilities(&self) -> crate::platform::PlatformCapabilities {
-        // PR-1 declares only what's wired today (text-only send). PR-4
-        // flips edit + media + threads to true alongside their wire impls.
-        crate::platform::PlatformCapabilities::default()
+        // PR-4 flips edit + media + threads on. edit_min_interval_ms = 200ms
+        // gives headroom under Discord's 5/5s edit floor.
+        crate::platform::PlatformCapabilities {
+            supports_edit: true,
+            supports_media_send: true,
+            supports_media_recv: true,
+            supports_threads: true,
+            edit_min_interval_ms: 200,
+        }
     }
 }
 
@@ -204,15 +238,33 @@ mod tests {
     }
 
     #[test]
-    fn discord_capabilities_declare_no_features_for_now() {
-        // PR-1 declares Discord's current shipping surface (no edit, no
-        // typed media). PR-4 flips these to true alongside the matching
-        // wire impls.
-        let p = DiscordPlatform::new("Bot abc.def.ghi").expect("ctor");
+    fn discord_capabilities_now_declare_edit_and_media_true() {
+        // PR-4 flip: edit, media send/recv, threads all true.
+        let p = DiscordPlatform::new("Bot fake.token.xyz").expect("ctor");
         let caps = p.capabilities();
-        assert!(!caps.supports_edit);
-        assert!(!caps.supports_media_send);
-        assert!(!caps.supports_media_recv);
-        assert!(!caps.supports_threads);
+        assert!(caps.supports_edit);
+        assert!(caps.supports_media_send);
+        assert!(caps.supports_media_recv);
+        assert!(caps.supports_threads);
+        assert_eq!(caps.edit_min_interval_ms, 200);
+    }
+
+    #[tokio::test]
+    async fn message_id_from_str_parses_numeric_id() {
+        // Indirect test: the parse path inside send returns a parse
+        // error for non-numeric reply_to ids before any HTTP work.
+        use crate::platform::OutboundMessage;
+        let p = DiscordPlatform::new("Bot fake.token.xyz").expect("ctor");
+        let bad = OutboundMessage {
+            platform: "discord".into(),
+            chat_id: "42".into(),
+            text: "hi".into(),
+            attachments: vec![],
+            reply_to: Some("not-a-number".into()),
+            edit_target: None,
+            turn_id: None,
+        };
+        let err = p.send(&bad).await.expect_err("invalid id");
+        assert!(err.to_string().contains("invalid Discord reply_to id"));
     }
 }
