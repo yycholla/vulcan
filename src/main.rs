@@ -33,7 +33,9 @@ async fn main() -> anyhow::Result<()> {
             // YYC-38: stream tokens to stdout as they arrive instead of
             // blocking on the buffered chat path. Long generations now
             // start producing visible output immediately.
-            let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<StreamEvent>();
+            let (tx, mut rx) = tokio::sync::mpsc::channel::<StreamEvent>(
+                vulcan::provider::STREAM_CHANNEL_CAPACITY,
+            );
             let stream_task = tokio::spawn(async move { agent.run_prompt_stream(&text, tx).await });
 
             let mut stdout = std::io::stdout().lock();

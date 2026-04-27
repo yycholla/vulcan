@@ -146,7 +146,7 @@ mod tests {
             &self,
             m: &[Message],
             t: &[ToolDefinition],
-            tx: tokio::sync::mpsc::UnboundedSender<StreamEvent>,
+            tx: tokio::sync::mpsc::Sender<StreamEvent>,
             c: CancellationToken,
         ) -> Result<()> {
             self.0.chat_stream(m, t, tx, c).await
@@ -173,7 +173,7 @@ mod tests {
             &self,
             _m: &[Message],
             _t: &[ToolDefinition],
-            _tx: tokio::sync::mpsc::UnboundedSender<StreamEvent>,
+            _tx: tokio::sync::mpsc::Sender<StreamEvent>,
             _c: CancellationToken,
         ) -> Result<()> {
             panic!("PanickingProvider: chat_stream panic");
