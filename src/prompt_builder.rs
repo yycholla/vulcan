@@ -149,6 +149,7 @@ mod tests {
         normalize_cwd_line(&out)
     }
 
+
     fn normalize_cwd_line(prompt: &str) -> String {
         let mut out = String::with_capacity(prompt.len());
         for line in prompt.split_inclusive('\n') {
@@ -156,13 +157,18 @@ mod tests {
             if trimmed.starts_with("- working directory:") {
                 let leading_ws = &line[..line.len() - trimmed.len()];
                 out.push_str(leading_ws);
-                out.push_str("- working directory: <CWD>\n");
+                out.push_str("- working directory: <CWD>");
+                // Preserve original line ending
+                if line.ends_with('\n') {
+                    out.push('\n');
+                }
             } else {
                 out.push_str(line);
             }
         }
         out
     }
+
 
     /// YYC-86: the prompt must steer the model toward native tools and
     /// position bash as a last resort. Without this section, even with
