@@ -352,6 +352,45 @@ fn reasoning_content_round_trips() {
     }
 }
 
+// YYC-150: try_open_at must return an Err (not panic) when the DB
+// path can't be opened. Pointing at a nonexistent parent directory
+// triggers SQLite's open-with-create to fail; we assert the error
+// chain includes the path so operators see actionable context.
+#[test]
+fn try_open_at_returns_err_when_parent_missing() {
+    let dir = TempDir::new().unwrap();
+    let bogus = dir.path().join("does_not_exist").join("sessions.db");
+    let err = match SessionStore::try_open_at(&bogus) {
+        Ok(_) => panic!("expected open to fail"),
+        Err(e) => e,
+    };
+    let chain = format!("{err:#}");
+    assert!(
+        chain.contains("open session DB"),
+        "error chain should mention the failing op, got: {chain}",
+    );
+    assert!(
+        chain.contains("sessions.db"),
+        "error chain should include the DB path, got: {chain}",
+    );
+}
+
+// YYC-150: try_open_at must succeed for a normal path and produce a
+// store that round-trips data — guards against a future regression
+// where the new API is broken in some subtle way that the panic
+// path didn't exercise.
+#[test]
+fn try_open_at_returns_ok_for_writable_path() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("ok.db");
+    let store = SessionStore::try_open_at(&path).expect("open ok");
+    let id = uuid::Uuid::new_v4().to_string();
+    store
+        .save_session_metadata(&id, None, None)
+        .expect("save metadata");
+    assert_eq!(store.last_session_id().as_deref(), Some(id.as_str()));
+}
+
 // YYC-149: every connection used by SessionStore should have the
 // 5-second busy_timeout applied so a contended writer doesn't fail
 // immediately with SQLITE_BUSY and pin a tokio worker thread.
