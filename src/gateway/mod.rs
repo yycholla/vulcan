@@ -209,6 +209,10 @@ fn spawn_inbound_dispatcher(
     commands: Arc<CommandDispatcher>,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
+        // YYC-146: worker lifecycle is observable via tracing so a stuck
+        // dispatcher (e.g. claim_next failing every tick) is visible
+        // without inspecting queue state directly.
+        tracing::info!(target: "gateway::worker", "inbound dispatcher started");
         let handler_inbound = Arc::clone(&inbound);
         let handler_outbound = Arc::clone(&outbound);
         let handler_agent_map = Arc::clone(&agent_map);

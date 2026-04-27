@@ -186,10 +186,12 @@ impl InboundQueue {
             |row| row.get(0),
         )?;
         let next_state = if attempts as u32 >= self.max_attempts {
-            tracing::warn!(
+            // YYC-146: DLQ transitions log at error so operators don't
+            // need to query state to notice exhausted rows.
+            tracing::error!(
                 target: "gateway::queue",
                 id, attempts, error, max_attempts = self.max_attempts,
-                "inbound message exhausted retries; routing to dead-letter queue",
+                "inbound DLQ transition: row exhausted retries, routing to dead-letter queue",
             );
             "dead"
         } else {
@@ -408,11 +410,8 @@ impl OutboundQueue {
     pub async fn mark_failed(&self, id: i64, error: &str) -> Result<()> {
         let row = self.peek(id).await?;
         let now = chrono::Utc::now().timestamp();
-        let next_state = if row.attempts as u32 >= self.max_attempts {
-            "failed"
-        } else {
-            "pending"
-        };
+        let dlq = row.attempts as u32 >= self.max_attempts;
+        let next_state = if dlq { "failed" } else { "pending" };
         let next_at = now + outbound_backoff_secs(row.attempts);
         {
             let conn = self
@@ -426,7 +425,30 @@ impl OutboundQueue {
                 params![next_state, next_at, error, id],
             )?;
         }
-        tracing::warn!(target: "gateway::queue", id, error, "outbound delivery failed");
+        // YYC-146: DLQ transitions log at error with lane metadata.
+        // Retries stay at warn so operators can filter on level.
+        if dlq {
+            tracing::error!(
+                target: "gateway::queue",
+                id,
+                platform = %row.platform,
+                chat_id = %row.chat_id,
+                attempts = row.attempts,
+                max_attempts = self.max_attempts,
+                error,
+                "outbound DLQ transition: row exhausted retries",
+            );
+        } else {
+            tracing::warn!(
+                target: "gateway::queue",
+                id,
+                platform = %row.platform,
+                chat_id = %row.chat_id,
+                attempts = row.attempts,
+                error,
+                "outbound delivery failed; will retry",
+            );
+        }
         Ok(())
     }
 
@@ -626,6 +648,60 @@ mod tests {
         let row = q.peek(id).await.unwrap();
         assert_eq!(row.state, "failed");
         assert_eq!(row.attempts, 3);
+    }
+
+    // YYC-146: a DLQ transition must surface as an `error` event with
+    // lane metadata so operators see exhausted rows without polling
+    // queue state. Captures tracing output to a buffer and asserts the
+    // structured fields appear.
+    #[tokio::test]
+    async fn outbound_dlq_transition_logs_at_error_with_lane() {
+        use std::sync::{Arc, Mutex};
+
+        #[derive(Clone)]
+        struct VecMakeWriter(Arc<Mutex<Vec<u8>>>);
+        struct SharedVec(Arc<Mutex<Vec<u8>>>);
+        impl std::io::Write for SharedVec {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(buf);
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for VecMakeWriter {
+            type Writer = SharedVec;
+            fn make_writer(&'a self) -> SharedVec {
+                SharedVec(self.0.clone())
+            }
+        }
+
+        let buf = Arc::new(Mutex::new(Vec::<u8>::new()));
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(VecMakeWriter(buf.clone()))
+            .with_max_level(tracing::Level::ERROR)
+            .with_ansi(false)
+            .finish();
+        let _guard = tracing::subscriber::set_default(subscriber);
+
+        let q = OutboundQueue::new(test_conn(), 2);
+        let id = q.enqueue(sample_out_msg()).await.unwrap();
+        for _ in 0..2 {
+            let now = chrono::Utc::now().timestamp() + 1_000_000;
+            let _ = q.claim_due(now).await.unwrap().expect("claim");
+            q.mark_failed(id, "boom").await.unwrap();
+        }
+
+        let captured = String::from_utf8(buf.lock().unwrap().clone()).unwrap();
+        assert!(
+            captured.contains("ERROR") && captured.contains("DLQ"),
+            "expected ERROR-level DLQ event, got: {captured}",
+        );
+        assert!(
+            captured.contains("platform=loopback") && captured.contains("chat_id=c1"),
+            "expected lane metadata in event, got: {captured}",
+        );
     }
 
     #[tokio::test]

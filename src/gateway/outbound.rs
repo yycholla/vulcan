@@ -84,6 +84,13 @@ async fn dispatch_loop(
     render_registry: Arc<RenderRegistry>,
     poll_interval: Duration,
 ) {
+    // YYC-146: lifecycle log so operators can confirm the dispatcher
+    // is running without grepping for delivery events.
+    tracing::info!(
+        target: "gateway::outbound",
+        poll_ms = poll_interval.as_millis() as u64,
+        "outbound dispatcher started",
+    );
     let mut ticker = tokio::time::interval(poll_interval);
     // Skip missed ticks rather than bursting them after a long pause (laptop
     // sleep, GC stall) — drain_due is idempotent so the next tick handles
