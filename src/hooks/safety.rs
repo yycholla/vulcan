@@ -51,11 +51,13 @@ impl SafetyHook {
     /// the *exact same* command in this session will bypass the safety check.
     /// Public so the TUI can pre-seed approvals if it ever wants to.
     pub fn approve(&self, command: &str) {
-        self.approved.lock().insert(command.to_string());
+        self.approved.lock().insert(canonical_command_key(command));
     }
 
     fn is_approved(&self, command: &str) -> bool {
-        self.approved.lock().contains(command)
+        self.approved
+            .lock()
+            .contains(&canonical_command_key(command))
     }
 }
 
@@ -83,14 +85,33 @@ impl HookHandler for SafetyHook {
         args: &Value,
         cancel: CancellationToken,
     ) -> Result<HookOutcome> {
-        if tool != "bash" {
-            return Ok(HookOutcome::Continue);
-        }
-
-        let command = match args.get("command").and_then(|v| v.as_str()) {
-            Some(c) => c,
-            None => return Ok(HookOutcome::Continue),
+        // YYC-130: also intercept pty_write so the model can't bypass the
+        // bash-tool check by routing the same command through a PTY's
+        // stdin. The PTY tool writes raw bytes; if the model is
+        // controlling an interactive shell session it can issue arbitrary
+        // commands without going through the BashTool path.
+        let command = match tool {
+            "bash" => match args.get("command").and_then(|v| v.as_str()) {
+                Some(c) => c.to_string(),
+                None => return Ok(HookOutcome::Continue),
+            },
+            "pty_write" => match args.get("input").and_then(|v| v.as_str()) {
+                Some(input) => {
+                    // Treat each newline-terminated line as a candidate
+                    // command. Strip the trailing CR/LF for matching but
+                    // preserve them in the cache key (the canonical key
+                    // path normalizes whitespace).
+                    let trimmed = input.trim_end_matches(['\r', '\n']);
+                    if trimmed.is_empty() {
+                        return Ok(HookOutcome::Continue);
+                    }
+                    trimmed.to_string()
+                }
+                None => return Ok(HookOutcome::Continue),
+            },
+            _ => return Ok(HookOutcome::Continue),
         };
+        let command = command.as_str();
 
         let reason = match match_dangerous(command) {
             Some(r) => r,
@@ -271,6 +292,25 @@ fn match_dangerous_tokens(tokens: &[String]) -> Option<&'static str> {
     }
 
     None
+}
+
+/// Canonical key for the per-session approval cache (YYC-130).
+///
+/// Tokenizes the command and joins with single spaces so semantically
+/// equivalent variants — extra whitespace, equivalent quoting, mixed
+/// space/tab — collapse to the same key. Variants that change *meaning*
+/// (sudo prefix, different target path, different flag values) keep
+/// distinct keys so an approval for one doesn't silently authorize the
+/// other.
+///
+/// Pipeline / sequence operators are preserved as their own tokens so
+/// approving `cd /tmp` doesn't authorize `cd /tmp && rm -rf /`.
+fn canonical_command_key(command: &str) -> String {
+    let tokens = shell_tokenize(command);
+    if tokens.is_empty() {
+        return command.trim().to_string();
+    }
+    tokens.join(" ")
 }
 
 /// Minimal shell tokenizer — handles single + double quotes, backslash escapes,
@@ -728,5 +768,155 @@ mod tests {
             HookOutcome::Continue => {}
             other => panic!("expected Continue, got {other:?}"),
         }
+    }
+
+    // ── YYC-130: canonical-key approval cache ───────────────────────────
+
+    #[test]
+    fn canonical_key_normalizes_whitespace() {
+        // Extra spaces / tabs between tokens shouldn't produce distinct
+        // cache entries — each is the same dangerous command.
+        assert_eq!(
+            canonical_command_key("rm -rf /"),
+            canonical_command_key("rm  -rf  /"),
+        );
+        assert_eq!(
+            canonical_command_key("rm -rf /"),
+            canonical_command_key("rm\t-rf\t/"),
+        );
+    }
+
+    #[test]
+    fn canonical_key_strips_equivalent_quoting() {
+        // YYC-130: approving `rm -rf /` should also cover `rm -rf "/"`
+        // (and `rm -rf '/'`) because the tokenizer drops quote chars —
+        // a model can't bypass the cache by quoting the target.
+        assert_eq!(
+            canonical_command_key("rm -rf /"),
+            canonical_command_key(r#"rm -rf "/""#),
+        );
+        assert_eq!(
+            canonical_command_key("rm -rf /"),
+            canonical_command_key("rm -rf '/'"),
+        );
+    }
+
+    #[test]
+    fn canonical_key_keeps_sudo_distinct() {
+        // YYC-130 acceptance: sudo prefix doesn't bypass — approving
+        // `rm -rf /tmp` must NOT authorize `sudo rm -rf /tmp` (different
+        // privilege model).
+        assert_ne!(
+            canonical_command_key("rm -rf /tmp"),
+            canonical_command_key("sudo rm -rf /tmp"),
+        );
+        assert_ne!(
+            canonical_command_key("rm -rf /tmp"),
+            canonical_command_key("doas rm -rf /tmp"),
+        );
+    }
+
+    #[test]
+    fn canonical_key_keeps_target_paths_distinct() {
+        // Different target paths must produce different keys so
+        // approving a scoped delete doesn't authorize a root delete.
+        assert_ne!(
+            canonical_command_key("rm -rf /tmp/build"),
+            canonical_command_key("rm -rf /"),
+        );
+        assert_ne!(
+            canonical_command_key("rm -rf /tmp/foo"),
+            canonical_command_key("rm -rf /tmp/foo/.."),
+        );
+    }
+
+    #[test]
+    fn canonical_key_keeps_pipeline_segments_distinct() {
+        // Approving `cd /tmp` must NOT authorize `cd /tmp && rm -rf /`
+        // — the pipeline operator is a token that survives normalization.
+        assert_ne!(
+            canonical_command_key("cd /tmp"),
+            canonical_command_key("cd /tmp && rm -rf /"),
+        );
+    }
+
+    #[tokio::test]
+    async fn approval_cache_treats_quoted_target_as_same_command() {
+        // Pin behavior: approve once, then a quoted variant lands in
+        // the cache without re-prompting the user.
+        let hook = SafetyHook::new();
+        hook.approve("rm -rf /");
+
+        let args = serde_json::json!({ "command": r#"rm -rf "/""# });
+        let outcome = hook
+            .before_tool_call("bash", &args, CancellationToken::new())
+            .await
+            .unwrap();
+        assert!(matches!(outcome, HookOutcome::Continue));
+    }
+
+    #[tokio::test]
+    async fn approval_cache_does_not_authorize_sudo_variant() {
+        // YYC-130: approving the unsudo'd command must not silently
+        // authorize the sudo'd one.
+        let hook = SafetyHook::new();
+        hook.approve("rm -rf /");
+
+        let args = serde_json::json!({ "command": "sudo rm -rf /" });
+        let outcome = hook
+            .before_tool_call("bash", &args, CancellationToken::new())
+            .await
+            .unwrap();
+        assert!(matches!(outcome, HookOutcome::Block { .. }));
+    }
+
+    // ── YYC-130: pty_write interception ─────────────────────────────────
+
+    #[tokio::test]
+    async fn pty_write_with_dangerous_command_blocks_without_pause_emitter() {
+        // YYC-130: PTY stdin route must go through the same safety
+        // check as the bash tool. Without a pause emitter the hook
+        // hard-blocks (matches the bash-tool behavior).
+        let hook = SafetyHook::new();
+        let args = serde_json::json!({
+            "session_id": "x",
+            "input": "rm -rf /\n",
+        });
+        let outcome = hook
+            .before_tool_call("pty_write", &args, CancellationToken::new())
+            .await
+            .unwrap();
+        assert!(matches!(outcome, HookOutcome::Block { .. }));
+    }
+
+    #[tokio::test]
+    async fn pty_write_with_safe_input_continues() {
+        // Sanity check: regular keystrokes / typing into a PTY shouldn't
+        // be intercepted.
+        let hook = SafetyHook::new();
+        let args = serde_json::json!({
+            "session_id": "x",
+            "input": "ls\n",
+        });
+        let outcome = hook
+            .before_tool_call("pty_write", &args, CancellationToken::new())
+            .await
+            .unwrap();
+        assert!(matches!(outcome, HookOutcome::Continue));
+    }
+
+    #[tokio::test]
+    async fn pty_write_empty_input_continues() {
+        // Empty / pure-whitespace stdin should not engage the matcher.
+        let hook = SafetyHook::new();
+        let args = serde_json::json!({
+            "session_id": "x",
+            "input": "\n",
+        });
+        let outcome = hook
+            .before_tool_call("pty_write", &args, CancellationToken::new())
+            .await
+            .unwrap();
+        assert!(matches!(outcome, HookOutcome::Continue));
     }
 }
