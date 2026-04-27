@@ -23,8 +23,10 @@ pub mod loopback;
 pub mod outbound;
 pub mod queue;
 pub mod registry;
+pub mod render_registry;
 pub mod routes;
 pub mod server;
+pub mod stream_render;
 pub mod worker;
 
 pub async fn run(config: &Config, bind_override: Option<String>) -> Result<()> {
@@ -90,8 +92,13 @@ where
     }
 
     let evictor = agent_map.spawn_evictor();
-    let outbound_dispatcher =
-        OutboundDispatcher::new(Arc::clone(&outbound), Arc::clone(&registry)).spawn();
+    let render_registry = Arc::new(crate::gateway::render_registry::RenderRegistry::new());
+    let outbound_dispatcher = OutboundDispatcher::new(
+        Arc::clone(&outbound),
+        Arc::clone(&registry),
+        Arc::clone(&render_registry),
+    )
+    .spawn();
     let discord_dispatcher = if gateway.discord.enabled {
         Some(DiscordPlatform::spawn_gateway_client(
             gateway.discord.bot_token.clone(),
@@ -417,6 +424,9 @@ mod tests {
                 chat_id: "c".into(),
                 user_id: "u".into(),
                 text: "recover me".into(),
+                message_id: None,
+                reply_to: None,
+                attachments: vec![],
             })
             .await
             .unwrap();

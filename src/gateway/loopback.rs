@@ -141,6 +141,9 @@ impl Platform for LoopbackPlatform {
             chat_id: parsed["chat_id"].as_str().unwrap_or_default().to_string(),
             user_id: parsed["user_id"].as_str().unwrap_or_default().to_string(),
             text: parsed["text"].as_str().unwrap_or_default().to_string(),
+            message_id: None,
+            reply_to: None,
+            attachments: vec![],
         })
     }
 }
@@ -157,6 +160,8 @@ mod tests {
             chat_id: "c".into(),
             text: "one".into(),
             attachments: vec![],
+            reply_to: None,
+            edit_target: None,
         };
         let m2 = OutboundMessage {
             text: "two".into(),
@@ -178,6 +183,8 @@ mod tests {
             chat_id: "c".into(),
             text: "x".into(),
             attachments: vec![],
+            reply_to: None,
+            edit_target: None,
         };
         assert!(lp.send(&m).await.is_err());
         assert!(lp.send(&m).await.is_err());
@@ -194,6 +201,8 @@ mod tests {
             chat_id: "c".into(),
             text: "x".into(),
             attachments: vec![],
+            reply_to: None,
+            edit_target: None,
         };
         let s1 = lp.send(&m).await.unwrap();
         let s2 = lp.send(&m).await.unwrap();

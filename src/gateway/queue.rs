@@ -2,7 +2,7 @@ use anyhow::{Result, anyhow};
 use rusqlite::params;
 
 use crate::memory::DbPool;
-use crate::platform::{InboundMessage, OutboundMessage};
+use crate::platform::{InboundMessage, OutboundAttachment, OutboundMessage};
 
 /// Default per-row attempt cap before mark_failed routes a row to the
 /// dead-letter queue (YYC-137). Operators can override via
@@ -151,9 +151,18 @@ impl InboundQueue {
         let attachments_json = serde_json::to_string(&msg.attachments)?;
         tx.execute(
             "INSERT INTO outbound_queue \
-             (platform, chat_id, text, attachments_json, enqueued_at, next_attempt_at, state) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?5, 'pending')",
-            params![msg.platform, msg.chat_id, msg.text, attachments_json, now],
+             (platform, chat_id, text, attachments_json, enqueued_at, next_attempt_at, state, \
+              edit_target, reply_to) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?5, 'pending', ?6, ?7)",
+            params![
+                msg.platform,
+                msg.chat_id,
+                msg.text,
+                attachments_json,
+                now,
+                msg.edit_target,
+                msg.reply_to,
+            ],
         )?;
         let outbound_id = tx.last_insert_rowid();
         tx.execute("DELETE FROM inbound_queue WHERE id = ?1", params![id])?;
@@ -292,12 +301,18 @@ pub struct OutboundRow {
     pub platform: String,
     pub chat_id: String,
     pub text: String,
-    pub attachments: Vec<String>,
+    pub attachments: Vec<OutboundAttachment>,
     pub enqueued_at: i64,
     pub next_attempt_at: i64,
     pub attempts: i64,
     pub state: String,
     pub last_error: Option<String>,
+    /// YYC-18 PR-2a: anchor for edit-in-place streaming. When `Some`,
+    /// the OutboundDispatcher routes to `Platform::edit` instead of
+    /// `Platform::send`.
+    pub edit_target: Option<String>,
+    /// Reply / thread target on the platform side.
+    pub reply_to: Option<String>,
 }
 
 // Retry waits indexed by failures-so-far: 1st → 5s, 2nd → 30s, ... clamps at 7200s.
@@ -321,9 +336,18 @@ impl OutboundQueue {
         let attachments_json = serde_json::to_string(&msg.attachments)?;
         conn.execute(
             "INSERT INTO outbound_queue \
-             (platform, chat_id, text, attachments_json, enqueued_at, next_attempt_at, state) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?5, 'pending')",
-            params![msg.platform, msg.chat_id, msg.text, attachments_json, now],
+             (platform, chat_id, text, attachments_json, enqueued_at, next_attempt_at, state, \
+              edit_target, reply_to) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?5, 'pending', ?6, ?7)",
+            params![
+                msg.platform,
+                msg.chat_id,
+                msg.text,
+                attachments_json,
+                now,
+                msg.edit_target,
+                msg.reply_to,
+            ],
         )?;
         Ok(conn.last_insert_rowid())
     }
@@ -338,14 +362,14 @@ impl OutboundQueue {
              SET state='sending', attempts = attempts + 1 \
              WHERE id = (SELECT id FROM outbound_queue \
                          WHERE state='pending' AND next_attempt_at <= ?1 \
-                         ORDER BY next_attempt_at ASC LIMIT 1) \
+                         ORDER BY next_attempt_at ASC, id ASC LIMIT 1) \
              RETURNING id, platform, chat_id, text, attachments_json, enqueued_at, \
-                       next_attempt_at, attempts, state, last_error",
+                       next_attempt_at, attempts, state, last_error, edit_target, reply_to",
         )?;
         let mut rows = stmt.query(params![now])?;
         if let Some(row) = rows.next()? {
             let attachments_json: String = row.get(4)?;
-            let attachments: Vec<String> = serde_json::from_str(&attachments_json)?;
+            let attachments: Vec<OutboundAttachment> = serde_json::from_str(&attachments_json)?;
             Ok(Some(OutboundRow {
                 id: row.get(0)?,
                 platform: row.get(1)?,
@@ -357,6 +381,8 @@ impl OutboundQueue {
                 attempts: row.get(7)?,
                 state: row.get(8)?,
                 last_error: row.get(9)?,
+                edit_target: row.get(10)?,
+                reply_to: row.get(11)?,
             }))
         } else {
             Ok(None)
@@ -416,13 +442,13 @@ impl OutboundQueue {
             .map_err(|e| anyhow!("queue DB pool checkout: {e}"))?;
         let mut stmt = conn.prepare(
             "SELECT id, platform, chat_id, text, attachments_json, enqueued_at, \
-                    next_attempt_at, attempts, state, last_error \
+                    next_attempt_at, attempts, state, last_error, edit_target, reply_to \
              FROM outbound_queue WHERE id = ?1",
         )?;
         let mut rows = stmt.query(params![id])?;
         if let Some(row) = rows.next()? {
             let attachments_json: String = row.get(4)?;
-            let attachments: Vec<String> = serde_json::from_str(&attachments_json)?;
+            let attachments: Vec<OutboundAttachment> = serde_json::from_str(&attachments_json)?;
             Ok(OutboundRow {
                 id: row.get(0)?,
                 platform: row.get(1)?,
@@ -434,6 +460,8 @@ impl OutboundQueue {
                 attempts: row.get(7)?,
                 state: row.get(8)?,
                 last_error: row.get(9)?,
+                edit_target: row.get(10)?,
+                reply_to: row.get(11)?,
             })
         } else {
             Err(anyhow!("row not found"))
@@ -455,6 +483,9 @@ mod tests {
             chat_id: "c1".into(),
             user_id: "u1".into(),
             text: "hi".into(),
+            message_id: None,
+            reply_to: None,
+            attachments: vec![],
         }
     }
 
@@ -464,7 +495,57 @@ mod tests {
             chat_id: "c1".into(),
             text: "hello".into(),
             attachments: vec![],
+            reply_to: None,
+            edit_target: None,
         }
+    }
+
+    #[tokio::test]
+    async fn outbound_queue_round_trips_edit_target_and_reply_to() {
+        let q = OutboundQueue::new(test_conn(), 5);
+        let msg = OutboundMessage {
+            platform: "loopback".into(),
+            chat_id: "c".into(),
+            text: "edit me".into(),
+            attachments: vec![],
+            reply_to: Some("parent-msg-1".into()),
+            edit_target: Some("anchor-msg-7".into()),
+        };
+        q.enqueue(msg).await.unwrap();
+        let row = q
+            .claim_due(chrono::Utc::now().timestamp())
+            .await
+            .unwrap()
+            .expect("row");
+        assert_eq!(row.edit_target, Some("anchor-msg-7".into()));
+        assert_eq!(row.reply_to, Some("parent-msg-1".into()));
+    }
+
+    #[tokio::test]
+    async fn outbound_queue_round_trips_typed_attachments() {
+        use crate::platform::{AttachmentKind, OutboundAttachment};
+        let q = OutboundQueue::new(test_conn(), 5);
+        let msg = OutboundMessage {
+            platform: "loopback".into(),
+            chat_id: "c".into(),
+            text: "hi".into(),
+            attachments: vec![OutboundAttachment {
+                path: std::path::PathBuf::from("/tmp/x.png"),
+                kind: AttachmentKind::Image,
+                caption: Some("cap".into()),
+            }],
+            reply_to: None,
+            edit_target: None,
+        };
+        q.enqueue(msg).await.unwrap();
+        let row = q
+            .claim_due(chrono::Utc::now().timestamp())
+            .await
+            .unwrap()
+            .expect("row");
+        assert_eq!(row.attachments.len(), 1);
+        assert_eq!(row.attachments[0].kind, AttachmentKind::Image);
+        assert_eq!(row.attachments[0].caption.as_deref(), Some("cap"));
     }
 
     #[tokio::test]
@@ -739,6 +820,8 @@ mod tests {
                     chat_id: "c1".into(),
                     text: "reply".into(),
                     attachments: vec![],
+                    reply_to: None,
+                    edit_target: None,
                 },
             )
             .await

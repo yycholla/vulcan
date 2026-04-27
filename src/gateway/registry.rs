@@ -52,6 +52,8 @@ mod tests {
             chat_id: chat.into(),
             text: text.into(),
             attachments: vec![],
+            reply_to: None,
+            edit_target: None,
         }
     }
 
