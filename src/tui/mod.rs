@@ -20,10 +20,13 @@ use crate::hooks::audit::AuditHook;
 use crate::pause::{self, AgentResume, PauseKind};
 use crate::provider::StreamEvent;
 
+pub mod chat_message;
 pub mod chat_render;
 pub mod keybinds;
 pub mod markdown;
 pub mod model_picker;
+pub mod orchestration;
+pub mod picker_state;
 pub mod state;
 pub mod theme;
 pub mod views;
