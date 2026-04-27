@@ -771,3 +771,61 @@ fn summarize_tool_result_per_tool_meta() {
     let s = summarize_tool_result("unknown_tool", "line one\nline two\nline three").unwrap();
     assert!(s.starts_with("3 lines"), "got {s}");
 }
+
+// YYC-152: is_local_base_url contract tests. Cover scheme/no-scheme,
+// IPv4 + IPv6 forms, RFC1918 + link-local + .local, and the
+// previously-broken edge cases (IPv6 brackets, IPv4-mapped IPv6).
+#[test]
+fn is_local_base_url_accepts_localhost_forms() {
+    assert!(is_local_base_url("http://localhost:11434/v1"));
+    assert!(is_local_base_url("https://LOCALHOST:8080"));
+    assert!(is_local_base_url("localhost:11434"));
+    assert!(is_local_base_url("http://my-host.local"));
+    assert!(is_local_base_url("http://laptop.LOCAL"));
+}
+
+#[test]
+fn is_local_base_url_accepts_ipv4_loopback_and_private() {
+    assert!(is_local_base_url("http://127.0.0.1:11434"));
+    assert!(is_local_base_url("http://0.0.0.0:8080"));
+    assert!(is_local_base_url("http://10.0.0.5"));
+    assert!(is_local_base_url("http://192.168.1.5"));
+    assert!(is_local_base_url("http://172.16.0.1"));
+    assert!(is_local_base_url("http://172.31.255.254"));
+    assert!(is_local_base_url("http://169.254.1.1"));
+}
+
+#[test]
+fn is_local_base_url_rejects_public_ipv4() {
+    assert!(!is_local_base_url("http://8.8.8.8"));
+    assert!(!is_local_base_url("https://api.example.com"));
+    assert!(!is_local_base_url("http://172.32.0.1")); // outside 172.16/12
+    assert!(!is_local_base_url("http://192.169.0.1")); // outside 192.168/16
+}
+
+#[test]
+fn is_local_base_url_handles_ipv6_brackets() {
+    // Previously the hand-rolled parser tripped on the bracket
+    // form when a port was present (YYC-152).
+    assert!(is_local_base_url("http://[::1]:11434"));
+    assert!(is_local_base_url("http://[::1]"));
+    assert!(is_local_base_url("http://[fc00::1]:8080")); // ULA
+    assert!(!is_local_base_url("http://[2001:4860:4860::8888]"));
+}
+
+#[test]
+fn is_local_base_url_handles_ipv4_mapped_ipv6() {
+    // ::ffff:127.0.0.1 must classify as local because it routes
+    // to a loopback IPv4. Previously the hand-rolled parser
+    // rejected this form.
+    assert!(is_local_base_url("http://[::ffff:127.0.0.1]:11434"));
+    assert!(is_local_base_url("http://[::ffff:192.168.1.5]"));
+    assert!(!is_local_base_url("http://[::ffff:8.8.8.8]"));
+}
+
+#[test]
+fn is_local_base_url_returns_false_on_malformed_input() {
+    assert!(!is_local_base_url(""));
+    assert!(!is_local_base_url("not a url"));
+    assert!(!is_local_base_url("http://"));
+}

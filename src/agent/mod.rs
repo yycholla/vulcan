@@ -29,41 +29,45 @@ mod skills;
 mod tests;
 
 /// Heuristic for "local" provider endpoints (loopback, link-local, mDNS
-/// `.local`, RFC1918 private IPv4). Used to skip the API key requirement
-/// when switching to or starting up against a self-hosted endpoint that
-/// typically doesn't need auth.
+/// `.local`, RFC1918 private IPv4, IPv6 ULA, IPv4-mapped IPv6). Used
+/// to skip the API key requirement when switching to or starting up
+/// against a self-hosted endpoint that typically doesn't need auth.
+///
+/// YYC-152: parses through `url::Url` so IPv6 brackets (`[::1]:11434`),
+/// percent-encoded hosts, and IPv4-mapped IPv6 (`::ffff:192.168.1.1`)
+/// are handled by a real URL parser instead of hand-rolled split/strip.
+/// Bare host:port input (no scheme) is normalized with `http://`
+/// before parsing so the heuristic still works on user-pasted endpoints.
 pub(in crate::agent) fn is_local_base_url(base_url: &str) -> bool {
-    let lower = base_url.to_ascii_lowercase();
-    let host_port = lower
-        .split_once("://")
-        .map(|(_, rest)| rest)
-        .unwrap_or(&lower);
-    let host = host_port.split(['/', '?']).next().unwrap_or("");
-    let host = host
-        .strip_prefix('[')
-        .and_then(|h| h.split_once(']').map(|(host, _)| host))
-        .unwrap_or_else(|| host.split(':').next().unwrap_or(""));
-    if host == "localhost" || host.ends_with(".local") {
-        return true;
-    }
-    if host == "127.0.0.1" || host == "0.0.0.0" || host == "::1" {
-        return true;
-    }
-    let parts: Vec<&str> = host.split('.').collect();
-    if parts.len() == 4 {
-        let a = parts[0].parse::<u8>().ok();
-        let b = parts[1].parse::<u8>().ok();
-        if let (Some(a), Some(b)) = (a, b) {
-            if a == 127 || a == 10 || (a == 192 && b == 168) || (a == 172 && (16..=31).contains(&b))
-            {
-                return true;
-            }
-            if a == 169 && b == 254 {
-                return true;
-            }
+    let normalized = if base_url.contains("://") {
+        base_url.to_string()
+    } else {
+        format!("http://{base_url}")
+    };
+    let Ok(url) = url::Url::parse(&normalized) else {
+        return false;
+    };
+    match url.host() {
+        Some(url::Host::Domain(d)) => {
+            let dl = d.to_ascii_lowercase();
+            dl == "localhost" || dl.ends_with(".local")
         }
+        Some(url::Host::Ipv4(ip)) => is_local_ipv4(ip),
+        Some(url::Host::Ipv6(ip)) => {
+            if ip.is_loopback() || ip.is_unspecified() || ip.is_unique_local() {
+                return true;
+            }
+            if let Some(v4) = ip.to_ipv4_mapped() {
+                return is_local_ipv4(v4);
+            }
+            false
+        }
+        None => false,
     }
-    false
+}
+
+fn is_local_ipv4(ip: std::net::Ipv4Addr) -> bool {
+    ip.is_loopback() || ip.is_private() || ip.is_link_local() || ip.is_unspecified()
 }
 
 /// The core agent — orchestrates the LLM, tools, hooks, and state.
