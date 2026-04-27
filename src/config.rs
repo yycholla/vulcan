@@ -394,6 +394,18 @@ pub struct DiscordConfig {
     pub bot_token: String,
     #[serde(default)]
     pub allow_bots: bool,
+    /// YYC-19: guild ids the bot will respond in. Empty = open (all
+    /// guilds the bot has been invited to). When set, messages from
+    /// any other guild are dropped before they hit the inbound
+    /// queue. DM messages (no guild) are always allowed.
+    #[serde(default)]
+    pub allowed_guild_ids: Vec<u64>,
+    /// YYC-19: channel ids (including thread channels) the bot
+    /// will respond in. Empty = open. When both
+    /// `allowed_guild_ids` and `allowed_channel_ids` are set, both
+    /// filters must pass.
+    #[serde(default)]
+    pub allowed_channel_ids: Vec<u64>,
 }
 
 /// YYC-18 PR-3: Telegram connector configuration.
