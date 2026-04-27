@@ -10,11 +10,11 @@ use crate::hooks::{HookRegistry, ToolCallDecision};
 use crate::memory::SessionStore;
 use crate::pause::PauseSender;
 use crate::prompt_builder::PromptBuilder;
-use crate::provider::openai::OpenAIProvider;
+use crate::provider::factory::{DefaultProviderFactory, ProviderFactory};
 use crate::provider::{ChatResponse, LLMProvider, Message, StreamEvent, ToolCall, ToolDefinition};
 use crate::skills::SkillRegistry;
 use crate::tools::{ToolRegistry, ToolResult};
-use anyhow::{Context, Result};
+use anyhow::Result;
 use serde_json::Value;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
@@ -200,18 +200,13 @@ impl Agent {
         let supports_json_mode = selection.model.features.json_mode;
         let pricing = selection.pricing.clone();
 
-        let provider: Box<dyn LLMProvider> = Box::new(
-            OpenAIProvider::new(
-                &config.provider.base_url,
-                &api_key,
-                &config.provider.model,
-                effective_max_context,
-                config.provider.max_retries,
-                supports_json_mode,
-                config.provider.debug,
-            )
-            .context("Failed to initialize LLM provider")?,
-        );
+        let provider_factory: Arc<dyn ProviderFactory> = Arc::new(DefaultProviderFactory);
+        let provider = provider_factory.build(
+            &config.provider,
+            &api_key,
+            effective_max_context,
+            supports_json_mode,
+        )?;
 
         let diff_sink = crate::tools::new_diff_sink();
         let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
@@ -391,18 +386,12 @@ impl Agent {
         let mut next_config = self.provider_config.clone();
         next_config.model = model_id.to_string();
         let selection = Self::resolve_model_selection(&next_config, &self.provider_api_key).await?;
-        let provider: Box<dyn LLMProvider> = Box::new(
-            OpenAIProvider::new(
-                &next_config.base_url,
-                &self.provider_api_key,
-                &next_config.model,
-                selection.max_context,
-                next_config.max_retries,
-                selection.model.features.json_mode,
-                next_config.debug,
-            )
-            .context("Failed to initialize LLM provider")?,
-        );
+        let provider = DefaultProviderFactory.build(
+            &next_config,
+            &self.provider_api_key,
+            selection.max_context,
+            selection.model.features.json_mode,
+        )?;
 
         self.provider = provider;
         self.provider_config = next_config;
@@ -454,18 +443,12 @@ impl Agent {
         };
 
         let selection = Self::resolve_model_selection(&next_config, &api_key).await?;
-        let provider: Box<dyn LLMProvider> = Box::new(
-            OpenAIProvider::new(
-                &next_config.base_url,
-                &api_key,
-                &next_config.model,
-                selection.max_context,
-                next_config.max_retries,
-                selection.model.features.json_mode,
-                next_config.debug,
-            )
-            .context("Failed to initialize LLM provider")?,
-        );
+        let provider = DefaultProviderFactory.build(
+            &next_config,
+            &api_key,
+            selection.max_context,
+            selection.model.features.json_mode,
+        )?;
 
         self.provider = provider;
         self.provider_config = next_config;
