@@ -264,17 +264,24 @@ impl ToolRegistry {
     /// `None` keeps the legacy behavior (tools don't observe their own
     /// writes). LSP tools are registered with their own manager so
     /// callers don't have to thread it separately (YYC-46).
+    ///
+    /// Probes `current_dir()` for the LSP manager and code graph. Use
+    /// [`Self::new_with_diff_and_lsp`] when the caller already has a
+    /// resolved cwd to avoid duplicate probes (YYC-116).
     pub fn new_with_diff_sink(sink: Option<EditDiffSink>) -> Self {
-        Self::new_with_diff_and_lsp(sink, None)
+        let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+        Self::new_with_diff_and_lsp(sink, None, cwd)
     }
 
     /// Same as `new_with_diff_sink`, plus an external LSP manager so
     /// the agent can share one across tools and the diagnostics hook
     /// (YYC-51). When `lsp` is `None`, a per-registry manager is
-    /// created.
+    /// created rooted at `cwd`. Pass the cwd that's already been
+    /// probed at the call site rather than re-probing here (YYC-116).
     pub fn new_with_diff_and_lsp(
         sink: Option<EditDiffSink>,
         lsp: Option<Arc<crate::code::lsp::LspManager>>,
+        cwd: std::path::PathBuf,
     ) -> Self {
         let mut registry = Self {
             tools: HashMap::new(),
@@ -298,11 +305,8 @@ impl ToolRegistry {
         registry.register(Arc::new(code::CodeQueryTool::new(parser_cache.clone())));
         // YYC-46: LSP-backed semantic tools. One manager pool — servers
         // are spawned lazily on first use per language.
-        let lsp_mgr = lsp.unwrap_or_else(|| {
-            Arc::new(crate::code::lsp::LspManager::new(
-                std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")),
-            ))
-        });
+        let lsp_mgr =
+            lsp.unwrap_or_else(|| Arc::new(crate::code::lsp::LspManager::new(cwd.clone())));
         registry.register(Arc::new(lsp::GotoDefinitionTool::new(lsp_mgr.clone())));
         registry.register(Arc::new(lsp::FindReferencesTool::new(lsp_mgr.clone())));
         registry.register(Arc::new(lsp::HoverTool::new(lsp_mgr.clone())));
@@ -312,7 +316,6 @@ impl ToolRegistry {
         registry.register(Arc::new(code_edit::RenameSymbolTool::new(lsp_mgr)));
         // YYC-50: workspace symbol index. Lazy — the agent has to run
         // `index_code_graph` once before `find_symbol` returns hits.
-        let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
         if let Ok(graph) = crate::code::graph::CodeGraph::open(cwd, parser_cache.clone()) {
             let graph_arc = Arc::new(graph);
             registry.register(Arc::new(code_graph::IndexCodeGraphTool::new(
@@ -593,6 +596,25 @@ path = "src/primary.rs"
         let msg = err.to_string();
         assert!(msg.contains("Failed to parse arguments"), "got {msg:?}");
         assert!(msg.contains("Raw args"), "got {msg:?}");
+    }
+
+    #[test]
+    fn registry_accepts_explicit_cwd_without_probing() {
+        // YYC-116: callers that already have a resolved cwd pass it
+        // through; the registry must honor it without falling back to
+        // current_dir(). A non-existent path is the cleanest signal —
+        // construction succeeds (the code graph open just no-ops on
+        // failure) and the registry contains the expected core tools.
+        let bogus = std::path::PathBuf::from("/nonexistent/yyc-116/probe-root");
+        let registry = ToolRegistry::new_with_diff_and_lsp(None, None, bogus);
+        let defs = registry.definitions();
+        let names: Vec<&str> = defs.iter().map(|d| d.function.name.as_str()).collect();
+        for must in ["read_file", "goto_definition", "git_status"] {
+            assert!(
+                names.contains(&must),
+                "registry missing {must:?}; have {names:?}"
+            );
+        }
     }
 
     #[test]

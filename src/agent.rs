@@ -214,9 +214,12 @@ impl Agent {
         // YYC-107: probe the workspace once so tool registration can
         // drop irrelevant tools (cargo_check off-Rust, etc.) and the
         // remaining tools can render runtime-aware descriptions.
-        let tool_context = crate::tools::ToolContext::probe(cwd);
-        let mut tools =
-            ToolRegistry::new_with_diff_and_lsp(Some(diff_sink.clone()), Some(lsp_manager.clone()));
+        let tool_context = crate::tools::ToolContext::probe(cwd.clone());
+        let mut tools = ToolRegistry::new_with_diff_and_lsp(
+            Some(diff_sink.clone()),
+            Some(lsp_manager.clone()),
+            cwd,
+        );
 
         // YYC-81: ask_user is only useful in interactive (TUI) mode.
         // Register it whenever a pause channel is wired; it self-
