@@ -8,9 +8,19 @@
 //! Scope of v1: shell commands only. The patterns are hard-coded; user
 //! customization will land when there's demand. See Linear YYC-26.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 
 use parking_lot::Mutex;
+
+/// YYC-151: cap on the per-session approval cache. Without this the
+/// `approved` set could grow unbounded across a long-running TUI or
+/// gateway lane (one entry per distinct dangerous command), letting
+/// the user's RAM footprint creep with every approval. 256 is well
+/// over any realistic per-session approval count and keeps the FIFO
+/// scan cheap. When the cap is reached, the oldest entry is evicted
+/// — its usage counter goes too, so the next invocation re-prompts
+/// as if the entry had never existed.
+const APPROVAL_CACHE_CAP: usize = 256;
 
 use anyhow::Result;
 use async_trait::async_trait;
@@ -24,7 +34,12 @@ use crate::pause::{AgentPause, AgentResume, OptionKind, PauseKind, PauseOption, 
 use super::{HookHandler, HookOutcome};
 
 pub struct SafetyHook {
-    approved: Mutex<HashSet<String>>,
+    /// FIFO-bounded approval cache (YYC-151). The `HashSet` gives
+    /// O(1) membership checks; the `VecDeque` records insertion
+    /// order so the oldest entry can be evicted in O(1) when the
+    /// cap is reached. Both structures move in lockstep — entries
+    /// only land in one if they land in both.
+    approved: Mutex<ApprovalCache>,
     /// Per-session usage count keyed by canonical command (YYC-130
     /// follow-up). When the count for an approved command exceeds
     /// `policy.quota_per_session`, the hook re-prompts as if the
@@ -32,6 +47,56 @@ pub struct SafetyHook {
     usage: Mutex<HashMap<String, u32>>,
     pause_tx: Option<PauseSender>,
     policy: DangerousCommandsConfig,
+}
+
+#[derive(Default)]
+struct ApprovalCache {
+    set: HashSet<String>,
+    order: VecDeque<String>,
+    cap: usize,
+}
+
+impl ApprovalCache {
+    fn with_cap(cap: usize) -> Self {
+        Self {
+            set: HashSet::new(),
+            order: VecDeque::new(),
+            cap,
+        }
+    }
+
+    /// Insert `key` into the cache, evicting the oldest entry when
+    /// the cap is reached. Returns the evicted key (if any) so the
+    /// caller can drop a matching usage counter.
+    fn insert(&mut self, key: String) -> Option<String> {
+        if self.set.contains(&key) {
+            return None;
+        }
+        let evicted = if self.set.len() >= self.cap {
+            self.order.pop_front().inspect(|k| {
+                self.set.remove(k);
+            })
+        } else {
+            None
+        };
+        self.set.insert(key.clone());
+        self.order.push_back(key);
+        evicted
+    }
+
+    fn contains(&self, key: &str) -> bool {
+        self.set.contains(key)
+    }
+
+    fn remove(&mut self, key: &str) -> bool {
+        if !self.set.remove(key) {
+            return false;
+        }
+        if let Some(pos) = self.order.iter().position(|k| k == key) {
+            self.order.remove(pos);
+        }
+        true
+    }
 }
 
 impl SafetyHook {
@@ -52,7 +117,7 @@ impl SafetyHook {
     /// policy/quota configuration (YYC-130 follow-up).
     pub fn with_config(pause_tx: Option<PauseSender>, policy: DangerousCommandsConfig) -> Self {
         Self {
-            approved: Mutex::new(HashSet::new()),
+            approved: Mutex::new(ApprovalCache::with_cap(APPROVAL_CACHE_CAP)),
             usage: Mutex::new(HashMap::new()),
             pause_tx,
             policy,
@@ -63,7 +128,13 @@ impl SafetyHook {
     /// the *exact same* command in this session will bypass the safety check.
     /// Public so the TUI can pre-seed approvals if it ever wants to.
     pub fn approve(&self, command: &str) {
-        self.approved.lock().insert(canonical_command_key(command));
+        let key = canonical_command_key(command);
+        let evicted = self.approved.lock().insert(key);
+        // YYC-151: keep usage counters in sync with the approval
+        // cache so an evicted command's quota count doesn't linger.
+        if let Some(evicted_key) = evicted {
+            self.usage.lock().remove(&evicted_key);
+        }
     }
 
     fn is_approved(&self, command: &str) -> bool {
@@ -636,6 +707,64 @@ fn generic_substring_rules(command: &str) -> Option<&'static str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // YYC-151: the FIFO approval cache must drop the oldest entry
+    // once the cap is hit so a long-running session doesn't grow
+    // unbounded. Inserts CAP+1 distinct commands and asserts the
+    // first one is no longer approved while the latest still is.
+    #[test]
+    fn approval_cache_evicts_oldest_when_cap_exceeded() {
+        let hook = SafetyHook::new();
+        for i in 0..APPROVAL_CACHE_CAP {
+            hook.approve(&format!("approved_cmd_{i}"));
+        }
+        assert!(hook.is_approved("approved_cmd_0"));
+        // One more push past the cap evicts the FIFO head.
+        hook.approve("approved_cmd_overflow");
+        assert!(
+            !hook.is_approved("approved_cmd_0"),
+            "oldest approval should have been evicted past the cap",
+        );
+        assert!(hook.is_approved("approved_cmd_overflow"));
+        assert!(hook.is_approved(&format!("approved_cmd_{}", APPROVAL_CACHE_CAP - 1)));
+    }
+
+    // YYC-151: an approved command stays approved up to the moment
+    // it gets evicted; this guards against a regression where the
+    // cache loses entries before the cap is reached.
+    #[test]
+    fn approval_cache_keeps_entries_until_cap_reached() {
+        let hook = SafetyHook::new();
+        for i in 0..APPROVAL_CACHE_CAP {
+            hook.approve(&format!("cmd_{i}"));
+        }
+        for i in 0..APPROVAL_CACHE_CAP {
+            assert!(
+                hook.is_approved(&format!("cmd_{i}")),
+                "entry {i} should still be approved before the cap is exceeded",
+            );
+        }
+    }
+
+    // YYC-151: when the cache evicts an entry, its usage counter
+    // must go too — otherwise a later re-approval of the same
+    // command would inherit a stale quota count.
+    #[test]
+    fn approval_cache_eviction_clears_usage_counter() {
+        let hook = SafetyHook::new();
+        // Seed the would-be-evicted command with usage so we can see
+        // it disappear after eviction.
+        hook.approve("victim");
+        hook.record_usage("victim");
+        assert_eq!(hook.usage.lock().get("victim").copied(), Some(1));
+        // Fill the cache past the cap so "victim" is the oldest and
+        // gets evicted.
+        for i in 0..APPROVAL_CACHE_CAP {
+            hook.approve(&format!("filler_{i}"));
+        }
+        assert!(!hook.is_approved("victim"));
+        assert!(hook.usage.lock().get("victim").is_none());
+    }
 
     #[test]
     fn blocks_dangerous_commands() {
