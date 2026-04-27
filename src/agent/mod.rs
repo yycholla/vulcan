@@ -300,10 +300,7 @@ impl Agent {
         // is true — keeps the no-op path zero-cost. With a pause emitter
         // wired up, blocks become interactive prompts.
         if !config.tools.yolo_mode {
-            let safety = match pause_tx {
-                Some(tx) => SafetyHook::with_pause_emitter(tx),
-                None => SafetyHook::new(),
-            };
+            let safety = SafetyHook::with_config(pause_tx.clone(), config.tools.dangerous_commands);
             hooks.register(Arc::new(safety));
         }
 

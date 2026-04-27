@@ -63,6 +63,20 @@ default = "always"
 # git_push   = "ask"        # prompt every push
 # bash       = "ask"
 
+# YYC-130: SafetyHook policy + per-session quota for dangerous shell
+# patterns (rm -rf /, dd, mkfs, force push, ...).
+#   policy = "prompt" — pause the agent and ask the user (default;
+#                       matches legacy behavior).
+#   policy = "block"  — never prompt; hard-block every dangerous match.
+#                       Useful for unattended / CI runs.
+#   policy = "allow"  — never prompt and never block. NOT recommended.
+# quota_per_session caps how many times an approved-and-remembered
+# dangerous command can fire before the hook re-prompts. 0 disables
+# the cap (legacy behavior — once approved, runs unlimited).
+[tools.dangerous_commands]
+policy = "prompt"
+quota_per_session = 5
+
 [compaction]
 # Auto-compress context when token usage is high
 enabled = true
