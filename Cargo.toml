@@ -57,6 +57,11 @@ tiktoken-rs = "0.11"
 # HTTP / LLM API
 reqwest = { version = "0.13", features = ["json", "stream"] }
 
+# URL parsing for provider endpoint heuristics (YYC-152). Replaces a
+# hand-rolled split/strip parser that mishandled IPv6 brackets and
+# IPv4-mapped IPv6 addresses.
+url = "2"
+
 # Async trait support (needed for dyn-compatible tool/provider traits)
 async-trait = "0.1"
 
