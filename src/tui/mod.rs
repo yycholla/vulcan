@@ -1,15 +1,11 @@
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use anyhow::Result;
 use ratatui::{
-    Terminal,
     crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers},
     layout::Rect,
     prelude::Position,
-    style::{Modifier, Style},
-    text::{Line, Span},
-    widgets::Paragraph,
 };
 use tokio::sync::{Mutex, mpsc};
 
@@ -22,49 +18,24 @@ use crate::provider::StreamEvent;
 
 pub mod chat_message;
 pub mod chat_render;
+mod events;
+mod init;
 pub mod keybinds;
+mod keymap;
 pub mod markdown;
 pub mod miller_columns;
 pub mod model_picker;
 pub mod orchestration;
 pub mod picker_state;
+mod rendering;
 pub mod state;
 pub mod theme;
 pub mod views;
 pub mod widgets;
 
-use state::{AppState, ChatMessage, ChatRole, SessionStatus};
+use state::{AppState, ChatMessage, ChatRole};
 use theme::{Theme, body};
 use views::{View, render_view};
-
-const STREAM_FRAME_BUDGET: Duration = Duration::from_millis(16);
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum RenderWake {
-    Now,
-    Wait(Duration),
-}
-
-fn render_wake_for_stream_batch(
-    last_draw: Instant,
-    now: Instant,
-    is_terminal_event: bool,
-) -> RenderWake {
-    if is_terminal_event {
-        return RenderWake::Now;
-    }
-
-    let elapsed = now.saturating_duration_since(last_draw);
-    if elapsed >= STREAM_FRAME_BUDGET {
-        RenderWake::Now
-    } else {
-        RenderWake::Wait(STREAM_FRAME_BUDGET - elapsed)
-    }
-}
-
-fn stream_event_forces_redraw(ev: &StreamEvent) -> bool {
-    matches!(ev, StreamEvent::Done(_) | StreamEvent::Error(_))
-}
 
 /// What session, if any, the TUI should load on startup.
 #[derive(Debug, Clone)]
@@ -86,401 +57,12 @@ enum KeyEv {
     Error(String),
 }
 
-#[derive(Debug, Clone)]
-struct SlashCommand {
-    name: &'static str,
-    description: &'static str,
-    /// True when the command can run mid-turn without corrupting agent state
-    /// (YYC-62). Pure UI ops are safe; anything that mutates conversation
-    /// history or reaches into the agent is not. Default false (conservative).
-    mid_turn_safe: bool,
-}
-
-const SLASH_COMMANDS: &[SlashCommand] = &[
-    SlashCommand {
-        name: "exit",
-        description: "Quit Vulcan",
-        // Always exits cleanly; no state to corrupt.
-        mid_turn_safe: true,
-    },
-    SlashCommand {
-        name: "quit",
-        description: "Quit Vulcan",
-        mid_turn_safe: true,
-    },
-    SlashCommand {
-        name: "help",
-        description: "Show available commands",
-        // Pure UI: pushes a system message.
-        mid_turn_safe: true,
-    },
-    SlashCommand {
-        name: "clear",
-        description: "Clear message history",
-        // Destructive: would nuke the in-flight User+Agent pair the agent
-        // loop is streaming into. Defer until idle.
-        mid_turn_safe: false,
-    },
-    SlashCommand {
-        name: "view",
-        description: "Cycle to next view (or 1-5)",
-        mid_turn_safe: true,
-    },
-    SlashCommand {
-        name: "reasoning",
-        description: "Toggle reasoning trace",
-        mid_turn_safe: true,
-    },
-    SlashCommand {
-        name: "search",
-        description: "Search past sessions: /search <query>",
-        // Holds agent.lock().await — would deadlock against the in-flight
-        // run_prompt_stream task. Defer until idle.
-        mid_turn_safe: false,
-    },
-    SlashCommand {
-        name: "model",
-        description: "List or switch models: /model [id]",
-        // Rebuilds the provider for future turns and may fetch the catalog.
-        // Defer until idle so the in-flight provider stream is untouched.
-        mid_turn_safe: false,
-    },
-    SlashCommand {
-        name: "provider",
-        description: "List or switch named providers: /provider [name|default]",
-        // Rebuilds the provider against a different profile; same idle
-        // requirement as /model.
-        mid_turn_safe: false,
-    },
-    SlashCommand {
-        name: "diff-style",
-        description: "Set diff render: /diff-style <unified|side-by-side|inline>",
-        mid_turn_safe: true,
-    },
-    SlashCommand {
-        name: "resume",
-        description: "Open session picker to switch to another session",
-        mid_turn_safe: false,
-    },
-];
-
 fn short_id(id: &str) -> String {
     id.chars().take(8).collect()
 }
 
-#[allow(dead_code)] // retained for tests and potential `--help`-style printers.
-fn format_model_list(active_model: &str, models: &[crate::provider::catalog::ModelInfo]) -> String {
-    let mut out = format!("Models from active provider ({} total):", models.len());
-    for model in models.iter().take(30) {
-        let marker = if model.id == active_model { "*" } else { " " };
-        let context = if model.context_length > 0 {
-            crate::tui::state::format_thousands(model.context_length as u32)
-        } else {
-            "unknown".into()
-        };
-        let mut flags = Vec::new();
-        if model.features.tools {
-            flags.push("tools");
-        }
-        if model.features.reasoning {
-            flags.push("reasoning");
-        }
-        if model.features.vision {
-            flags.push("vision");
-        }
-        if model.features.json_mode {
-            flags.push("json");
-        }
-        let flags = if flags.is_empty() {
-            String::new()
-        } else {
-            format!(" · {}", flags.join(","))
-        };
-        out.push_str(&format!("\n  {marker} {} · ctx {context}{flags}", model.id));
-    }
-    if models.len() > 30 {
-        out.push_str(&format!("\n  ... {} more", models.len() - 30));
-    }
-    out.push_str("\n\nUse /model <id> to switch.");
-    out
-}
-
-fn build_provider_picker_entries(config: &Config) -> Vec<crate::tui::state::ProviderPickerEntry> {
-    use crate::tui::state::ProviderPickerEntry;
-    let mut out = Vec::with_capacity(config.providers.len() + 1);
-    out.push(ProviderPickerEntry {
-        name: None,
-        model: config.provider.model.clone(),
-        base_url: config.provider.base_url.clone(),
-    });
-    let mut names: Vec<&String> = config.providers.keys().collect();
-    names.sort();
-    for name in names {
-        let cfg = &config.providers[name];
-        out.push(ProviderPickerEntry {
-            name: Some(name.clone()),
-            model: cfg.model.clone(),
-            base_url: cfg.base_url.clone(),
-        });
-    }
-    out
-}
-
-#[allow(dead_code)] // retained for tests and potential `--help`-style printers.
-fn format_provider_list(config: &Config, active: Option<&str>) -> String {
-    let mut out = String::from("Provider profiles:");
-    let default_marker = if active.is_none() { "*" } else { " " };
-    out.push_str(&format!(
-        "\n  {default_marker} default · {} · {}",
-        config.provider.base_url, config.provider.model,
-    ));
-
-    let mut names: Vec<&String> = config.providers.keys().collect();
-    names.sort();
-    for name in names {
-        let cfg = &config.providers[name];
-        let marker = if active == Some(name.as_str()) {
-            "*"
-        } else {
-            " "
-        };
-        out.push_str(&format!(
-            "\n  {marker} {name} · {} · {}",
-            cfg.base_url, cfg.model,
-        ));
-    }
-    if config.providers.is_empty() {
-        out.push_str("\n  (no named [providers.<name>] profiles configured)");
-    }
-    out.push_str("\n\nUse /provider <name> to switch, /provider default to revert.");
-    out
-}
-
-fn filter_commands(prefix: &str) -> Vec<&'static SlashCommand> {
-    if prefix.is_empty() {
-        return SLASH_COMMANDS.iter().collect();
-    }
-    let lower = prefix.to_lowercase();
-    SLASH_COMMANDS
-        .iter()
-        .filter(|c| c.name.starts_with(&lower))
-        .collect()
-}
-
-/// Same matching logic as the palette renderer in the main loop — exposed
-/// as a helper so the key handler can decide what to highlight or commit
-/// without duplicating prefix logic (YYC-70).
-fn current_palette(input: &str) -> Vec<&'static SlashCommand> {
-    if input == "/" {
-        SLASH_COMMANDS.iter().collect()
-    } else if input.starts_with('/') && input.len() > 1 {
-        filter_commands(&input[1..])
-    } else {
-        Vec::new()
-    }
-}
-
-fn complete_slash(prefix: &str) -> Option<String> {
-    let matches = filter_commands(prefix);
-    if matches.is_empty() {
-        return None;
-    }
-    if matches.len() == 1 {
-        return Some(matches[0].name.to_string());
-    }
-    let first = matches[0].name.as_bytes();
-    let mut common = first.len();
-    for m in &matches[1..] {
-        let bytes = m.name.as_bytes();
-        common = common.min(bytes.len());
-        for (i, &b) in first.iter().enumerate().take(common) {
-            if b != bytes[i] {
-                common = i;
-                break;
-            }
-        }
-    }
-    if common > prefix.len() {
-        Some(matches[0].name[..common].to_string())
-    } else {
-        None
-    }
-}
-
-/// Spawn a fresh agent turn for `msg`. Updates chat state (User + empty
-/// Agent message), flips thinking on, re-engages auto-follow, then spawns
-/// `run_prompt_stream` against the agent. Used by the Enter handler for
-/// new submissions and by the Done handler when draining the queue
-/// (YYC-61).
-fn submit_prompt(
-    app: &mut AppState,
-    agent: &Arc<Mutex<Agent>>,
-    stream_tx: &mpsc::Sender<StreamEvent>,
-    msg: String,
-) {
-    app.messages.push(ChatMessage {
-        role: ChatRole::User,
-        content: msg.clone(),
-        ..Default::default()
-    });
-    app.messages.push(ChatMessage {
-        role: ChatRole::Agent,
-        content: String::new(),
-        ..Default::default()
-    });
-    app.thinking = true;
-    app.at_bottom = true;
-    app.note_prompt_submitted(&msg);
-
-    // YYC-105: hold a cancel token outside the agent mutex so Ctrl+C
-    // can fire it without waiting for the prompt task to release the
-    // lock. The agent mirrors the same token internally for tools /
-    // hooks that still consult `self.turn_cancel`.
-    let cancel = tokio_util::sync::CancellationToken::new();
-    app.current_turn_cancel = Some(cancel.clone());
-    let tx = stream_tx.clone();
-    let a = agent.clone();
-    tokio::spawn(async move {
-        let mut a = a.lock().await;
-        let _ = a.run_prompt_stream_with_cancel(&msg, tx, cancel).await;
-    });
-}
-
-async fn refresh_sessions(agent: &Arc<Mutex<Agent>>, app: &mut AppState) {
-    let (summaries, active_session_id) = {
-        let a = agent.lock().await;
-        (
-            a.memory().list_sessions(12).unwrap_or_default(),
-            a.session_id().to_string(),
-        )
-    };
-    app.hydrate_sessions(&summaries, &active_session_id);
-}
-
-async fn handle_stream_event(
-    app: &mut AppState,
-    agent: &Arc<Mutex<Agent>>,
-    stream_tx: &mpsc::Sender<StreamEvent>,
-    ev: StreamEvent,
-) {
-    match ev {
-        StreamEvent::Text(chunk) => {
-            if let Some(last) = app.messages.last_mut()
-                && matches!(last.role, ChatRole::Agent)
-            {
-                // Append to both the segment timeline (the YYC-71
-                // ordered renderer) and the legacy `content` field
-                // (kept so other code that peeks at .content keeps working).
-                last.append_text(&chunk);
-                // Strip leading whitespace so models that emit `\n\n`
-                // preambles don't render gaps before the visible body
-                // when the renderer falls back to `content`.
-                if last.content.is_empty() {
-                    let trimmed = chunk.trim_start_matches(|c: char| {
-                        c == '\n' || c == '\r' || c == ' ' || c == '\t'
-                    });
-                    last.content.push_str(trimmed);
-                } else {
-                    last.content.push_str(&chunk);
-                }
-            }
-        }
-        StreamEvent::Reasoning(chunk) => {
-            // Per-token reasoning trace from thinking-mode models. Push to
-            // the segment timeline so it interleaves with tool calls in
-            // render order; also append to the legacy `reasoning` field so
-            // latest_reasoning() etc. continue to work.
-            if let Some(last) = app.messages.last_mut()
-                && matches!(last.role, ChatRole::Agent)
-            {
-                last.append_reasoning(&chunk);
-                last.reasoning.push_str(&chunk);
-            }
-            app.note_reasoning();
-        }
-        StreamEvent::Done(resp) => {
-            app.thinking = false;
-            app.current_turn_cancel = None;
-            if let Some(usage) = resp.usage {
-                // YYC-60: track lifetime totals for cost (YYC-67) and the
-                // latest prompt size for the in-status capacity bar.
-                app.prompt_tokens_total = app
-                    .prompt_tokens_total
-                    .saturating_add(usage.prompt_tokens as u32);
-                app.completion_tokens_total = app
-                    .completion_tokens_total
-                    .saturating_add(usage.completion_tokens as u32);
-                app.prompt_tokens_last = usage.prompt_tokens as u32;
-            }
-            app.note_done();
-            refresh_sessions(agent, app).await;
-            // YYC-61: drain one queued prompt per turn end. Subsequent queued
-            // prompts ride the next Done event in the same way.
-            if let Some(next) = app.queue.pop_front() {
-                submit_prompt(app, agent, stream_tx, next);
-            }
-        }
-        StreamEvent::Error(e) => {
-            if let Some(last) = app.messages.last_mut()
-                && last.content.is_empty()
-            {
-                last.set_content(format!("⚠ Error: {e}"));
-            }
-            app.thinking = false;
-            app.current_turn_cancel = None;
-            // YYC-67: record provider-level error for telemetry.
-            app.provider_errors_total = app.provider_errors_total.saturating_add(1);
-            app.note_error(&e);
-        }
-        StreamEvent::ToolCallStart {
-            name, args_summary, ..
-        } => {
-            // YYC-71: push the tool-call segment into the timeline
-            // (interleaved with reasoning/text). YYC-74: carry the args
-            // summary so the card has structured context.
-            if let Some(last) = app.messages.last_mut()
-                && matches!(last.role, ChatRole::Agent)
-            {
-                last.push_tool_start_with(name.clone(), args_summary);
-            }
-            app.note_tool_start(&name);
-        }
-        StreamEvent::ToolCallEnd {
-            name,
-            ok,
-            output_preview,
-            result_meta,
-            elided_lines,
-            elapsed_ms,
-            ..
-        } => {
-            if let Some(last) = app.messages.last_mut()
-                && matches!(last.role, ChatRole::Agent)
-            {
-                // YYC-74: stamp preview + meta + timing onto the matching
-                // segment for the card. YYC-78: stash elided count for the
-                // collapse footer.
-                last.finish_tool_with(
-                    &name,
-                    ok,
-                    output_preview,
-                    result_meta,
-                    elided_lines,
-                    Some(elapsed_ms),
-                );
-            }
-            // YYC-67: tool call telemetry.
-            app.tool_calls_total = app.tool_calls_total.saturating_add(1);
-            if !ok {
-                app.tool_errors_total = app.tool_errors_total.saturating_add(1);
-            }
-            app.note_tool_end(&name, ok);
-        }
-    }
-}
-
 pub async fn run_tui(config: &Config, resume: ResumeTarget) -> Result<()> {
-    let mut terminal = init_terminal()?;
+    let mut terminal = init::init_terminal()?;
 
     // keyboard
     let (key_tx, mut key_rx) = mpsc::unbounded_channel::<KeyEv>();
@@ -583,7 +165,7 @@ pub async fn run_tui(config: &Config, resume: ResumeTarget) -> Result<()> {
         app.token_max = a.max_context() as u32;
         app.provider_label = a.active_profile().map(str::to_string);
     }
-    refresh_sessions(&agent, &mut app).await;
+    events::refresh_sessions(&agent, &mut app).await;
 
     // YYC-86: if the user invoked --resume, activate the session picker.
     app.show_session_picker = matches!(resume, ResumeTarget::Pick);
@@ -640,9 +222,9 @@ pub async fn run_tui(config: &Config, resume: ResumeTarget) -> Result<()> {
 
     while !exit {
         let palette = if app.input.starts_with('/') && app.input.len() > 1 {
-            Some(filter_commands(&app.input[1..]))
+            Some(keymap::filter_commands(&app.input[1..]))
         } else if app.input == "/" {
-            Some(SLASH_COMMANDS.iter().collect())
+            Some(keymap::SLASH_COMMANDS.iter().collect())
         } else {
             None
         };
@@ -691,23 +273,23 @@ pub async fn run_tui(config: &Config, resume: ResumeTarget) -> Result<()> {
             }
 
             if let (Some(pal), Some(area)) = (palette.as_ref(), palette_area) {
-                draw_palette(f, area, pal, app.slash_menu_selection, &app.theme);
+                rendering::draw_palette(f, area, pal, app.slash_menu_selection, &app.theme);
             }
 
             // YYC-86: session picker overlay (--resume flag).
             if app.show_session_picker {
-                draw_session_picker(f, area, &app);
+                rendering::draw_session_picker(f, area, &app);
             }
             // YYC-97: model / provider picker overlays.
             if app.show_model_picker {
-                draw_model_picker(f, area, &app);
+                rendering::draw_model_picker(f, area, &app);
             }
             if app.show_provider_picker {
-                draw_provider_picker(f, area, &app);
+                rendering::draw_provider_picker(f, area, &app);
             }
             // YYC-75: diff scrubber overlay.
             if app.show_diff_scrubber {
-                draw_diff_scrubber(f, area, &app);
+                rendering::draw_diff_scrubber(f, area, &app);
             }
         })?;
         last_draw = Instant::now();
@@ -1098,7 +680,7 @@ pub async fn run_tui(config: &Config, resume: ResumeTarget) -> Result<()> {
                                                         }
                                                     }
                                                 }
-                                                refresh_sessions(&agent, &mut app).await;
+                                                events::refresh_sessions(&agent, &mut app).await;
                                             }
                                         }
                                         KeyCode::Esc => {
@@ -1269,7 +851,7 @@ pub async fn run_tui(config: &Config, resume: ResumeTarget) -> Result<()> {
                                 if app.keybinds.toggle_sessions.matches(&key)
                                     && !app.input.starts_with('/')
                                 {
-                                    refresh_sessions(&agent, &mut app).await;
+                                    events::refresh_sessions(&agent, &mut app).await;
                                     app.show_session_picker = true;
                                     app.session_picker_selection = 0;
                                     continue;
@@ -1304,7 +886,7 @@ pub async fn run_tui(config: &Config, resume: ResumeTarget) -> Result<()> {
                                         // slash menu when it's open.
                                         KeyCode::Char('j') | KeyCode::Char('k') => {
                                             if app.input.starts_with('/') {
-                                                let candidates = current_palette(&app.input);
+                                                let candidates = keymap::current_palette(&app.input);
                                                 if !candidates.is_empty() {
                                                     let len = candidates.len();
                                                     if matches!(key.code, KeyCode::Char('j')) {
@@ -1358,7 +940,7 @@ pub async fn run_tui(config: &Config, resume: ResumeTarget) -> Result<()> {
                                         // YYC-70: when the slash menu is open with at least one
                                         // match, Enter commits the highlighted command.
                                         if app.input.starts_with('/') {
-                                            let candidates = current_palette(&app.input);
+                                            let candidates = keymap::current_palette(&app.input);
                                             if !candidates.is_empty() {
                                                 let idx = app.slash_menu_selection.min(candidates.len() - 1);
                                                 app.input = format!("/{}", candidates[idx].name);
@@ -1376,7 +958,7 @@ pub async fn run_tui(config: &Config, resume: ResumeTarget) -> Result<()> {
                                         let mid_turn_safe = if is_slash {
                                             let body = &app.input[1..];
                                             let head = body.split_whitespace().next().unwrap_or("");
-                                            SLASH_COMMANDS
+                                            keymap::SLASH_COMMANDS
                                                 .iter()
                                                 .find(|c| c.name == head)
                                                 .map(|c| c.mid_turn_safe)
@@ -1426,7 +1008,7 @@ pub async fn run_tui(config: &Config, resume: ResumeTarget) -> Result<()> {
                                                     "exit" | "quit" => { exit = true; continue; }
                                                     "help" => {
                                                         let mut help = String::from("Commands:");
-                                                        for cmd in SLASH_COMMANDS {
+                                                        for cmd in keymap::SLASH_COMMANDS {
                                                             help.push_str(&format!("\n  /{:<10}  {}", cmd.name, cmd.description));
                                                         }
                                                         help.push_str("\n\nKeys:\n  Ctrl+1..5  switch view (1=stack 2=split 3=tiled 4=tree 5=floor)\n  Ctrl+R     toggle reasoning trace\n  Tab        complete slash command");
@@ -1497,7 +1079,7 @@ pub async fn run_tui(config: &Config, resume: ResumeTarget) -> Result<()> {
                                                         continue;
                                                     }
                                                     "resume" => {
-                                                        refresh_sessions(&agent, &mut app).await;
+                                                        events::refresh_sessions(&agent, &mut app).await;
                                                         app.show_session_picker = true;
                                                         app.session_picker_selection = 0;
                                                         continue;
@@ -1553,7 +1135,7 @@ pub async fn run_tui(config: &Config, resume: ResumeTarget) -> Result<()> {
                                                                 a.active_profile().map(str::to_string)
                                                             };
                                                             app.provider_picker_items =
-                                                                build_provider_picker_entries(config);
+                                                                keymap::build_provider_picker_entries(config);
                                                             let active_idx = app
                                                                 .provider_picker_items
                                                                 .iter()
@@ -1620,7 +1202,7 @@ pub async fn run_tui(config: &Config, resume: ResumeTarget) -> Result<()> {
                                                                     });
                                                                 }
                                                                 Ok(active_models) => {
-                                                                    open_unified_picker(
+                                                                    rendering::open_unified_picker(
                                                                         &mut app,
                                                                         config,
                                                                         &agent,
@@ -1682,7 +1264,7 @@ pub async fn run_tui(config: &Config, resume: ResumeTarget) -> Result<()> {
                                                 }
                                             }
 
-                                            submit_prompt(&mut app, &agent, &stream_tx, msg);
+                                            events::submit_prompt(&mut app, &agent, &stream_tx, msg);
                                         }
                                     }
                                     KeyCode::Char(c) => {
@@ -1700,14 +1282,14 @@ pub async fn run_tui(config: &Config, resume: ResumeTarget) -> Result<()> {
                                     KeyCode::Tab => {
                                         pending_quit = false;
                                         if let Some(rest) = app.input.strip_prefix('/')
-                                            && let Some(c) = complete_slash(rest) {
+                                            && let Some(c) = keymap::complete_slash(rest) {
                                                 app.input = format!("/{c}");
                                             }
                                     }
                                     KeyCode::Up => {
                                         // YYC-70: arrows navigate the slash menu when open.
                                         if app.input.starts_with('/') {
-                                            let candidates = current_palette(&app.input);
+                                            let candidates = keymap::current_palette(&app.input);
                                             if !candidates.is_empty() {
                                                 app.slash_menu_selection =
                                                     app.slash_menu_selection.saturating_sub(1);
@@ -1719,7 +1301,7 @@ pub async fn run_tui(config: &Config, resume: ResumeTarget) -> Result<()> {
                                     }
                                     KeyCode::Down => {
                                         if app.input.starts_with('/') {
-                                            let candidates = current_palette(&app.input);
+                                            let candidates = keymap::current_palette(&app.input);
                                             if !candidates.is_empty() {
                                                 let len = candidates.len();
                                                 app.slash_menu_selection =
@@ -1765,15 +1347,15 @@ pub async fn run_tui(config: &Config, resume: ResumeTarget) -> Result<()> {
             ev = stream_rx.recv() => {
                 match ev {
                     Some(ev) => {
-                        let mut force_redraw = stream_event_forces_redraw(&ev);
-                        handle_stream_event(&mut app, &agent, &stream_tx, ev).await;
+                        let mut force_redraw = events::stream_event_forces_redraw(&ev);
+                        events::handle_stream_event(&mut app, &agent, &stream_tx, ev).await;
                         while let Ok(ev) = stream_rx.try_recv() {
-                            force_redraw |= stream_event_forces_redraw(&ev);
-                            handle_stream_event(&mut app, &agent, &stream_tx, ev).await;
+                            force_redraw |= events::stream_event_forces_redraw(&ev);
+                            events::handle_stream_event(&mut app, &agent, &stream_tx, ev).await;
                         }
                         if !force_redraw
-                            && let RenderWake::Wait(delay) =
-                                render_wake_for_stream_batch(last_draw, Instant::now(), false)
+                            && let events::RenderWake::Wait(delay) =
+                                events::render_wake_for_stream_batch(last_draw, Instant::now(), false)
                             {
                                 tokio::time::sleep(delay).await;
                             }
@@ -1794,650 +1376,22 @@ pub async fn run_tui(config: &Config, resume: ResumeTarget) -> Result<()> {
         a.end_session().await;
     }
 
-    restore_terminal()?;
-    Ok(())
-}
-
-fn draw_palette(
-    f: &mut ratatui::Frame,
-    area: Rect,
-    cmds: &[&SlashCommand],
-    selected: usize,
-    theme: &Theme,
-) {
-    if area.height == 0 {
-        return;
-    }
-    // Title bar
-    let bar = Rect {
-        x: area.x,
-        y: area.y,
-        width: area.width,
-        height: 1,
-    };
-    let mut header_text = " ▓▓ COMMANDS".to_string();
-    if (header_text.chars().count() as u16) < bar.width {
-        header_text.push_str(&" ".repeat(bar.width as usize - header_text.chars().count()));
-    }
-    f.render_widget(
-        Paragraph::new(header_text).style(theme.accent.add_modifier(Modifier::BOLD)),
-        bar,
-    );
-    let inner = Rect {
-        x: area.x,
-        y: area.y + 1,
-        width: area.width,
-        height: area.height.saturating_sub(1),
-    };
-    let mut lines = Vec::new();
-    if cmds.is_empty() {
-        lines.push(Line::from(Span::styled(
-            "  No matching commands",
-            theme.muted,
-        )));
-    } else {
-        let active = selected.min(cmds.len().saturating_sub(1));
-        for (i, cmd) in cmds.iter().enumerate() {
-            let is_active = i == active;
-            // YYC-70: highlight the active row by swapping fg/bg of accent
-            // (gives a visible selection bar regardless of active theme).
-            let (prefix, name_style, desc_style) = if is_active {
-                let active_style = theme.accent.add_modifier(Modifier::BOLD);
-                ("▸ ", active_style, active_style)
-            } else {
-                (
-                    "  ",
-                    theme.accent.add_modifier(Modifier::BOLD),
-                    theme.assistant,
-                )
-            };
-            lines.push(Line::from(vec![
-                Span::styled(format!("{prefix}/{:<12}", cmd.name), name_style),
-                Span::styled(cmd.description, desc_style),
-            ]));
-        }
-    }
-    f.render_widget(Paragraph::new(lines).style(body()), inner);
-}
-
-fn draw_session_picker(f: &mut ratatui::Frame, area: Rect, app: &AppState) {
-    let theme = &app.theme;
-    let width = area.width.min(56);
-    let height = (app.sessions.len() as u16 + 6).min(area.height.saturating_sub(2));
-    let x = area.x + (area.width.saturating_sub(width)) / 2;
-    let y = area.y + (area.height.saturating_sub(height)) / 2;
-
-    let box_area = Rect {
-        x,
-        y,
-        width,
-        height,
-    };
-    if box_area.height < 4 {
-        return;
-    }
-
-    // Title bar
-    let bar = Rect {
-        x: box_area.x,
-        y: box_area.y,
-        width: box_area.width,
-        height: 1,
-    };
-    let mut title = "  Resume a Session  ".to_string();
-    if (title.chars().count() as u16) < bar.width {
-        let pad = bar.width as usize - title.chars().count();
-        title = format!(
-            "{}{}{}",
-            " ".repeat(pad / 2),
-            title.trim(),
-            " ".repeat(pad - pad / 2)
-        );
-    }
-    f.render_widget(
-        Paragraph::new(title).style(theme.accent.add_modifier(Modifier::BOLD)),
-        bar,
-    );
-
-    // Session list
-    let list_area = Rect {
-        x: box_area.x,
-        y: box_area.y + 1,
-        width: box_area.width,
-        height: box_area.height.saturating_sub(2),
-    };
-    let mut lines: Vec<Line<'static>> = Vec::new();
-
-    if app.sessions.is_empty() {
-        lines.push(Line::from(Span::styled(
-            "  No saved sessions found.",
-            theme.muted,
-        )));
-        lines.push(Line::from(Span::styled(
-            "  Start a conversation and sessions will appear here.",
-            theme.muted,
-        )));
-    } else {
-        let active = app
-            .session_picker_selection
-            .min(app.sessions.len().saturating_sub(1));
-        for (i, s) in app.sessions.iter().enumerate() {
-            let is_active = i == active;
-            let marker = if is_active { "▸ " } else { "  " };
-            let status_style = match s.status {
-                SessionStatus::Live => theme.success,
-                SessionStatus::Saved => theme.system,
-            };
-            let status_label = match s.status {
-                SessionStatus::Live => "LIVE",
-                SessionStatus::Saved => "saved",
-            };
-
-            let dt = chrono::DateTime::from_timestamp(s.last_active, 0)
-                .map(|d| {
-                    d.with_timezone(&chrono::Local)
-                        .format("%b %d %H:%M")
-                        .to_string()
-                })
-                .unwrap_or_default();
-
-            let name_style = Style::default()
-                .fg(theme.body_fg)
-                .add_modifier(if is_active {
-                    Modifier::BOLD
-                } else {
-                    Modifier::empty()
-                });
-
-            lines.push(Line::from(vec![
-                Span::styled(marker, name_style.add_modifier(Modifier::BOLD)),
-                Span::styled("█ ", status_style),
-                Span::styled(format!("{:<12}", short_id(&s.id)), name_style),
-                Span::styled(format!("{:>4}m", s.message_count), theme.muted),
-                Span::styled(format!("  {} ", dt), theme.muted),
-                Span::styled(status_label, status_style.add_modifier(Modifier::BOLD)),
-            ]));
-
-            if let Some(preview) = &s.preview {
-                lines.push(Line::from(vec![
-                    Span::raw("  "),
-                    Span::styled(
-                        format!("  {}", preview),
-                        theme.muted.add_modifier(Modifier::DIM),
-                    ),
-                ]));
-            }
-        }
-    }
-
-    // Footer hint
-    let hint = "  ↑↓ navigate · Enter select · Esc cancel  ";
-    lines.push(Line::from(""));
-    lines.push(Line::from(Span::styled(hint, theme.muted)));
-
-    f.render_widget(
-        Paragraph::new(lines).style(Style::default().bg(theme.body_bg)),
-        list_area,
-    );
-
-    // Draw a border around the whole thing
-    draw_picker_border(f, box_area, theme);
-}
-
-fn draw_model_picker(f: &mut ratatui::Frame, area: Rect, app: &AppState) {
-    // YYC-102: render via the universal miller_columns widget. The
-    // overlay anchors top-left and grows rightward as the user drills.
-    // Column 0 = configured providers; columns 1+ = lab/series/version.
-    let source = model_picker::UnifiedPickerSource {
-        provider_labels: &app.picker_provider_labels,
-        provider_keys: &app.picker_provider_keys,
-        items_by_key: &app.picker_items_by_key,
-        trees_by_key: &app.picker_trees_by_key,
-    };
-    let state = miller_columns::MillerState {
-        path: app.model_picker_path.clone(),
-        focus: app.model_picker_focus,
-    };
-    // Inset by 1 from the top-left so we don't paint over the very edge.
-    let rect = Rect {
-        x: area.x + 1,
-        y: area.y + 1,
-        width: area.width.saturating_sub(2),
-        height: area.height.saturating_sub(2),
-    };
-    miller_columns::render(f, rect, &state, &source, &app.theme);
-    // Footer hint anchored to the bottom of the area.
-    let hint = "  hjkl navigate · Enter select · Esc cancel  ";
-    let footer = Rect {
-        x: area.x + 1,
-        y: area.y + area.height.saturating_sub(1),
-        width: area.width.saturating_sub(2),
-        height: 1,
-    };
-    f.render_widget(
-        Paragraph::new(Line::from(Span::styled(hint, app.theme.muted))),
-        footer,
-    );
-}
-
-async fn open_unified_picker(
-    app: &mut AppState,
-    config: &Config,
-    agent: &Arc<Mutex<Agent>>,
-    active_model_id: &str,
-    active_provider_models: Vec<crate::provider::catalog::ModelInfo>,
-) {
-    use std::collections::HashMap;
-
-    // Build the column-0 list: [default + named profiles, sorted].
-    let mut labels: Vec<String> = Vec::new();
-    let mut keys: Vec<Option<String>> = Vec::new();
-    labels.push("default".to_string());
-    keys.push(None);
-    let mut named: Vec<&String> = config.providers.keys().collect();
-    named.sort();
-    for n in named {
-        labels.push(n.clone());
-        keys.push(Some(n.clone()));
-    }
-
-    // Determine active provider key.
-    let active_profile = {
-        let a = agent.lock().await;
-        a.active_profile().map(str::to_string)
-    };
-    let active_key: String = active_profile.clone().unwrap_or_else(|| "default".into());
-
-    // Seed the catalog cache with the already-loaded active provider.
-    let mut items_by_key: HashMap<String, Vec<crate::provider::catalog::ModelInfo>> =
-        HashMap::new();
-    items_by_key.insert(active_key.clone(), active_provider_models);
-
-    // Fetch catalogs for the other providers in parallel. Disable_catalog
-    // entries (e.g. Ollama) are skipped — they get an empty tree and a
-    // "type the model id with /model <id>" hint via the empty list.
-    let mut handles: Vec<(String, tokio::task::JoinHandle<_>)> = Vec::new();
-    for (key_opt, _label) in keys.iter().zip(labels.iter()) {
-        let cache_key = key_opt.clone().unwrap_or_else(|| "default".into());
-        if items_by_key.contains_key(&cache_key) {
-            continue;
-        }
-        let provider_cfg = match key_opt {
-            Some(name) => config.providers.get(name).cloned(),
-            None => Some(config.provider.clone()),
-        };
-        let Some(provider_cfg) = provider_cfg else {
-            continue;
-        };
-        if provider_cfg.disable_catalog {
-            items_by_key.insert(cache_key, Vec::new());
-            continue;
-        }
-        let api_key = config.api_key_for(&provider_cfg).unwrap_or_default();
-        let handle = tokio::spawn(async move {
-            use std::time::Duration;
-            let client = match reqwest::Client::builder()
-                .timeout(Duration::from_secs(5))
-                .build()
-            {
-                Ok(c) => c,
-                Err(_) => return Vec::new(),
-            };
-            let cat = crate::provider::catalog::for_base_url(
-                client,
-                &provider_cfg.base_url,
-                &api_key,
-                Duration::from_secs(0),
-            );
-            cat.list_models().await.unwrap_or_default()
-        });
-        handles.push((cache_key, handle));
-    }
-    for (cache_key, handle) in handles {
-        match handle.await {
-            Ok(models) => {
-                items_by_key.insert(cache_key, models);
-            }
-            Err(_) => {
-                items_by_key.insert(cache_key, Vec::new());
-            }
-        }
-    }
-
-    // Build trees for every provider.
-    let mut trees_by_key: HashMap<String, crate::tui::model_picker::ModelTree> = HashMap::new();
-    for (key_opt, label) in keys.iter().zip(labels.iter()) {
-        let cache_key = key_opt.clone().unwrap_or_else(|| "default".into());
-        let models = items_by_key.get(&cache_key).cloned().unwrap_or_default();
-        let tree = crate::tui::model_picker::build_model_tree(label, &models);
-        trees_by_key.insert(cache_key, tree);
-    }
-
-    // Initial path: active provider in column 0, then drill into the
-    // active model if we can match it.
-    let active_idx = keys
-        .iter()
-        .position(|k| match (k, &active_profile) {
-            (None, None) => true,
-            (Some(a), Some(b)) => a == b,
-            _ => false,
-        })
-        .unwrap_or(0);
-
-    let active_provider_tree = trees_by_key.get(&active_key).cloned().unwrap_or_default();
-    let active_provider_items = items_by_key.get(&active_key).cloned().unwrap_or_default();
-    let inner_path = initial_path_for_active_model(
-        &active_provider_tree,
-        active_model_id,
-        &active_provider_items,
-    );
-    let mut path = vec![active_idx];
-    path.extend(inner_path);
-
-    app.picker_provider_labels = labels;
-    app.picker_provider_keys = keys;
-    app.picker_items_by_key = items_by_key;
-    app.picker_trees_by_key = trees_by_key;
-    app.model_picker_focus = path.len().saturating_sub(1);
-    app.model_picker_path = path;
-    app.show_model_picker = true;
-}
-
-fn initial_path_for_active_model(
-    tree: &crate::tui::model_picker::ModelTree,
-    active_id: &str,
-    items: &[crate::provider::catalog::ModelInfo],
-) -> Vec<usize> {
-    let target = items.iter().position(|m| m.id == active_id);
-    fn find_path(
-        nodes: &[crate::tui::model_picker::TreeNode],
-        target: Option<usize>,
-        path: &mut Vec<usize>,
-    ) -> bool {
-        for (i, node) in nodes.iter().enumerate() {
-            path.push(i);
-            if node.model_index.is_some() && node.model_index == target {
-                return true;
-            }
-            if find_path(&node.children, target, path) {
-                return true;
-            }
-            path.pop();
-        }
-        false
-    }
-    let mut path = Vec::new();
-    if !find_path(&tree.labs, target, &mut path) {
-        // No exact match — start from column 0 with no drilled selection.
-        path.clear();
-        path.push(0);
-    }
-    path
-}
-
-fn draw_provider_picker(f: &mut ratatui::Frame, area: Rect, app: &AppState) {
-    let theme = &app.theme;
-    let width = area.width.min(72);
-    let rows = (app.provider_picker_items.len() as u16).min(12);
-    let height = (rows + 5).min(area.height.saturating_sub(2));
-    let x = area.x + (area.width.saturating_sub(width)) / 2;
-    let y = area.y + (area.height.saturating_sub(height)) / 2;
-    let box_area = Rect {
-        x,
-        y,
-        width,
-        height,
-    };
-    if box_area.height < 4 {
-        return;
-    }
-
-    let bar = Rect {
-        x: box_area.x,
-        y: box_area.y,
-        width: box_area.width,
-        height: 1,
-    };
-    let mut title = "  Switch Provider  ".to_string();
-    if (title.chars().count() as u16) < bar.width {
-        let pad = bar.width as usize - title.chars().count();
-        title = format!(
-            "{}{}{}",
-            " ".repeat(pad / 2),
-            title.trim(),
-            " ".repeat(pad - pad / 2)
-        );
-    }
-    f.render_widget(
-        Paragraph::new(title).style(theme.accent.add_modifier(Modifier::BOLD)),
-        bar,
-    );
-
-    let list_area = Rect {
-        x: box_area.x,
-        y: box_area.y + 1,
-        width: box_area.width,
-        height: box_area.height.saturating_sub(2),
-    };
-
-    let mut lines: Vec<Line<'static>> = Vec::new();
-    if app.provider_picker_items.is_empty() {
-        lines.push(Line::from(Span::styled("  (no providers)", theme.muted)));
-    } else {
-        let active = app
-            .provider_picker_selection
-            .min(app.provider_picker_items.len().saturating_sub(1));
-        for (i, e) in app.provider_picker_items.iter().enumerate() {
-            let is_active = i == active;
-            let marker = if is_active { "▸ " } else { "  " };
-            let label = e.name.clone().unwrap_or_else(|| "default".into());
-            let row_style = Style::default()
-                .fg(theme.body_fg)
-                .add_modifier(if is_active {
-                    Modifier::BOLD
-                } else {
-                    Modifier::empty()
-                });
-            lines.push(Line::from(vec![
-                Span::styled(marker, row_style.add_modifier(Modifier::BOLD)),
-                Span::styled(format!("{label:<12}"), row_style),
-                Span::styled(format!(" {}", e.model), theme.muted),
-                Span::styled(format!("  ({})", e.base_url), theme.muted),
-            ]));
-        }
-    }
-
-    let hint = "  ↑↓ navigate · Enter select · Esc cancel  ";
-    lines.push(Line::from(""));
-    lines.push(Line::from(Span::styled(hint, theme.muted)));
-
-    f.render_widget(Paragraph::new(lines), list_area);
-    draw_picker_border(f, box_area, theme);
-}
-
-fn draw_diff_scrubber(f: &mut ratatui::Frame, area: Rect, app: &AppState) {
-    let theme = &app.theme;
-    let width = area.width.min(96);
-    let total = app.scrubber_hunks.len() as u16;
-    let height = (total * 4 + 8).min(area.height.saturating_sub(2));
-    let x = area.x + (area.width.saturating_sub(width)) / 2;
-    let y = area.y + (area.height.saturating_sub(height)) / 2;
-    let box_area = Rect {
-        x,
-        y,
-        width,
-        height,
-    };
-    if box_area.height < 6 {
-        return;
-    }
-
-    let bar = Rect {
-        x: box_area.x,
-        y: box_area.y,
-        width: box_area.width,
-        height: 1,
-    };
-    let title = format!(
-        "  Edit Scrubber — {} ({} hunks)  ",
-        app.scrubber_path, total
-    );
-    f.render_widget(
-        Paragraph::new(title).style(theme.accent.add_modifier(Modifier::BOLD)),
-        bar,
-    );
-
-    let list_area = Rect {
-        x: box_area.x,
-        y: box_area.y + 1,
-        width: box_area.width,
-        height: box_area.height.saturating_sub(2),
-    };
-
-    let mut lines: Vec<Line<'static>> = Vec::new();
-    let active = app
-        .scrubber_selection
-        .min(app.scrubber_hunks.len().saturating_sub(1));
-    for (i, hunk) in app.scrubber_hunks.iter().enumerate() {
-        let is_active = i == active;
-        let accepted = app.scrubber_accepted.get(i).copied().unwrap_or(true);
-        let marker = if is_active { "▸ " } else { "  " };
-        let state = if accepted { "[✓]" } else { "[ ]" };
-        let header = format!(
-            "{marker}{state} hunk {} of {} · line {}",
-            i + 1,
-            total,
-            hunk.line_no
-        );
-        let header_style = Style::default()
-            .fg(theme.body_fg)
-            .add_modifier(if is_active {
-                Modifier::BOLD
-            } else {
-                Modifier::empty()
-            });
-        lines.push(Line::from(Span::styled(header, header_style)));
-        for before in &hunk.before_lines {
-            lines.push(Line::from(vec![
-                Span::styled(
-                    "    - ",
-                    Style::default().fg(crate::tui::theme::Palette::RED),
-                ),
-                Span::styled(
-                    before.clone(),
-                    Style::default().fg(crate::tui::theme::Palette::RED),
-                ),
-            ]));
-        }
-        for after in &hunk.after_lines {
-            lines.push(Line::from(vec![
-                Span::styled(
-                    "    + ",
-                    Style::default().fg(crate::tui::theme::Palette::GREEN),
-                ),
-                Span::styled(
-                    after.clone(),
-                    Style::default().fg(crate::tui::theme::Palette::GREEN),
-                ),
-            ]));
-        }
-        lines.push(Line::from(""));
-    }
-
-    let hint = "  ↑↓ navigate · y/n toggle · Y all · N none · Enter apply · Esc cancel  ";
-    lines.push(Line::from(Span::styled(hint, theme.muted)));
-
-    f.render_widget(Paragraph::new(lines), list_area);
-    draw_picker_border(f, box_area, theme);
-}
-
-/// Simple border drawn with box-drawing characters.
-fn draw_picker_border(f: &mut ratatui::Frame, r: Rect, theme: &Theme) {
-    let style = theme.border;
-    // Top
-    if r.height > 0 {
-        let top = "─".repeat(r.width as usize);
-        f.render_widget(
-            Paragraph::new(top).style(style),
-            Rect {
-                x: r.x,
-                y: r.y,
-                width: r.width,
-                height: 1,
-            },
-        );
-    }
-    // Bottom
-    if r.height > 1 {
-        let bot = "─".repeat(r.width as usize);
-        f.render_widget(
-            Paragraph::new(bot).style(style),
-            Rect {
-                x: r.x,
-                y: r.y + r.height - 1,
-                width: r.width,
-                height: 1,
-            },
-        );
-    }
-    // Left edge (corners overlap — good enough for a 1px line)
-    if r.height > 2 {
-        let left: Vec<Line<'static>> = (1..r.height - 1)
-            .map(|_| Line::from(Span::styled("│", style)))
-            .collect();
-        f.render_widget(
-            Paragraph::new(left),
-            Rect {
-                x: r.x,
-                y: r.y + 1,
-                width: 1,
-                height: r.height - 2,
-            },
-        );
-        let right: Vec<Line<'static>> = (1..r.height - 1)
-            .map(|_| Line::from(Span::styled("│", style)))
-            .collect();
-        f.render_widget(
-            Paragraph::new(right),
-            Rect {
-                x: r.x + r.width - 1,
-                y: r.y + 1,
-                width: 1,
-                height: r.height - 2,
-            },
-        );
-    }
-}
-
-fn init_terminal() -> Result<Terminal<ratatui::backend::CrosstermBackend<std::io::Stdout>>> {
-    ratatui::crossterm::terminal::enable_raw_mode()?;
-    let mut stdout = std::io::stdout();
-    ratatui::crossterm::execute!(stdout, ratatui::crossterm::terminal::EnterAlternateScreen)?;
-    let backend = ratatui::backend::CrosstermBackend::new(stdout);
-    let terminal = Terminal::new(backend)?;
-    Ok(terminal)
-}
-
-fn restore_terminal() -> Result<()> {
-    let _ = ratatui::crossterm::terminal::disable_raw_mode();
-    ratatui::crossterm::execute!(
-        std::io::stdout(),
-        ratatui::crossterm::terminal::LeaveAlternateScreen,
-    )?;
+    init::restore_terminal()?;
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration;
 
     #[test]
     fn stream_batching_caps_stream_redraws_to_frame_budget() {
         let start = Instant::now();
 
         assert_eq!(
-            render_wake_for_stream_batch(start, start + Duration::from_millis(1), false),
-            RenderWake::Wait(Duration::from_millis(15))
+            events::render_wake_for_stream_batch(start, start + Duration::from_millis(1), false),
+            events::RenderWake::Wait(Duration::from_millis(15))
         );
     }
 
@@ -2446,20 +1400,20 @@ mod tests {
         let start = Instant::now();
 
         assert_eq!(
-            render_wake_for_stream_batch(start, start + Duration::from_millis(1), true),
-            RenderWake::Now
+            events::render_wake_for_stream_batch(start, start + Duration::from_millis(1), true),
+            events::RenderWake::Now
         );
     }
 
     #[test]
     fn model_command_is_available_and_deferred_mid_turn() {
-        let command = SLASH_COMMANDS
+        let command = keymap::SLASH_COMMANDS
             .iter()
             .find(|cmd| cmd.name == "model")
             .expect("model slash command");
 
         assert!(!command.mid_turn_safe);
-        assert_eq!(filter_commands("mod")[0].name, "model");
+        assert_eq!(keymap::filter_commands("mod")[0].name, "model");
     }
 
     #[test]
@@ -2482,7 +1436,7 @@ mod tests {
         config.provider.model = "deepseek/v4".into();
         config.providers = providers;
 
-        let entries = build_provider_picker_entries(&config);
+        let entries = keymap::build_provider_picker_entries(&config);
         assert_eq!(entries.len(), 3);
         assert!(entries[0].name.is_none());
         assert_eq!(entries[0].model, "deepseek/v4");
@@ -2492,13 +1446,13 @@ mod tests {
 
     #[test]
     fn provider_command_is_available_and_deferred_mid_turn() {
-        let command = SLASH_COMMANDS
+        let command = keymap::SLASH_COMMANDS
             .iter()
             .find(|cmd| cmd.name == "provider")
             .expect("provider slash command");
 
         assert!(!command.mid_turn_safe);
-        assert_eq!(filter_commands("prov")[0].name, "provider");
+        assert_eq!(keymap::filter_commands("prov")[0].name, "provider");
     }
 
     #[test]
@@ -2517,11 +1471,11 @@ mod tests {
         config.provider.model = "deepseek/v4".into();
         config.providers = providers;
 
-        let active_default = format_provider_list(&config, None);
+        let active_default = keymap::format_provider_list(&config, None);
         assert!(active_default.contains("* default · https://openrouter.ai/api/v1 · deepseek/v4"));
         assert!(active_default.contains("  local · http://localhost:11434/v1 · qwen2.5"));
 
-        let active_local = format_provider_list(&config, Some("local"));
+        let active_local = keymap::format_provider_list(&config, Some("local"));
         assert!(active_local.contains("  default · https://openrouter.ai/api/v1"));
         assert!(active_local.contains("* local · http://localhost:11434/v1"));
     }
@@ -2530,7 +1484,7 @@ mod tests {
     fn format_provider_list_handles_no_named_profiles() {
         use crate::config::Config;
         let config = Config::default();
-        let report = format_provider_list(&config, None);
+        let report = keymap::format_provider_list(&config, None);
         assert!(report.contains("* default"));
         assert!(report.contains("(no named [providers.<name>] profiles configured)"));
     }
@@ -2561,7 +1515,7 @@ mod tests {
             },
         ];
 
-        let report = format_model_list("model-a", &models);
+        let report = keymap::format_model_list("model-a", &models);
 
         assert!(report.contains("* model-a · ctx 1,000 · tools,json"));
         assert!(report.contains("  model-b · ctx unknown"));
