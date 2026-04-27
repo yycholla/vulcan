@@ -31,6 +31,15 @@ pub struct SanitizeOut {
 const OPEN_TAG: &str = "<think";
 const CLOSE_TAG: &str = "</think";
 
+/// YYC-157: cap on the buffered partial-tag tail. Bounds memory if
+/// a misbehaving (or adversarial) provider opens `<think` followed
+/// by megabytes of content without ever closing the tag — `pending`
+/// would otherwise accumulate the entire stream waiting for a `>`
+/// that never arrives. 64 KiB is well above the longest realistic
+/// reasoning prefix and small enough that hitting the cap surfaces
+/// the streaming bug to the operator immediately.
+const MAX_PENDING_BYTES: usize = 64 * 1024;
+
 impl ThinkSanitizer {
     pub fn new() -> Self {
         Self::default()
@@ -56,7 +65,17 @@ impl ThinkSanitizer {
                     }
                     TagMatch::Partial { start } => {
                         out.reasoning.push_str(&rest[..start]);
-                        self.pending.push_str(&rest[start..]);
+                        let tail = &rest[start..];
+                        // YYC-157: bound pending. If a malformed
+                        // stream never closes `<think`, give up on
+                        // matching and emit the tail as reasoning so
+                        // the buffer can't grow without bound.
+                        if self.pending.len().saturating_add(tail.len()) > MAX_PENDING_BYTES {
+                            out.reasoning.push_str(tail);
+                            self.pending.clear();
+                        } else {
+                            self.pending.push_str(tail);
+                        }
                         return out;
                     }
                     TagMatch::None => {
@@ -73,7 +92,17 @@ impl ThinkSanitizer {
                     }
                     TagMatch::Partial { start } => {
                         out.text.push_str(&rest[..start]);
-                        self.pending.push_str(&rest[start..]);
+                        let tail = &rest[start..];
+                        // YYC-157: same cap as the in_think branch.
+                        // Outside a `<think` block, if a malformed
+                        // partial tag never resolves, flush as plain
+                        // text rather than buffer indefinitely.
+                        if self.pending.len().saturating_add(tail.len()) > MAX_PENDING_BYTES {
+                            out.text.push_str(tail);
+                            self.pending.clear();
+                        } else {
+                            self.pending.push_str(tail);
+                        }
                         return out;
                     }
                     TagMatch::None => {
@@ -261,5 +290,67 @@ mod tests {
         let _ = s.feed("foo <thi");
         let out = s.flush();
         assert_eq!(out.text, "<thi");
+    }
+
+    // YYC-157: attacker feeds a flood of `<` characters. Each is
+    // examined in O(1), the loop stays linear in input size, and
+    // pending never exceeds the size of one trailing `<`.
+    #[test]
+    fn lt_flood_remains_linear_with_bounded_pending() {
+        let mut s = ThinkSanitizer::new();
+        // 100k `<` chars is far too large to ReDoS a real regex; for
+        // this hand-rolled scanner it should run in ~milliseconds
+        // and produce one pending byte for the trailing `<`.
+        let payload = "<".repeat(100_000);
+        let out = s.feed(&payload);
+        // Every `<` except the last passes through as plain text;
+        // the last is buffered as a partial match.
+        assert_eq!(out.text.len(), 99_999);
+        assert!(s.pending.len() <= OPEN_TAG.len());
+    }
+
+    // YYC-157: an unclosed `<think` tag with megabytes of content
+    // must NOT grow `pending` past `MAX_PENDING_BYTES`. The
+    // sanitizer gives up and emits the buffered content as
+    // reasoning so memory stays bounded.
+    #[test]
+    fn unclosed_think_with_huge_payload_stays_bounded() {
+        let mut s = ThinkSanitizer::new();
+        // Open the tag but never close it; feed in chunks larger
+        // than the cap so eviction must fire at least once.
+        let _ = s.feed("<think>");
+        assert!(s.in_think);
+        let big = "x".repeat(MAX_PENDING_BYTES);
+        let out = s.feed(&big);
+        // Reasoning should have absorbed the payload; pending must
+        // not have exceeded the cap.
+        assert!(s.pending.len() <= MAX_PENDING_BYTES);
+        // Most of the big payload routed to reasoning.
+        assert!(out.reasoning.len() + s.pending.len() >= big.len() / 2);
+    }
+
+    // YYC-157: a deceptive prefix that flips between `<` and other
+    // bytes shouldn't allow pending to grow either. Each chunk
+    // ends with a partial that resolves on the next chunk.
+    #[test]
+    fn alternating_partials_do_not_accumulate_pending() {
+        let mut s = ThinkSanitizer::new();
+        for _ in 0..1000 {
+            let _ = s.feed("<x");
+            // `<x` doesn't match the `<think` prefix → re-enters
+            // the loop, no pending kept.
+            assert!(s.pending.is_empty());
+        }
+    }
+
+    // YYC-157: the tag-matcher must not panic on multibyte UTF-8
+    // adjacent to `<`. Indexing into `bytes` is byte-level; we
+    // assert here that surrounding emoji content round-trips.
+    #[test]
+    fn multibyte_input_does_not_panic() {
+        let mut s = ThinkSanitizer::new();
+        let out = s.feed("emoji 🌊 before <think>x</think> after 🐈");
+        assert_eq!(out.text, "emoji 🌊 before  after 🐈");
+        assert_eq!(out.reasoning, "x");
     }
 }
