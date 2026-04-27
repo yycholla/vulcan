@@ -20,7 +20,7 @@
 //! helpers, `codec` carries the message (de)serialization helpers, and this
 //! file holds `SessionStore` plus its CRUD surface.
 
-use std::sync::Mutex;
+use parking_lot::Mutex;
 
 use anyhow::{Context, Result};
 use chrono::Utc;
@@ -96,7 +96,7 @@ impl SessionStore {
     /// Most recently active session, by `last_active`. `None` if there are no
     /// sessions yet.
     pub fn last_session_id(&self) -> Option<String> {
-        let conn = self.conn.lock().ok()?;
+        let conn = self.conn.lock();
         conn.query_row(
             "SELECT id FROM sessions ORDER BY last_active DESC LIMIT 1",
             [],
@@ -110,10 +110,7 @@ impl SessionStore {
     /// Load all messages for `session_id` in the order they were saved.
     /// Returns `Ok(None)` if the session doesn't exist.
     pub fn load_history(&self, session_id: &str) -> Result<Option<Vec<Message>>> {
-        let conn = self
-            .conn
-            .lock()
-            .map_err(|_| anyhow::anyhow!("session DB poisoned"))?;
+        let conn = self.conn.lock();
 
         let exists: bool = conn
             .query_row(
@@ -176,10 +173,7 @@ impl SessionStore {
     pub fn save_messages(&self, session_id: &str, messages: &[Message]) -> Result<()> {
         let now = Utc::now().timestamp();
 
-        let mut conn = self
-            .conn
-            .lock()
-            .map_err(|_| anyhow::anyhow!("session DB poisoned"))?;
+        let mut conn = self.conn.lock();
         let tx = conn.transaction()?;
 
         // Upsert the session row while preserving any previously-recorded
@@ -222,10 +216,7 @@ impl SessionStore {
     /// on every turn.
     pub fn append_messages(&self, session_id: &str, messages: &[Message]) -> Result<()> {
         let now = Utc::now().timestamp();
-        let mut conn = self
-            .conn
-            .lock()
-            .map_err(|_| anyhow::anyhow!("session DB poisoned"))?;
+        let mut conn = self.conn.lock();
         let tx = conn.transaction()?;
 
         upsert_session_metadata(&tx, session_id, now, None, None)?;
@@ -272,10 +263,7 @@ impl SessionStore {
         provider_profile: Option<&str>,
     ) -> Result<()> {
         let now = Utc::now().timestamp();
-        let conn = self
-            .conn
-            .lock()
-            .map_err(|_| anyhow::anyhow!("session DB poisoned"))?;
+        let conn = self.conn.lock();
         upsert_session_provider_profile(&conn, session_id, now, provider_profile)
     }
 
@@ -284,10 +272,7 @@ impl SessionStore {
     /// the column is NULL — both interpretations mean "use the legacy
     /// `[provider]` block".
     pub fn load_provider_profile(&self, session_id: &str) -> Result<Option<String>> {
-        let conn = self
-            .conn
-            .lock()
-            .map_err(|_| anyhow::anyhow!("session DB poisoned"))?;
+        let conn = self.conn.lock();
         let value = conn
             .query_row(
                 "SELECT provider_profile FROM sessions WHERE id = ?1",
@@ -308,20 +293,14 @@ impl SessionStore {
         lineage_label: Option<&str>,
     ) -> Result<()> {
         let now = Utc::now().timestamp();
-        let conn = self
-            .conn
-            .lock()
-            .map_err(|_| anyhow::anyhow!("session DB poisoned"))?;
+        let conn = self.conn.lock();
 
         upsert_session_metadata(&conn, session_id, now, parent_session_id, lineage_label)
     }
 
     /// Most-recent-first list of saved sessions, capped at `limit`.
     pub fn list_sessions(&self, limit: usize) -> Result<Vec<SessionSummary>> {
-        let conn = self
-            .conn
-            .lock()
-            .map_err(|_| anyhow::anyhow!("session DB poisoned"))?;
+        let conn = self.conn.lock();
 
         let mut stmt = conn.prepare(
             "SELECT s.id, s.created_at, s.last_active, s.parent_session_id, s.lineage_label,
@@ -359,10 +338,7 @@ impl SessionStore {
     /// Full-text search across every saved message. Returns the top `limit`
     /// hits ranked by BM25.
     pub fn search_messages(&self, query: &str, limit: usize) -> Result<Vec<SearchHit>> {
-        let conn = self
-            .conn
-            .lock()
-            .map_err(|_| anyhow::anyhow!("session DB poisoned"))?;
+        let conn = self.conn.lock();
 
         let mut stmt = conn.prepare(
             "SELECT m.session_id, m.position, m.role, m.content, m.created_at, bm25(messages_fts) AS score

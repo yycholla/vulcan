@@ -300,7 +300,7 @@ fn assistant_with_tool_calls_round_trips() {
 #[test]
 fn queue_tables_created() {
     let store = SessionStore::in_memory();
-    let conn = store.conn.lock().expect("lock");
+    let conn = store.conn.lock();
     let count: i64 = conn
         .query_row(
             "SELECT count(*) FROM sqlite_master \
@@ -315,7 +315,7 @@ fn queue_tables_created() {
 #[test]
 fn queue_indexes_created() {
     let store = SessionStore::in_memory();
-    let conn = store.conn.lock().expect("lock");
+    let conn = store.conn.lock();
     let count: i64 = conn
         .query_row(
             "SELECT count(*) FROM sqlite_master \
