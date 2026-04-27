@@ -362,7 +362,7 @@ impl OutboundQueue {
              SET state='sending', attempts = attempts + 1 \
              WHERE id = (SELECT id FROM outbound_queue \
                          WHERE state='pending' AND next_attempt_at <= ?1 \
-                         ORDER BY next_attempt_at ASC LIMIT 1) \
+                         ORDER BY next_attempt_at ASC, id ASC LIMIT 1) \
              RETURNING id, platform, chat_id, text, attachments_json, enqueued_at, \
                        next_attempt_at, attempts, state, last_error, edit_target, reply_to",
         )?;

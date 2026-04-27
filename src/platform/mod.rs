@@ -99,11 +99,10 @@ pub struct Attachment {
     pub original_name: Option<String>,
 }
 
-/// An attachment to send. `OutboundMessage` will gain a `Vec<Self>`
-/// in PR-2 once StreamRenderer wires media into the outbound pipeline.
-/// `path` is the local file to upload — `PathBuf` matches what
-/// `Platform::download_attachment` returns so a roundtrip
-/// (receive → re-send) is friction-free.
+/// An attachment to send. Lives on `OutboundMessage.attachments`
+/// (typed `Vec<Self>`); `path` is the local file the platform layer
+/// uploads. `PathBuf` matches what `Platform::download_attachment`
+/// returns so a roundtrip (receive → re-send) is friction-free.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct OutboundAttachment {
     pub path: std::path::PathBuf,

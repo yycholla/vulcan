@@ -27,9 +27,21 @@ pub struct StreamRenderer {
     last_emit: Instant,
     outbound: Arc<OutboundQueue>,
     registry: Arc<RenderRegistry>,
-    /// First-emit guard. We always send (no edit) on the first chunk;
-    /// subsequent chunks attempt edit_target.
-    sent_first: bool,
+    /// "Have we enqueued at least one outbound row for this turn?"
+    /// First chunk: false → emit with `edit_target = None`. Subsequent
+    /// chunks: true → read RenderRegistry for the anchor.
+    ///
+    /// Race window — PR-2b TODO: between `enqueued_first = true` (here)
+    /// and the dispatcher writing the anchor (after Platform::send
+    /// returns), a second chunk that fires inside the throttle interval
+    /// reads `None` and emits another no-anchor send, producing a
+    /// duplicate first message on the user's screen. The 1s Telegram
+    /// edit-floor + the dispatcher's 250ms poll make this a narrow
+    /// window in practice; PR-2b should tighten it by either
+    ///   (a) blocking subsequent enqueues until the anchor lands, or
+    ///   (b) capturing the anchor synchronously inside the renderer
+    ///       (skip the dispatcher round-trip for first send).
+    enqueued_first: bool,
 }
 
 impl StreamRenderer {
@@ -46,7 +58,7 @@ impl StreamRenderer {
             last_emit: Instant::now() - Duration::from_secs(3600),
             outbound,
             registry,
-            sent_first: false,
+            enqueued_first: false,
         }
     }
 
@@ -55,14 +67,17 @@ impl StreamRenderer {
             StreamEvent::Text(chunk) | StreamEvent::Reasoning(chunk) => {
                 self.buffer.push_str(&chunk);
                 if self.last_emit.elapsed() >= self.interval {
-                    self.flush(false).await?;
+                    self.flush().await?;
                 }
             }
             StreamEvent::ToolCallStart { .. } | StreamEvent::ToolCallEnd { .. } => {
-                self.flush(false).await?;
+                self.flush().await?;
             }
+            // PR-2b TODO: surface ChatResponse.finish_reason / usage on
+            // the final flush so the chat surface can render a "✓ done"
+            // footer with token counts.
             StreamEvent::Done(_) | StreamEvent::Error(_) => {
-                self.flush(true).await?;
+                self.flush().await?;
                 // Forget the anchor — turn is over.
                 self.registry.forget(&self.key);
             }
@@ -70,11 +85,11 @@ impl StreamRenderer {
         Ok(())
     }
 
-    async fn flush(&mut self, _final: bool) -> anyhow::Result<()> {
+    async fn flush(&mut self) -> anyhow::Result<()> {
         if self.buffer.is_empty() {
             return Ok(());
         }
-        let edit_target = if self.sent_first {
+        let edit_target = if self.enqueued_first {
             self.registry.anchor(&self.key)
         } else {
             None
@@ -89,7 +104,7 @@ impl StreamRenderer {
         };
         self.outbound.enqueue(msg).await?;
         self.last_emit = Instant::now();
-        self.sent_first = true;
+        self.enqueued_first = true;
         Ok(())
     }
 }

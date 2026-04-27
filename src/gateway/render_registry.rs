@@ -17,6 +17,10 @@ use parking_lot::RwLock;
 pub struct RenderKey {
     pub platform: String,
     pub chat_id: String,
+    /// PR-2a stand-in: callers populate this with `chat_id` because the
+    /// worker hasn't yet been switched to streaming and there's no real
+    /// per-turn id surfaced to the dispatcher. PR-2b adds a real
+    /// `turn_id` column on `outbound_queue` and threads it through.
     pub turn_id: String,
 }
 

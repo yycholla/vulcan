@@ -119,6 +119,11 @@ async fn drain_due(
         };
         let result = if let Some(anchor) = edit_target {
             // Route to edit; ignore SentMessage shape (edit returns ()).
+            // PR-2b TODO: on persistent edit failure (anchor stale,
+            // message deleted, message-too-old), forget the registry
+            // anchor and fall back to a fresh send rather than retry
+            // the same edit forever. Today, mark_failed reschedules
+            // and the next attempt re-edits the same anchor.
             let plat = registry
                 .get(&msg.platform)
                 .ok_or_else(|| anyhow::anyhow!("unknown platform: {}", msg.platform))?;
@@ -140,6 +145,16 @@ async fn drain_due(
                         chat_id: msg.chat_id.clone(),
                         turn_id: msg.chat_id.clone(),
                     };
+                    // PR-2b TODO: anchor write happens before mark_done.
+                    // If the subsequent mark_done fails (DB pool / disk),
+                    // recover_sending will re-deliver the row → second
+                    // Platform::send → second visible message, but the
+                    // registry still holds the *first* anchor. The next
+                    // edit then targets a message whose body diverges
+                    // from what the registry expects. Move the
+                    // set_anchor call into a transaction with mark_done
+                    // (or capture-after-mark-done) when worker streaming
+                    // lands.
                     render_registry.set_anchor(key, sent.message_id);
                     Ok(())
                 }
