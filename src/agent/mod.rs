@@ -53,8 +53,9 @@ pub(in crate::agent) fn is_local_base_url(base_url: &str) -> bool {
             dl == "localhost" || dl.ends_with(".local")
         }
         Some(url::Host::Ipv4(ip)) => is_local_ipv4(ip),
+
         Some(url::Host::Ipv6(ip)) => {
-            if ip.is_loopback() || ip.is_unspecified() || ip.is_unique_local() {
+            if ip.is_loopback() || ip.is_unspecified() || ip.is_unique_local() || ip.is_link_local() {
                 return true;
             }
             if let Some(v4) = ip.to_ipv4_mapped() {
@@ -62,6 +63,7 @@ pub(in crate::agent) fn is_local_base_url(base_url: &str) -> bool {
             }
             false
         }
+
         None => false,
     }
 }
