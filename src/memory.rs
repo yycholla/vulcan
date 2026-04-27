@@ -450,7 +450,7 @@ impl SessionStore {
         Ok(hits)
     }
 
-    #[cfg(any(test, feature = "bench-soak"))]
+    #[doc(hidden)]
     pub fn in_memory() -> Self {
         let conn = Connection::open_in_memory().expect("open in-memory session DB");
         initialize_conn(&conn).expect("initialize in-memory session DB");

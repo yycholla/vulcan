@@ -1,0 +1,217 @@
+use std::sync::{Arc, Mutex};
+
+use anyhow::Result;
+use async_trait::async_trait;
+use tempfile::tempdir;
+use tokio::sync::mpsc;
+use tokio_util::sync::CancellationToken;
+use vulcan::agent::Agent;
+use vulcan::hooks::HookRegistry;
+use vulcan::provider::mock::MockProvider;
+use vulcan::provider::{LLMProvider, Message, StreamEvent, ToolDefinition};
+use vulcan::skills::SkillRegistry;
+use vulcan::tools::ToolRegistry;
+
+static CWD_LOCK: Mutex<()> = Mutex::new(());
+
+struct ProviderHandle(Arc<MockProvider>);
+
+#[async_trait]
+impl LLMProvider for ProviderHandle {
+    async fn chat(
+        &self,
+        messages: &[Message],
+        tools: &[ToolDefinition],
+        cancel: CancellationToken,
+    ) -> Result<vulcan::provider::ChatResponse> {
+        self.0.chat(messages, tools, cancel).await
+    }
+
+    async fn chat_stream(
+        &self,
+        messages: &[Message],
+        tools: &[ToolDefinition],
+        tx: mpsc::UnboundedSender<StreamEvent>,
+        cancel: CancellationToken,
+    ) -> Result<()> {
+        self.0.chat_stream(messages, tools, tx, cancel).await
+    }
+
+    fn max_context(&self) -> usize {
+        self.0.max_context()
+    }
+}
+
+fn empty_skills() -> Arc<SkillRegistry> {
+    Arc::new(SkillRegistry::new(&std::path::PathBuf::from(
+        "/tmp/vulcan-integration-skills-nonexistent",
+    )))
+}
+
+fn agent_with_mock() -> (Agent, Arc<MockProvider>) {
+    let mock = Arc::new(MockProvider::new(128_000));
+    let agent = Agent::for_test(
+        Box::new(ProviderHandle(mock.clone())),
+        ToolRegistry::new(),
+        HookRegistry::new(),
+        empty_skills(),
+    );
+    (agent, mock)
+}
+
+#[tokio::test]
+async fn agent_read_file_tool_result_flows_into_next_llm_turn() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("note.txt");
+    std::fs::write(&path, "hello from integration\n").unwrap();
+    let (mut agent, mock) = agent_with_mock();
+
+    mock.enqueue_tool_call("read_file", "read_note", serde_json::json!({"path": path}));
+    mock.enqueue_text("I read the note.");
+
+    let response = agent.run_prompt("read the note").await.unwrap();
+
+    assert_eq!(response, "I read the note.");
+    let calls = mock.captured_calls();
+    assert_eq!(calls.len(), 2);
+    assert!(calls[1].iter().any(|message| matches!(
+        message,
+        Message::Tool { content, .. } if content.contains("hello from integration")
+    )));
+}
+
+#[tokio::test]
+async fn agent_tool_loop_can_read_edit_and_cargo_check_real_project() {
+    let _cwd = CWD_LOCK.lock().unwrap();
+    let dir = tempdir().unwrap();
+    let src_dir = dir.path().join("src");
+    std::fs::create_dir(&src_dir).unwrap();
+    std::fs::write(
+        dir.path().join("Cargo.toml"),
+        "[package]\nname = \"agent_loop_fixture\"\nversion = \"0.1.0\"\nedition = \"2024\"\n",
+    )
+    .unwrap();
+    let lib_path = src_dir.join("lib.rs");
+    std::fs::write(&lib_path, "pub fn answer() -> i32 {\n    41\n}\n").unwrap();
+
+    let prev = std::env::current_dir().unwrap();
+    std::env::set_current_dir(dir.path()).unwrap();
+    let (mut agent, mock) = agent_with_mock();
+
+    mock.enqueue_tool_call(
+        "read_file",
+        "read_lib",
+        serde_json::json!({"path": lib_path}),
+    );
+    mock.enqueue_tool_call(
+        "edit_file",
+        "edit_answer",
+        serde_json::json!({
+            "path": lib_path,
+            "old_string": "    41",
+            "new_string": "    42"
+        }),
+    );
+    mock.enqueue_tool_call(
+        "cargo_check",
+        "check_project",
+        serde_json::json!({"all_targets": false}),
+    );
+    mock.enqueue_text("The project still checks.");
+
+    let result = agent.run_prompt("fix answer").await;
+    std::env::set_current_dir(prev).unwrap();
+
+    assert_eq!(result.unwrap(), "The project still checks.");
+    assert!(std::fs::read_to_string(&lib_path).unwrap().contains("42"));
+    let calls = mock.captured_calls();
+    assert_eq!(calls.len(), 4);
+    assert!(calls[3].iter().any(|message| matches!(
+        message,
+        Message::Tool { tool_call_id, content } if tool_call_id == "check_project"
+            && content.contains("\"ok\": true")
+    )));
+}
+
+#[tokio::test]
+async fn stream_cancel_mid_tool_emits_done_and_persists_partial_messages() {
+    let (mut agent, mock) = agent_with_mock();
+    let session_id = agent.session_id().to_string();
+    mock.enqueue_tool_call(
+        "bash",
+        "sleep_call",
+        serde_json::json!({"command": "sleep 5", "timeout": 10}),
+    );
+    let cancel = CancellationToken::new();
+    let (tx, mut rx) = mpsc::unbounded_channel();
+
+    let cancel_for_task = cancel.clone();
+    let run = tokio::spawn(async move {
+        agent
+            .run_prompt_stream_with_cancel("start slow tool", tx, cancel_for_task)
+            .await
+            .map(|response| (response, agent))
+    });
+
+    while let Some(event) = rx.recv().await {
+        if matches!(event, StreamEvent::ToolCallStart { .. }) {
+            break;
+        }
+    }
+    cancel.cancel();
+
+    let mut saw_done = false;
+    while let Some(event) = rx.recv().await {
+        if matches!(
+            event,
+            StreamEvent::Done(vulcan::provider::ChatResponse {
+                finish_reason: Some(reason),
+                ..
+            }) if reason == "cancelled"
+        ) {
+            saw_done = true;
+            break;
+        }
+    }
+
+    let (response, agent) = run.await.unwrap().unwrap();
+    assert_eq!(response, "Cancelled");
+    assert!(saw_done);
+    let history = agent.memory().load_history(&session_id).unwrap().unwrap();
+    assert!(history.iter().any(|message| matches!(
+        message,
+        Message::Tool { tool_call_id, content } if tool_call_id == "sleep_call"
+            && content.contains("Cancelled")
+    )));
+}
+
+#[tokio::test]
+async fn resume_session_reloads_saved_history_for_next_prompt() {
+    let (mut agent, mock) = agent_with_mock();
+    mock.enqueue_text("first answer");
+
+    assert_eq!(
+        agent.run_prompt("first question").await.unwrap(),
+        "first answer"
+    );
+    let session_id = agent.session_id().to_string();
+    let saved = agent.memory().load_history(&session_id).unwrap().unwrap();
+    assert!(saved.iter().any(|message| matches!(
+        message,
+        Message::Assistant { content: Some(content), .. } if content == "first answer"
+    )));
+
+    agent.resume_session(&session_id).unwrap();
+    mock.enqueue_text("second answer");
+    assert_eq!(
+        agent.run_prompt("second question").await.unwrap(),
+        "second answer"
+    );
+
+    let calls = mock.captured_calls();
+    let second_turn = calls.last().unwrap();
+    assert!(second_turn.iter().any(|message| matches!(
+        message,
+        Message::Assistant { content: Some(content), .. } if content == "first answer"
+    )));
+}
