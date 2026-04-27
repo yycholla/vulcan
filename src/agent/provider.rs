@@ -1,10 +1,8 @@
-use anyhow::{Context, Result};
+use anyhow::Result;
 use tokio_util::sync::CancellationToken;
 
 use crate::config::{Config, ProviderConfig};
 use crate::context::ContextManager;
-use crate::provider::LLMProvider;
-use crate::provider::openai::OpenAIProvider;
 
 use super::{Agent, ModelSelection};
 
@@ -21,18 +19,12 @@ impl Agent {
         let mut next_config = self.provider_config.clone();
         next_config.model = model_id.to_string();
         let selection = Self::resolve_model_selection(&next_config, &self.provider_api_key).await?;
-        let provider: Box<dyn LLMProvider> = Box::new(
-            OpenAIProvider::new(
-                &next_config.base_url,
-                &self.provider_api_key,
-                &next_config.model,
-                selection.max_context,
-                next_config.max_retries,
-                selection.model.features.json_mode,
-                next_config.debug,
-            )
-            .context("Failed to initialize LLM provider")?,
-        );
+        let provider = self.provider_factory.build(
+            &next_config,
+            &self.provider_api_key,
+            selection.max_context,
+            selection.model.features.json_mode,
+        )?;
 
         self.provider = provider;
         self.provider_config = next_config;
@@ -73,18 +65,12 @@ impl Agent {
         })?;
 
         let selection = Self::resolve_model_selection(&next_config, &api_key).await?;
-        let provider: Box<dyn LLMProvider> = Box::new(
-            OpenAIProvider::new(
-                &next_config.base_url,
-                &api_key,
-                &next_config.model,
-                selection.max_context,
-                next_config.max_retries,
-                selection.model.features.json_mode,
-                next_config.debug,
-            )
-            .context("Failed to initialize LLM provider")?,
-        );
+        let provider = self.provider_factory.build(
+            &next_config,
+            &api_key,
+            selection.max_context,
+            selection.model.features.json_mode,
+        )?;
 
         self.provider = provider;
         self.provider_config = next_config;

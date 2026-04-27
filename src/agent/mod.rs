@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
@@ -14,7 +14,7 @@ use crate::hooks::skills::SkillsHook;
 use crate::memory::SessionStore;
 use crate::pause::PauseSender;
 use crate::prompt_builder::PromptBuilder;
-use crate::provider::openai::OpenAIProvider;
+use crate::provider::factory::{DefaultProviderFactory, ProviderFactory};
 use crate::provider::{LLMProvider, Message};
 use crate::skills::SkillRegistry;
 use crate::tools::{ToolRegistry, ToolResult};
@@ -72,6 +72,10 @@ pub struct Agent {
     pub(in crate::agent) last_saved_count: usize,
     /// Max agent loop iterations per prompt. 0 = unlimited (default).
     pub(in crate::agent) max_iterations: u32,
+    /// Builds [`LLMProvider`] instances from a `ProviderConfig`. Defaults to
+    /// [`DefaultProviderFactory`]; tests can swap it via [`Agent::for_test`]
+    /// to avoid hitting real network. See YYC-112.
+    pub(in crate::agent) provider_factory: Arc<dyn ProviderFactory>,
 }
 
 #[derive(Debug, Clone)]
@@ -125,18 +129,13 @@ impl Agent {
         let supports_json_mode = selection.model.features.json_mode;
         let pricing = selection.pricing.clone();
 
-        let provider: Box<dyn LLMProvider> = Box::new(
-            OpenAIProvider::new(
-                &config.provider.base_url,
-                &api_key,
-                &config.provider.model,
-                effective_max_context,
-                config.provider.max_retries,
-                supports_json_mode,
-                config.provider.debug,
-            )
-            .context("Failed to initialize LLM provider")?,
-        );
+        let provider_factory: Arc<dyn ProviderFactory> = Arc::new(DefaultProviderFactory);
+        let provider = provider_factory.build(
+            &config.provider,
+            &api_key,
+            effective_max_context,
+            supports_json_mode,
+        )?;
 
         let diff_sink = crate::tools::new_diff_sink();
         let lsp_manager = Arc::new(crate::code::lsp::LspManager::new(
@@ -263,6 +262,7 @@ impl Agent {
             lsp_manager,
             last_saved_count: 0,
             max_iterations: config.provider.max_iterations,
+            provider_factory,
         })
     }
 
@@ -333,6 +333,7 @@ impl Agent {
             )),
             last_saved_count: 0,
             max_iterations: 0,
+            provider_factory: Arc::new(DefaultProviderFactory),
         }
     }
 
