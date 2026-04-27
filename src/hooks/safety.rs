@@ -9,7 +9,8 @@
 //! customization will land when there's demand. See Linear YYC-26.
 
 use std::collections::HashSet;
-use std::sync::Mutex;
+
+use parking_lot::Mutex;
 
 use anyhow::Result;
 use async_trait::async_trait;
@@ -50,16 +51,11 @@ impl SafetyHook {
     /// the *exact same* command in this session will bypass the safety check.
     /// Public so the TUI can pre-seed approvals if it ever wants to.
     pub fn approve(&self, command: &str) {
-        if let Ok(mut set) = self.approved.lock() {
-            set.insert(command.to_string());
-        }
+        self.approved.lock().insert(command.to_string());
     }
 
     fn is_approved(&self, command: &str) -> bool {
-        self.approved
-            .lock()
-            .map(|s| s.contains(command))
-            .unwrap_or(false)
+        self.approved.lock().contains(command)
     }
 }
 

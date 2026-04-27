@@ -232,10 +232,10 @@ pub struct EditDiff {
 /// Shared latest-edit slot. `None` until the first successful edit;
 /// overwritten on every subsequent edit. The TUI clones the Arc and
 /// peeks the inner Option each render.
-pub type EditDiffSink = Arc<std::sync::Mutex<Option<EditDiff>>>;
+pub type EditDiffSink = Arc<parking_lot::Mutex<Option<EditDiff>>>;
 
 pub fn new_diff_sink() -> EditDiffSink {
-    Arc::new(std::sync::Mutex::new(None))
+    Arc::new(parking_lot::Mutex::new(None))
 }
 
 /// Trim a string to a max number of lines + chars so the TUI doesn't

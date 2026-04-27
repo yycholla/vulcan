@@ -18,9 +18,9 @@ use crate::config::{ApprovalConfig, ApprovalMode};
 use crate::hooks::{HookHandler, HookOutcome};
 use crate::pause::{AgentPause, AgentResume, OptionKind, PauseKind, PauseOption, PauseSender};
 use anyhow::Result;
+use parking_lot::Mutex;
 use serde_json::Value;
 use std::collections::HashSet;
-use std::sync::Mutex;
 use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
 
@@ -69,9 +69,7 @@ impl HookHandler for ApprovalHook {
         if matches!(mode, ApprovalMode::Always) {
             return Ok(HookOutcome::Continue);
         }
-        if matches!(mode, ApprovalMode::Session)
-            && self.session_allow.lock().unwrap().contains(tool)
-        {
+        if matches!(mode, ApprovalMode::Session) && self.session_allow.lock().contains(tool) {
             return Ok(HookOutcome::Continue);
         }
 
@@ -156,7 +154,7 @@ impl HookHandler for ApprovalHook {
         match resume {
             Ok(AgentResume::Allow) => Ok(HookOutcome::Continue),
             Ok(AgentResume::AllowAndRemember) => {
-                self.session_allow.lock().unwrap().insert(tool.to_string());
+                self.session_allow.lock().insert(tool.to_string());
                 Ok(HookOutcome::Continue)
             }
             Ok(AgentResume::Deny) => Ok(HookOutcome::Block {

@@ -392,30 +392,30 @@ impl AppState {
     /// trading-floor tool-log pane. Returns demo data if no audit buffer is
     /// attached or it's still empty.
     pub fn tool_log_view(&self, max: usize) -> Vec<ToolLogRow> {
-        if let Some(buf) = &self.audit_log
-            && let Ok(buf) = buf.lock()
-            && !buf.is_empty()
-        {
-            return buf
-                .iter()
-                .rev()
-                .take(max)
-                .map(|e| {
-                    let kind_marker = match e.kind {
-                        AuditKind::Started => "●",
-                        AuditKind::Ok => "✓",
-                        AuditKind::Err => "✗",
-                    };
-                    ToolLogRow {
-                        time: e.time.with_timezone(&Local).format("%H:%M:%S").to_string(),
-                        actor: short_tool(&e.tool),
-                        msg: format!("{} {}", kind_marker, e.detail),
-                    }
-                })
-                .collect::<Vec<_>>()
-                .into_iter()
-                .rev()
-                .collect();
+        if let Some(buf) = &self.audit_log {
+            let buf = buf.lock();
+            if !buf.is_empty() {
+                return buf
+                    .iter()
+                    .rev()
+                    .take(max)
+                    .map(|e| {
+                        let kind_marker = match e.kind {
+                            AuditKind::Started => "●",
+                            AuditKind::Ok => "✓",
+                            AuditKind::Err => "✗",
+                        };
+                        ToolLogRow {
+                            time: e.time.with_timezone(&Local).format("%H:%M:%S").to_string(),
+                            actor: short_tool(&e.tool),
+                            msg: format!("{} {}", kind_marker, e.detail),
+                        }
+                    })
+                    .collect::<Vec<_>>()
+                    .into_iter()
+                    .rev()
+                    .collect();
+            }
         }
         demo_tool_log()
     }
@@ -503,7 +503,7 @@ impl AppState {
     /// value so the renderer doesn't hold the mutex across draws.
     pub fn latest_diff(&self) -> Option<crate::tools::EditDiff> {
         let sink = self.diff_sink.as_ref()?;
-        sink.lock().ok()?.clone()
+        sink.lock().clone()
     }
 
     /// Cumulative token count (input + output across all turns). Used by

@@ -257,7 +257,7 @@ impl Tool for WriteFile {
                 after: crate::tools::snippet(content, 6, 800),
                 at: chrono::Local::now(),
             };
-            *sink.lock().unwrap() = Some(diff);
+            *sink.lock() = Some(diff);
         }
 
         // YYC-bonus: surface a real diff in the card preview without
@@ -441,7 +441,7 @@ impl Tool for PatchFile {
                 after: crate::tools::snippet(new, 6, 800),
                 at: chrono::Local::now(),
             };
-            *sink.lock().unwrap() = Some(diff);
+            *sink.lock() = Some(diff);
         }
 
         // YYC-bonus: render a Claude Code-style diff in the card.
@@ -578,7 +578,7 @@ mod tests {
         .await
         .unwrap();
 
-        let diff = sink.lock().unwrap().clone().expect("diff captured");
+        let diff = sink.lock().clone().expect("diff captured");
         assert_eq!(diff.tool, "write_file");
         assert_eq!(diff.path, path_str);
         assert_eq!(diff.before, "old contents");
@@ -631,7 +631,7 @@ mod tests {
         .await
         .unwrap();
 
-        let diff = sink.lock().unwrap().clone().expect("diff captured");
+        let diff = sink.lock().clone().expect("diff captured");
         assert_eq!(diff.tool, "edit_file");
         assert_eq!(diff.before, "1");
         assert_eq!(diff.after, "42");
