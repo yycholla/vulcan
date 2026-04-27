@@ -8,7 +8,17 @@ all-features = true
 [advisories]
 version = 2
 yanked = "warn"
-ignore = []
+# Track upstream advisories we've intentionally accepted. Each entry
+# must include rationale + a path back to fix.
+ignore = [
+    # RUSTSEC-2026-0104: rustls-webpki 0.102.8 panics on syntactically-
+    # valid empty BIT STRING in CRL onlySomeReasons. Reaches us via
+    # serenity 0.12.5 → tokio-tungstenite 0.21.0 → rustls 0.22.4. We
+    # do not parse CRLs anywhere in our own code; serenity only opens
+    # WebSockets. Upstream serenity needs to bump tungstenite + rustls
+    # to consume the fix. Re-evaluate on next serenity major.
+    { id = "RUSTSEC-2026-0104", reason = "transitive via serenity; CRL path unreachable for us." },
+]
 
 [licenses]
 version = 2
