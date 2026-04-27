@@ -13,6 +13,7 @@ use crate::tools::ToolRegistry;
 
 use super::Agent;
 use super::dispatch::{elided_lines, preview_output, summarize_tool_args, summarize_tool_result};
+use super::run::empty_terminal_message;
 
 fn empty_skills() -> Arc<SkillRegistry> {
     // Point at a path that doesn't exist so the registry is empty.
@@ -139,6 +140,84 @@ async fn provider_error_propagates() {
     assert!(result.is_err());
     let msg = result.unwrap_err().to_string();
     assert!(msg.contains("simulated 500"), "got {msg:?}");
+}
+
+#[tokio::test]
+async fn empty_terminal_response_after_tool_explains_why_buffered() {
+    // YYC-104: agent used to return an empty string when the model
+    // emitted no content + no tool calls after a tool error. That
+    // exit looked silent to the caller. Now the run_prompt return
+    // value carries a structured hint (iteration, tool-call count).
+    let (mut agent, mock) = agent_with_mock();
+    mock.enqueue_tool_call(
+        "read_file",
+        "call_1",
+        serde_json::json!({"path": "/tmp/vulcan-test-nonexistent-file"}),
+    );
+    mock.enqueue_text(""); // model gives up after seeing tool error
+
+    let resp = agent.run_prompt("read it").await.unwrap();
+    assert!(
+        resp.contains("1 tool call"),
+        "expected tool count in hint, got {resp:?}"
+    );
+    assert!(
+        resp.contains("iteration 1"),
+        "expected iteration in hint, got {resp:?}"
+    );
+    assert!(resp.contains("terminal turn"), "got {resp:?}");
+}
+
+#[tokio::test]
+async fn empty_terminal_response_after_tool_explains_why_streaming() {
+    let (mut agent, mock) = agent_with_mock();
+    mock.enqueue_tool_call(
+        "read_file",
+        "call_1",
+        serde_json::json!({"path": "/tmp/vulcan-test-nonexistent-file"}),
+    );
+    mock.enqueue_text("");
+
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let resp = agent.run_prompt_stream("read it", tx).await.unwrap();
+
+    assert!(resp.contains("1 tool call"), "got {resp:?}");
+    assert!(resp.contains("iteration 1"), "got {resp:?}");
+    assert!(resp.contains("terminal turn"), "got {resp:?}");
+
+    // The hint should also reach the TUI via a Text event.
+    let mut saw_text_hint = false;
+    while let Ok(ev) = rx.try_recv() {
+        if let crate::provider::StreamEvent::Text(t) = ev {
+            if t.contains("terminal turn") {
+                saw_text_hint = true;
+            }
+        }
+    }
+    assert!(saw_text_hint, "TUI never saw the hint Text event");
+}
+
+#[test]
+fn empty_terminal_message_includes_reasoning_and_context_hints() {
+    use crate::provider::Usage;
+    let usage = Usage {
+        prompt_tokens: 970,
+        completion_tokens: 0,
+        total_tokens: 970,
+    };
+    // 970/1000 = 97% — over the 0.95 threshold, expect a hint.
+    let msg = empty_terminal_message(3, 5, 1234, Some(&usage), 1_000);
+    assert!(msg.contains("5 tool calls"), "got {msg:?}");
+    assert!(msg.contains("iteration 3"), "got {msg:?}");
+    assert!(msg.contains("1234 chars"), "got {msg:?}");
+    assert!(msg.contains("near context limit"), "got {msg:?}");
+    // Plural / singular agreement for tool count.
+    let msg = empty_terminal_message(0, 1, 0, None, 0);
+    assert!(msg.contains("1 tool call"), "got {msg:?}");
+    assert!(!msg.contains("1 tool calls"), "got {msg:?}");
+    // No reasoning, no usage → just the base summary.
+    assert!(!msg.contains("chars"), "should hide reasoning hint when 0");
+    assert!(!msg.contains("near context"), "should hide context hint when no usage");
 }
 
 #[tokio::test]
