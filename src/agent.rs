@@ -106,6 +106,9 @@ pub struct Agent {
     last_saved_count: usize,
     /// Max agent loop iterations per prompt. 0 = unlimited (default).
     max_iterations: u32,
+    /// Workspace context probed at session start (YYC-107). Used to
+    /// filter the tool registry and feed dynamic tool descriptions.
+    tool_context: crate::tools::ToolContext,
 }
 
 #[derive(Debug, Clone)]
@@ -183,9 +186,12 @@ impl Agent {
         );
 
         let diff_sink = crate::tools::new_diff_sink();
-        let lsp_manager = Arc::new(crate::code::lsp::LspManager::new(
-            std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")),
-        ));
+        let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+        let lsp_manager = Arc::new(crate::code::lsp::LspManager::new(cwd.clone()));
+        // YYC-107: probe the workspace once so tool registration can
+        // drop irrelevant tools (cargo_check off-Rust, etc.) and the
+        // remaining tools can render runtime-aware descriptions.
+        let tool_context = crate::tools::ToolContext::probe(cwd);
         let mut tools = ToolRegistry::new_with_diff_and_lsp(
             Some(diff_sink.clone()),
             Some(lsp_manager.clone()),
@@ -288,6 +294,9 @@ impl Agent {
             )));
         }
 
+        // YYC-107: drop tools that aren't relevant to this workspace.
+        tools.filter_for_context(&tool_context);
+
         Ok(Self {
             provider,
             tools,
@@ -306,6 +315,7 @@ impl Agent {
             active_profile: None,
             lsp_manager,
             last_saved_count: 0,
+            tool_context,
             max_iterations: config.provider.max_iterations,
         })
     }
@@ -593,6 +603,9 @@ impl Agent {
             )),
             last_saved_count: 0,
             max_iterations: 0,
+            tool_context: crate::tools::ToolContext::probe(
+                std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")),
+            ),
         }
     }
 
@@ -640,8 +653,12 @@ impl Agent {
         self.turn_cancel = CancellationToken::new();
         let cancel = self.turn_cancel.clone();
 
-        let system = self.prompt_builder.build_system_prompt(&self.tools);
-        let tool_defs = self.tools.definitions();
+        let system = self
+            .prompt_builder
+            .build_system_prompt_with_context(&self.tools, Some(&self.tool_context));
+        let tool_defs = self
+            .tools
+            .definitions_with_context(Some(&self.tool_context));
         let mut messages = vec![Message::System { content: system }];
 
         // Load history for *this* agent's session — set by `resume_session` or
@@ -798,8 +815,12 @@ impl Agent {
         // sees the cancellation. The external token is the source of truth.
         self.turn_cancel = cancel.clone();
 
-        let system = self.prompt_builder.build_system_prompt(&self.tools);
-        let tool_defs = self.tools.definitions();
+        let system = self
+            .prompt_builder
+            .build_system_prompt_with_context(&self.tools, Some(&self.tool_context));
+        let tool_defs = self
+            .tools
+            .definitions_with_context(Some(&self.tool_context));
         let mut messages = vec![Message::System { content: system }];
 
         if let Some(history) = self.memory.load_history(&self.session_id)? {

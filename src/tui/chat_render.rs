@@ -172,7 +172,7 @@ impl ChatRenderStore {
                     MessageSegment::Reasoning(reasoning)
                         if options.show_reasoning && !reasoning.trim().is_empty() =>
                     {
-                        lines.extend(reasoning_lines(reasoning, false, theme));
+                        lines.extend(reasoning_lines(reasoning, false, theme, options.width));
                     }
                     MessageSegment::Reasoning(_) => {}
                     MessageSegment::ToolCall {
@@ -221,7 +221,7 @@ impl ChatRenderStore {
             }
         } else {
             if options.show_reasoning && is_agent && !message.reasoning.is_empty() {
-                lines.extend(reasoning_lines(&message.reasoning, false, theme));
+                lines.extend(reasoning_lines(&message.reasoning, false, theme, options.width));
             }
             if is_agent && message.content.is_empty() {
                 lines.push(agent_placeholder(

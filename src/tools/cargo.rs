@@ -7,7 +7,7 @@
 //! auto-diagnostics hook for a "did my edit compile?" Rust path that
 //! doesn't depend on tooling state.
 
-use crate::tools::{Tool, ToolResult};
+use crate::tools::{Tool, ToolContext, ToolResult};
 use anyhow::Result;
 use async_trait::async_trait;
 use serde_json::{Value, json};
@@ -42,6 +42,33 @@ impl Tool for CargoCheckTool {
             }
         })
     }
+    fn is_relevant(&self, ctx: &ToolContext) -> bool {
+        // YYC-107: only register cargo_check when there's a Cargo.toml
+        // within the probe depth. Saves the agent from the confusing
+        // "could not find Cargo.toml" error path on non-Rust workspaces.
+        ctx.cargo_manifest.is_some()
+    }
+
+    fn dynamic_description(&self, ctx: &ToolContext) -> Option<String> {
+        let manifest = ctx.cargo_manifest.as_ref()?;
+        let mut out = String::from(
+            "Run `cargo check --message-format=json` and return parsed compiler diagnostics. \
+             Use this instead of `cargo check` via bash — structured errors with paths, lines, \
+             rendered messages.",
+        );
+        if let Some(name) = &ctx.cargo_package_name {
+            out.push_str(&format!(" Workspace package: `{name}`."));
+        }
+        if !ctx.cargo_bin_targets.is_empty() {
+            out.push_str(&format!(
+                " Binary targets: {}.",
+                ctx.cargo_bin_targets.join(", ")
+            ));
+        }
+        out.push_str(&format!(" Manifest: `{}`.", manifest.display()));
+        Some(out)
+    }
+
     async fn call(&self, params: Value, cancel: CancellationToken) -> Result<ToolResult> {
         let package = params.get("package").and_then(|v| v.as_str());
         let all_targets = params

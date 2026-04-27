@@ -1,26 +1,58 @@
-use crate::tools::ToolRegistry;
+use crate::tools::{ToolContext, ToolRegistry};
 
 /// Builds the system prompt injected into every conversation.
 pub struct PromptBuilder;
 
 impl PromptBuilder {
     pub fn build_system_prompt(&self, tools: &ToolRegistry) -> String {
-        let cwd = std::env::current_dir()
-            .ok()
-            .map(|p| p.display().to_string())
+        self.build_system_prompt_with_context(tools, None)
+    }
+
+    pub fn build_system_prompt_with_context(
+        &self,
+        tools: &ToolRegistry,
+        ctx: Option<&ToolContext>,
+    ) -> String {
+        let cwd = ctx
+            .map(|c| c.cwd.display().to_string())
+            .or_else(|| std::env::current_dir().ok().map(|p| p.display().to_string()))
             .unwrap_or_else(|| "(unknown)".into());
-        let env_section = format!(
-            "## Environment\n\
-             - working directory: `{cwd}`\n\
-             - bash and other shell commands run in this directory unless `workdir` is supplied.\n"
+        let mut env_lines = vec![format!("- working directory: `{cwd}`")];
+        if let Some(c) = ctx {
+            if let Some(manifest) = &c.cargo_manifest {
+                let pkg = c
+                    .cargo_package_name
+                    .clone()
+                    .unwrap_or_else(|| "(unnamed)".into());
+                env_lines.push(format!(
+                    "- rust workspace: package `{pkg}` at `{}`",
+                    manifest.display()
+                ));
+                if !c.cargo_bin_targets.is_empty() {
+                    env_lines.push(format!(
+                        "- bin targets: {}",
+                        c.cargo_bin_targets.join(", ")
+                    ));
+                }
+            } else {
+                env_lines
+                    .push("- no Cargo.toml within depth=4 — `cargo_check` is not registered".into());
+            }
+            if c.git_present {
+                env_lines.push("- git: working tree present".into());
+            }
+        }
+        env_lines.push(
+            "- bash and other shell commands run in the working directory unless `workdir` is supplied.".into(),
         );
+        let env_section = format!("## Environment\n{}\n", env_lines.join("\n"));
 
         let tool_section = format!(
             "## Available Tools\n\
              You have access to the following tools. When you need to perform an action, \
              call the appropriate tool directly through the tool-calling interface:\n\n{}\n",
             tools
-                .definitions()
+                .definitions_with_context(ctx)
                 .iter()
                 .map(|t| format!("- `{}`: {}", t.function.name, t.function.description))
                 .collect::<Vec<_>>()
