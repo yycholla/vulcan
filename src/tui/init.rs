@@ -20,6 +20,12 @@ pub(super) fn init_terminal() -> Result<Terminal<CrosstermBackend<std::io::Stdou
         // of N KeyCode::Char events. Without this, multiline pastes
         // submit a prompt per line.
         ratatui::crossterm::event::EnableBracketedPaste,
+        // YYC-123: capture mouse events so the scroll wheel can drive
+        // the chat viewport directly. Without this, the terminal sends
+        // scroll-wheel motions as escape sequences that don't reach
+        // crossterm cleanly — users have to rely on Up/Down, which
+        // only steps one line per render frame.
+        ratatui::crossterm::event::EnableMouseCapture,
     )?;
     let backend = CrosstermBackend::new(stdout);
     let terminal = Terminal::new(backend)?;
@@ -32,7 +38,9 @@ pub(super) fn restore_terminal() -> Result<()> {
     ratatui::crossterm::execute!(
         std::io::stdout(),
         // Disable before leaving the alt screen so the user's primary
-        // terminal isn't left in bracketed-paste mode if Vulcan exits.
+        // terminal isn't left in bracketed-paste / mouse-capture state
+        // if Vulcan exits.
+        ratatui::crossterm::event::DisableMouseCapture,
         ratatui::crossterm::event::DisableBracketedPaste,
         ratatui::crossterm::terminal::LeaveAlternateScreen,
     )?;
