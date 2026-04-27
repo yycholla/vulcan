@@ -229,6 +229,51 @@ pub struct GatewayConfig {
     pub outbound_max_attempts: u32,
     #[serde(default)]
     pub discord: DiscordConfig,
+    /// YYC-18 PR-2c: slash commands routed through the gateway worker
+    /// before falling through to the streaming agent. Built-ins
+    /// (/help, /status, /clear, /resume) are pre-registered by
+    /// `CommandDispatcher::new`; entries here add custom commands or
+    /// override a builtin (`kind = "shell"` against e.g. `"help"`
+    /// replaces the registered builtin).
+    #[serde(default)]
+    pub commands: HashMap<String, CommandConfig>,
+}
+
+/// YYC-18 PR-2c: per-command configuration. Tagged via
+/// `serde(tag = "kind")` so a TOML entry reads naturally:
+///
+/// ```toml
+/// [gateway.commands]
+/// mybot = { kind = "shell", command = "scripts/mybot.sh" }
+/// ```
+///
+/// `Builtin { name }` is rarely needed in user TOML — the four built-in
+/// names are registered automatically. It exists so a config can
+/// pin a builtin under a different name if desired.
+#[derive(Debug, Deserialize, Clone)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum CommandConfig {
+    /// Built-in command. `name` selects which handler runs; supported
+    /// values: "help", "status", "clear", "resume". Unknown names are
+    /// warn-logged at dispatcher build time and skipped.
+    Builtin { name: String },
+    /// Run a subprocess and reply with its stdout. The user's message
+    /// body (after `/<name>`) is piped into stdin, and `VULCAN_PLATFORM`
+    /// / `VULCAN_CHAT_ID` / `VULCAN_USER_ID` env vars are set on the
+    /// child.
+    Shell {
+        command: String,
+        #[serde(default)]
+        args: Vec<String>,
+        #[serde(default = "default_command_timeout_secs")]
+        timeout_secs: u64,
+        #[serde(default)]
+        working_dir: Option<std::path::PathBuf>,
+    },
+}
+
+fn default_command_timeout_secs() -> u64 {
+    30
 }
 
 #[derive(Debug, Deserialize, Clone, Default)]

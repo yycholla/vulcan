@@ -263,6 +263,7 @@ mod tests {
             max_concurrent_lanes: 64,
             outbound_max_attempts: 5,
             discord: crate::config::DiscordConfig::default(),
+            commands: std::collections::HashMap::new(),
         });
         config
     }
