@@ -65,12 +65,26 @@ impl HookHandler for DiagnosticsHook {
             return Ok(HookOutcome::Continue);
         }
 
-        let edit = match self.diff_sink.lock().clone() {
-            Some(d) => d,
-            None => return Ok(HookOutcome::Continue),
+        // YYC-131: prefer the per-call diff carried on this ToolResult
+        // over the global sink. The sink is single-slot and last-write
+        // wins under concurrent dispatch, so two near-simultaneous
+        // edits could leave one DiagnosticsHook reading the *other*
+        // call's diff. The per-call field cannot race because it
+        // travels with the result.
+        let edit = if let Some(d) = result.edit_diff.clone() {
+            d
+        } else {
+            // Fall back to the global sink for results that don't carry
+            // a per-call diff (older paths or tools we haven't migrated).
+            // Validate against the matching tool name so a stale entry
+            // can't trigger diagnostics for an unrelated call.
+            match self.diff_sink.lock().clone() {
+                Some(d) if d.tool == tool => d,
+                _ => return Ok(HookOutcome::Continue),
+            }
         };
-        // Defense against stale sink contents — only act if the latest
-        // sink entry was produced by the tool we just observed.
+        // Defense against stale sink contents on the fallback path —
+        // only act if the diff is for the tool we just observed.
         if edit.tool != tool {
             return Ok(HookOutcome::Continue);
         }

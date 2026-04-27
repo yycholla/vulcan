@@ -25,6 +25,12 @@ pub struct ToolResult {
     /// (`Replaced 1 occurrence(s) in foo.rs`). Plain-output tools
     /// leave this `None` and the renderer falls back to `output`.
     pub display_preview: Option<String>,
+    /// Per-call diff record from a file-editing tool (YYC-131). Travels
+    /// with the result through the dispatch pipeline so AfterToolCall
+    /// hooks (e.g. DiagnosticsHook) can see *this* call's diff rather
+    /// than racing on a global last-write slot under concurrent
+    /// dispatch.
+    pub edit_diff: Option<EditDiff>,
 }
 
 impl ToolResult {
@@ -34,6 +40,7 @@ impl ToolResult {
             media: Vec::new(),
             is_error: false,
             display_preview: None,
+            edit_diff: None,
         }
     }
 
@@ -43,11 +50,20 @@ impl ToolResult {
             media: Vec::new(),
             is_error: true,
             display_preview: None,
+            edit_diff: None,
         }
     }
 
     pub fn with_display_preview(mut self, preview: impl Into<String>) -> Self {
         self.display_preview = Some(preview.into());
+        self
+    }
+
+    /// Attach the per-call edit diff so AfterToolCall hooks can react
+    /// to *this* call without racing on the global EditDiffSink slot
+    /// (YYC-131).
+    pub fn with_edit_diff(mut self, diff: EditDiff) -> Self {
+        self.edit_diff = Some(diff);
         self
     }
 }
