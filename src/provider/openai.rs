@@ -215,11 +215,10 @@ impl OpenAIProvider {
                                             },
                                         });
                                     }
-                                    if let Some(id) = tc.get("id").and_then(|i| i.as_str()) {
-                                        if !id.is_empty() {
+                                    if let Some(id) = tc.get("id").and_then(|i| i.as_str())
+                                        && !id.is_empty() {
                                             tool_calls[idx].id.push_str(id);
                                         }
-                                    }
                                     if let Some(func) = tc.get("function") {
                                         if let Some(name) =
                                             func.get("name").and_then(|n| n.as_str())
@@ -236,15 +235,14 @@ impl OpenAIProvider {
                             }
                         }
                     }
-                    if let Some(reason) = choice["finish_reason"].as_str() {
-                        if !reason.is_empty() && reason != "null" {
+                    if let Some(reason) = choice["finish_reason"].as_str()
+                        && !reason.is_empty() && reason != "null" {
                             *finish_reason = Some(reason.to_string());
                         }
-                    }
                 }
             }
-            if let Some(u) = chunk.get("usage") {
-                if let (Some(prompt), Some(completion)) = (
+            if let Some(u) = chunk.get("usage")
+                && let (Some(prompt), Some(completion)) = (
                     u.get("prompt_tokens").and_then(|v| v.as_u64()),
                     u.get("completion_tokens").and_then(|v| v.as_u64()),
                 ) {
@@ -254,7 +252,6 @@ impl OpenAIProvider {
                         total_tokens: (prompt + completion) as usize,
                     });
                 }
-            }
         }
     }
 }
@@ -467,8 +464,8 @@ fn infer_content_tool_calls(content: &str, tools: &[ToolDefinition]) -> Option<V
             }
         }
 
-        if let Some(arguments) = obj.get("arguments").or_else(|| obj.get("params")) {
-            if let Some(name) = obj
+        if let Some(arguments) = obj.get("arguments").or_else(|| obj.get("params"))
+            && let Some(name) = obj
                 .get("name")
                 .or_else(|| obj.get("tool"))
                 .or_else(|| obj.get("tool_name"))
@@ -488,7 +485,6 @@ fn infer_content_tool_calls(content: &str, tools: &[ToolDefinition]) -> Option<V
                     },
                 }]);
             }
-        }
     }
 
     infer_bare_object_tool_call(&value, tools).map(|tc| vec![tc])

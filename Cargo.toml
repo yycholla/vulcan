@@ -136,6 +136,30 @@ dhat = { version = "0.3", optional = true }
 # `cargo bench` can use it without enabling the feature.)
 hdrhistogram = { version = "7", optional = true }
 
+# Workspace lint baseline (YYC-121). Conservative defaults that bias
+# toward forward-leaning warnings without forcing a sprawling cleanup
+# of pre-existing patterns (TUI rendering helpers with many args, test
+# scaffolding that mutates a Default::default()). Tighten these as
+# follow-ups; primary goal is to make new code land consistent and
+# get clippy gated in CI.
+[lints.rust]
+unsafe_code = "deny"
+unused_must_use = "warn"
+
+[lints.clippy]
+# Common but noisy in this crate. Allowed at the baseline; revisit
+# per-call-site as those code paths get refactored.
+too_many_arguments = "allow"
+field_reassign_with_default = "allow"
+doc_overindented_list_items = "allow"
+# `&PathBuf` / `&String` parameters are technically slower than `&Path`
+# / `&str`, but the call sites are TUI/CLI scaffolding where the cost
+# is negligible. Allow until those modules get a focused pass.
+ptr_arg = "allow"
+# Builder-style helpers in tests (`Default::default()` then mutate)
+# trip large_enum_variant in error paths; allow at baseline.
+large_enum_variant = "allow"
+
 [profile.release]
 opt-level = "z"    # optimize for size
 lto = true

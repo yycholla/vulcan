@@ -204,11 +204,10 @@ impl ChatRenderStore {
                 }
                 if lines.len() > segment_lines_before {
                     let kind = segment.kind_label();
-                    if let Some(prev) = prev_emitted_kind {
-                        if prev != kind {
+                    if let Some(prev) = prev_emitted_kind
+                        && prev != kind {
                             lines.insert(segment_lines_before, Line::from(""));
                         }
-                    }
                     prev_emitted_kind = Some(kind);
                 }
             }
@@ -276,7 +275,7 @@ fn push_markdown_body(
     // breaks the bar after the first row.
     // Trim trailing whitespace/newlines so models that emit `\n\n`
     // suffixes don't leave empty `▎` rails after the body.
-    let trimmed = text.trim_end_matches(|c: char| c == '\n' || c == '\r' || c == ' ' || c == '\t');
+    let trimmed = text.trim_end_matches(['\n', '\r', ' ', '\t']);
     if trimmed.is_empty() {
         return;
     }

@@ -50,11 +50,10 @@ impl SkillRegistry {
         for entry in std::fs::read_dir(&self.skills_dir)? {
             let entry = entry?;
             let path = entry.path();
-            if path.extension().map_or(false, |e| e == "md") {
-                if let Some(skill) = Self::load_skill(&path)? {
+            if path.extension().is_some_and(|e| e == "md")
+                && let Some(skill) = Self::load_skill(&path)? {
                     skills.push(skill);
                 }
-            }
         }
 
         self.skills = skills;
@@ -143,11 +142,10 @@ impl SkillRegistry {
     /// Get the body text after stripping frontmatter
     fn strip_frontmatter(content: &str) -> String {
         let content = content.trim();
-        if content.starts_with("---") {
-            if let Some(end) = content[3..].find("\n---") {
+        if content.starts_with("---")
+            && let Some(end) = content[3..].find("\n---") {
                 return content[3 + end + 5..].trim().to_string();
             }
-        }
         content.to_string()
     }
 

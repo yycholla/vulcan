@@ -234,9 +234,9 @@ fn match_dangerous_tokens(tokens: &[String]) -> Option<&'static str> {
 
     match head {
         "rm" => {
-            let recursive = has_short_or_long(&tokens, &['r', 'R'], &["--recursive"]);
-            let force = has_short_or_long(&tokens, &['f'], &["--force"]);
-            if recursive && force && has_dangerous_rm_target(&tokens) {
+            let recursive = has_short_or_long(tokens, &['r', 'R'], &["--recursive"]);
+            let force = has_short_or_long(tokens, &['f'], &["--force"]);
+            if recursive && force && has_dangerous_rm_target(tokens) {
                 return Some("destructive recursive remove of root or home directory");
             }
         }
@@ -245,7 +245,7 @@ fn match_dangerous_tokens(tokens: &[String]) -> Option<&'static str> {
             return Some("filesystem format command (mkfs)");
         }
         "chmod" => {
-            let recursive = has_short_or_long(&tokens, &['R'], &["--recursive"]);
+            let recursive = has_short_or_long(tokens, &['R'], &["--recursive"]);
             let permissive = tokens.iter().any(|t| t == "777");
             let on_root = tokens
                 .iter()
@@ -483,11 +483,10 @@ fn has_dangerous_rm_target(tokens: &[String]) -> bool {
         {
             return true;
         }
-        if let Some(h) = &home {
-            if trimmed == h || trimmed.starts_with(&format!("{h}/")) {
+        if let Some(h) = &home
+            && (trimmed == h || trimmed.starts_with(&format!("{h}/"))) {
                 return false; // home subdir = ok
             }
-        }
         false
     })
 }

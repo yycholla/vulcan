@@ -76,11 +76,10 @@ fn find_function_body_range(
                 body_range = Some((cap.node.start_byte(), cap.node.end_byte()));
             }
         }
-        if let (Some(n), Some(range)) = (name_text, body_range) {
-            if n == symbol {
+        if let (Some(n), Some(range)) = (name_text, body_range)
+            && n == symbol {
                 return Ok(Some(range));
             }
-        }
     }
     Ok(None)
 }

@@ -33,7 +33,7 @@ fn is_local_base_url(base_url: &str) -> bool {
         .map(|(_, rest)| rest)
         .unwrap_or(&lower);
     let host = host_port
-        .split(|c: char| c == '/' || c == '?')
+        .split(['/', '?'])
         .next()
         .unwrap_or("");
     let host = host
@@ -1796,7 +1796,7 @@ mod tests {
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         let streamed = a2.run_prompt_stream("x", tx).await.unwrap();
         // Drain the channel.
-        while let Ok(_) = rx.try_recv() {}
+        while rx.try_recv().is_ok() {}
 
         assert_eq!(buffered, streamed);
         assert_eq!(buffered, "identical output");
