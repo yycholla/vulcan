@@ -70,9 +70,7 @@ impl HookHandler for PreferNativeToolsHook {
         match self.mode {
             NativeEnforcement::Off => Ok(HookOutcome::Continue),
             NativeEnforcement::Warn => {
-                tracing::info!(
-                    "prefer-native-tools (warn): bash `{command}` could use {redirect}"
-                );
+                tracing::info!("prefer-native-tools (warn): bash `{command}` could use {redirect}");
                 Ok(HookOutcome::Continue)
             }
             NativeEnforcement::Block => Ok(HookOutcome::Block {
@@ -190,29 +188,89 @@ mod tests {
 
     #[test]
     fn match_redirect_catches_ripgrep_and_grep_recursive() {
-        assert!(match_native_redirect("rg foo").unwrap().contains("search_files"));
-        assert!(match_native_redirect("rg -i pattern src/").unwrap().contains("search_files"));
-        assert!(match_native_redirect("grep -r needle ./").unwrap().contains("search_files"));
-        assert!(match_native_redirect("grep -rn x").unwrap().contains("search_files"));
+        assert!(
+            match_native_redirect("rg foo")
+                .unwrap()
+                .contains("search_files")
+        );
+        assert!(
+            match_native_redirect("rg -i pattern src/")
+                .unwrap()
+                .contains("search_files")
+        );
+        assert!(
+            match_native_redirect("grep -r needle ./")
+                .unwrap()
+                .contains("search_files")
+        );
+        assert!(
+            match_native_redirect("grep -rn x")
+                .unwrap()
+                .contains("search_files")
+        );
     }
 
     #[test]
     fn match_redirect_catches_cat_head_tail_ls_find() {
-        assert!(match_native_redirect("cat README.md").unwrap().contains("read_file"));
-        assert!(match_native_redirect("head -20 main.rs").unwrap().contains("read_file"));
-        assert!(match_native_redirect("tail Cargo.toml").unwrap().contains("read_file"));
-        assert!(match_native_redirect("ls -la").unwrap().contains("list_files"));
-        assert!(match_native_redirect("find . -name '*.rs'").unwrap().contains("list_files"));
+        assert!(
+            match_native_redirect("cat README.md")
+                .unwrap()
+                .contains("read_file")
+        );
+        assert!(
+            match_native_redirect("head -20 main.rs")
+                .unwrap()
+                .contains("read_file")
+        );
+        assert!(
+            match_native_redirect("tail Cargo.toml")
+                .unwrap()
+                .contains("read_file")
+        );
+        assert!(
+            match_native_redirect("ls -la")
+                .unwrap()
+                .contains("list_files")
+        );
+        assert!(
+            match_native_redirect("find . -name '*.rs'")
+                .unwrap()
+                .contains("list_files")
+        );
     }
 
     #[test]
     fn match_redirect_catches_cargo_check_and_git_subcommands() {
-        assert!(match_native_redirect("cargo check").unwrap().contains("cargo_check"));
-        assert!(match_native_redirect("cargo build").unwrap().contains("cargo_check"));
-        assert!(match_native_redirect("git status").unwrap().contains("git_status"));
-        assert!(match_native_redirect("git diff --cached").unwrap().contains("git_diff"));
-        assert!(match_native_redirect("git log --oneline").unwrap().contains("git_log"));
-        assert!(match_native_redirect("git commit -m fixup").unwrap().contains("git_commit"));
+        assert!(
+            match_native_redirect("cargo check")
+                .unwrap()
+                .contains("cargo_check")
+        );
+        assert!(
+            match_native_redirect("cargo build")
+                .unwrap()
+                .contains("cargo_check")
+        );
+        assert!(
+            match_native_redirect("git status")
+                .unwrap()
+                .contains("git_status")
+        );
+        assert!(
+            match_native_redirect("git diff --cached")
+                .unwrap()
+                .contains("git_diff")
+        );
+        assert!(
+            match_native_redirect("git log --oneline")
+                .unwrap()
+                .contains("git_log")
+        );
+        assert!(
+            match_native_redirect("git commit -m fixup")
+                .unwrap()
+                .contains("git_commit")
+        );
     }
 
     #[test]

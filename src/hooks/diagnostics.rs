@@ -86,7 +86,10 @@ impl HookHandler for DiagnosticsHook {
         let server = match self.lsp.server(lang).await {
             Ok(s) => s,
             Err(e) => {
-                tracing::debug!("diagnostics hook: LSP unavailable for {} ({e})", lang.name());
+                tracing::debug!(
+                    "diagnostics hook: LSP unavailable for {} ({e})",
+                    lang.name()
+                );
                 return Ok(HookOutcome::Continue);
             }
         };

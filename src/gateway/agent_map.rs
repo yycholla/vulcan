@@ -37,11 +37,8 @@ use std::pin::Pin;
 /// Agent without an API key. Boxed-future return so the closure type can be
 /// erased behind `dyn Fn`.
 #[cfg(test)]
-pub(crate) type AgentBuilder = Arc<
-    dyn Fn(HookRegistry) -> Pin<Box<dyn Future<Output = Result<Agent>> + Send>>
-        + Send
-        + Sync,
->;
+pub(crate) type AgentBuilder =
+    Arc<dyn Fn(HookRegistry) -> Pin<Box<dyn Future<Output = Result<Agent>> + Send>> + Send + Sync>;
 
 pub struct AgentMap {
     inner: Arc<RwLock<HashMap<LaneKey, LaneEntry>>>,
@@ -249,10 +246,7 @@ impl AgentMap {
     }
 }
 
-pub(crate) async fn evict_idle(
-    inner: &Arc<RwLock<HashMap<LaneKey, LaneEntry>>>,
-    ttl: Duration,
-) {
+pub(crate) async fn evict_idle(inner: &Arc<RwLock<HashMap<LaneKey, LaneEntry>>>, ttl: Duration) {
     // Build the to-evict list under the read lock; do the actual removal +
     // end_session under the write lock + outside the map. This keeps the
     // write lock window tight even if many lanes age out at once.
@@ -423,11 +417,8 @@ mod tests {
 
     #[tokio::test]
     async fn second_get_reuses_agent() {
-        let map = AgentMap::with_builder(
-            test_config(),
-            Duration::from_secs(60),
-            mock_agent_builder(),
-        );
+        let map =
+            AgentMap::with_builder(test_config(), Duration::from_secs(60), mock_agent_builder());
         let lane = test_lane("x");
         let a1 = map.get_or_spawn(&lane).await.expect("first spawn");
         let a2 = map.get_or_spawn(&lane).await.expect("second get");
@@ -437,11 +428,8 @@ mod tests {
 
     #[tokio::test]
     async fn distinct_lanes_get_distinct_agents() {
-        let map = AgentMap::with_builder(
-            test_config(),
-            Duration::from_secs(60),
-            mock_agent_builder(),
-        );
+        let map =
+            AgentMap::with_builder(test_config(), Duration::from_secs(60), mock_agent_builder());
         let a = map.get_or_spawn(&test_lane("a")).await.expect("a");
         let b = map.get_or_spawn(&test_lane("b")).await.expect("b");
         assert!(!Arc::ptr_eq(&a, &b));

@@ -59,15 +59,7 @@ where
         Duration::from_secs(gateway.idle_ttl_secs),
     ));
 
-    run_on_listener_with_parts(
-        gateway,
-        listener,
-        shutdown,
-        db,
-        registry,
-        agent_map,
-    )
-    .await
+    run_on_listener_with_parts(gateway, listener, shutdown, db, registry, agent_map).await
 }
 
 async fn run_on_listener_with_parts<S>(
@@ -123,7 +115,9 @@ where
         agent_map,
     });
 
-    let addr = listener.local_addr().context("gateway listener local_addr")?;
+    let addr = listener
+        .local_addr()
+        .context("gateway listener local_addr")?;
     tracing::info!(%addr, "gateway listening");
     let result = axum::serve(listener, app)
         .with_graceful_shutdown(shutdown)
@@ -330,11 +324,7 @@ mod tests {
         let client = reqwest::Client::new();
         let mut ok = false;
         for _ in 0..50 {
-            match client
-                .get(format!("http://{addr}/health"))
-                .send()
-                .await
-            {
+            match client.get(format!("http://{addr}/health")).send().await {
                 Ok(resp) if resp.status().is_success() => {
                     ok = true;
                     break;

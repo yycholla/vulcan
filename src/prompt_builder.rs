@@ -81,7 +81,13 @@ mod tests {
             prompt.contains("Tool preferences"),
             "prompt missing 'Tool preferences' section: {prompt:?}"
         );
-        for native in ["search_files", "cargo_check", "git_status", "read_file", "list_files"] {
+        for native in [
+            "search_files",
+            "cargo_check",
+            "git_status",
+            "read_file",
+            "list_files",
+        ] {
             assert!(
                 prompt.contains(native),
                 "preference table missing `{native}` reference: {prompt:?}"

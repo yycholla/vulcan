@@ -146,7 +146,9 @@ pub fn tool_call_lines(
         format!(" ┃ {}", args),
         Style::default().fg(Palette::MUTED),
     )));
-    let tail = result.map(|r| format!(" ┗ {}", r)).unwrap_or_else(|| " ┗".to_string());
+    let tail = result
+        .map(|r| format!(" ┗ {}", r))
+        .unwrap_or_else(|| " ┗".to_string());
     lines.push(Line::from(Span::raw(tail)));
     lines
 }
@@ -189,7 +191,12 @@ pub fn reasoning_lines(text: &str, hidden: bool, theme: &Theme) -> Vec<Line<'sta
 /// `accent` is the role color (caller resolves from `theme.user`,
 /// `theme.assistant`, etc.). `theme.body_fg` is used for the role
 /// label so it follows the active theme's foreground.
-pub fn message_header(role: &str, accent: Color, tag: Option<&str>, theme: &Theme) -> Line<'static> {
+pub fn message_header(
+    role: &str,
+    accent: Color,
+    tag: Option<&str>,
+    theme: &Theme,
+) -> Line<'static> {
     let mut spans = vec![
         Span::styled(
             "▆ ",
@@ -296,7 +303,9 @@ pub fn prompt_row(
     );
     let caret = Span::styled(
         " ❯ ",
-        Style::default().fg(Palette::RED).add_modifier(Modifier::BOLD),
+        Style::default()
+            .fg(Palette::RED)
+            .add_modifier(Modifier::BOLD),
     );
     let input_span = Span::styled(input.to_string(), body_style);
     let cursor_block = Span::styled(
@@ -322,7 +331,9 @@ pub fn prompt_row(
         }
         hint_spans.push(Span::styled(
             format!("[{key}]"),
-            Style::default().fg(theme.body_fg).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(theme.body_fg)
+                .add_modifier(Modifier::BOLD),
         ));
         hint_spans.push(Span::styled(format!(" {label}"), muted_style));
     }
@@ -359,7 +370,9 @@ pub fn ticker(f: &mut TuiFrame, area: Rect, cells: &[(String, String, Color)]) {
     }
     let mut spans = vec![Span::styled(
         "[TICKER] ",
-        Style::default().fg(Palette::RED).add_modifier(Modifier::BOLD),
+        Style::default()
+            .fg(Palette::RED)
+            .add_modifier(Modifier::BOLD),
     )];
     for (sub, msg, color) in cells {
         spans.push(Span::raw(" "));
@@ -434,8 +447,8 @@ pub fn tool_card(
     // Truncate params if pill + name + minimum gap don't fit.
     let min_gap = 2;
     if left_chars + right_chars + min_gap > inner_w && !params_text.is_empty() {
-        let max_params = inner_w
-            .saturating_sub(name_pill_text.chars().count() + right_chars + min_gap);
+        let max_params =
+            inner_w.saturating_sub(name_pill_text.chars().count() + right_chars + min_gap);
         if max_params >= 4 {
             let chars: Vec<char> = params_text.chars().collect();
             let kept: String = chars.iter().take(max_params - 1).collect();
@@ -495,7 +508,9 @@ pub fn tool_card(
             Span::raw(body_indent.to_string()),
             Span::styled(
                 meta.to_string(),
-                Style::default().fg(Palette::MUTED).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(Palette::MUTED)
+                    .add_modifier(Modifier::BOLD),
             ),
         ];
         render_body(&mut spans, used);
@@ -518,9 +533,13 @@ pub fn tool_card(
                 || body.starts_with("MODIFIED")
                 || body.starts_with("EDITED")
             {
-                Style::default().fg(Palette::MUTED).add_modifier(Modifier::BOLD)
+                Style::default()
+                    .fg(Palette::MUTED)
+                    .add_modifier(Modifier::BOLD)
             } else if body.starts_with("… ") {
-                Style::default().fg(Palette::MUTED).add_modifier(Modifier::ITALIC)
+                Style::default()
+                    .fg(Palette::MUTED)
+                    .add_modifier(Modifier::ITALIC)
             } else {
                 Style::default()
             };
@@ -546,7 +565,9 @@ pub fn tool_card(
             Span::raw(body_indent.to_string()),
             Span::styled(
                 footer,
-                Style::default().fg(Palette::MUTED).add_modifier(Modifier::ITALIC),
+                Style::default()
+                    .fg(Palette::MUTED)
+                    .add_modifier(Modifier::ITALIC),
             ),
         ];
         render_body(&mut spans, used);

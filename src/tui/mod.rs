@@ -235,7 +235,11 @@ fn format_provider_list(config: &Config, active: Option<&str>) -> String {
     names.sort();
     for name in names {
         let cfg = &config.providers[name];
-        let marker = if active == Some(name.as_str()) { "*" } else { " " };
+        let marker = if active == Some(name.as_str()) {
+            "*"
+        } else {
+            " "
+        };
         out.push_str(&format!(
             "\n  {marker} {name} · {} · {}",
             cfg.base_url, cfg.model,
@@ -2051,10 +2055,7 @@ fn draw_session_picker(f: &mut ratatui::Frame, area: Rect, app: &AppState) {
                 Span::styled(format!("{:<12}", short_id(&s.id)), name_style),
                 Span::styled(format!("{:>4}m", s.message_count), theme.muted),
                 Span::styled(format!("  {} ", dt), theme.muted),
-                Span::styled(
-                    status_label,
-                    status_style.add_modifier(Modifier::BOLD),
-                ),
+                Span::styled(status_label, status_style.add_modifier(Modifier::BOLD)),
             ]));
 
             if let Some(preview) = &s.preview {
@@ -2090,7 +2091,12 @@ fn draw_model_picker(f: &mut ratatui::Frame, area: Rect, app: &AppState) {
     let height = (rows + 5).min(area.height.saturating_sub(2));
     let x = area.x + (area.width.saturating_sub(width)) / 2;
     let y = area.y + (area.height.saturating_sub(height)) / 2;
-    let box_area = Rect { x, y, width, height };
+    let box_area = Rect {
+        x,
+        y,
+        width,
+        height,
+    };
     if box_area.height < 4 {
         return;
     }
@@ -2174,7 +2180,10 @@ fn draw_model_picker(f: &mut ratatui::Frame, area: Rect, app: &AppState) {
     // Details panel at the rightmost column.
     let details_col = cols.last().copied().unwrap_or(list_area);
     let detail_lines = build_picker_details(app);
-    f.render_widget(Paragraph::new(detail_lines).wrap(Wrap { trim: false }), details_col);
+    f.render_widget(
+        Paragraph::new(detail_lines).wrap(Wrap { trim: false }),
+        details_col,
+    );
 
     let hint = "  hjkl move · Enter select · Esc cancel  (drilled: column ";
     let footer_line = format!(
@@ -2337,16 +2346,8 @@ fn trim_to_width(s: &str, width: usize) -> String {
 
 fn picker_move(app: &mut AppState, delta: i32) {
     let depth = app.model_picker_focus;
-    let path_prefix: Vec<usize> = app
-        .model_picker_path
-        .iter()
-        .copied()
-        .take(depth)
-        .collect();
-    let len = app
-        .model_picker_tree
-        .column_at(depth, &path_prefix)
-        .len();
+    let path_prefix: Vec<usize> = app.model_picker_path.iter().copied().take(depth).collect();
+    let len = app.model_picker_tree.column_at(depth, &path_prefix).len();
     if len == 0 {
         return;
     }
@@ -2362,12 +2363,7 @@ fn picker_move(app: &mut AppState, delta: i32) {
 
 fn picker_drill_or_commit(app: &mut AppState) -> Option<String> {
     let depth = app.model_picker_focus;
-    let path_prefix: Vec<usize> = app
-        .model_picker_path
-        .iter()
-        .copied()
-        .take(depth)
-        .collect();
+    let path_prefix: Vec<usize> = app.model_picker_path.iter().copied().take(depth).collect();
     let nodes = app
         .model_picker_tree
         .column_at(depth, &path_prefix)
@@ -2456,7 +2452,12 @@ fn draw_provider_picker(f: &mut ratatui::Frame, area: Rect, app: &AppState) {
     let height = (rows + 5).min(area.height.saturating_sub(2));
     let x = area.x + (area.width.saturating_sub(width)) / 2;
     let y = area.y + (area.height.saturating_sub(height)) / 2;
-    let box_area = Rect { x, y, width, height };
+    let box_area = Rect {
+        x,
+        y,
+        width,
+        height,
+    };
     if box_area.height < 4 {
         return;
     }
@@ -2531,7 +2532,12 @@ fn draw_diff_scrubber(f: &mut ratatui::Frame, area: Rect, app: &AppState) {
     let height = (total * 4 + 8).min(area.height.saturating_sub(2));
     let x = area.x + (area.width.saturating_sub(width)) / 2;
     let y = area.y + (area.height.saturating_sub(height)) / 2;
-    let box_area = Rect { x, y, width, height };
+    let box_area = Rect {
+        x,
+        y,
+        width,
+        height,
+    };
     if box_area.height < 6 {
         return;
     }
@@ -2564,11 +2570,7 @@ fn draw_diff_scrubber(f: &mut ratatui::Frame, area: Rect, app: &AppState) {
         .min(app.scrubber_hunks.len().saturating_sub(1));
     for (i, hunk) in app.scrubber_hunks.iter().enumerate() {
         let is_active = i == active;
-        let accepted = app
-            .scrubber_accepted
-            .get(i)
-            .copied()
-            .unwrap_or(true);
+        let accepted = app.scrubber_accepted.get(i).copied().unwrap_or(true);
         let marker = if is_active { "▸ " } else { "  " };
         let state = if accepted { "[✓]" } else { "[ ]" };
         let header = format!(
@@ -2587,14 +2589,26 @@ fn draw_diff_scrubber(f: &mut ratatui::Frame, area: Rect, app: &AppState) {
         lines.push(Line::from(Span::styled(header, header_style)));
         for before in &hunk.before_lines {
             lines.push(Line::from(vec![
-                Span::styled("    - ", Style::default().fg(crate::tui::theme::Palette::RED)),
-                Span::styled(before.clone(), Style::default().fg(crate::tui::theme::Palette::RED)),
+                Span::styled(
+                    "    - ",
+                    Style::default().fg(crate::tui::theme::Palette::RED),
+                ),
+                Span::styled(
+                    before.clone(),
+                    Style::default().fg(crate::tui::theme::Palette::RED),
+                ),
             ]));
         }
         for after in &hunk.after_lines {
             lines.push(Line::from(vec![
-                Span::styled("    + ", Style::default().fg(crate::tui::theme::Palette::GREEN)),
-                Span::styled(after.clone(), Style::default().fg(crate::tui::theme::Palette::GREEN)),
+                Span::styled(
+                    "    + ",
+                    Style::default().fg(crate::tui::theme::Palette::GREEN),
+                ),
+                Span::styled(
+                    after.clone(),
+                    Style::default().fg(crate::tui::theme::Palette::GREEN),
+                ),
             ]));
         }
         lines.push(Line::from(""));

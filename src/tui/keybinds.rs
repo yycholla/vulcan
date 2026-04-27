@@ -175,7 +175,8 @@ impl Keybinds {
     /// user-supplied value fails to parse. Reports each fallback via tracing
     /// so misconfigurations are visible.
     pub fn from_config(cfg: &KeybindsConfig) -> Self {
-        let parse = |raw: &str, action: &str, fallback: KeyBinding| match raw.parse::<KeyBinding>() {
+        let parse = |raw: &str, action: &str, fallback: KeyBinding| match raw.parse::<KeyBinding>()
+        {
             Ok(b) => b,
             Err(e) => {
                 tracing::warn!(

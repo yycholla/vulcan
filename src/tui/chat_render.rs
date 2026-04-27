@@ -321,8 +321,7 @@ mod tests {
             muted_style: Style::default(),
         };
         let theme = Theme::system();
-        let window =
-            store.visible_lines_at(std::slice::from_ref(&msg), options, &theme, 0, 200);
+        let window = store.visible_lines_at(std::slice::from_ref(&msg), options, &theme, 0, 200);
         let lines: Vec<String> = window.lines.iter().map(line_text).collect();
 
         let reasoning_idx = lines
@@ -341,7 +340,8 @@ mod tests {
         assert!(text_idx > reasoning_idx, "text after reasoning");
         assert!(tool_idx > text_idx, "tool after text");
 
-        let between_reasoning_text: Vec<&String> = lines[reasoning_idx + 1..text_idx].iter().collect();
+        let between_reasoning_text: Vec<&String> =
+            lines[reasoning_idx + 1..text_idx].iter().collect();
         assert!(
             between_reasoning_text.iter().any(|l| l.trim().is_empty()),
             "blank line missing between reasoning and text, got {between_reasoning_text:?}"
@@ -368,8 +368,7 @@ mod tests {
             muted_style: Style::default(),
         };
         let theme = Theme::system();
-        let window =
-            store.visible_lines_at(std::slice::from_ref(&msg), options, &theme, 0, 200);
+        let window = store.visible_lines_at(std::slice::from_ref(&msg), options, &theme, 0, 200);
         let lines: Vec<String> = window.lines.iter().map(line_text).collect();
 
         let first_idx = lines
@@ -403,8 +402,7 @@ mod tests {
             muted_style: Style::default(),
         };
         let theme = Theme::system();
-        let window =
-            store.visible_lines_at(std::slice::from_ref(&msg), options, &theme, 0, 200);
+        let window = store.visible_lines_at(std::slice::from_ref(&msg), options, &theme, 0, 200);
         let lines: Vec<String> = window.lines.iter().map(line_text).collect();
 
         let text_idx = lines

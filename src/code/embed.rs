@@ -252,9 +252,8 @@ impl EmbeddingIndex {
 
         let rows: Vec<(String, String, String, i64, i64, Vec<u8>)> = {
             let conn = self.conn.lock().unwrap();
-            let mut stmt = conn.prepare(
-                "SELECT file, kind, name, start_line, end_line, embedding FROM chunks",
-            )?;
+            let mut stmt = conn
+                .prepare("SELECT file, kind, name, start_line, end_line, embedding FROM chunks")?;
             stmt.query_map([], |row| {
                 Ok((
                     row.get::<_, String>(0)?,
@@ -283,7 +282,11 @@ impl EmbeddingIndex {
                 })
             })
             .collect();
-        scored.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+        scored.sort_by(|a, b| {
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
         scored.truncate(top_k);
         Ok(scored)
     }
@@ -315,8 +318,7 @@ fn chunk_file(
             Language::Go => tree_sitter_go::LANGUAGE.into(),
             Language::Json => return Ok(Vec::new()),
         };
-        let query = Query::new(&grammar, query_text)
-            .map_err(|e| anyhow!("query: {e}"))?;
+        let query = Query::new(&grammar, query_text).map_err(|e| anyhow!("query: {e}"))?;
         let name_idx = query.capture_index_for_name("name");
         let mut cursor = QueryCursor::new();
         let mut iter = cursor.matches(&query, tree.root_node(), source.as_bytes());

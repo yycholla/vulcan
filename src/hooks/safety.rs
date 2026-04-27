@@ -316,14 +316,18 @@ mod tests {
         let pause = rx.recv().await.expect("pause should arrive");
         let keys: Vec<char> = pause.options.iter().map(|o| o.key).collect();
         assert_eq!(keys, vec!['y', 'r', 'n']);
-        assert!(pause
-            .options
-            .iter()
-            .any(|o| o.key == 'y' && matches!(o.kind, OptionKind::Primary)));
-        assert!(pause
-            .options
-            .iter()
-            .any(|o| o.key == 'n' && matches!(o.kind, OptionKind::Destructive)));
+        assert!(
+            pause
+                .options
+                .iter()
+                .any(|o| o.key == 'y' && matches!(o.kind, OptionKind::Primary))
+        );
+        assert!(
+            pause
+                .options
+                .iter()
+                .any(|o| o.key == 'n' && matches!(o.kind, OptionKind::Destructive))
+        );
 
         // Drain the task with a deny so the spawned future doesn't leak.
         pause.reply.send(AgentResume::Deny).ok();

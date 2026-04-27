@@ -53,9 +53,7 @@ fn find_function_body_range(
 
     // Per-language query: capture the function name + its body block.
     let query_text = match lang {
-        Language::Rust => {
-            "(function_item name: (identifier) @name body: (block) @body)"
-        }
+        Language::Rust => "(function_item name: (identifier) @name body: (block) @body)",
         Language::Python => "(function_definition name: (identifier) @name body: (block) @body)",
         Language::TypeScript | Language::JavaScript => {
             "(function_declaration name: (identifier) @name body: (statement_block) @body)"
@@ -63,8 +61,7 @@ fn find_function_body_range(
         Language::Go => "(function_declaration name: (identifier) @name body: (block) @body)",
         Language::Json => return Ok(None),
     };
-    let query =
-        Query::new(&grammar, query_text).map_err(|e| anyhow::anyhow!("query: {e}"))?;
+    let query = Query::new(&grammar, query_text).map_err(|e| anyhow::anyhow!("query: {e}"))?;
     let mut cursor = QueryCursor::new();
     let mut iter = cursor.matches(&query, tree.root_node(), source.as_bytes());
     let name_idx = query.capture_index_for_name("name");
@@ -187,7 +184,9 @@ impl Tool for RenameSymbolTool {
         })
     }
     async fn call(&self, params: Value, _cancel: CancellationToken) -> Result<ToolResult> {
-        let path = params["path"].as_str().ok_or_else(|| anyhow::anyhow!("path required"))?;
+        let path = params["path"]
+            .as_str()
+            .ok_or_else(|| anyhow::anyhow!("path required"))?;
         let line = params["line"]
             .as_u64()
             .ok_or_else(|| anyhow::anyhow!("line required"))?;
@@ -198,16 +197,16 @@ impl Tool for RenameSymbolTool {
         let pb = PathBuf::from(path);
         let lang = match Language::from_path(&pb) {
             Some(l) => l,
-            None => return Ok(ToolResult::err(format!(
-                "Unsupported file type: {path}"
-            ))),
+            None => return Ok(ToolResult::err(format!("Unsupported file type: {path}"))),
         };
         let server = match self.manager.server(lang).await {
             Ok(s) => s,
-            Err(e) => return Ok(ToolResult::err(format!(
-                "LSP unavailable for {}: {e}",
-                lang.name()
-            ))),
+            Err(e) => {
+                return Ok(ToolResult::err(format!(
+                    "LSP unavailable for {}: {e}",
+                    lang.name()
+                )));
+            }
         };
 
         // didOpen so the server has the file contents indexed.
@@ -246,11 +245,7 @@ mod tests {
     async fn replace_function_body_swaps_block_only() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("a.rs");
-        std::fs::write(
-            &path,
-            "fn alpha() { 1 }\n\nfn beta() {\n    1\n}\n",
-        )
-        .unwrap();
+        std::fs::write(&path, "fn alpha() { 1 }\n\nfn beta() {\n    1\n}\n").unwrap();
         let tool = ReplaceFunctionBodyTool;
         let result = tool
             .call(

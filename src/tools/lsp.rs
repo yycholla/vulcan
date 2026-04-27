@@ -7,9 +7,7 @@
 //! tree-sitter tools (YYC-45).
 
 use crate::code::Language;
-use crate::code::lsp::{
-    LspManager, diagnostics_for, find_references, goto_definition, hover,
-};
+use crate::code::lsp::{LspManager, diagnostics_for, find_references, goto_definition, hover};
 use crate::tools::{Tool, ToolResult};
 use anyhow::Result;
 use async_trait::async_trait;
@@ -22,9 +20,8 @@ use tokio_util::sync::CancellationToken;
 /// by every tool below to fail fast on unsupported file types.
 fn lang_for(path: &str) -> Result<Language> {
     let pb = PathBuf::from(path);
-    Language::from_path(&pb).ok_or_else(|| {
-        anyhow::anyhow!("Unsupported file type for LSP tools: {path}")
-    })
+    Language::from_path(&pb)
+        .ok_or_else(|| anyhow::anyhow!("Unsupported file type for LSP tools: {path}"))
 }
 
 #[derive(Clone)]
@@ -58,8 +55,12 @@ impl Tool for GotoDefinitionTool {
         })
     }
     async fn call(&self, params: Value, _cancel: CancellationToken) -> Result<ToolResult> {
-        let path = params["path"].as_str().ok_or_else(|| anyhow::anyhow!("path required"))?;
-        let line = params["line"].as_u64().ok_or_else(|| anyhow::anyhow!("line required"))?;
+        let path = params["path"]
+            .as_str()
+            .ok_or_else(|| anyhow::anyhow!("path required"))?;
+        let line = params["line"]
+            .as_u64()
+            .ok_or_else(|| anyhow::anyhow!("line required"))?;
         let character = params["character"].as_u64().unwrap_or(0);
         let lang = match lang_for(path) {
             Ok(l) => l,
@@ -67,10 +68,12 @@ impl Tool for GotoDefinitionTool {
         };
         let server = match self.manager.server(lang).await {
             Ok(s) => s,
-            Err(e) => return Ok(ToolResult::err(format!(
-                "LSP unavailable for {}: {e}. Try the tree-sitter tools as a fallback.",
-                lang.name()
-            ))),
+            Err(e) => {
+                return Ok(ToolResult::err(format!(
+                    "LSP unavailable for {}: {e}. Try the tree-sitter tools as a fallback.",
+                    lang.name()
+                )));
+            }
         };
         let pb = PathBuf::from(path);
         // LSP positions are 0-indexed; translate the more agent-friendly
@@ -116,8 +119,12 @@ impl Tool for FindReferencesTool {
         })
     }
     async fn call(&self, params: Value, _cancel: CancellationToken) -> Result<ToolResult> {
-        let path = params["path"].as_str().ok_or_else(|| anyhow::anyhow!("path required"))?;
-        let line = params["line"].as_u64().ok_or_else(|| anyhow::anyhow!("line required"))?;
+        let path = params["path"]
+            .as_str()
+            .ok_or_else(|| anyhow::anyhow!("path required"))?;
+        let line = params["line"]
+            .as_u64()
+            .ok_or_else(|| anyhow::anyhow!("line required"))?;
         let character = params["character"].as_u64().unwrap_or(0);
         let lang = match lang_for(path) {
             Ok(l) => l,
@@ -125,10 +132,12 @@ impl Tool for FindReferencesTool {
         };
         let server = match self.manager.server(lang).await {
             Ok(s) => s,
-            Err(e) => return Ok(ToolResult::err(format!(
-                "LSP unavailable for {}: {e}",
-                lang.name()
-            ))),
+            Err(e) => {
+                return Ok(ToolResult::err(format!(
+                    "LSP unavailable for {}: {e}",
+                    lang.name()
+                )));
+            }
         };
         let pb = PathBuf::from(path);
         let line0 = (line as u32).saturating_sub(1);
@@ -172,8 +181,12 @@ impl Tool for HoverTool {
         })
     }
     async fn call(&self, params: Value, _cancel: CancellationToken) -> Result<ToolResult> {
-        let path = params["path"].as_str().ok_or_else(|| anyhow::anyhow!("path required"))?;
-        let line = params["line"].as_u64().ok_or_else(|| anyhow::anyhow!("line required"))?;
+        let path = params["path"]
+            .as_str()
+            .ok_or_else(|| anyhow::anyhow!("path required"))?;
+        let line = params["line"]
+            .as_u64()
+            .ok_or_else(|| anyhow::anyhow!("line required"))?;
         let character = params["character"].as_u64().unwrap_or(0);
         let lang = match lang_for(path) {
             Ok(l) => l,
@@ -181,10 +194,12 @@ impl Tool for HoverTool {
         };
         let server = match self.manager.server(lang).await {
             Ok(s) => s,
-            Err(e) => return Ok(ToolResult::err(format!(
-                "LSP unavailable for {}: {e}",
-                lang.name()
-            ))),
+            Err(e) => {
+                return Ok(ToolResult::err(format!(
+                    "LSP unavailable for {}: {e}",
+                    lang.name()
+                )));
+            }
         };
         let pb = PathBuf::from(path);
         let line0 = (line as u32).saturating_sub(1);
@@ -226,17 +241,21 @@ impl Tool for DiagnosticsTool {
         })
     }
     async fn call(&self, params: Value, _cancel: CancellationToken) -> Result<ToolResult> {
-        let path = params["path"].as_str().ok_or_else(|| anyhow::anyhow!("path required"))?;
+        let path = params["path"]
+            .as_str()
+            .ok_or_else(|| anyhow::anyhow!("path required"))?;
         let lang = match lang_for(path) {
             Ok(l) => l,
             Err(e) => return Ok(ToolResult::err(e.to_string())),
         };
         let server = match self.manager.server(lang).await {
             Ok(s) => s,
-            Err(e) => return Ok(ToolResult::err(format!(
-                "LSP unavailable for {}: {e}",
-                lang.name()
-            ))),
+            Err(e) => {
+                return Ok(ToolResult::err(format!(
+                    "LSP unavailable for {}: {e}",
+                    lang.name()
+                )));
+            }
         };
         let pb = PathBuf::from(path);
         let diags = diagnostics_for(&server, &pb).await?;
