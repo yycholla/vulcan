@@ -1154,10 +1154,69 @@ pub async fn run_tui(config: &Config, resume: ResumeTarget) -> Result<()> {
                                                         });
                                                         continue;
                                                     }
+                                                    "skills" => {
+                                                        let body = {
+                                                            let a = agent.lock().await;
+                                                            let skills = a.skills();
+                                                            if skills.is_empty() {
+                                                                "No skills loaded.".to_string()
+                                                            } else {
+                                                                let mut out = format!(
+                                                                    "Loaded skills ({}):",
+                                                                    skills.len()
+                                                                );
+                                                                for s in skills {
+                                                                    out.push_str(&format!(
+                                                                        "\n  • {} — {}",
+                                                                        s.name, s.description
+                                                                    ));
+                                                                }
+                                                                out
+                                                            }
+                                                        };
+                                                        app.messages.push(ChatMessage {
+                                                            role: ChatRole::System,
+                                                            content: body,
+                                                            ..Default::default()
+                                                        });
+                                                        continue;
+                                                    }
                                                     "queue" => {
                                                         app.messages.push(ChatMessage {
                                                             role: ChatRole::System,
                                                             content: "Usage: /queue <msg> — schedules a prompt to run after the next turn ends and any pending steers flush.".into(),
+                                                            ..Default::default()
+                                                        });
+                                                        continue;
+                                                    }
+                                                    "status" => {
+                                                        let (session_id, profile, ctx_used) = {
+                                                            let a = agent.lock().await;
+                                                            (
+                                                                a.session_id().to_string(),
+                                                                a.active_profile()
+                                                                    .map(str::to_string),
+                                                                a.max_context() as u32,
+                                                            )
+                                                        };
+                                                        let profile_label = profile
+                                                            .as_deref()
+                                                            .unwrap_or("[provider]");
+                                                        let body = format!(
+                                                            "Session: {}\nProvider: {}\nModel: {}\nContext window: {}\nLast prompt: {} tokens · session totals: {} prompt / {} completion · {} tool calls ({} errors)",
+                                                            short_id(&session_id),
+                                                            profile_label,
+                                                            app.model_label,
+                                                            crate::tui::state::format_thousands(ctx_used),
+                                                            crate::tui::state::format_thousands(app.prompt_tokens_last),
+                                                            crate::tui::state::format_thousands(app.prompt_tokens_total),
+                                                            crate::tui::state::format_thousands(app.completion_tokens_total),
+                                                            app.tool_calls_total,
+                                                            app.tool_errors_total,
+                                                        );
+                                                        app.messages.push(ChatMessage {
+                                                            role: ChatRole::System,
+                                                            content: body,
                                                             ..Default::default()
                                                         });
                                                         continue;
