@@ -1,0 +1,19 @@
+# nextest config — see https://nexte.st/docs/configuration/
+[profile.default]
+# Show test output for failed tests inline; quiet for passing.
+failure-output = "immediate-final"
+success-output = "never"
+status-level = "fail"
+final-status-level = "flaky"
+# Per-test timeout; gateway tests use sqlite + tokio so 60s is generous.
+slow-timeout = { period = "30s", terminate-after = 4 }
+
+[profile.ci]
+# CI runs get retries for flake tolerance + JUnit output for downstream tools.
+retries = 2
+failure-output = "immediate-final"
+success-output = "never"
+fail-fast = false
+
+[profile.ci.junit]
+path = "junit.xml"

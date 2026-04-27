@@ -65,10 +65,42 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@nextest
       - name: Build
         run: cargo build --all-targets --features "${{ matrix.features }}"
-      - name: Test
-        run: cargo test --all-targets --features "${{ matrix.features }}"
+      - name: Test (nextest)
+        run: cargo nextest run --profile ci --all-targets --features "${{ matrix.features }}"
+      - name: Doc tests
+        run: cargo test --doc --features "${{ matrix.features }}"
+      - name: Upload junit
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: junit-${{ matrix.features || 'default' }}
+          path: target/nextest/ci/junit.xml
+          if-no-files-found: ignore
+
+  coverage:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@cargo-llvm-cov
+      - uses: taiki-e/install-action@nextest
+      - name: Generate coverage (lcov)
+        run: cargo llvm-cov nextest --all-features --workspace --lcov --output-path lcov.info
+      - name: Coverage summary
+        run: cargo llvm-cov report --all-features --workspace --summary-only
+      - name: Upload lcov
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-lcov
+          path: lcov.info
+          retention-days: 14
 
   feature-powerset:
     runs-on: ubuntu-latest
