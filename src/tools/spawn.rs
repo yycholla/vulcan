@@ -32,6 +32,7 @@ use tokio_util::sync::CancellationToken;
 use crate::agent::Agent;
 use crate::config::Config;
 use crate::hooks::HookRegistry;
+use crate::orchestration::OrchestrationStore;
 use crate::tools::{Tool, ToolResult};
 
 /// YYC-82: conservative default tool set for a child agent. Read-
@@ -78,11 +79,25 @@ const SUBAGENT_DEFAULT_ITERATIONS: u32 = 8;
 #[derive(Clone)]
 pub struct SpawnSubagentTool {
     config: Arc<Config>,
+    /// YYC-206: orchestration store the tool registers child runs
+    /// against. Shared via `Arc` so the TUI / future admin endpoint
+    /// can read the same state.
+    orchestration: Arc<OrchestrationStore>,
 }
 
 impl SpawnSubagentTool {
     pub fn new(config: Arc<Config>) -> Self {
-        Self { config }
+        Self::with_store(config, Arc::new(OrchestrationStore::new()))
+    }
+
+    /// YYC-206: explicit-store constructor so the parent agent
+    /// can hand in a shared `OrchestrationStore` (the same one
+    /// the TUI reads from).
+    pub fn with_store(config: Arc<Config>, orchestration: Arc<OrchestrationStore>) -> Self {
+        Self {
+            config,
+            orchestration,
+        }
     }
 }
 
@@ -137,6 +152,16 @@ impl Tool for SpawnSubagentTool {
             .unwrap_or(SUBAGENT_DEFAULT_ITERATIONS as u64) as u32;
         let max_iter = max_iter_raw.min(SUBAGENT_MAX_ITERATIONS_CAP);
 
+        // YYC-206: register a pending record up front so the TUI
+        // sees the run as it starts. The id is included in the
+        // tool's JSON payload so callers can correlate against the
+        // store snapshot.
+        let summary_for_store = task.chars().take(120).collect::<String>();
+        let record = self
+            .orchestration
+            .register(None, summary_for_store, max_iter);
+        let child_id = record.id;
+
         let child = Agent::builder(self.config.as_ref())
             .with_hooks(HookRegistry::new())
             .with_max_iterations(max_iter)
@@ -145,41 +170,57 @@ impl Tool for SpawnSubagentTool {
         let mut child = match child {
             Ok(c) => c,
             Err(e) => {
+                self.orchestration.mark_failed(
+                    child_id,
+                    format!("child agent build failed: {e}"),
+                    0,
+                );
                 return Ok(ToolResult::err(format!("child agent build failed: {e}")));
             }
         };
         child.restrict_tools(&allowed);
+        self.orchestration
+            .update_status(child_id, crate::orchestration::ChildStatus::Running);
 
-        let final_text = match child.run_prompt(&task).await {
-            Ok(text) => text,
+        let run_result = child.run_prompt(&task).await;
+        let iterations = child.iterations();
+        match run_result {
+            Ok(final_text) => {
+                self.orchestration
+                    .mark_completed(child_id, final_text.clone(), iterations);
+                let status = if iterations >= max_iter {
+                    "budget_exceeded"
+                } else {
+                    "completed"
+                };
+                let payload = json!({
+                    "status": status,
+                    "child_id": child_id.to_string(),
+                    "summary": final_text,
+                    "budget_used": {
+                        "iterations": iterations,
+                        "max_iterations": max_iter,
+                    },
+                    "tools_granted": allowed.len(),
+                });
+                Ok(ToolResult::ok(serde_json::to_string_pretty(&payload)?))
+            }
             Err(e) => {
+                let err_msg = format!("child agent failed: {e}");
+                self.orchestration
+                    .mark_failed(child_id, err_msg.clone(), iterations);
                 let payload = json!({
                     "status": "error",
-                    "summary": format!("child agent failed: {e}"),
+                    "child_id": child_id.to_string(),
+                    "summary": err_msg,
                     "budget_used": {
-                        "iterations": child.iterations(),
+                        "iterations": iterations,
                         "max_iterations": max_iter,
                     },
                 });
-                return Ok(ToolResult::ok(serde_json::to_string_pretty(&payload)?));
+                Ok(ToolResult::ok(serde_json::to_string_pretty(&payload)?))
             }
-        };
-        let iterations = child.iterations();
-        let status = if iterations >= max_iter {
-            "budget_exceeded"
-        } else {
-            "completed"
-        };
-        let payload = json!({
-            "status": status,
-            "summary": final_text,
-            "budget_used": {
-                "iterations": iterations,
-                "max_iterations": max_iter,
-            },
-            "tools_granted": allowed.len(),
-        });
-        Ok(ToolResult::ok(serde_json::to_string_pretty(&payload)?))
+        }
     }
 }
 
