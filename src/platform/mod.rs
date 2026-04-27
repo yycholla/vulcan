@@ -75,7 +75,7 @@ pub struct PlatformCapabilities {
 /// (Telegram has separate `send_photo` / `send_document` / `send_voice`
 /// endpoints; Discord uploads any file the same way but the kind still
 /// drives rendering hints).
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum AttachmentKind {
     Image,
     Document,
@@ -90,7 +90,7 @@ pub enum AttachmentKind {
 /// An attachment received from a platform. `local_path` is populated
 /// after `Platform::download_attachment` materializes the bytes.
 /// Receivers store these on `InboundMessage.attachments` (PR-2).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Attachment {
     pub url: Option<String>,
     pub local_path: Option<String>,
@@ -104,7 +104,7 @@ pub struct Attachment {
 /// `path` is the local file to upload — `PathBuf` matches what
 /// `Platform::download_attachment` returns so a roundtrip
 /// (receive → re-send) is friction-free.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct OutboundAttachment {
     pub path: std::path::PathBuf,
     pub kind: AttachmentKind,

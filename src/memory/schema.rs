@@ -79,7 +79,14 @@ CREATE TABLE IF NOT EXISTS inbound_queue (
   -- Wallclock the worker last touched this row. claim_next sets it to now;
   -- recover_processing only resets rows whose heartbeat is stale relative
   -- to the configured threshold (YYC-137).
-  last_heartbeat_at INTEGER
+  last_heartbeat_at INTEGER,
+  -- YYC-18 PR-2a: typed attachments serialized as JSON (Vec<Attachment>).
+  attachments_json TEXT NOT NULL DEFAULT '[]',
+  -- Platform's id for the received message (Discord/Telegram); NULL for
+  -- loopback / CLI which don't have a wire concept of a message id.
+  message_id TEXT,
+  -- Platform message id this is a reply to, if the user threaded.
+  reply_to TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_inbound_lane  ON inbound_queue(platform, chat_id, state);
 CREATE INDEX IF NOT EXISTS idx_inbound_state ON inbound_queue(state, received_at);
@@ -94,7 +101,12 @@ CREATE TABLE IF NOT EXISTS outbound_queue (
   next_attempt_at INTEGER NOT NULL,
   attempts INTEGER NOT NULL DEFAULT 0,
   state    TEXT NOT NULL,  -- 'pending'|'sending'|'failed'
-  last_error TEXT
+  last_error TEXT,
+  -- YYC-18 PR-2a: anchor for edit-in-place streaming. When set, the
+  -- OutboundDispatcher routes to Platform::edit instead of Platform::send.
+  edit_target TEXT,
+  -- Reply / thread target on the platform side.
+  reply_to TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_outbound_due ON outbound_queue(state, next_attempt_at);
 "#;
@@ -113,6 +125,15 @@ pub(in crate::memory) fn initialize_conn(conn: &Connection) -> Result<()> {
         "ALTER TABLE inbound_queue ADD COLUMN last_heartbeat_at INTEGER",
         [],
     );
+    // YYC-18 PR-2a: payload extensions for outbound + inbound queues.
+    let _ = conn.execute("ALTER TABLE outbound_queue ADD COLUMN edit_target TEXT", []);
+    let _ = conn.execute("ALTER TABLE outbound_queue ADD COLUMN reply_to TEXT", []);
+    let _ = conn.execute(
+        "ALTER TABLE inbound_queue ADD COLUMN attachments_json TEXT NOT NULL DEFAULT '[]'",
+        [],
+    );
+    let _ = conn.execute("ALTER TABLE inbound_queue ADD COLUMN message_id TEXT", []);
+    let _ = conn.execute("ALTER TABLE inbound_queue ADD COLUMN reply_to TEXT", []);
     Ok(())
 }
 

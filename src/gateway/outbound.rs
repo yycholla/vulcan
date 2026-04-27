@@ -95,8 +95,8 @@ async fn drain_due(queue: &OutboundQueue, registry: &PlatformRegistry) -> anyhow
             chat_id: row.chat_id,
             text: row.text,
             attachments: row.attachments,
-            reply_to: None,
-            edit_target: None,
+            reply_to: row.reply_to,
+            edit_target: row.edit_target,
         };
         match registry.send(&msg).await {
             Ok(_sent) => queue.mark_done(id).await?,
