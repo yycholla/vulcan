@@ -241,7 +241,7 @@ impl Agent {
     pub async fn run_prompt_stream(
         &mut self,
         input: &str,
-        ui_tx: mpsc::UnboundedSender<StreamEvent>,
+        ui_tx: mpsc::Sender<StreamEvent>,
     ) -> Result<String> {
         let cancel = CancellationToken::new();
         self.run_prompt_stream_with_cancel(input, ui_tx, cancel)
@@ -254,7 +254,7 @@ impl Agent {
     pub async fn run_prompt_stream_with_cancel(
         &mut self,
         input: &str,
-        ui_tx: mpsc::UnboundedSender<StreamEvent>,
+        ui_tx: mpsc::Sender<StreamEvent>,
         cancel: CancellationToken,
     ) -> Result<String> {
         let StreamTurn {
@@ -275,13 +275,15 @@ impl Agent {
         };
         for iteration in 0..max_iter {
             if cancel.is_cancelled() {
-                let _ = ui_tx.send(StreamEvent::Done(crate::provider::ChatResponse {
-                    content: Some("Cancelled".into()),
-                    tool_calls: None,
-                    usage: None,
-                    finish_reason: Some("cancelled".into()),
-                    reasoning_content: None,
-                }));
+                let _ = ui_tx
+                    .send(StreamEvent::Done(crate::provider::ChatResponse {
+                        content: Some("Cancelled".into()),
+                        tool_calls: None,
+                        usage: None,
+                        finish_reason: Some("cancelled".into()),
+                        reasoning_content: None,
+                    }))
+                    .await;
                 return Ok("Cancelled".to_string());
             }
 
@@ -407,16 +409,18 @@ impl Agent {
                         "agent: model returned empty content with no tool calls",
                     );
                     full_response = hint.clone();
-                    let _ = ui_tx.send(StreamEvent::Text(hint));
+                    let _ = ui_tx.send(StreamEvent::Text(hint)).await;
                 }
 
-                let _ = ui_tx.send(StreamEvent::Done(crate::provider::ChatResponse {
-                    content: Some(full_response.clone()),
-                    tool_calls: None,
-                    usage: response.usage,
-                    finish_reason: response.finish_reason,
-                    reasoning_content: reasoning,
-                }));
+                let _ = ui_tx
+                    .send(StreamEvent::Done(crate::provider::ChatResponse {
+                        content: Some(full_response.clone()),
+                        tool_calls: None,
+                        usage: response.usage,
+                        finish_reason: response.finish_reason,
+                        reasoning_content: reasoning,
+                    }))
+                    .await;
                 return Ok(full_response);
             }
         }
@@ -425,16 +429,20 @@ impl Agent {
         // though there's no text-only final turn. The loop maxed out
         // at 10 iterations of tool calls — without this, the UI hangs
         // in thinking=true forever (YYC-76).
-        let _ = ui_tx.send(StreamEvent::Text(
-            "Agent reached maximum iteration limit.".into(),
-        ));
-        let _ = ui_tx.send(StreamEvent::Done(crate::provider::ChatResponse {
-            content: Some("Agent reached maximum iteration limit.".into()),
-            tool_calls: None,
-            usage: None,
-            finish_reason: Some("max_iterations".into()),
-            reasoning_content: None,
-        }));
+        let _ = ui_tx
+            .send(StreamEvent::Text(
+                "Agent reached maximum iteration limit.".into(),
+            ))
+            .await;
+        let _ = ui_tx
+            .send(StreamEvent::Done(crate::provider::ChatResponse {
+                content: Some("Agent reached maximum iteration limit.".into()),
+                tool_calls: None,
+                usage: None,
+                finish_reason: Some("max_iterations".into()),
+                reasoning_content: None,
+            }))
+            .await;
         Ok("Agent reached maximum iteration limit.".to_string())
     }
 
@@ -490,7 +498,7 @@ impl Agent {
         &mut self,
         messages: &mut Vec<Message>,
         _input: &str,
-        ui_tx: &mpsc::UnboundedSender<StreamEvent>,
+        ui_tx: &mpsc::Sender<StreamEvent>,
         iteration: usize,
     ) {
         // YYC-105 + YYC-128: when the accumulated history would push the next
@@ -510,9 +518,11 @@ impl Agent {
             .await;
         if compacted {
             let kept_count = pre_count.saturating_sub(messages.len()).max(1);
-            let _ = ui_tx.send(StreamEvent::Text(format!(
-                "_(compacted {kept_count} earlier turns into a summary to fit context)_\n"
-            )));
+            let _ = ui_tx
+                .send(StreamEvent::Text(format!(
+                    "_(compacted {kept_count} earlier turns into a summary to fit context)_\n"
+                )))
+                .await;
             tracing::info!("agent iteration {iteration}: compacted {kept_count} prior messages");
         } else {
             tracing::warn!(
@@ -582,26 +592,28 @@ impl Agent {
         &self,
         outgoing: &[Message],
         tool_defs: &[ToolDefinition],
-        ui_tx: &mpsc::UnboundedSender<StreamEvent>,
+        ui_tx: &mpsc::Sender<StreamEvent>,
         cancel: CancellationToken,
         iteration: usize,
     ) -> Result<ChatResponse> {
-        let (inner_tx, mut inner_rx) = mpsc::unbounded_channel::<StreamEvent>();
-        let (priv_tx, mut priv_rx) = mpsc::unbounded_channel::<StreamEvent>();
+        let (inner_tx, mut inner_rx) =
+            mpsc::channel::<StreamEvent>(crate::provider::STREAM_CHANNEL_CAPACITY);
+        let (priv_tx, mut priv_rx) =
+            mpsc::channel::<StreamEvent>(crate::provider::STREAM_CHANNEL_CAPACITY);
 
         let ui_tx_clone = ui_tx.clone();
         tokio::spawn(async move {
             while let Some(ev) = inner_rx.recv().await {
                 match &ev {
                     StreamEvent::Text(_) => {
-                        let _ = ui_tx_clone.send(ev);
+                        let _ = ui_tx_clone.send(ev).await;
                     }
                     StreamEvent::Done(_) | StreamEvent::Error(_) => {
-                        let _ = priv_tx.send(ev);
+                        let _ = priv_tx.send(ev).await;
                         break;
                     }
                     _ => {
-                        let _ = ui_tx_clone.send(ev);
+                        let _ = ui_tx_clone.send(ev).await;
                     }
                 }
             }
@@ -622,14 +634,16 @@ impl Agent {
                 .map(|pe| pe.to_string())
                 .unwrap_or_else(|| format!("{e}"));
             tracing::error!("agent iteration {iteration}: chat_stream failed: {user_message}");
-            let _ = ui_tx.send(StreamEvent::Error(user_message.clone()));
-            let _ = ui_tx.send(StreamEvent::Done(ChatResponse {
-                content: Some(format!("⚠ {user_message}")),
-                tool_calls: None,
-                usage: None,
-                finish_reason: Some("error".into()),
-                reasoning_content: None,
-            }));
+            let _ = ui_tx.send(StreamEvent::Error(user_message.clone())).await;
+            let _ = ui_tx
+                .send(StreamEvent::Done(ChatResponse {
+                    content: Some(format!("⚠ {user_message}")),
+                    tool_calls: None,
+                    usage: None,
+                    finish_reason: Some("error".into()),
+                    reasoning_content: None,
+                }))
+                .await;
             return Err(e);
         }
 
@@ -652,7 +666,7 @@ impl Agent {
             None => {
                 let msg = "Stream ended without Done event";
                 tracing::error!("agent iteration {iteration}: {msg}");
-                let _ = ui_tx.send(StreamEvent::Error(msg.into()));
+                let _ = ui_tx.send(StreamEvent::Error(msg.into())).await;
                 Err(anyhow::anyhow!(msg))
             }
         }
@@ -661,7 +675,7 @@ impl Agent {
     pub(in crate::agent) async fn execute_stream_tool_calls(
         &self,
         tool_calls: &[ToolCall],
-        ui_tx: &mpsc::UnboundedSender<StreamEvent>,
+        ui_tx: &mpsc::Sender<StreamEvent>,
         cancel: CancellationToken,
     ) -> Vec<(String, ToolResult)> {
         // YYC-34: dispatch all calls concurrently. ToolCallStart events fire
@@ -674,11 +688,13 @@ impl Agent {
             // YYC-74: derive a one-line args summary so the TUI's tool-card
             // has structured context to show.
             let args_summary = summarize_tool_args(&tc.function.name, &tc.function.arguments);
-            let _ = ui_tx.send(StreamEvent::ToolCallStart {
-                id: tc.id.clone(),
-                name: tc.function.name.clone(),
-                args_summary,
-            });
+            let _ = ui_tx
+                .send(StreamEvent::ToolCallStart {
+                    id: tc.id.clone(),
+                    name: tc.function.name.clone(),
+                    args_summary,
+                })
+                .await;
         }
 
         let dispatches = tool_calls.iter().map(|tc| {
@@ -703,15 +719,17 @@ impl Agent {
                 let output_preview = preview_output(preview_source);
                 let result_meta = summarize_tool_result(&name, &result.output);
                 let elided = elided_lines(preview_source, output_preview.as_deref());
-                let _ = ui_tx.send(StreamEvent::ToolCallEnd {
-                    id: id.clone(),
-                    name: name.clone(),
-                    ok,
-                    output_preview,
-                    result_meta,
-                    elided_lines: elided,
-                    elapsed_ms,
-                });
+                let _ = ui_tx
+                    .send(StreamEvent::ToolCallEnd {
+                        id: id.clone(),
+                        name: name.clone(),
+                        ok,
+                        output_preview,
+                        result_meta,
+                        elided_lines: elided,
+                        elapsed_ms,
+                    })
+                    .await;
                 (id, result)
             }
         });

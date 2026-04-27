@@ -645,7 +645,7 @@ impl LLMProvider for OpenAIProvider {
         &self,
         messages: &[Message],
         tools: &[ToolDefinition],
-        tx: mpsc::UnboundedSender<StreamEvent>,
+        tx: mpsc::Sender<StreamEvent>,
         cancel: CancellationToken,
     ) -> Result<()> {
         let response = tokio::select! {
@@ -723,7 +723,7 @@ impl LLMProvider for OpenAIProvider {
                 reasoning.push_str(&sanitized.reasoning);
 
                 if !sanitized.text.is_empty() {
-                    let _ = tx.send(StreamEvent::Text(sanitized.text));
+                    let _ = tx.send(StreamEvent::Text(sanitized.text)).await;
                 }
                 let mut combined_reasoning = native_reasoning_delta;
                 combined_reasoning.push_str(&sanitized.reasoning);
@@ -731,7 +731,7 @@ impl LLMProvider for OpenAIProvider {
                 // whitespace; suppress those so a stub THINKING header
                 // doesn't get inserted between text segments.
                 if !combined_reasoning.trim().is_empty() {
-                    let _ = tx.send(StreamEvent::Reasoning(combined_reasoning));
+                    let _ = tx.send(StreamEvent::Reasoning(combined_reasoning)).await;
                 }
             }
         }
@@ -767,12 +767,12 @@ impl LLMProvider for OpenAIProvider {
             let native_reasoning_delta = reasoning[prev_reasoning_len..].to_string();
             reasoning.push_str(&sanitized.reasoning);
             if !sanitized.text.is_empty() {
-                let _ = tx.send(StreamEvent::Text(sanitized.text));
+                let _ = tx.send(StreamEvent::Text(sanitized.text)).await;
             }
             let mut combined_reasoning = native_reasoning_delta;
             combined_reasoning.push_str(&sanitized.reasoning);
             if !combined_reasoning.trim().is_empty() {
-                let _ = tx.send(StreamEvent::Reasoning(combined_reasoning));
+                let _ = tx.send(StreamEvent::Reasoning(combined_reasoning)).await;
             }
         }
 
@@ -780,11 +780,11 @@ impl LLMProvider for OpenAIProvider {
         let leftover = think.flush();
         if !leftover.text.is_empty() {
             content.push_str(&leftover.text);
-            let _ = tx.send(StreamEvent::Text(leftover.text));
+            let _ = tx.send(StreamEvent::Text(leftover.text)).await;
         }
         if !leftover.reasoning.trim().is_empty() {
             reasoning.push_str(&leftover.reasoning);
-            let _ = tx.send(StreamEvent::Reasoning(leftover.reasoning));
+            let _ = tx.send(StreamEvent::Reasoning(leftover.reasoning)).await;
         }
 
         if let Some(raw) = raw_stream.as_ref() {
@@ -820,7 +820,7 @@ impl LLMProvider for OpenAIProvider {
             reasoning_content: Some(reasoning).filter(|r| !r.is_empty()),
         };
 
-        let _ = tx.send(StreamEvent::Done(response));
+        let _ = tx.send(StreamEvent::Done(response)).await;
         Ok(())
     }
 

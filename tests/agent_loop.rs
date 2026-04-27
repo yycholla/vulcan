@@ -31,7 +31,7 @@ impl LLMProvider for ProviderHandle {
         &self,
         messages: &[Message],
         tools: &[ToolDefinition],
-        tx: mpsc::UnboundedSender<StreamEvent>,
+        tx: mpsc::Sender<StreamEvent>,
         cancel: CancellationToken,
     ) -> Result<()> {
         self.0.chat_stream(messages, tools, tx, cancel).await
@@ -144,7 +144,7 @@ async fn stream_cancel_mid_tool_emits_done_and_persists_partial_messages() {
         serde_json::json!({"command": "sleep 5", "timeout": 10}),
     );
     let cancel = CancellationToken::new();
-    let (tx, mut rx) = mpsc::unbounded_channel();
+    let (tx, mut rx) = mpsc::channel(vulcan::provider::STREAM_CHANNEL_CAPACITY);
 
     let cancel_for_task = cancel.clone();
     let run = tokio::spawn(async move {

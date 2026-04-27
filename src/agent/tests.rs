@@ -157,7 +157,7 @@ fn agent_with_mock() -> (Agent, Arc<MockProvider>) {
             &self,
             m: &[Message],
             t: &[crate::provider::ToolDefinition],
-            tx: tokio::sync::mpsc::UnboundedSender<crate::provider::StreamEvent>,
+            tx: tokio::sync::mpsc::Sender<crate::provider::StreamEvent>,
             c: CancellationToken,
         ) -> Result<()> {
             self.0.chat_stream(m, t, tx, c).await
@@ -261,7 +261,7 @@ async fn streaming_and_buffered_paths_match() {
 
     let (mut a2, m2) = agent_with_mock();
     m2.enqueue_text("identical output");
-    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let (tx, mut rx) = tokio::sync::mpsc::channel(crate::provider::STREAM_CHANNEL_CAPACITY);
     let streamed = a2.run_prompt_stream("x", tx).await.unwrap();
     // Drain the channel.
     while rx.try_recv().is_ok() {}
@@ -302,7 +302,7 @@ async fn compact_stream_messages_if_needed_replaces_history_with_summary_and_kee
     // contain it and not the legacy "Previous conversation context:" stub.
     mock.enqueue_text("- user wanted X done\n- file /tmp/foo.txt was created");
 
-    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let (tx, mut rx) = tokio::sync::mpsc::channel(crate::provider::STREAM_CHANNEL_CAPACITY);
     let mut messages = vec![Message::System {
         content: "system".into(),
     }];
@@ -357,7 +357,7 @@ async fn compact_skips_when_no_user_boundary_in_recent_window() {
     // no-op so we don't break the tool_calls/Tool wire invariant.
     let (mut agent, _mock) = agent_with_mock();
     agent.context = ContextManager::new(10);
-    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    let (tx, _rx) = tokio::sync::mpsc::channel(crate::provider::STREAM_CHANNEL_CAPACITY);
     let original = vec![
         Message::System {
             content: "system".into(),
@@ -386,7 +386,7 @@ async fn compact_skips_when_no_user_boundary_in_recent_window() {
 async fn collect_stream_response_forwards_text_and_returns_done() {
     let (agent, mock) = agent_with_mock();
     mock.enqueue_text("streamed text");
-    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let (tx, mut rx) = tokio::sync::mpsc::channel(crate::provider::STREAM_CHANNEL_CAPACITY);
     let messages = vec![Message::User {
         content: "x".into(),
     }];
@@ -424,7 +424,7 @@ async fn execute_stream_tool_calls_emits_events_and_preserves_result_order() {
             },
         },
     ];
-    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let (tx, mut rx) = tokio::sync::mpsc::channel(crate::provider::STREAM_CHANNEL_CAPACITY);
 
     let results = agent
         .execute_stream_tool_calls(&calls, &tx, CancellationToken::new())
@@ -626,7 +626,7 @@ async fn parallel_tool_calls_dispatch_concurrently() {
             &self,
             m: &[Message],
             t: &[crate::provider::ToolDefinition],
-            tx: tokio::sync::mpsc::UnboundedSender<crate::provider::StreamEvent>,
+            tx: tokio::sync::mpsc::Sender<crate::provider::StreamEvent>,
             c: CancellationToken,
         ) -> Result<()> {
             self.0.chat_stream(m, t, tx, c).await

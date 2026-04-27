@@ -315,7 +315,7 @@ fn complete_slash(prefix: &str) -> Option<String> {
 fn submit_prompt(
     app: &mut AppState,
     agent: &Arc<Mutex<Agent>>,
-    stream_tx: &mpsc::UnboundedSender<StreamEvent>,
+    stream_tx: &mpsc::Sender<StreamEvent>,
     msg: String,
 ) {
     app.messages.push(ChatMessage {
@@ -360,7 +360,7 @@ async fn refresh_sessions(agent: &Arc<Mutex<Agent>>, app: &mut AppState) {
 async fn handle_stream_event(
     app: &mut AppState,
     agent: &Arc<Mutex<Agent>>,
-    stream_tx: &mpsc::UnboundedSender<StreamEvent>,
+    stream_tx: &mpsc::Sender<StreamEvent>,
     ev: StreamEvent,
 ) {
     match ev {
@@ -502,7 +502,8 @@ pub async fn run_tui(config: &Config, resume: ResumeTarget) -> Result<()> {
     });
 
     // streaming
-    let (stream_tx, mut stream_rx) = mpsc::unbounded_channel::<StreamEvent>();
+    let (stream_tx, mut stream_rx) =
+        mpsc::channel::<StreamEvent>(crate::provider::STREAM_CHANNEL_CAPACITY);
 
     // ── Hook registry: audit-log + (room for safety-gate, etc.). Built-in
     // hooks (skills) are registered by AgentBuilder.

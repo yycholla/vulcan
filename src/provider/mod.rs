@@ -10,6 +10,14 @@ use std::fmt;
 use std::time::Duration;
 
 use anyhow::Result;
+
+/// Default capacity for the streaming-event channel between provider
+/// and consumer (TUI / CLI / gateway). Bounded to prevent unbounded
+/// memory growth when a slow consumer can't keep up with SSE deltas
+/// (YYC-132). Generous enough that typical bursts never block; small
+/// enough that a stuck consumer surfaces as backpressure within
+/// seconds rather than gigabytes.
+pub const STREAM_CHANNEL_CAPACITY: usize = 1024;
 use serde::ser::SerializeStruct;
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
 use serde_json::Value;
@@ -388,11 +396,17 @@ pub trait LLMProvider: Send + Sync {
     ) -> Result<ChatResponse>;
 
     /// Send a chat request and stream response events through a channel (for TUI mode).
+    ///
+    /// YYC-132: `tx` is a bounded sender. Implementations should `.await`
+    /// every `tx.send(...)` so a slow consumer applies backpressure to
+    /// the SSE parser, rather than letting the channel grow without
+    /// bound. Channel capacity is set by the caller (default
+    /// `STREAM_CHANNEL_CAPACITY`).
     async fn chat_stream(
         &self,
         messages: &[Message],
         tools: &[ToolDefinition],
-        tx: mpsc::UnboundedSender<StreamEvent>,
+        tx: mpsc::Sender<StreamEvent>,
         cancel: tokio_util::sync::CancellationToken,
     ) -> Result<()>;
 
