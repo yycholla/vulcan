@@ -25,7 +25,6 @@ bench-soak = ["dep:dhat", "dep:hdrhistogram"]
 gateway = [
     "dep:axum",
     "dep:tower",
-    "dep:tower-http",
     "dep:subtle",
     "dep:hmac",
     "dep:sha2",
@@ -108,7 +107,6 @@ ignore = "0.4.25"
 # Gateway daemon HTTP stack. Optional — only linked under `gateway`.
 axum = { version = "0.8.9", optional = true }
 tower = { version = "0.5.3", features = ["util"], optional = true }
-tower-http = { version = "0.6.8", features = ["trace", "cors"], optional = true }
 subtle = { version = "2.6.1", optional = true }
 # Webhook HMAC verification (Task 16). hmac 0.12 + sha2 0.10 share `digest 0.10`,
 # already in Cargo.lock transitively — picking the matching majors avoids
