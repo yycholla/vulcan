@@ -1,7 +1,57 @@
 use anyhow::{Context, Result};
 use serde::Deserialize;
 use std::collections::HashMap;
+use std::io::Write;
 use std::path::{Path, PathBuf};
+
+/// Atomic-write helper for config-fragment files (YYC-136).
+///
+/// Writes to `<path>.tmp`, fsyncs the data + metadata, then renames
+/// over the destination. The rename is atomic on POSIX and on Windows
+/// (rename-overwrites-existing semantics on Win10+). A mid-write
+/// crash leaves the destination either fully old or fully new — never
+/// a truncated middle state.
+pub(crate) fn atomic_write(path: &Path, content: &str) -> Result<()> {
+    let file_name = path.file_name().and_then(|n| n.to_str()).ok_or_else(|| {
+        anyhow::anyhow!("atomic_write: path has no file name: {}", path.display())
+    })?;
+    let tmp = path.with_file_name(format!("{file_name}.tmp"));
+    {
+        let mut f = std::fs::File::create(&tmp)
+            .with_context(|| format!("Failed to create {}", tmp.display()))?;
+        f.write_all(content.as_bytes())
+            .with_context(|| format!("Failed to write {}", tmp.display()))?;
+        f.sync_all()
+            .with_context(|| format!("Failed to fsync {}", tmp.display()))?;
+    }
+    std::fs::rename(&tmp, path).with_context(|| {
+        format!(
+            "Failed to atomic-rename {} → {}",
+            tmp.display(),
+            path.display()
+        )
+    })?;
+    Ok(())
+}
+
+/// Snapshot `path` to `<path>.bak` and return the backup's path.
+/// Used by `Config::migrate` so a failed migration can roll the
+/// original file back into place (YYC-136). Caller is expected to
+/// only call this when `path` exists.
+pub(crate) fn snapshot_bak(path: &Path) -> Result<PathBuf> {
+    let file_name = path.file_name().and_then(|n| n.to_str()).ok_or_else(|| {
+        anyhow::anyhow!("snapshot_bak: path has no file name: {}", path.display())
+    })?;
+    let bak = path.with_file_name(format!("{file_name}.bak"));
+    std::fs::copy(path, &bak).with_context(|| {
+        format!(
+            "Failed to snapshot {} to {} (config migration safety net)",
+            path.display(),
+            bak.display(),
+        )
+    })?;
+    Ok(bak)
+}
 
 /// Outcome of a `Config::migrate(dir, force)` run (YYC-99). Booleans
 /// flag which fragment files the run produced so the CLI can print a
@@ -582,11 +632,54 @@ impl Config {
     /// Idempotent — safe to run repeatedly.
     pub fn migrate(dir: &Path, force: bool) -> Result<MigrationReport> {
         let main_path = dir.join("config.toml");
-        let mut report = MigrationReport::default();
         if !main_path.exists() {
-            return Ok(report);
+            return Ok(MigrationReport::default());
         }
-        let raw = std::fs::read_to_string(&main_path)
+
+        // YYC-136: snapshot the original config to <name>.bak before
+        // mutating anything. If any subsequent step errors, restore from
+        // the snapshot and remove any half-written .tmp files so the
+        // user is left with the same state they started with — never a
+        // wedged config.
+        let bak_path = snapshot_bak(&main_path)?;
+
+        let result = Self::migrate_inner(dir, force, &main_path);
+
+        if let Err(e) = &result {
+            tracing::warn!(
+                "config migration failed mid-flight: {e}. Rolling back from {}",
+                bak_path.display()
+            );
+            // Best-effort restore — the user keeps their original
+            // config no matter what happens during migration.
+            if let Err(restore_err) = std::fs::copy(&bak_path, &main_path) {
+                tracing::error!(
+                    "config migration rollback also failed: {restore_err}. \
+                     Original config is at {}.",
+                    bak_path.display()
+                );
+            }
+            // Sweep any lingering .tmp files from atomic_write.
+            for name in ["config.toml", "keybinds.toml", "providers.toml"] {
+                let tmp = dir.join(format!("{name}.tmp"));
+                if tmp.exists() {
+                    let _ = std::fs::remove_file(tmp);
+                }
+            }
+        }
+
+        result
+    }
+
+    /// Body of `migrate` extracted so the outer function owns the
+    /// snapshot / rollback boundary. All file writes here go through
+    /// `atomic_write` (write `.tmp`, fsync, rename) so a mid-write
+    /// crash leaves the destination either fully old or fully new —
+    /// never a half-byte truncation (YYC-136).
+    fn migrate_inner(dir: &Path, force: bool, main_path: &Path) -> Result<MigrationReport> {
+        let mut report = MigrationReport::default();
+
+        let raw = std::fs::read_to_string(main_path)
             .with_context(|| format!("Failed to read {}", main_path.display()))?;
         let mut doc: toml_edit::DocumentMut = raw
             .parse()
@@ -610,8 +703,7 @@ impl Config {
                 for (k, v) in table.iter() {
                     out.insert(k, v.clone());
                 }
-                std::fs::write(&keybinds_path, out.to_string())
-                    .with_context(|| format!("Failed to write {}", keybinds_path.display()))?;
+                atomic_write(&keybinds_path, &out.to_string())?;
                 report.keybinds_written = true;
             }
         }
@@ -634,15 +726,13 @@ impl Config {
                 for (name, sub) in table.iter() {
                     out.insert(name, sub.clone());
                 }
-                std::fs::write(&providers_path, out.to_string())
-                    .with_context(|| format!("Failed to write {}", providers_path.display()))?;
+                atomic_write(&providers_path, &out.to_string())?;
                 report.providers_written = true;
             }
         }
 
         if report.keybinds_written || report.providers_written {
-            std::fs::write(&main_path, doc.to_string())
-                .with_context(|| format!("Failed to write {}", main_path.display()))?;
+            atomic_write(main_path, &doc.to_string())?;
             report.main_rewritten = true;
         }
         Ok(report)
@@ -892,5 +982,78 @@ model = "qwen2.5"
         let cfg = Config::load_from_dir(dir.path()).unwrap();
         assert_eq!(cfg.keybinds.toggle_tools, "F4");
         assert_eq!(cfg.providers["local"].model, "qwen2.5");
+    }
+
+    // ── YYC-136: atomic write + rollback safety net ─────────────────────
+
+    #[test]
+    fn atomic_write_replaces_destination_atomically() {
+        // YYC-136: after atomic_write, the destination contains the new
+        // content and no .tmp file is left behind.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "old = true\n").unwrap();
+
+        atomic_write(&path, "new = true\n").unwrap();
+
+        let after = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(after, "new = true\n");
+        assert!(!dir.path().join("config.toml.tmp").exists());
+    }
+
+    #[test]
+    fn migrate_writes_bak_snapshot_for_rollback() {
+        // YYC-136: every migration run snapshots the pre-mutation
+        // config.toml to config.toml.bak. After the run completes the
+        // .bak still exists so the user has a manual undo path.
+        let dir = tempfile::tempdir().unwrap();
+        let original = "# original\n[keybinds]\ntoggle_tools = \"F4\"\n";
+        std::fs::write(dir.path().join("config.toml"), original).unwrap();
+
+        Config::migrate(dir.path(), false).unwrap();
+
+        let bak = dir.path().join("config.toml.bak");
+        assert!(bak.exists(), ".bak snapshot should survive migration");
+        let bak_raw = std::fs::read_to_string(&bak).unwrap();
+        assert_eq!(bak_raw, original);
+    }
+
+    #[test]
+    fn migrate_rolls_back_when_inner_step_fails() {
+        // YYC-136: simulate a failure mid-migration by handing migrate
+        // a pre-existing keybinds.toml that's a directory (so the write
+        // attempt fails). Without rollback the user would be left with
+        // a wedged config; with rollback the original config.toml is
+        // restored.
+        let dir = tempfile::tempdir().unwrap();
+        let original = "[keybinds]\ntoggle_tools = \"F4\"\n";
+        std::fs::write(dir.path().join("config.toml"), original).unwrap();
+
+        // Create keybinds.toml as a *directory* — atomic_write will fail
+        // when its rename target is a non-empty directory on Linux.
+        std::fs::create_dir(dir.path().join("keybinds.toml")).unwrap();
+        std::fs::write(
+            dir.path().join("keybinds.toml").join("blocker"),
+            "non-empty\n",
+        )
+        .unwrap();
+
+        // force=true so migration tries to overwrite the (directory)
+        // keybinds.toml — that's the step that errors.
+        let result = Config::migrate(dir.path(), true);
+        assert!(
+            result.is_err(),
+            "expected migration to fail when keybinds.toml is a non-empty dir"
+        );
+
+        // Rollback ran: config.toml still has its original content.
+        let restored = std::fs::read_to_string(dir.path().join("config.toml")).unwrap();
+        assert_eq!(
+            restored, original,
+            "config.toml should be rolled back to the original snapshot"
+        );
+
+        // No .tmp leftover from the partial write.
+        assert!(!dir.path().join("config.toml.tmp").exists());
     }
 }
