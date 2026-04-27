@@ -794,6 +794,28 @@ pub async fn run_tui(config: &Config, resume: ResumeTarget) -> Result<()> {
                             }
                             continue;
                         }
+                        // YYC-123: mouse wheel drives the chat viewport
+                        // directly. Three lines per notch matches a
+                        // typical terminal scroll feel; PageUp/PageDown
+                        // remain available for bigger jumps.
+                        if let Event::Mouse(m) = &event {
+                            use ratatui::crossterm::event::MouseEventKind;
+                            const SCROLL_LINES: u16 = 3;
+                            match m.kind {
+                                MouseEventKind::ScrollUp => {
+                                    app.scroll = app.scroll.saturating_sub(SCROLL_LINES);
+                                    app.at_bottom = false;
+                                }
+                                MouseEventKind::ScrollDown => {
+                                    let max = app.chat_max_scroll.get();
+                                    app.scroll =
+                                        app.scroll.saturating_add(SCROLL_LINES).min(max);
+                                    app.at_bottom = app.scroll >= max;
+                                }
+                                _ => {}
+                            }
+                            continue;
+                        }
                         if let Event::Key(key) = event
                             && key.kind == KeyEventKind::Press {
                                 // ── If a pause is active, intercept the keys that
@@ -1311,7 +1333,11 @@ pub async fn run_tui(config: &Config, resume: ResumeTarget) -> Result<()> {
                                                 continue;
                                             }
                                         }
-                                        app.scroll = app.scroll.saturating_sub(1);
+                                        // YYC-123: 3 lines per arrow keypress so
+                                        // holding Up/Down feels closer to a
+                                        // mouse-wheel scroll instead of crawling
+                                        // one line at a time per render frame.
+                                        app.scroll = app.scroll.saturating_sub(3);
                                         app.at_bottom = false;
                                     }
                                     KeyCode::Down => {
@@ -1325,7 +1351,7 @@ pub async fn run_tui(config: &Config, resume: ResumeTarget) -> Result<()> {
                                             }
                                         }
                                         let max = app.chat_max_scroll.get();
-                                        app.scroll = app.scroll.saturating_add(1).min(max);
+                                        app.scroll = app.scroll.saturating_add(3).min(max);
                                         app.at_bottom = app.scroll >= max;
                                     }
                                     KeyCode::PageUp => {
