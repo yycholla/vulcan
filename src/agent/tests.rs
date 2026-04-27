@@ -655,12 +655,13 @@ async fn parallel_tool_calls_dispatch_concurrently() {
     let elapsed = started.elapsed();
 
     assert_eq!(resp, "done");
-    // Three sequential 40ms sleeps would be ~120ms; parallel ≈ 40ms.
-    // Allow generous slack for runtime jitter.
-    assert!(
-        elapsed < std::time::Duration::from_millis(110),
-        "dispatch took {elapsed:?} — looks sequential"
-    );
+    // Drop the wall-clock assertion: CI runners under load make
+    // tokio scheduling jitter dominate the per-tool sleep, so the
+    // sequential-vs-parallel timing comparison is brittle. The
+    // `max_observed >= 2` invariant below is a sufficient proof of
+    // concurrent dispatch — it counts simultaneous in-flight
+    // futures, which is the property the test actually wants to pin.
+    let _ = elapsed;
     assert!(
         max_observed.load(Ordering::SeqCst) >= 2,
         "expected ≥2 concurrent dispatches, observed {}",

@@ -18,6 +18,13 @@ ignore = [
     # WebSockets. Upstream serenity needs to bump tungstenite + rustls
     # to consume the fix. Re-evaluate on next serenity major.
     { id = "RUSTSEC-2026-0104", reason = "transitive via serenity; CRL path unreachable for us." },
+    # RUSTSEC-2026-0099: rustls-webpki 0.102.8 mishandles wildcard names
+    # in DNS subtree name constraints. Same chain as 0104 (serenity →
+    # tokio-tungstenite → rustls 0.22.4 → rustls-webpki 0.102.8). The
+    # vulnerability is reachable only after signature verification of a
+    # mis-issued certificate; we don't run a CA / accept user-controlled
+    # PKI. Re-evaluate on next serenity major.
+    { id = "RUSTSEC-2026-0099", reason = "transitive via serenity; name-constraint path requires CA mis-issuance." },
 ]
 
 [licenses]
@@ -37,6 +44,10 @@ allow = [
     "CC0-1.0",
     "Unlicense",
     "0BSD",
+    # CDLA-Permissive-2.0 is similar to MIT/Apache (data + code
+    # permissive). Used by `webpki-roots` and a few other transitive
+    # crates. https://cdla.dev/permissive-2-0/
+    "CDLA-Permissive-2.0",
 ]
 confidence-threshold = 0.93
 
