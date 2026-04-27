@@ -43,7 +43,7 @@ impl OpenAIProvider {
 
         Ok(Self {
             client,
-            base_url: base_url.trim_end_matches('/').to_string(),
+            base_url: crate::provider::normalize_base_url(base_url),
             api_key: api_key.to_string(),
             model: model.to_string(),
             max_context,

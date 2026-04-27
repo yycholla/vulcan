@@ -70,7 +70,7 @@ impl OpenRouterCatalog {
     pub fn new(client: Client, base_url: &str, api_key: &str, cache_ttl: Duration) -> Self {
         Self {
             client,
-            base_url: base_url.trim_end_matches('/').to_string(),
+            base_url: super::normalize_base_url(base_url),
             api_key: api_key.to_string(),
             cache_ttl,
         }
@@ -197,7 +197,7 @@ impl OpenAICatalog {
     pub fn new(client: Client, base_url: &str, api_key: &str, cache_ttl: Duration) -> Self {
         Self {
             client,
-            base_url: base_url.trim_end_matches('/').to_string(),
+            base_url: super::normalize_base_url(base_url),
             api_key: api_key.to_string(),
             cache_ttl,
         }

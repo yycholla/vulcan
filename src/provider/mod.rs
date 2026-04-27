@@ -432,3 +432,11 @@ pub struct Usage {
     pub completion_tokens: usize,
     pub total_tokens: usize,
 }
+
+/// Strip a single trailing `/` so callers can interpolate `{base}/path`
+/// without doubling slashes. Idempotent: safe to call on already-clean URLs.
+/// One canonical helper instead of three open-coded `.trim_end_matches('/')`
+/// sites that drift apart over time.
+pub fn normalize_base_url(url: &str) -> String {
+    url.trim_end_matches('/').to_string()
+}

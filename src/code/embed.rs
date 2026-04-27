@@ -100,7 +100,7 @@ impl EmbeddingIndex {
         } else {
             &self.cfg.base_url
         };
-        format!("{}/embeddings", base.trim_end_matches('/'))
+        format!("{}/embeddings", crate::provider::normalize_base_url(base))
     }
 
     fn api_key(&self) -> Option<&str> {
