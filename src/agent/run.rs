@@ -605,10 +605,11 @@ impl Agent {
         cancel: CancellationToken,
         iteration: usize,
     ) -> Result<ChatResponse> {
-        let (inner_tx, mut inner_rx) =
-            mpsc::channel::<StreamEvent>(crate::provider::STREAM_CHANNEL_CAPACITY);
-        let (priv_tx, mut priv_rx) =
-            mpsc::channel::<StreamEvent>(crate::provider::STREAM_CHANNEL_CAPACITY);
+        // YYC-147: capacity comes from the active provider config so
+        // operators can tune it for slow renderers / fast providers.
+        let stream_cap = self.provider_config.effective_stream_channel_capacity();
+        let (inner_tx, mut inner_rx) = mpsc::channel::<StreamEvent>(stream_cap);
+        let (priv_tx, mut priv_rx) = mpsc::channel::<StreamEvent>(stream_cap);
 
         let ui_tx_clone = ui_tx.clone();
         tokio::spawn(async move {

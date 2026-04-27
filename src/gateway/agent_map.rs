@@ -224,6 +224,14 @@ impl AgentMap {
         self.inner.lock().remove(lane).is_some()
     }
 
+    /// YYC-147: clamped stream channel capacity for gateway workers
+    /// that need to size an mpsc before they hold an Agent. Sourced
+    /// from the active provider config so operators can tune
+    /// backpressure without recompiling.
+    pub fn stream_channel_capacity(&self) -> usize {
+        self.config.provider.effective_stream_channel_capacity()
+    }
+
     /// Spawn a background task that periodically evicts lanes idle longer
     /// than `self.idle_ttl`. The returned `EvictorHandle` aborts the loop on
     /// drop, so callers don't need to remember to call `.abort()` on shutdown.

@@ -109,8 +109,11 @@ pub async fn process_one(
         render_registry.clone(),
     );
 
+    // YYC-147: capacity sourced from the agent map's active provider
+    // config so gateway streaming respects the same tuning knob as
+    // the TUI / one-shot paths.
     let (tx, mut rx) = tokio::sync::mpsc::channel::<crate::provider::StreamEvent>(
-        crate::provider::STREAM_CHANNEL_CAPACITY,
+        agent_map.stream_channel_capacity(),
     );
 
     // Consumer task: pump StreamEvents through the renderer. Lives until the

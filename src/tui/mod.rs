@@ -83,9 +83,11 @@ pub async fn run_tui(config: &Config, resume: ResumeTarget) -> Result<()> {
         }
     });
 
-    // streaming
+    // streaming. YYC-147: capacity sourced from the active provider
+    // config so users can tune for slow renderers (raise) or
+    // memory-constrained hosts (lower).
     let (stream_tx, mut stream_rx) =
-        mpsc::channel::<StreamEvent>(crate::provider::STREAM_CHANNEL_CAPACITY);
+        mpsc::channel::<StreamEvent>(config.provider.effective_stream_channel_capacity());
 
     // ── Hook registry: audit-log + (room for safety-gate, etc.). Built-in
     // hooks (skills) are registered by AgentBuilder.

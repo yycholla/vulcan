@@ -483,6 +483,39 @@ pub struct ProviderConfig {
     /// out room for the prompt; raise it for models with long-form output.
     #[serde(default)]
     pub max_output_tokens: Option<usize>,
+    /// YYC-147: bounded mpsc capacity for the provider stream
+    /// channel. The historical default is 1024 — generous enough that
+    /// typical bursts never block, small enough that a stuck consumer
+    /// surfaces as backpressure within seconds. Tuneable for slow
+    /// renderers (raise it) or memory-constrained hosts (lower it).
+    /// Clamped to [16, 65536] at read time to avoid pathological
+    /// settings.
+    #[serde(default = "default_stream_channel_capacity")]
+    pub stream_channel_capacity: usize,
+}
+
+/// Clamp on `ProviderConfig::stream_channel_capacity` (YYC-147).
+/// 16 is small enough to surface backpressure on a stalled consumer;
+/// 65536 is well past the point where unbounded growth is the real
+/// problem. The clamp is applied at read time via `effective_stream_channel_capacity`.
+pub const STREAM_CHANNEL_CAPACITY_MIN: usize = 16;
+pub const STREAM_CHANNEL_CAPACITY_MAX: usize = 65_536;
+pub const STREAM_CHANNEL_CAPACITY_DEFAULT: usize = 1024;
+
+fn default_stream_channel_capacity() -> usize {
+    STREAM_CHANNEL_CAPACITY_DEFAULT
+}
+
+impl ProviderConfig {
+    /// YYC-147: clamped stream channel capacity for this provider.
+    /// Anything outside `[STREAM_CHANNEL_CAPACITY_MIN,
+    /// STREAM_CHANNEL_CAPACITY_MAX]` is pulled into range so a
+    /// misconfigured value can't OOM the host or starve the
+    /// renderer.
+    pub fn effective_stream_channel_capacity(&self) -> usize {
+        self.stream_channel_capacity
+            .clamp(STREAM_CHANNEL_CAPACITY_MIN, STREAM_CHANNEL_CAPACITY_MAX)
+    }
 }
 
 #[derive(Debug, Deserialize, Clone, Default)]
@@ -626,6 +659,7 @@ impl Default for ProviderConfig {
             debug: ProviderDebugMode::Off,
             max_iterations: 0,
             max_output_tokens: None,
+            stream_channel_capacity: default_stream_channel_capacity(),
         }
     }
 }
@@ -1063,6 +1097,46 @@ toggle_tools = "F2"
 
         assert!(ProviderDebugMode::Wire.logs_wire());
         assert!(ProviderDebugMode::Wire.logs_tool_fallback());
+    }
+
+    // YYC-147: stream_channel_capacity defaults to 1024 when not
+    // configured, preserving prior behavior.
+    #[test]
+    fn provider_stream_channel_capacity_defaults_to_legacy_value() {
+        let cfg = ProviderConfig::default();
+        assert_eq!(cfg.stream_channel_capacity, STREAM_CHANNEL_CAPACITY_DEFAULT);
+        assert_eq!(
+            cfg.effective_stream_channel_capacity(),
+            STREAM_CHANNEL_CAPACITY_DEFAULT,
+        );
+    }
+
+    // YYC-147: explicit user override flows through.
+    #[test]
+    fn provider_stream_channel_capacity_honors_user_override() {
+        let toml = r#"
+            [provider]
+            stream_channel_capacity = 4096
+        "#;
+        let cfg: Config = toml::from_str(toml).expect("parse");
+        assert_eq!(cfg.provider.effective_stream_channel_capacity(), 4096,);
+    }
+
+    // YYC-147: nonsensical values clamp into the documented bounds
+    // so a typo can't OOM the host or starve the renderer.
+    #[test]
+    fn provider_stream_channel_capacity_clamps_to_bounds() {
+        let mut cfg = ProviderConfig::default();
+        cfg.stream_channel_capacity = 1;
+        assert_eq!(
+            cfg.effective_stream_channel_capacity(),
+            STREAM_CHANNEL_CAPACITY_MIN,
+        );
+        cfg.stream_channel_capacity = 10_000_000;
+        assert_eq!(
+            cfg.effective_stream_channel_capacity(),
+            STREAM_CHANNEL_CAPACITY_MAX,
+        );
     }
 
     // YYC-161: a clean canonical config should produce no
