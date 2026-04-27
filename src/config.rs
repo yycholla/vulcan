@@ -105,6 +105,56 @@ pub struct Config {
 
     #[serde(default)]
     pub keybinds: KeybindsConfig,
+
+    /// YYC-42: auto-inject relevant past-session context on the first
+    /// turn of a new session. Off by default — flip to enabled = true
+    /// after reviewing the privacy tradeoff (recalled snippets land in
+    /// the system prompt and are visible to the model).
+    #[serde(default)]
+    pub recall: RecallConfig,
+}
+
+/// Auto-recall config (YYC-42). Drives the `RecallHook` BeforePrompt
+/// handler. When enabled, the first user prompt of a fresh session is
+/// run through FTS5 against the messages table and the top hits are
+/// injected as a System message at AfterSystem position.
+#[derive(Debug, Deserialize, Clone, Copy)]
+pub struct RecallConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default = "default_recall_max_hits")]
+    pub max_hits: usize,
+    /// BM25 score cap (FTS5 returns lower-is-better ranks; SQLite's
+    /// `bm25()` returns negative numbers where more-negative = closer
+    /// match). Hits with `score > min_score` are skipped. Default
+    /// includes everything; tighten for a stricter relevance bar.
+    #[serde(default = "default_recall_min_score")]
+    pub min_score: f64,
+    /// Max characters per recalled hit before truncation. Long
+    /// historical messages can blow the context budget.
+    #[serde(default = "default_recall_max_chars")]
+    pub max_chars_per_hit: usize,
+}
+
+impl Default for RecallConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            max_hits: default_recall_max_hits(),
+            min_score: default_recall_min_score(),
+            max_chars_per_hit: default_recall_max_chars(),
+        }
+    }
+}
+
+fn default_recall_max_hits() -> usize {
+    5
+}
+fn default_recall_min_score() -> f64 {
+    0.0
+}
+fn default_recall_max_chars() -> usize {
+    400
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -465,6 +515,7 @@ impl Default for Config {
             tui: TuiConfig::default(),
             gateway: None,
             keybinds: KeybindsConfig::default(),
+            recall: RecallConfig::default(),
         }
     }
 }
