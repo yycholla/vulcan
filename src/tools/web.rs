@@ -184,15 +184,30 @@ impl Tool for WebFetch {
         let text = html_to_text(&body);
 
         let mut result = format!("URL: {url}\nStatus: {status}\n\n");
-        if text.len() > 5000 {
-            result.push_str(&text[..5000]);
+        let (body_text, truncated) = truncate_chars(&text, FETCH_MAX_CHARS);
+        result.push_str(&body_text);
+        if truncated {
             result.push_str("\n\n... (truncated at 5000 chars)");
-        } else {
-            result.push_str(&text);
         }
 
         Ok(ToolResult::ok(result))
     }
+}
+
+/// YYC-255: cap on `web_fetch` output text length, expressed in
+/// Unicode scalar values. Slicing by byte offset would panic on
+/// non-ASCII content; iterating over `chars()` walks scalar values.
+const FETCH_MAX_CHARS: usize = 5000;
+
+/// YYC-255: truncate `text` to at most `max` chars (Unicode scalar
+/// values). Returns `(truncated_text, was_truncated)` so the caller
+/// only renders the elision marker when it actually elided.
+fn truncate_chars(text: &str, max: usize) -> (String, bool) {
+    let count = text.chars().count();
+    if count <= max {
+        return (text.to_string(), false);
+    }
+    (text.chars().take(max).collect(), true)
 }
 
 fn html_to_text(html: &str) -> String {
@@ -255,4 +270,58 @@ fn html_to_text(html: &str) -> String {
     }
 
     text.trim().to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn truncate_chars_passes_through_when_under_cap() {
+        let (out, truncated) = truncate_chars("hello", 100);
+        assert_eq!(out, "hello");
+        assert!(!truncated);
+    }
+
+    #[test]
+    fn truncate_chars_caps_at_max() {
+        let raw = "x".repeat(200);
+        let (out, truncated) = truncate_chars(&raw, 50);
+        assert_eq!(out.chars().count(), 50);
+        assert!(truncated);
+    }
+
+    #[test]
+    fn truncate_chars_does_not_panic_on_emoji_at_byte_boundary() {
+        // Construct a string where the byte-offset cap (4998) lands
+        // inside the multibyte sequence of an emoji at position
+        // 4999/5000. Slicing by `&s[..5000]` would panic; the char-aware
+        // helper must succeed and return exactly 5000 chars.
+        let mut raw = String::new();
+        for _ in 0..4999 {
+            raw.push('a');
+        }
+        raw.push('🦀'); // 4 bytes; the only non-ASCII char.
+        let (out, truncated) = truncate_chars(&raw, 5000);
+        assert_eq!(out.chars().count(), 5000);
+        assert!(!truncated, "exactly-cap input should not flag truncation");
+    }
+
+    #[test]
+    fn truncate_chars_handles_cjk_past_cap() {
+        let raw: String = "你".repeat(6000);
+        let (out, truncated) = truncate_chars(&raw, FETCH_MAX_CHARS);
+        assert_eq!(out.chars().count(), FETCH_MAX_CHARS);
+        assert!(truncated);
+        // Output must remain valid UTF-8 — implicit, but assert it
+        // doesn't panic when round-tripped.
+        let _ = out.as_bytes();
+    }
+
+    #[test]
+    fn truncate_chars_zero_max_returns_empty_when_input_nonempty() {
+        let (out, truncated) = truncate_chars("hi", 0);
+        assert!(out.is_empty());
+        assert!(truncated);
+    }
 }
