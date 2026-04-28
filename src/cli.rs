@@ -80,4 +80,27 @@ pub enum Command {
         /// Target shell (bash, zsh, fish, powershell, elvish).
         shell: Shell,
     },
+    /// YYC-179: inspect durable run records persisted by past
+    /// agent turns. `vulcan run list` shows recent turns;
+    /// `vulcan run show <id>` prints the full timeline.
+    Run {
+        #[command(subcommand)]
+        cmd: RunSubcommand,
+    },
+}
+
+/// YYC-179: subcommands under `vulcan run`.
+#[derive(Subcommand, Debug)]
+pub enum RunSubcommand {
+    /// List the most recent run records.
+    List {
+        /// Maximum number of runs to display (default 20).
+        #[arg(long, default_value_t = 20)]
+        limit: usize,
+    },
+    /// Print the full event timeline for a single run.
+    Show {
+        /// Run id (UUID, full or 8-char prefix).
+        id: String,
+    },
 }
