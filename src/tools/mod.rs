@@ -80,6 +80,44 @@ impl From<&str> for ToolResult {
     }
 }
 
+/// YYC-263: typed-parameter helper for tool implementations. Wraps
+/// `serde_json::from_value` so a tool can declare its params as a
+/// `#[derive(Deserialize)]` struct and avoid the manual
+/// `params["k"].as_str().unwrap_or("")` chain. The error path
+/// returns a `ToolResult::err` with the deserialize message,
+/// already shaped for the LLM.
+///
+/// Usage:
+/// ```ignore
+/// #[derive(serde::Deserialize)]
+/// struct ReadFileParams {
+///     path: String,
+///     #[serde(default = "default_offset")]
+///     offset: i64,
+/// }
+///
+/// async fn call(&self, params: Value, _: CancellationToken) -> Result<ToolResult> {
+///     let p: ReadFileParams = match parse_tool_params(params) {
+///         Ok(p) => p,
+///         Err(e) => return Ok(e),
+///     };
+///     // use p.path, p.offset, ...
+/// }
+/// ```
+///
+/// The full migration (every tool gets a typed struct, the
+/// `unwrap_or` chains die) is tracked under YYC-263.
+pub fn parse_tool_params<T>(params: Value) -> std::result::Result<T, ToolResult>
+where
+    T: serde::de::DeserializeOwned,
+{
+    serde_json::from_value(params).map_err(|e| {
+        ToolResult::err(format!(
+            "tool params failed to validate: {e}. Check the schema and retry."
+        ))
+    })
+}
+
 /// YYC-222: replay-safety classification for a tool.
 ///
 /// `ReadOnly` — pure observation; safe to actually re-run during a
@@ -666,6 +704,52 @@ mod tests {
             after: String::new(),
             at: chrono::Local::now(),
         }
+    }
+
+    #[test]
+    fn yyc263_parse_tool_params_returns_typed_struct_on_valid_input() {
+        #[derive(serde::Deserialize, Debug, PartialEq, Eq)]
+        struct Params {
+            path: String,
+            #[serde(default)]
+            limit: i64,
+        }
+        let v = json!({"path": "src/main.rs", "limit": 42});
+        let p: Params = parse_tool_params(v).unwrap();
+        assert_eq!(p.path, "src/main.rs");
+        assert_eq!(p.limit, 42);
+    }
+
+    #[test]
+    fn yyc263_parse_tool_params_uses_serde_default_for_missing_field() {
+        #[derive(serde::Deserialize, Debug)]
+        struct Params {
+            #[serde(default = "default_count")]
+            count: i64,
+        }
+        fn default_count() -> i64 {
+            7
+        }
+        let v = json!({});
+        let p: Params = parse_tool_params(v).unwrap();
+        assert_eq!(p.count, 7);
+    }
+
+    #[test]
+    fn yyc263_parse_tool_params_returns_toolresult_err_on_bad_input() {
+        #[derive(serde::Deserialize, Debug)]
+        struct Params {
+            #[allow(dead_code)]
+            path: String,
+        }
+        let v = json!({"path": 42}); // wrong type
+        let result = parse_tool_params::<Params>(v);
+        let err = match result {
+            Ok(_) => panic!("expected error"),
+            Err(e) => e,
+        };
+        assert!(err.is_error);
+        assert!(err.output.contains("failed to validate"));
     }
 
     #[test]
