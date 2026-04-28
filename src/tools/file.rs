@@ -334,7 +334,7 @@ impl Tool for WriteFile {
             at: chrono::Local::now(),
         };
         if let Some(sink) = &self.diff_sink {
-            *sink.lock() = Some(diff.clone());
+            sink.push(diff.clone());
         }
 
         // YYC-bonus: surface a real diff in the card preview without
@@ -540,7 +540,7 @@ impl Tool for PatchFile {
             at: chrono::Local::now(),
         };
         if let Some(sink) = &self.diff_sink {
-            *sink.lock() = Some(diff.clone());
+            sink.push(diff.clone());
         }
 
         // YYC-bonus: render a Claude Code-style diff in the card.
@@ -679,7 +679,7 @@ mod tests {
         .await
         .unwrap();
 
-        let diff = sink.lock().clone().expect("diff captured");
+        let diff = sink.latest().expect("diff captured");
         assert_eq!(diff.tool, "write_file");
         assert_eq!(diff.path, path_str);
         assert_eq!(diff.before, "old contents");
@@ -865,7 +865,7 @@ mod tests {
         .await
         .unwrap();
 
-        let diff = sink.lock().clone().expect("diff captured");
+        let diff = sink.latest().expect("diff captured");
         assert_eq!(diff.tool, "edit_file");
         assert_eq!(diff.before, "1");
         assert_eq!(diff.after, "42");

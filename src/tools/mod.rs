@@ -251,13 +251,73 @@ pub struct EditDiff {
     pub at: chrono::DateTime<chrono::Local>,
 }
 
-/// Shared latest-edit slot. `None` until the first successful edit;
-/// overwritten on every subsequent edit. The TUI clones the Arc and
-/// peeks the inner Option each render.
-pub type EditDiffSink = Arc<parking_lot::Mutex<Option<EditDiff>>>;
+/// YYC-273: cap on the global diff sink. With concurrent tool dispatch
+/// the previous `Option<EditDiff>` slot threw earlier writes away — the
+/// last writer won, so a parallel pair of `edit_file` calls only ever
+/// surfaced one diff in the TUI panel. The bounded queue keeps the
+/// most-recent N edits so concurrent edits both surface and the TUI
+/// can render a small history without unbounded memory growth.
+const DIFF_SINK_CAP: usize = 8;
+
+/// Shared edit history backed by a bounded queue. Producers push the
+/// latest diff; consumers (TUI status panel, DiagnosticsHook fallback
+/// path) ask for the most-recent entry — optionally filtered by tool
+/// name so a stale unrelated entry can't trigger a hook.
+#[derive(Debug)]
+pub struct DiffSink {
+    inner: parking_lot::Mutex<std::collections::VecDeque<EditDiff>>,
+    cap: usize,
+}
+
+impl DiffSink {
+    pub fn new(cap: usize) -> Self {
+        Self {
+            inner: parking_lot::Mutex::new(std::collections::VecDeque::with_capacity(cap)),
+            cap,
+        }
+    }
+
+    pub fn push(&self, diff: EditDiff) {
+        let mut q = self.inner.lock();
+        q.push_back(diff);
+        while q.len() > self.cap {
+            q.pop_front();
+        }
+    }
+
+    pub fn latest(&self) -> Option<EditDiff> {
+        self.inner.lock().back().cloned()
+    }
+
+    /// Most-recent diff whose `tool` name matches. Used by
+    /// `DiagnosticsHook` so a stale entry from a different tool can't
+    /// re-trigger the wrong language server.
+    pub fn latest_for_tool(&self, tool: &str) -> Option<EditDiff> {
+        self.inner
+            .lock()
+            .iter()
+            .rev()
+            .find(|d| d.tool == tool)
+            .cloned()
+    }
+
+    pub fn recent(&self) -> Vec<EditDiff> {
+        self.inner.lock().iter().cloned().collect()
+    }
+
+    pub fn len(&self) -> usize {
+        self.inner.lock().len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.inner.lock().is_empty()
+    }
+}
+
+pub type EditDiffSink = Arc<DiffSink>;
 
 pub fn new_diff_sink() -> EditDiffSink {
-    Arc::new(parking_lot::Mutex::new(None))
+    Arc::new(DiffSink::new(DIFF_SINK_CAP))
 }
 
 /// Trim a string to a max number of lines + chars so the TUI doesn't
@@ -553,6 +613,104 @@ mod tests {
     use serde_json::json;
     use tempfile::tempdir;
     use tokio_util::sync::CancellationToken;
+
+    fn make_diff(tool: &str, path: &str) -> EditDiff {
+        EditDiff {
+            path: path.into(),
+            tool: tool.into(),
+            before: String::new(),
+            after: String::new(),
+            at: chrono::Local::now(),
+        }
+    }
+
+    #[test]
+    fn diff_sink_push_then_latest_returns_last_pushed() {
+        let s = DiffSink::new(4);
+        assert!(s.latest().is_none());
+        s.push(make_diff("write_file", "a.rs"));
+        s.push(make_diff("edit_file", "b.rs"));
+        let last = s.latest().unwrap();
+        assert_eq!(last.tool, "edit_file");
+        assert_eq!(last.path, "b.rs");
+    }
+
+    #[test]
+    fn diff_sink_caps_at_capacity_dropping_oldest() {
+        let s = DiffSink::new(3);
+        for i in 0..5 {
+            s.push(make_diff("edit_file", &format!("f{i}.rs")));
+        }
+        let recent = s.recent();
+        assert_eq!(recent.len(), 3);
+        assert_eq!(recent[0].path, "f2.rs");
+        assert_eq!(recent[2].path, "f4.rs");
+    }
+
+    #[test]
+    fn diff_sink_latest_for_tool_skips_unrelated_entries() {
+        let s = DiffSink::new(4);
+        s.push(make_diff("write_file", "wrote.rs"));
+        s.push(make_diff("edit_file", "edited.rs"));
+        // Concurrent dispatch: a parallel write happens after the edit.
+        s.push(make_diff("write_file", "wrote_again.rs"));
+        let edit_match = s.latest_for_tool("edit_file").unwrap();
+        assert_eq!(edit_match.path, "edited.rs");
+        let write_match = s.latest_for_tool("write_file").unwrap();
+        assert_eq!(write_match.path, "wrote_again.rs");
+        assert!(s.latest_for_tool("nonexistent").is_none());
+    }
+
+    #[test]
+    fn diff_sink_concurrent_pushes_respect_cap_without_panic() {
+        // Two parallel producers under heavy contention used to race
+        // on the previous global last-writer slot. The bounded queue
+        // must keep len ≤ cap regardless of interleaving — that's the
+        // deterministic property worth pinning here. Whether both
+        // tools' diffs end up in the final window depends on timing,
+        // so the test doesn't assert that.
+        let s = std::sync::Arc::new(DiffSink::new(8));
+        let s1 = std::sync::Arc::clone(&s);
+        let s2 = std::sync::Arc::clone(&s);
+        let h1 = std::thread::spawn(move || {
+            for i in 0..50 {
+                s1.push(make_diff("edit_file", &format!("a{i}.rs")));
+            }
+        });
+        let h2 = std::thread::spawn(move || {
+            for i in 0..50 {
+                s2.push(make_diff("write_file", &format!("b{i}.rs")));
+            }
+        });
+        h1.join().unwrap();
+        h2.join().unwrap();
+        assert_eq!(s.len(), 8);
+        assert_eq!(s.recent().len(), 8);
+    }
+
+    #[test]
+    fn diff_sink_low_volume_concurrent_pushes_keep_both_producers() {
+        // With push counts that fit inside the cap, both producers'
+        // entries survive deterministically regardless of timing.
+        let s = std::sync::Arc::new(DiffSink::new(8));
+        let s1 = std::sync::Arc::clone(&s);
+        let s2 = std::sync::Arc::clone(&s);
+        let h1 = std::thread::spawn(move || {
+            for i in 0..3 {
+                s1.push(make_diff("edit_file", &format!("a{i}.rs")));
+            }
+        });
+        let h2 = std::thread::spawn(move || {
+            for i in 0..3 {
+                s2.push(make_diff("write_file", &format!("b{i}.rs")));
+            }
+        });
+        h1.join().unwrap();
+        h2.join().unwrap();
+        assert_eq!(s.len(), 6);
+        assert!(s.latest_for_tool("edit_file").is_some());
+        assert!(s.latest_for_tool("write_file").is_some());
+    }
 
     #[test]
     fn tool_context_finds_cargo_manifest_at_root_and_nested() {
