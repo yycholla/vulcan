@@ -8,13 +8,27 @@
 //! ask interactively there.
 
 use crate::pause::{AgentPause, AgentResume, OptionKind, PauseKind, PauseOption, PauseSender};
-use crate::tools::{Tool, ToolResult};
+use crate::tools::{Tool, ToolResult, parse_tool_params};
 use anyhow::Result;
 use async_trait::async_trait;
+use serde::Deserialize;
 use serde_json::{Value, json};
 use std::time::Duration;
 use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
+
+#[derive(Deserialize)]
+struct AskUserParams {
+    question: String,
+    options: Vec<AskUserOption>,
+}
+
+#[derive(Deserialize)]
+struct AskUserOption {
+    key: String,
+    label: String,
+    value: String,
+}
 
 pub struct AskUserTool {
     pause_tx: Option<PauseSender>,
@@ -57,15 +71,12 @@ impl Tool for AskUserTool {
         })
     }
     async fn call(&self, params: Value, cancel: CancellationToken) -> Result<ToolResult> {
-        let question = params["question"]
-            .as_str()
-            .ok_or_else(|| anyhow::anyhow!("question required"))?
-            .to_string();
-        let options_in = params["options"]
-            .as_array()
-            .ok_or_else(|| anyhow::anyhow!("options must be a non-empty array"))?
-            .clone();
-        if options_in.is_empty() {
+        let p: AskUserParams = match parse_tool_params(params) {
+            Ok(p) => p,
+            Err(e) => return Ok(e),
+        };
+
+        if p.options.is_empty() {
             return Ok(ToolResult::err("options must contain at least one entry"));
         }
 
@@ -78,21 +89,13 @@ impl Tool for AskUserTool {
             }
         };
 
-        // Map JSON entries to PauseOption with Custom(value) resume.
-        let mut options = Vec::with_capacity(options_in.len());
-        for (i, entry) in options_in.iter().enumerate() {
-            let key = entry["key"]
-                .as_str()
-                .and_then(|s| s.chars().next())
-                .ok_or_else(|| anyhow::anyhow!("options[{i}].key must be a single character"))?;
-            let label = entry["label"]
-                .as_str()
-                .ok_or_else(|| anyhow::anyhow!("options[{i}].label required"))?
-                .to_string();
-            let value = entry["value"]
-                .as_str()
-                .ok_or_else(|| anyhow::anyhow!("options[{i}].value required"))?
-                .to_string();
+        // Map typed entries to PauseOption with Custom(value) resume.
+        let mut options = Vec::with_capacity(p.options.len());
+        for (i, entry) in p.options.into_iter().enumerate() {
+            let key =
+                entry.key.chars().next().ok_or_else(|| {
+                    anyhow::anyhow!("options[{i}].key must be a single character")
+                })?;
             // First option = primary; rest = neutral. Lets the TUI
             // pill colors hint at the suggested default without the
             // agent having to specify per-option styling.
@@ -103,15 +106,17 @@ impl Tool for AskUserTool {
             };
             options.push(PauseOption {
                 key,
-                label,
+                label: entry.label,
                 kind,
-                resume: AgentResume::Custom(value),
+                resume: AgentResume::Custom(entry.value),
             });
         }
 
         let (reply_tx, reply_rx) = oneshot::channel();
         let pause = AgentPause {
-            kind: PauseKind::UserChoice { question },
+            kind: PauseKind::UserChoice {
+                question: p.question,
+            },
             reply: reply_tx,
             options,
         };
@@ -144,5 +149,46 @@ impl Tool for AskUserTool {
             AgentResume::Deny => Ok(ToolResult::err("user denied")),
             AgentResume::DenyWithReason(r) => Ok(ToolResult::err(format!("user denied: {r}"))),
         }
+    }
+}
+
+#[cfg(test)]
+mod yyc277_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[tokio::test]
+    async fn missing_question_surfaces_as_toolresult_err() {
+        let tool = AskUserTool::new(None);
+        let result = tool
+            .call(
+                json!({ "options": [{ "key": "y", "label": "Yes", "value": "yes" }] }),
+                CancellationToken::new(),
+            )
+            .await
+            .expect("call returns Ok(ToolResult)");
+        assert!(
+            result.is_error,
+            "expected ToolResult::err on missing question"
+        );
+        assert!(
+            result.output.contains("tool params failed to validate"),
+            "expected serde-shaped error, got: {}",
+            result.output
+        );
+    }
+
+    #[tokio::test]
+    async fn empty_options_array_surfaces_as_toolresult_err() {
+        let tool = AskUserTool::new(None);
+        let result = tool
+            .call(
+                json!({ "question": "go?", "options": [] }),
+                CancellationToken::new(),
+            )
+            .await
+            .expect("call returns Ok(ToolResult)");
+        assert!(result.is_error);
+        assert!(result.output.contains("at least one entry"));
     }
 }
