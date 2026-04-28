@@ -587,6 +587,15 @@ impl Agent {
         Arc::clone(&self.artifact_store)
     }
 
+    /// YYC-193: snapshot of the tool definitions exposed to the
+    /// LLM under the active profile. Used by contract tests to
+    /// assert tool visibility without poking at the inner
+    /// registry.
+    pub fn tool_definitions(&self) -> Vec<ToolDefinition> {
+        self.tools
+            .definitions_with_context(Some(&self.tool_context))
+    }
+
     /// YYC-180: persist a typed artifact and (when a run is in
     /// flight) emit a `RunEvent::ArtifactCreated` so the timeline
     /// references it. The artifact's `run_id` and `session_id` are
