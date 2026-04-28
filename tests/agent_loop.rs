@@ -90,6 +90,7 @@ async fn run_record_lifecycle_events_land_for_completed_turn() {
             vulcan::run_record::RunEvent::ToolCall { .. } => "tool",
             vulcan::run_record::RunEvent::SubagentSpawned { .. } => "sub",
             vulcan::run_record::RunEvent::ArtifactCreated { .. } => "art",
+            vulcan::run_record::RunEvent::TrustResolved { .. } => "trust",
         })
         .collect();
     assert!(kinds.contains(&"status"), "no status events: {kinds:?}");

@@ -151,6 +151,10 @@ async fn main() -> anyhow::Result<()> {
             init_cli_logging();
             vulcan::cli_config::run(cmd).await?;
         }
+        Some(Command::Trust { cmd }) => {
+            init_cli_logging();
+            vulcan::cli_trust::run(cmd).await?;
+        }
     }
 
     Ok(())

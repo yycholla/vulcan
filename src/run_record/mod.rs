@@ -193,6 +193,18 @@ pub enum RunEvent {
         artifact_id: String,
         artifact_type: String,
     },
+    /// YYC-182: workspace trust profile resolved at run start.
+    /// `level` is the canonical lowercase tag (`trusted`,
+    /// `restricted`, `sensitive`, `untrusted`). `reason` is the
+    /// resolver's free-form explanation surfaced by `vulcan trust
+    /// why` and `vulcan run show`.
+    TrustResolved {
+        level: String,
+        capability_profile: String,
+        reason: String,
+        allow_indexing: bool,
+        allow_persistence: bool,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
