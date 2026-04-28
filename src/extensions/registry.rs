@@ -181,6 +181,78 @@ impl ExtensionRegistry {
         self.code_backed.read().len()
     }
 
+    /// YYC-232 (YYC-166 PR-4): discover installed extensions in
+    /// `home`, upsert their metadata as `LocalManifest`, and
+    /// honor each id's `InstallState.enabled` flag when picking
+    /// status. Manifest parse failures land as `Broken` with
+    /// the parse-error message recorded on the install state
+    /// row.
+    ///
+    /// Returns `(loaded_ok, broken)` so callers can log
+    /// per-startup health.
+    pub fn load_from_store(
+        &self,
+        home: &std::path::Path,
+        install_state: &dyn super::install_state::InstallStateStore,
+    ) -> (usize, usize) {
+        let discovered = super::store::discover(home);
+        let mut ok = 0usize;
+        let mut broken = 0usize;
+        for entry in discovered {
+            let dir_id = entry.dir_id.clone();
+            match (entry.manifest, entry.parse_error) {
+                (Some(manifest), _) => {
+                    let mut meta = ExtensionMetadata::new(
+                        manifest.id.clone(),
+                        manifest.name.clone(),
+                        manifest.version.clone(),
+                        crate::extensions::ExtensionSource::LocalManifest,
+                    );
+                    if let Some(desc) = manifest.description.clone() {
+                        meta.description = desc;
+                    }
+                    if let Some(perm) = manifest.permissions.clone() {
+                        meta.permissions_summary = Some(perm);
+                    }
+                    // Honor install state when present; default
+                    // to Inactive otherwise so freshly-dropped
+                    // extensions stay quiet until the user opts
+                    // in.
+                    let enabled = install_state
+                        .get(&manifest.id)
+                        .ok()
+                        .flatten()
+                        .map(|s| s.enabled)
+                        .unwrap_or(false);
+                    meta.status = if enabled {
+                        ExtensionStatus::Active
+                    } else {
+                        ExtensionStatus::Inactive
+                    };
+                    self.upsert(meta);
+                    let _ = install_state.clear_load_error(&manifest.id);
+                    ok += 1;
+                }
+                (None, Some(err)) => {
+                    let reason = err.to_string();
+                    let mut meta = ExtensionMetadata::new(
+                        dir_id.clone(),
+                        dir_id.clone(),
+                        "0.0.0",
+                        crate::extensions::ExtensionSource::LocalManifest,
+                    );
+                    meta.status = ExtensionStatus::Broken;
+                    meta.broken_reason = Some(reason.clone());
+                    self.upsert(meta);
+                    let _ = install_state.record_load_error(&dir_id, &reason);
+                    broken += 1;
+                }
+                _ => {}
+            }
+        }
+        (ok, broken)
+    }
+
     /// YYC-228: enumerate every config field contributed by an
     /// `Active` extension. Returns `(extension_id, field)` pairs
     /// so callers can prefix the id when displaying.
@@ -437,6 +509,114 @@ mod tests {
         assert_eq!(fields.len(), 1);
         assert_eq!(fields[0].0, "active-fielded");
         assert_eq!(fields[0].1.path, "enabled");
+    }
+
+    // ── YYC-232 (YYC-166 PR-4): store + install_state bridge ────────
+
+    fn write_manifest(path: std::path::PathBuf, body: &str) {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, body).unwrap();
+    }
+
+    #[test]
+    fn load_from_store_imports_manifests_with_inactive_default() {
+        let dir = tempfile::tempdir().unwrap();
+        write_manifest(
+            dir.path().join("extensions/lint-helper/extension.toml"),
+            r#"
+id = "lint-helper"
+name = "Lint Helper"
+version = "0.1.0"
+
+[entry]
+kind = "builtin"
+"#,
+        );
+        let install =
+            crate::extensions::install_state::SqliteInstallStateStore::try_open_in_memory()
+                .unwrap();
+        let reg = ExtensionRegistry::new();
+        let (ok, broken) = reg.load_from_store(dir.path(), &install);
+        assert_eq!(ok, 1);
+        assert_eq!(broken, 0);
+        let got = reg.get("lint-helper").unwrap();
+        assert_eq!(got.status, ExtensionStatus::Inactive);
+        assert_eq!(
+            got.source,
+            crate::extensions::ExtensionSource::LocalManifest
+        );
+    }
+
+    #[test]
+    fn load_from_store_promotes_to_active_when_install_state_says_enabled() {
+        let dir = tempfile::tempdir().unwrap();
+        write_manifest(
+            dir.path().join("extensions/active-tool/extension.toml"),
+            r#"
+id = "active-tool"
+name = "Active Tool"
+version = "0.1.0"
+
+[entry]
+kind = "builtin"
+"#,
+        );
+        let install =
+            crate::extensions::install_state::SqliteInstallStateStore::try_open_in_memory()
+                .unwrap();
+        crate::extensions::install_state::InstallStateStore::upsert(
+            &install,
+            &crate::extensions::install_state::InstallState {
+                id: "active-tool".into(),
+                version: "0.1.0".into(),
+                enabled: true,
+                installed_at: chrono::Utc::now(),
+                last_load_error: None,
+            },
+        )
+        .unwrap();
+        let reg = ExtensionRegistry::new();
+        reg.load_from_store(dir.path(), &install);
+        assert_eq!(
+            reg.get("active-tool").unwrap().status,
+            ExtensionStatus::Active
+        );
+    }
+
+    #[test]
+    fn load_from_store_marks_invalid_manifest_broken_and_records_error() {
+        let dir = tempfile::tempdir().unwrap();
+        write_manifest(
+            dir.path().join("extensions/broken/extension.toml"),
+            "completely[broken",
+        );
+        let install =
+            crate::extensions::install_state::SqliteInstallStateStore::try_open_in_memory()
+                .unwrap();
+        // Pre-create a state row so record_load_error has somewhere
+        // to land.
+        crate::extensions::install_state::InstallStateStore::upsert(
+            &install,
+            &crate::extensions::install_state::InstallState {
+                id: "broken".into(),
+                version: "0.0.0".into(),
+                enabled: false,
+                installed_at: chrono::Utc::now(),
+                last_load_error: None,
+            },
+        )
+        .unwrap();
+        let reg = ExtensionRegistry::new();
+        let (ok, broken) = reg.load_from_store(dir.path(), &install);
+        assert_eq!(ok, 0);
+        assert_eq!(broken, 1);
+        let got = reg.get("broken").unwrap();
+        assert_eq!(got.status, ExtensionStatus::Broken);
+        assert!(got.broken_reason.is_some());
+        let state = crate::extensions::install_state::InstallStateStore::get(&install, "broken")
+            .unwrap()
+            .unwrap();
+        assert!(state.last_load_error.is_some());
     }
 
     #[test]
