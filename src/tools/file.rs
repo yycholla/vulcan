@@ -1,5 +1,5 @@
 use crate::pause::{AgentPause, AgentResume, DiffScrubHunk, PauseKind, PauseSender};
-use crate::tools::{Tool, ToolResult, fs_sandbox};
+use crate::tools::{ReplaySafety, Tool, ToolResult, fs_sandbox};
 use anyhow::Result;
 use async_trait::async_trait;
 use serde_json::{Value, json};
@@ -32,6 +32,10 @@ const WRITE_FILE_MAX_CONTENT_BYTES: usize = 5 * 1024 * 1024;
 impl Tool for ReadFile {
     fn name(&self) -> &str {
         "read_file"
+    }
+    fn replay_safety(&self) -> ReplaySafety {
+        // Pure file read — safe to actually run during tool-replay.
+        ReplaySafety::ReadOnly
     }
     fn description(&self) -> &str {
         "Read a file from the filesystem. Returns content with line numbers. Use this instead of `cat`, `head`, `tail`, or `sed -n` via bash."
@@ -137,6 +141,9 @@ pub struct ListFiles;
 impl Tool for ListFiles {
     fn name(&self) -> &str {
         "list_files"
+    }
+    fn replay_safety(&self) -> ReplaySafety {
+        ReplaySafety::ReadOnly
     }
     fn description(&self) -> &str {
         "List files + directories under a path as a structured tree (JSON). Respects .gitignore. Use this instead of `ls`, `tree`, or `find -type f` via bash — won't drown in target/ or node_modules/."
@@ -430,6 +437,9 @@ pub struct SearchFiles;
 impl Tool for SearchFiles {
     fn name(&self) -> &str {
         "search_files"
+    }
+    fn replay_safety(&self) -> ReplaySafety {
+        ReplaySafety::ReadOnly
     }
     fn description(&self) -> &str {
         "Search file contents using regex patterns. Ripgrep-style, gitignore-aware. Use this instead of `rg`, `grep -r`, or `grep -rn` via bash."
@@ -866,6 +876,19 @@ mod tests {
             }
         }
         false
+    }
+
+    #[test]
+    fn yyc222_replay_safety_classifies_each_file_tool() {
+        assert_eq!(ReadFile.replay_safety(), ReplaySafety::ReadOnly);
+        assert_eq!(ListFiles.replay_safety(), ReplaySafety::ReadOnly);
+        assert_eq!(SearchFiles.replay_safety(), ReplaySafety::ReadOnly);
+        // Mutating defaults — pinned so a future refactor that
+        // accidentally drops these tools' overrides still flags
+        // here as a regression. WriteFile / PatchFile use the
+        // trait default (Mutating), which is the correct posture.
+        assert_eq!(WriteFile::new(None).replay_safety(), ReplaySafety::Mutating);
+        assert_eq!(PatchFile::new(None).replay_safety(), ReplaySafety::Mutating);
     }
 
     #[tokio::test]
