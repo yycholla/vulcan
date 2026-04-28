@@ -131,6 +131,10 @@ pub struct Agent {
     /// and writes it under `<skills_dir>/_pending/`. Off by default
     /// (`config.auto_create_skills`).
     pub(in crate::agent) auto_create_skills: bool,
+    /// YYC-206: shared orchestration store for child agent runs.
+    /// `SpawnSubagentTool` writes to this so the TUI can render
+    /// a real subagent timeline (YYC-205).
+    pub(in crate::agent) orchestration: Arc<crate::orchestration::OrchestrationStore>,
 }
 
 #[derive(Debug, Clone)]
@@ -263,10 +267,16 @@ impl Agent {
         // config so child agents can be built with the same provider
         // wiring. Default tool allowlist is read-only (see
         // `tools::spawn::default_allowed_tools`).
+        // YYC-206: shares the agent's `orchestration` store so the
+        // TUI / parent can read child-run records the tool produces.
         let config_arc = Arc::new(config.clone());
-        tools.register(Arc::new(crate::tools::spawn::SpawnSubagentTool::new(
-            Arc::clone(&config_arc),
-        )));
+        let orchestration = Arc::new(crate::orchestration::OrchestrationStore::new());
+        tools.register(Arc::new(
+            crate::tools::spawn::SpawnSubagentTool::with_store(
+                Arc::clone(&config_arc),
+                Arc::clone(&orchestration),
+            ),
+        ));
 
         // YYC-48: register embedding tools when [embeddings] is
         // enabled. The index opens its own SQLite store; failure is
@@ -385,6 +395,7 @@ impl Agent {
             tool_context,
             max_iterations: max_iterations.unwrap_or(config.provider.max_iterations),
             auto_create_skills: config.auto_create_skills,
+            orchestration: Arc::clone(&orchestration),
         })
     }
 
@@ -439,6 +450,13 @@ impl Agent {
         self.turns
     }
 
+    /// YYC-206: handle to the orchestration store this Agent's
+    /// `spawn_subagent` tool writes child runs into. The TUI
+    /// clones the Arc to render real subagent records.
+    pub fn orchestration(&self) -> Arc<crate::orchestration::OrchestrationStore> {
+        Arc::clone(&self.orchestration)
+    }
+
     pub fn for_test(
         provider: Box<dyn LLMProvider>,
         tools: ToolRegistry,
@@ -472,6 +490,7 @@ impl Agent {
                 std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")),
             ),
             auto_create_skills: false,
+            orchestration: Arc::new(crate::orchestration::OrchestrationStore::new()),
         }
     }
 
