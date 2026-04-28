@@ -13,6 +13,7 @@ pub mod code;
 pub mod config;
 pub mod config_registry;
 pub mod context;
+pub mod context_pack;
 #[cfg(feature = "gateway")]
 pub mod gateway;
 pub mod hooks;
