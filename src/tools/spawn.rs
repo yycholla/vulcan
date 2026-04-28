@@ -83,6 +83,10 @@ pub struct SpawnSubagentTool {
     /// against. Shared via `Arc` so the TUI / future admin endpoint
     /// can read the same state.
     orchestration: Arc<OrchestrationStore>,
+    /// YYC-180: parent agent's artifact store. When the child run
+    /// completes, the tool writes a `SubagentSummary` artifact here
+    /// so the parent's `vulcan run show` view can link to it.
+    artifact_store: Option<Arc<dyn crate::artifact::ArtifactStore>>,
 }
 
 impl SpawnSubagentTool {
@@ -97,7 +101,15 @@ impl SpawnSubagentTool {
         Self {
             config,
             orchestration,
+            artifact_store: None,
         }
+    }
+
+    /// YYC-180: extra wiring — share the parent's artifact store so
+    /// child-summary artifacts land alongside the parent's run.
+    pub fn with_artifact_store(mut self, store: Arc<dyn crate::artifact::ArtifactStore>) -> Self {
+        self.artifact_store = Some(store);
+        self
     }
 }
 
@@ -277,6 +289,21 @@ impl Tool for SpawnSubagentTool {
             Ok(final_text) => {
                 self.orchestration
                     .mark_completed(child_id, final_text.clone(), iterations);
+                // YYC-180: persist the child's final summary as a
+                // typed artifact when the parent shared its store.
+                // The artifact's `source` carries the child's id so
+                // future replay can stitch parent-child timelines.
+                if let Some(store) = &self.artifact_store {
+                    let art = crate::artifact::Artifact::inline_text(
+                        crate::artifact::ArtifactKind::SubagentSummary,
+                        final_text.clone(),
+                    )
+                    .with_source(format!("subagent:{child_id}"))
+                    .with_title(task.chars().take(60).collect::<String>());
+                    if let Err(e) = store.create(&art) {
+                        tracing::warn!("subagent summary artifact persist failed: {e}");
+                    }
+                }
                 let status = if iterations >= max_iter {
                     "budget_exceeded"
                 } else {
