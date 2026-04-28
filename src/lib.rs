@@ -24,6 +24,7 @@ pub mod provider;
 pub mod run_record;
 pub mod skills;
 pub mod tools;
+pub mod trust;
 pub mod tui;
 
 // Re-export for convenience

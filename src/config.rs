@@ -190,6 +190,12 @@ pub struct Config {
     /// validated lazily so the rest of the runtime is unaffected.
     #[serde(default)]
     pub scheduler: SchedulerConfig,
+
+    /// YYC-182: per-workspace trust profile rules. Empty by
+    /// default — unknown workspaces fall back to the conservative
+    /// `untrusted` level.
+    #[serde(default)]
+    pub workspace_trust: crate::trust::WorkspaceTrustConfig,
 }
 
 /// YYC-17: top-level scheduler configuration. Each job entry
@@ -930,6 +936,7 @@ impl Default for Config {
             keybinds: KeybindsConfig::default(),
             recall: RecallConfig::default(),
             scheduler: SchedulerConfig::default(),
+            workspace_trust: crate::trust::WorkspaceTrustConfig::default(),
         }
     }
 }
