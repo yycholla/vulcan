@@ -1,8 +1,8 @@
-use crate::tools::{Tool, ToolResult};
+use crate::tools::{Tool, ToolResult, parse_tool_params};
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use portable_pty::{CommandBuilder, MasterPty, NativePtySystem, PtySize, PtySystem};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::{HashMap, VecDeque};
 use std::io::{Read, Write};
@@ -15,6 +15,25 @@ use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 const DEFAULT_TIMEOUT_SECS: i64 = 60;
+
+fn default_bash_timeout() -> i64 {
+    DEFAULT_TIMEOUT_SECS
+}
+
+#[derive(Deserialize)]
+struct BashParams {
+    command: String,
+    #[serde(default = "default_bash_timeout")]
+    timeout: i64,
+    #[serde(default)]
+    workdir: Option<String>,
+    #[serde(default)]
+    use_pty: bool,
+    #[serde(default)]
+    rows: Option<u64>,
+    #[serde(default)]
+    cols: Option<u64>,
+}
 /// YYC-261: ceiling on the bash tool timeout. Past this, the LLM
 /// would effectively be running the command without supervision —
 /// long enough for an oversight by the user to lose minutes of
@@ -495,9 +514,11 @@ impl Tool for BashTool {
     }
 
     async fn call(&self, params: Value, cancel: CancellationToken) -> Result<ToolResult> {
-        let command = params["command"]
-            .as_str()
-            .ok_or_else(|| anyhow::anyhow!("command required"))?;
+        let p: BashParams = match parse_tool_params(params) {
+            Ok(p) => p,
+            Err(e) => return Ok(e),
+        };
+        let command = p.command.as_str();
         // YYC-261: clamp the LLM-supplied timeout into the safe range.
         // Negative values would otherwise wrap to ~∞ when cast to u64
         // for `Duration::from_secs`, bypassing the kill-deadline; out-
@@ -505,12 +526,11 @@ impl Tool for BashTool {
         // silent — `tracing::warn!` if a value lands outside the
         // window so an operator can spot a misconfigured tool call
         // without breaking the run.
-        let raw_timeout = params["timeout"].as_i64().unwrap_or(DEFAULT_TIMEOUT_SECS);
-        let timeout = clamp_bash_timeout(raw_timeout);
-        let workdir = params["workdir"].as_str();
-        let use_pty = params["use_pty"].as_bool().unwrap_or(false);
-        let rows = params["rows"].as_u64().map(|v| v as u16);
-        let cols = params["cols"].as_u64().map(|v| v as u16);
+        let timeout = clamp_bash_timeout(p.timeout);
+        let workdir = p.workdir.as_deref();
+        let use_pty = p.use_pty;
+        let rows = p.rows.map(|v| v as u16);
+        let cols = p.cols.map(|v| v as u16);
 
         if use_pty {
             return run_one_shot_pty(command, timeout, workdir, cancel, rows, cols).await;
@@ -1036,6 +1056,20 @@ mod tests {
     use std::time::Instant;
     use tokio::time::sleep;
     use tokio_util::sync::CancellationToken;
+
+    #[tokio::test]
+    async fn yyc263_bash_missing_command_surfaces_as_toolresult_err() {
+        let result = BashTool
+            .call(json!({}), CancellationToken::new())
+            .await
+            .expect("call returns Ok(ToolResult)");
+        assert!(result.is_error);
+        assert!(
+            result.output.contains("tool params failed to validate"),
+            "expected serde-shaped error, got: {}",
+            result.output
+        );
+    }
 
     /// YYC-262: a reader whose underlying source has finite output —
     /// the read function returns N bytes each call, then `Ok(0)` to
