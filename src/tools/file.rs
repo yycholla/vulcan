@@ -36,6 +36,9 @@ impl Tool for ReadFile {
         })
     }
     async fn call(&self, params: Value, _cancel: CancellationToken) -> Result<ToolResult> {
+        use tokio::fs::File;
+        use tokio::io::{AsyncBufReadExt, BufReader};
+
         let path = params["path"]
             .as_str()
             .ok_or_else(|| anyhow::anyhow!("path required"))?;
@@ -44,10 +47,6 @@ impl Tool for ReadFile {
 
         // YYC-159: preflight the file size so multi-GB inputs are
         // refused before they hit `read_to_string` and OOM the host.
-        // Returning a structured "too large" message keeps the
-        // contract identical for callers — they get a string back —
-        // and lets the agent retry with a narrower scope (grep, head,
-        // a different file) instead of crashing.
         let metadata = tokio::fs::metadata(path).await?;
         let size = metadata.len();
         if size > READ_FILE_MAX_BYTES {
@@ -58,27 +57,57 @@ impl Tool for ReadFile {
             )));
         }
 
-        let content = tokio::fs::read_to_string(path).await?;
-        let lines: Vec<&str> = content.lines().collect();
-        let start = (offset - 1) as usize;
-        let end = (start + limit as usize).min(lines.len());
+        // YYC-199: stream the requested line range instead of
+        // pulling the whole file into RAM. A request for
+        // offset=1, limit=10 against a 49 MiB log no longer
+        // allocates 49 MiB; we only walk far enough to collect
+        // `limit` lines and confirm whether more exist after.
+        let start = (offset - 1).max(0) as usize;
+        let limit = limit.max(0) as usize;
+        let target_end = start.saturating_add(limit);
 
-        if start >= lines.len() {
+        let file = File::open(path).await?;
+        let reader = BufReader::new(file);
+        let mut lines_iter = reader.lines();
+        let mut collected: Vec<String> = Vec::with_capacity(limit.min(1024));
+        let mut total_seen = 0usize;
+        let mut more_after = false;
+        while let Some(line) = lines_iter.next_line().await? {
+            if total_seen >= target_end {
+                more_after = true;
+                break;
+            }
+            if total_seen >= start {
+                collected.push(line);
+            }
+            total_seen += 1;
+        }
+
+        if collected.is_empty() && start >= total_seen && !more_after {
+            // Empty file or offset beyond EOF.
+            if total_seen == 0 {
+                return Ok(ToolResult::ok("File is empty."));
+            }
             return Ok(ToolResult::ok("File offset exceeds file length."));
         }
 
-        let result: String = lines[start..end]
+        let result: String = collected
             .iter()
             .enumerate()
             .map(|(i, line)| format!("{:>6}|{line}", start + i + 1))
             .collect::<Vec<_>>()
             .join("\n");
 
-        let output = if result.is_empty() {
-            "File is empty.".to_string()
+        let footer = if more_after {
+            format!(
+                "{}/{}+ lines shown (more available; raise `limit` or use a tighter `offset` window)",
+                collected.len(),
+                total_seen
+            )
         } else {
-            format!("{result}\n---\n{}/{} lines shown", end - start, lines.len())
+            format!("{}/{} lines shown", collected.len(), total_seen)
         };
+        let output = format!("{result}\n---\n{footer}");
         Ok(ToolResult::ok(output))
     }
 }
@@ -638,6 +667,83 @@ mod tests {
         assert!(!result.is_error, "{}", result.output);
         assert!(result.output.contains("alpha"));
         assert!(result.output.contains("3/3 lines shown"));
+    }
+
+    // YYC-199: requesting a small line range from a multi-MiB
+    // file should walk only enough of the stream to collect the
+    // requested lines + confirm that more exist after. We can't
+    // observe peak memory directly in unit tests, but the footer
+    // says "more available" without reporting the file's real
+    // total — proof that the stream early-exited.
+    #[tokio::test]
+    async fn read_file_streams_range_without_full_read() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("big.txt");
+        // 5_000 lines of "abcdefghij\n" = ~55 KB. Plenty to
+        // demonstrate the early-exit behavior.
+        let mut contents = String::with_capacity(60_000);
+        for i in 0..5_000 {
+            contents.push_str(&format!("line {i}\n"));
+        }
+        std::fs::write(&path, &contents).unwrap();
+
+        let result = ReadFile
+            .call(
+                json!({"path": path.to_string_lossy(), "offset": 1, "limit": 3}),
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+        assert!(!result.is_error, "{}", result.output);
+        assert!(result.output.contains("line 0"));
+        assert!(result.output.contains("line 1"));
+        assert!(result.output.contains("line 2"));
+        assert!(
+            !result.output.contains("line 100"),
+            "should not have read past limit",
+        );
+        assert!(
+            result.output.contains("more available"),
+            "expected more-available footer, got: {}",
+            result.output,
+        );
+    }
+
+    // YYC-199: when limit covers the entire file, footer reports
+    // exact line counts ("X/Y lines shown") and no "more
+    // available" hint.
+    #[tokio::test]
+    async fn read_file_full_range_reports_exact_counts() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("small.txt");
+        std::fs::write(&path, "alpha\nbeta\ngamma\n").unwrap();
+        let result = ReadFile
+            .call(
+                json!({"path": path.to_string_lossy(), "offset": 1, "limit": 100}),
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+        assert!(!result.is_error);
+        assert!(result.output.contains("3/3 lines shown"));
+        assert!(!result.output.contains("more available"));
+    }
+
+    // YYC-199: offset past EOF still surfaces the existing
+    // structured response.
+    #[tokio::test]
+    async fn read_file_offset_past_end_returns_message() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("tiny.txt");
+        std::fs::write(&path, "one\n").unwrap();
+        let result = ReadFile
+            .call(
+                json!({"path": path.to_string_lossy(), "offset": 100, "limit": 10}),
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+        assert!(result.output.contains("offset exceeds"));
     }
 
     // YYC-159: a file larger than the cap must NOT be loaded into
