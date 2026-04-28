@@ -226,9 +226,12 @@ pub mod code_search;
 pub mod file;
 pub mod git;
 pub mod lsp;
+pub mod profile;
 pub mod shell;
 pub mod spawn;
 pub mod web;
+
+pub use profile::{ToolProfile, builtin_profile, builtin_profiles};
 
 /// Compact record of the most recent file-edit operation (YYC-66).
 /// Captured by `WriteFile`/`PatchFile` after a successful write so the
@@ -269,6 +272,10 @@ pub(crate) fn snippet(text: &str, max_lines: usize, max_chars: usize) -> String 
 /// Registry of available tools — tools are discovered at startup via the `inventory` pattern
 pub struct ToolRegistry {
     tools: HashMap<String, Arc<dyn Tool>>,
+    /// YYC-181: name of the active capability profile, when one was
+    /// applied via [`Self::apply_profile`]. `None` means the registry
+    /// is unrestricted (the historical default).
+    active_profile: Option<String>,
 }
 
 impl Default for ToolRegistry {
@@ -308,6 +315,7 @@ impl ToolRegistry {
     ) -> Self {
         let mut registry = Self {
             tools: HashMap::new(),
+            active_profile: None,
         };
         registry.register(Arc::new(file::ReadFile));
         registry.register(Arc::new(file::WriteFile::new(sink.clone())));
@@ -371,6 +379,23 @@ impl ToolRegistry {
 
     pub fn register(&mut self, tool: Arc<dyn Tool>) {
         self.tools.insert(tool.name().to_string(), tool);
+    }
+
+    /// YYC-181: apply a named tool capability profile to this
+    /// registry. Drops every tool not in `profile.allowed` and
+    /// records `profile.name` so callers (run records, doctor,
+    /// subagent inheritance) can read what's active without
+    /// re-deriving the set.
+    pub fn apply_profile(&mut self, profile: &ToolProfile) {
+        let allowed: Vec<String> = profile.allowed.iter().map(|s| s.to_string()).collect();
+        self.retain_only(&allowed);
+        self.active_profile = Some(profile.name.to_string());
+    }
+
+    /// YYC-181: name of the currently active capability profile, or
+    /// `None` if the registry is unrestricted.
+    pub fn active_profile(&self) -> Option<&str> {
+        self.active_profile.as_deref()
     }
 
     /// YYC-82: keep only tools whose name appears in `allowed`.
@@ -719,6 +744,79 @@ path = "src/primary.rs"
                 "{name} description missing 'instead of <bash>' clause: {desc:?}"
             );
         }
+    }
+
+    // ── YYC-181: tool capability profiles ───────────────────────────
+
+    #[test]
+    fn apply_readonly_profile_drops_mutating_tools() {
+        let mut registry = ToolRegistry::new();
+        let profile = builtin_profile("readonly").expect("readonly profile exists");
+        registry.apply_profile(&profile);
+
+        let names: Vec<String> = registry
+            .definitions()
+            .into_iter()
+            .map(|d| d.function.name)
+            .collect();
+        // Mutating tools must be gone.
+        for forbidden in ["write_file", "edit_file", "bash", "git_commit", "git_push"] {
+            assert!(
+                !names.contains(&forbidden.to_string()),
+                "readonly profile should have dropped {forbidden:?}, got {names:?}"
+            );
+        }
+        // Read-only navigators should remain.
+        for must in ["read_file", "git_status"] {
+            assert!(
+                names.contains(&must.to_string()),
+                "readonly profile dropped {must:?}; got {names:?}"
+            );
+        }
+        assert_eq!(registry.active_profile(), Some("readonly"));
+    }
+
+    #[test]
+    fn apply_gateway_safe_profile_blocks_workspace_mutation() {
+        let mut registry = ToolRegistry::new();
+        let profile = builtin_profile("gateway-safe").expect("profile exists");
+        registry.apply_profile(&profile);
+        let names: Vec<String> = registry
+            .definitions()
+            .into_iter()
+            .map(|d| d.function.name)
+            .collect();
+        for forbidden in [
+            "write_file",
+            "edit_file",
+            "bash",
+            "cargo_check",
+            "git_commit",
+        ] {
+            assert!(
+                !names.contains(&forbidden.to_string()),
+                "gateway-safe should have dropped {forbidden:?}; got {names:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn disallowed_tool_after_profile_returns_unknown_tool_error() {
+        // YYC-181 acceptance: calling a disallowed tool surfaces a
+        // structured error path (the registry doesn't know about it),
+        // not an execution-time surprise from the tool itself.
+        let mut registry = ToolRegistry::new();
+        let profile = builtin_profile("readonly").unwrap();
+        registry.apply_profile(&profile);
+        let err = registry
+            .execute("write_file", "{}", CancellationToken::new())
+            .await
+            .expect_err("write_file must be denied under readonly");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("Unknown tool: write_file"),
+            "expected Unknown tool error, got {msg:?}"
+        );
     }
 
     #[tokio::test]
