@@ -475,6 +475,24 @@ impl Tool for WriteFile {
 
 pub struct SearchFiles;
 
+fn default_search_path() -> String {
+    ".".to_string()
+}
+fn default_search_limit() -> i64 {
+    20
+}
+
+#[derive(Deserialize)]
+struct SearchFilesParams {
+    pattern: String,
+    #[serde(default = "default_search_path")]
+    path: String,
+    #[serde(default)]
+    file_glob: Option<String>,
+    #[serde(default = "default_search_limit")]
+    limit: i64,
+}
+
 #[async_trait]
 impl Tool for SearchFiles {
     fn name(&self) -> &str {
@@ -499,17 +517,18 @@ impl Tool for SearchFiles {
         })
     }
     async fn call(&self, params: Value, _cancel: CancellationToken) -> Result<ToolResult> {
-        let pattern = params["pattern"]
-            .as_str()
-            .ok_or_else(|| anyhow::anyhow!("pattern required"))?;
-        let path = params["path"].as_str().unwrap_or(".");
-        let limit = params["limit"].as_i64().unwrap_or(20).max(1) as usize;
-        let glob = params["file_glob"].as_str().map(str::to_string);
+        let p: SearchFilesParams = match parse_tool_params(params) {
+            Ok(p) => p,
+            Err(e) => return Ok(e),
+        };
+        let pattern = p.pattern.as_str();
+        let limit = p.limit.max(1) as usize;
+        let glob = p.file_glob;
 
         // YYC-248: refuse search roots inside credential / pseudo-fs
         // directories — `rg pattern /etc/shadow` would dump shadow lines
         // matching the pattern to the LLM.
-        let path = match fs_sandbox::validate_read(path) {
+        let path = match fs_sandbox::validate_read(&p.path) {
             Ok(p) => p.to_string_lossy().into_owned(),
             Err(e) => return Ok(ToolResult::err(e.to_string())),
         };
@@ -948,6 +967,38 @@ mod tests {
             "expected serde-shaped error, got: {}",
             result.output
         );
+    }
+
+    #[tokio::test]
+    async fn yyc263_search_files_missing_pattern_surfaces_as_toolresult_err() {
+        let result = SearchFiles
+            .call(json!({ "path": "." }), CancellationToken::new())
+            .await
+            .expect("call returns Ok(ToolResult)");
+        assert!(result.is_error);
+        assert!(
+            result.output.contains("tool params failed to validate"),
+            "expected serde-shaped error, got: {}",
+            result.output
+        );
+    }
+
+    #[tokio::test]
+    async fn yyc263_search_files_typed_defaults_match_legacy() {
+        let dir = tempdir().unwrap();
+        std::fs::write(dir.path().join("hit.rs"), "fn target_function() {}\n").unwrap();
+        let result = SearchFiles
+            .call(
+                json!({
+                    "pattern": "target_function",
+                    "path": dir.path().to_str().unwrap(),
+                }),
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+        assert!(!result.is_error);
+        assert!(result.output.contains("target_function"));
     }
 
     #[tokio::test]
