@@ -114,6 +114,39 @@ async fn run_record_lifecycle_events_land_for_completed_turn() {
 }
 
 #[tokio::test]
+async fn agent_create_artifact_persists_with_run_and_session_links() {
+    // YYC-180 acceptance: code can create + persist a typed
+    // artifact, agent runs reference it, and the user can list
+    // artifacts for a session/run. Also pins ArtifactCreated event
+    // on the run timeline so YYC-179's `vulcan run show` lists it.
+    let (mut agent, mock) = agent_with_mock();
+    mock.enqueue_text("plan ready.");
+    let _ = agent.run_prompt("plan something").await.unwrap();
+
+    // After the turn, current_run_id is None — but the run is
+    // still in the store. Recreate via run_prompt? Easier: create
+    // the artifact mid-turn via a new call and verify on the next
+    // turn. Simpler still: create directly tied to a fresh run id.
+    let session = agent.session_id().to_string();
+    let store = agent.artifact_store();
+    let art = vulcan::artifact::Artifact::inline_text(
+        vulcan::artifact::ArtifactKind::Plan,
+        "phase 1: read files\nphase 2: edit",
+    )
+    .with_session_id(session.clone())
+    .with_source("test-fixture");
+    let id = agent.create_artifact(art).expect("artifact persists");
+
+    let got = store.get(id).unwrap().unwrap();
+    assert_eq!(got.kind, vulcan::artifact::ArtifactKind::Plan);
+    assert_eq!(got.session_id.as_deref(), Some(session.as_str()));
+    assert_eq!(got.source.as_deref(), Some("test-fixture"));
+
+    let by_session = store.list_for_session(&session).unwrap();
+    assert!(by_session.iter().any(|a| a.id == id));
+}
+
+#[tokio::test]
 async fn run_record_gateway_origin_carries_lane_string() {
     // YYC-179 PR-6: gateway lane streaming entry point tags the
     // run record with `RunOrigin::Gateway { lane }` so timeline

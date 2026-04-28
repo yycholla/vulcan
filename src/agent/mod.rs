@@ -151,6 +151,11 @@ pub struct Agent {
     /// `run_prompt_inner` on entry, cleared on exit. Other parts of
     /// the agent (hooks, tools) can read it to attach events.
     pub(in crate::agent) current_run_id: Option<crate::run_record::RunId>,
+    /// YYC-180: durable artifact store. Tools, hooks, and the
+    /// agent itself create typed artifacts (plans, diffs, reports,
+    /// subagent summaries) here; an `ArtifactCreated` run-record
+    /// event references them by id.
+    pub(in crate::agent) artifact_store: Arc<dyn crate::artifact::ArtifactStore>,
 }
 
 #[derive(Debug, Clone)]
@@ -440,6 +445,31 @@ impl Agent {
                 }
             };
 
+        // YYC-180: artifact store with the same SQLite-or-memory
+        // fallback. Retention will diverge from run records, so the
+        // backends stay separate.
+        let artifact_store: Arc<dyn crate::artifact::ArtifactStore> =
+            match crate::artifact::SqliteArtifactStore::try_new() {
+                Ok(s) => Arc::new(s),
+                Err(e) => {
+                    tracing::warn!("artifact store unavailable ({e}); falling back to in-memory");
+                    Arc::new(crate::artifact::InMemoryArtifactStore::new())
+                }
+            };
+
+        // YYC-180: re-register `spawn_subagent` with the parent's
+        // artifact store so child summaries land alongside the
+        // parent's run. The earlier registration sat without an
+        // artifact handle; replacing it here keeps registration
+        // ordering deterministic.
+        tools.register(Arc::new(
+            crate::tools::spawn::SpawnSubagentTool::with_store(
+                Arc::clone(&config_arc),
+                Arc::clone(&orchestration),
+            )
+            .with_artifact_store(Arc::clone(&artifact_store)),
+        ));
+
         Ok(Self {
             provider,
             tools,
@@ -466,6 +496,7 @@ impl Agent {
             tokens_consumed: 0,
             run_store,
             current_run_id: None,
+            artifact_store,
         })
     }
 
@@ -549,6 +580,46 @@ impl Agent {
         self.current_run_id
     }
 
+    /// YYC-180: handle to the artifact store. Cloned `Arc` so the
+    /// TUI / future `vulcan artifact` CLI / extensions read from
+    /// the same backend the agent writes to.
+    pub fn artifact_store(&self) -> Arc<dyn crate::artifact::ArtifactStore> {
+        Arc::clone(&self.artifact_store)
+    }
+
+    /// YYC-180: persist a typed artifact and (when a run is in
+    /// flight) emit a `RunEvent::ArtifactCreated` so the timeline
+    /// references it. The artifact's `run_id` and `session_id` are
+    /// auto-filled from the active run if the caller hasn't set
+    /// them. Returns the stored artifact's id.
+    pub fn create_artifact(
+        &self,
+        mut artifact: crate::artifact::Artifact,
+    ) -> anyhow::Result<crate::artifact::ArtifactId> {
+        if artifact.run_id.is_none() {
+            artifact.run_id = self.current_run_id;
+        }
+        if artifact.session_id.is_none() {
+            artifact.session_id = Some(self.session_id.clone());
+        }
+        let id = artifact.id;
+        let kind = artifact.kind;
+        self.artifact_store.create(&artifact)?;
+        // Emit on the run timeline if the agent is mid-turn so
+        // `vulcan run show` lists the artifact alongside the events
+        // that produced it.
+        if let Some(run_id) = self.current_run_id {
+            let _ = self.run_store.append_event(
+                run_id,
+                crate::run_record::RunEvent::ArtifactCreated {
+                    artifact_id: id.to_string(),
+                    artifact_type: kind.as_str().to_string(),
+                },
+            );
+        }
+        Ok(id)
+    }
+
     pub fn for_test(
         provider: Box<dyn LLMProvider>,
         tools: ToolRegistry,
@@ -586,6 +657,7 @@ impl Agent {
             tokens_consumed: 0,
             run_store: Arc::new(crate::run_record::InMemoryRunStore::default()),
             current_run_id: None,
+            artifact_store: Arc::new(crate::artifact::InMemoryArtifactStore::new()),
         }
     }
 
