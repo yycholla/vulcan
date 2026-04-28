@@ -4,12 +4,24 @@
 //! so they can land incrementally.
 
 use crate::code::graph::CodeGraph;
-use crate::tools::{Tool, ToolResult};
+use crate::tools::{Tool, ToolResult, parse_tool_params};
 use anyhow::Result;
 use async_trait::async_trait;
+use serde::Deserialize;
 use serde_json::{Value, json};
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
+
+fn default_find_symbol_limit() -> u64 {
+    25
+}
+
+#[derive(Deserialize)]
+struct FindSymbolParams {
+    name: String,
+    #[serde(default = "default_find_symbol_limit")]
+    limit: u64,
+}
 
 #[derive(Clone)]
 pub struct IndexCodeGraphTool {
@@ -79,22 +91,24 @@ impl Tool for FindSymbolTool {
         })
     }
     async fn call(&self, params: Value, _cancel: CancellationToken) -> Result<ToolResult> {
-        let name = params["name"]
-            .as_str()
-            .ok_or_else(|| anyhow::anyhow!("name required"))?;
-        let limit = params["limit"].as_u64().map(|n| n as usize).unwrap_or(25);
+        let p: FindSymbolParams = match parse_tool_params(params) {
+            Ok(p) => p,
+            Err(e) => return Ok(e),
+        };
+        let limit = p.limit as usize;
         let graph = self.graph.clone();
-        let name_owned = name.to_string();
+        let name_owned = p.name.clone();
         let rows =
             tokio::task::spawn_blocking(move || graph.find_by_name(&name_owned, limit)).await??;
         if rows.is_empty() {
             return Ok(ToolResult::ok(format!(
-                "No declarations of '{name}' in the indexed workspace. \
-                 Run `index_code_graph` if the index is stale."
+                "No declarations of '{}' in the indexed workspace. \
+                 Run `index_code_graph` if the index is stale.",
+                p.name
             )));
         }
         let payload = json!({
-            "name": name,
+            "name": p.name,
             "matches": rows,
         });
         Ok(ToolResult::ok(serde_json::to_string_pretty(&payload)?))
