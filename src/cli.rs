@@ -298,6 +298,104 @@ pub enum CortexSubcommand {
         #[arg(long, default_value_t = 20)]
         limit: usize,
     },
+    /// Manage prompt variants stored in the graph.
+    Prompt {
+        #[command(subcommand)]
+        cmd: PromptSubcommand,
+    },
+    /// Manage agent profiles and prompt bindings.
+    Agent {
+        #[command(subcommand)]
+        cmd: AgentSubcommand,
+    },
+    /// Record an outcome for a selected prompt variant (UCB1 learning).
+    Observe {
+        /// Agent name.
+        agent: String,
+        /// Prompt variant ID (UUID).
+        #[arg(long)]
+        variant_id: String,
+        /// Sentiment score 0.0-1.0.
+        #[arg(long)]
+        sentiment_score: f32,
+        /// Outcome label (success/failure/neutral).
+        #[arg(long)]
+        outcome: String,
+    },
+}
+
+/// YYC-264: subcommands under `vulcan cortex prompt`.
+#[derive(Subcommand, Debug)]
+pub enum PromptSubcommand {
+    /// Create a new prompt variant.
+    Create {
+        /// Prompt name.
+        name: String,
+        /// Prompt body text.
+        body: String,
+    },
+    /// Show a resolved prompt by name.
+    Get {
+        /// Prompt name.
+        name: String,
+    },
+    /// List all prompt variants.
+    List,
+    /// Update a prompt variant's body.
+    Set {
+        /// Prompt name.
+        name: String,
+        /// New body text.
+        body: String,
+    },
+    /// Remove (soft-delete) a prompt.
+    Remove {
+        /// Prompt name.
+        name: String,
+    },
+    /// Import prompts from a JSON file.
+    Migrate {
+        /// Path to JSON file: [{name, body}]
+        file: std::path::PathBuf,
+    },
+    /// Show performance metrics for a prompt.
+    Performance {
+        /// Prompt name.
+        name: String,
+    },
+}
+
+/// YYC-264: subcommands under `vulcan cortex agent`.
+#[derive(Subcommand, Debug)]
+pub enum AgentSubcommand {
+    /// List all agents and their bound prompts.
+    List,
+    /// Bind a prompt variant to an agent with a weight.
+    Bind {
+        /// Agent name. Created if it doesn't exist.
+        name: String,
+        /// Prompt variant name to bind.
+        prompt: String,
+        /// Weight for epsilon-greedy selection (0.0-1.0).
+        #[arg(long, default_value_t = 0.5)]
+        weight: f32,
+    },
+    /// Remove an agent profile.
+    Unbind {
+        /// Agent name to remove.
+        name: String,
+    },
+    /// Epsilon-greedy select the best prompt variant for an agent.
+    Select {
+        /// Agent name.
+        name: String,
+        /// Task type hint for context (optional).
+        #[arg(long)]
+        task_type: Option<String>,
+        /// Sentiment offset -1.0 to 1.0 (optional).
+        #[arg(long)]
+        sentiment: Option<f32>,
+    },
 }
 
 #[cfg(all(test, feature = "gateway"))]

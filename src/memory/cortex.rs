@@ -121,6 +121,40 @@ impl CortexStore {
         self.inner.create_edge(edge).context("cortex create edge")
     }
 
+    /// List all edges originating from `node_id`.
+    pub fn edges_from(&self, node_id: NodeId) -> Result<Vec<cortex_core::Edge>> {
+        self.storage
+            .edges_from(node_id)
+            .context("cortex edges_from")
+    }
+
+    /// List all edges terminating at `node_id`.
+    pub fn edges_to(&self, node_id: NodeId) -> Result<Vec<cortex_core::Edge>> {
+        self.storage.edges_to(node_id).context("cortex edges_to")
+    }
+
+    /// Delete an edge by its ID.
+    pub fn delete_edge(&self, edge_id: cortex_core::EdgeId) -> Result<()> {
+        self.storage
+            .delete_edge(edge_id)
+            .context("cortex delete_edge")
+    }
+
+    /// Atomically update the weight of an edge between two nodes.
+    /// Takes a relation filter and a weight-update closure.
+    /// Returns `(old_weight, new_weight)`.
+    pub fn update_edge_weight_atomic(
+        &self,
+        from: NodeId,
+        to: NodeId,
+        relation: &cortex_core::Relation,
+        f: impl FnOnce(f32) -> f32,
+    ) -> Result<(f32, f32)> {
+        self.storage
+            .update_edge_weight_atomic(from, to, relation, f)
+            .context("cortex update edge weight")
+    }
+
     // ── Search ──
 
     /// Semantic vector search. Returns `(score, node)` pairs, highest first.
