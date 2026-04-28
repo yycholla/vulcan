@@ -708,6 +708,107 @@ fn summarize_tool_args_picks_meaningful_field_per_tool() {
     );
 }
 
+// YYC-210: per-tool summarizers for new LSP + subagent tools.
+#[test]
+fn summarize_tool_args_handles_new_tools() {
+    assert_eq!(
+        summarize_tool_args(
+            "workspace_symbol",
+            r#"{"query":"parse_config","language":"rust"}"#
+        )
+        .as_deref(),
+        Some("parse_config [rust]"),
+    );
+    assert_eq!(
+        summarize_tool_args(
+            "type_definition",
+            r#"{"path":"src/foo.rs","line":12,"character":4}"#
+        )
+        .as_deref(),
+        Some("src/foo.rs:12"),
+    );
+    assert_eq!(
+        summarize_tool_args(
+            "implementation",
+            r#"{"path":"src/foo.rs","line":42,"character":0}"#
+        )
+        .as_deref(),
+        Some("src/foo.rs:42"),
+    );
+    assert_eq!(
+        summarize_tool_args(
+            "call_hierarchy",
+            r#"{"path":"src/foo.rs","line":7,"character":2,"direction":"outgoing"}"#
+        )
+        .as_deref(),
+        Some("src/foo.rs:7 (outgoing)"),
+    );
+    assert_eq!(
+        summarize_tool_args("code_action", r#"{"path":"src/foo.rs","start_line":3}"#).as_deref(),
+        Some("src/foo.rs:3"),
+    );
+    assert_eq!(
+        summarize_tool_args(
+            "spawn_subagent",
+            r#"{"task":"Review the provider streaming parser"}"#
+        )
+        .as_deref(),
+        Some("Review the provider streaming parser"),
+    );
+}
+
+#[test]
+fn summarize_tool_result_handles_new_tools() {
+    assert_eq!(
+        summarize_tool_result(
+            "workspace_symbol",
+            r#"{"query":"x","language":"rust","count":3,"hits":[]}"#
+        )
+        .as_deref(),
+        Some("3 symbols"),
+    );
+    assert_eq!(
+        summarize_tool_result(
+            "type_definition",
+            r#"{"locations":[{"uri":"file:///x"},{"uri":"file:///y"}]}"#
+        )
+        .as_deref(),
+        Some("2 hits"),
+    );
+    assert_eq!(
+        summarize_tool_result(
+            "implementation",
+            r#"{"implementations":[{"uri":"file:///x"}]}"#
+        )
+        .as_deref(),
+        Some("1 hit"),
+    );
+    assert_eq!(
+        summarize_tool_result(
+            "call_hierarchy",
+            r#"{"direction":"incoming","count":4,"calls":[]}"#
+        )
+        .as_deref(),
+        Some("4 incoming calls"),
+    );
+    assert_eq!(
+        summarize_tool_result(
+            "code_action",
+            r#"{"path":"src/foo.rs","count":2,"actions":[]}"#
+        )
+        .as_deref(),
+        Some("2 actions"),
+    );
+    assert_eq!(
+        summarize_tool_result(
+            "spawn_subagent",
+            r#"{"status":"completed","summary":"ok","budget_used":{"iterations":3,"max_iterations":8}}"#
+        )
+        .as_deref(),
+        Some("completed · 3/8 iters"),
+    );
+}
+
 #[test]
 fn preview_output_caps_to_twelve_lines_and_one_kb() {
     // YYC-78 raised the cap so collapsed cards still show useful

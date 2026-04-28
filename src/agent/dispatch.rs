@@ -109,7 +109,8 @@ pub(in crate::agent) fn summarize_tool_args(name: &str, raw_args: &str) -> Optio
         "code_outline" | "code_extract" => s("path").map(|p| tail(p, 60)),
         "find_symbol" => s("name"),
         // Code semantics — file:line.
-        "goto_definition" | "find_references" | "hover" | "diagnostics" => {
+        "goto_definition" | "find_references" | "hover" | "diagnostics" | "type_definition"
+        | "implementation" => {
             let p = s("path").map(|x| tail(x, 40));
             let line = args.get("line").and_then(|v| v.as_u64());
             match (p, line) {
@@ -118,6 +119,39 @@ pub(in crate::agent) fn summarize_tool_args(name: &str, raw_args: &str) -> Optio
                 _ => None,
             }
         }
+        // YYC-210: workspace symbol search — query + language.
+        "workspace_symbol" => {
+            let q = s("query").map(|x| truncate(x, 32));
+            let lang = s("language");
+            match (q, lang) {
+                (Some(q), Some(l)) => Some(format!("{q} [{l}]")),
+                (Some(q), None) => Some(q),
+                _ => None,
+            }
+        }
+        // YYC-210: call hierarchy — file:line + direction.
+        "call_hierarchy" => {
+            let p = s("path").map(|x| tail(x, 40));
+            let line = args.get("line").and_then(|v| v.as_u64());
+            let dir = s("direction").unwrap_or_else(|| "incoming".into());
+            match (p, line) {
+                (Some(p), Some(l)) => Some(format!("{p}:{l} ({dir})")),
+                (Some(p), None) => Some(format!("{p} ({dir})")),
+                _ => Some(dir),
+            }
+        }
+        // YYC-210: code action — file:start_line.
+        "code_action" => {
+            let p = s("path").map(|x| tail(x, 40));
+            let line = args.get("start_line").and_then(|v| v.as_u64());
+            match (p, line) {
+                (Some(p), Some(l)) => Some(format!("{p}:{l}")),
+                (Some(p), None) => Some(p),
+                _ => None,
+            }
+        }
+        // YYC-210: spawn_subagent — task prefix.
+        "spawn_subagent" => s("task").map(|t| truncate(t, 60)),
         "rename_symbol" => {
             let p = s("path").map(|x| tail(x, 40));
             let new = s("new_name");
@@ -275,6 +309,60 @@ pub(in crate::agent) fn summarize_tool_result(name: &str, output: &str) -> Optio
             .ok()
             .and_then(|v| v.get("count")?.as_u64())
             .map(|n| format!("{n} diagnostic{}", if n == 1 { "" } else { "s" })),
+        // YYC-210: workspace_symbol — JSON `count`.
+        "workspace_symbol" => serde_json::from_str::<serde_json::Value>(text)
+            .ok()
+            .and_then(|v| v.get("count")?.as_u64())
+            .map(|n| format!("{n} symbol{}", if n == 1 { "" } else { "s" })),
+        // YYC-210: type_definition / implementation — count
+        // entries in `locations` / `implementations`.
+        "type_definition" | "implementation" => serde_json::from_str::<serde_json::Value>(text)
+            .ok()
+            .and_then(|v| {
+                let arr = v
+                    .get("locations")
+                    .or_else(|| v.get("implementations"))?
+                    .as_array()?;
+                Some(format!(
+                    "{} hit{}",
+                    arr.len(),
+                    if arr.len() == 1 { "" } else { "s" }
+                ))
+            }),
+        // YYC-210: call_hierarchy — count + direction.
+        "call_hierarchy" => serde_json::from_str::<serde_json::Value>(text)
+            .ok()
+            .and_then(|v| {
+                let count = v.get("count")?.as_u64()?;
+                let dir = v.get("direction").and_then(|d| d.as_str()).unwrap_or("");
+                Some(format!(
+                    "{count} {} call{}",
+                    dir,
+                    if count == 1 { "" } else { "s" }
+                ))
+            }),
+        // YYC-210: code_action — JSON `count`.
+        "code_action" => serde_json::from_str::<serde_json::Value>(text)
+            .ok()
+            .and_then(|v| v.get("count")?.as_u64())
+            .map(|n| format!("{n} action{}", if n == 1 { "" } else { "s" })),
+        // YYC-210: spawn_subagent — child status + iterations.
+        "spawn_subagent" => serde_json::from_str::<serde_json::Value>(text)
+            .ok()
+            .and_then(|v| {
+                let status = v.get("status")?.as_str()?;
+                let used = v
+                    .get("budget_used")
+                    .and_then(|b| b.get("iterations"))
+                    .and_then(|i| i.as_u64())
+                    .unwrap_or(0);
+                let max = v
+                    .get("budget_used")
+                    .and_then(|b| b.get("max_iterations"))
+                    .and_then(|i| i.as_u64())
+                    .unwrap_or(0);
+                Some(format!("{status} · {used}/{max} iters"))
+            }),
         // Generic fallback so even an unknown tool gets *something*.
         _ => {
             if lines == 1 {
