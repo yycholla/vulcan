@@ -136,6 +136,10 @@ async fn main() -> anyhow::Result<()> {
             let dir = vulcan::config::vulcan_home();
             vulcan::cli_provider::run(cmd, dir).await?;
         }
+        Some(Command::Model { cmd }) => {
+            init_cli_logging();
+            vulcan::cli_model::run(cmd).await?;
+        }
         Some(Command::Auth(args)) => {
             init_cli_logging();
             let dir = vulcan::config::vulcan_home();

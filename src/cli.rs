@@ -70,6 +70,11 @@ pub enum Command {
         #[command(subcommand)]
         cmd: ProviderCommand,
     },
+    /// YYC-241: list + select models on the active provider.
+    Model {
+        #[command(subcommand)]
+        cmd: ModelSubcommand,
+    },
     /// Guided interactive provider setup (YYC-100). Picker + prompts for
     /// name, API key, and default model; writes to providers.toml.
     Auth(AuthArgs),
@@ -152,6 +157,23 @@ pub enum Command {
     Extension {
         #[command(subcommand)]
         cmd: ExtensionSubcommand,
+    },
+}
+
+/// YYC-241 subcommands under `vulcan model`.
+#[derive(Subcommand, Debug)]
+pub enum ModelSubcommand {
+    /// Query the active provider's `/models` catalog.
+    List,
+    /// Show the currently-active provider + model.
+    Show,
+    /// Persist a new `model = "<id>"` on the active provider.
+    Use {
+        id: String,
+        /// Skip catalog membership validation (useful for
+        /// self-hosted endpoints with no `/models` endpoint).
+        #[arg(long)]
+        force: bool,
     },
 }
 
