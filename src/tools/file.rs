@@ -218,6 +218,42 @@ impl Tool for ListFiles {
 /// Build a compact unified-style diff preview for the YYC-74 card
 /// (YYC-bonus: matches Claude Code-style render). Caps at ~10 line
 /// pairs and 1KB so megabyte rewrites don't bloat the TUI.
+/// YYC-258: tokio-friendly atomic write. Writes to `<path>.tmp` in
+/// the same directory, fsync's, then renames over the destination so
+/// the file is either entirely the new content or untouched. Falls
+/// back to a non-atomic write if creating the temp file fails (rare
+/// — usually a permission edge case where the parent dir is readable
+/// but the user can't drop new files there).
+async fn atomic_write_async(path: &std::path::Path, content: &[u8]) -> Result<()> {
+    let file_name = path.file_name().and_then(|n| n.to_str()).ok_or_else(|| {
+        anyhow::anyhow!(
+            "atomic_write_async: path has no file name: {}",
+            path.display()
+        )
+    })?;
+    let tmp = path.with_file_name(format!("{file_name}.vulcan-tmp"));
+    let write_result = async {
+        let mut f = tokio::fs::File::create(&tmp).await?;
+        use tokio::io::AsyncWriteExt;
+        f.write_all(content).await?;
+        f.sync_all().await?;
+        // Drop the file handle before rename so Windows is happy too.
+        drop(f);
+        tokio::fs::rename(&tmp, path).await?;
+        Ok::<_, std::io::Error>(())
+    }
+    .await;
+    if let Err(e) = write_result {
+        // Best-effort cleanup of the temp file before propagating.
+        let _ = tokio::fs::remove_file(&tmp).await;
+        return Err(anyhow::anyhow!(
+            "atomic write to {} failed: {e}",
+            path.display()
+        ));
+    }
+    Ok(())
+}
+
 fn diff_preview(before: &str, after: &str, label: &str) -> String {
     let max_lines = 10;
     let max_chars = 1024;
@@ -317,7 +353,10 @@ impl Tool for WriteFile {
             tokio::fs::create_dir_all(parent).await?;
         }
 
-        tokio::fs::write(path, content).await?;
+        // YYC-258: write atomically — write to `<path>.tmp`, fsync, then
+        // rename. A crash mid-write leaves the original (or no file)
+        // intact rather than a half-written target.
+        atomic_write_async(std::path::Path::new(path), content.as_bytes()).await?;
         let bytes = content.len();
 
         // YYC-66 / YYC-131: build the diff record once, then attach it
@@ -524,7 +563,9 @@ impl Tool for PatchFile {
         }
 
         let new_content = apply_accepted_hunks(&content, old, new, &accepted_offsets);
-        tokio::fs::write(path, &new_content).await?;
+        // YYC-258: atomic write so a crash mid-edit can't leave the
+        // file in a half-written state.
+        atomic_write_async(std::path::Path::new(path), new_content.as_bytes()).await?;
         let replaces = accepted_offsets.len();
 
         // YYC-66 / YYC-131: build the diff once, attach to both the
@@ -661,6 +702,58 @@ mod tests {
     use serde_json::json;
     use tempfile::tempdir;
     use tokio_util::sync::CancellationToken;
+
+    #[tokio::test]
+    async fn atomic_write_replaces_existing_file_atomically() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("a.txt");
+        std::fs::write(&path, "old").unwrap();
+        atomic_write_async(&path, b"new contents").await.unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "new contents");
+        // Temp file should not linger on success.
+        let tmp = dir.path().join("a.txt.vulcan-tmp");
+        assert!(!tmp.exists(), "leftover tmp file");
+    }
+
+    #[tokio::test]
+    async fn atomic_write_creates_new_file() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("fresh.txt");
+        assert!(!path.exists());
+        atomic_write_async(&path, b"hello").await.unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "hello");
+    }
+
+    #[tokio::test]
+    async fn atomic_write_cleans_up_tmp_on_failure() {
+        // Aim a write at a path whose parent directory doesn't exist,
+        // forcing `File::create` to fail. The helper must not leave a
+        // stray `.vulcan-tmp` on disk.
+        let dir = tempdir().unwrap();
+        let bad = dir.path().join("missing-parent").join("x.txt");
+        let result = atomic_write_async(&bad, b"hi").await;
+        assert!(result.is_err());
+        let tmp = dir.path().join("missing-parent").join("x.txt.vulcan-tmp");
+        assert!(!tmp.exists());
+    }
+
+    #[tokio::test]
+    async fn write_file_uses_atomic_rename_so_no_partial_file_visible() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("transactional.txt");
+        let path_str = path.to_string_lossy().to_string();
+        let tool = WriteFile::new(None);
+        tool.call(
+            json!({"path": path_str, "content": "atomic-payload"}),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "atomic-payload");
+        // No leftover temp file in the parent dir.
+        let tmp = dir.path().join("transactional.txt.vulcan-tmp");
+        assert!(!tmp.exists());
+    }
 
     #[tokio::test]
     async fn write_file_captures_before_after_into_diff_sink() {
