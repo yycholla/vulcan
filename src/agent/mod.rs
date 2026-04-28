@@ -427,6 +427,39 @@ impl Agent {
             ));
         }
 
+        // Built-in hook (YYC-264): when `rtk` is on PATH, transparently
+        // wrap bash commands with `rtk summary --` to compress output
+        // by 60-90% before it reaches the LLM. Falls through silently
+        // when RTK is not installed — zero per-call overhead.
+        hooks.register(Arc::new(crate::hooks::rtk::RtkHook::new()));
+
+        // YYC-264: embedded cortex-memory-core graph memory. When enabled,
+        // registers two hooks:
+        //   1. CortexRecallHook — BeforePrompt: semantically searches the graph
+        //      on every turn using the latest user message and injects context.
+        //   2. CortexCaptureHook — AfterToolCall: auto-stores notable tool
+        //      outputs as fact nodes in the graph.
+        // Both share the same `Arc<CortexStore>`. Non-fatal on failure.
+        if config.cortex.enabled {
+            match crate::memory::cortex::CortexStore::try_open(&config.cortex) {
+                Ok(store) => {
+                    let max_results = config.cortex.max_search_results;
+                    hooks.register(Arc::new(
+                        crate::hooks::cortex_recall::CortexRecallHook::new(
+                            store.clone(),
+                            max_results,
+                        ),
+                    ));
+                    hooks.register(Arc::new(
+                        crate::hooks::cortex_capture::CortexCaptureHook::new(store),
+                    ));
+                }
+                Err(e) => {
+                    tracing::warn!("cortex memory unavailable: {e}");
+                }
+            }
+        }
+
         // YYC-182: resolve the workspace trust profile from config
         // before tool-profile selection. The trust profile feeds
         // the default capability profile when neither CLI flag nor

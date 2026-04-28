@@ -36,9 +36,12 @@ pub enum InjectPosition {
 }
 
 pub mod approval;
+pub mod cortex_capture;
+pub mod cortex_recall;
 pub mod diagnostics;
 pub mod prefer_native;
 pub mod recall;
+pub mod rtk;
 
 /// What a handler returns. Each event honors a subset; unsupported variants
 /// are logged and ignored.

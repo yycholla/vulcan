@@ -111,6 +111,11 @@ uuid = { version = "1", features = ["v4", "serde"] }
 tokio-util = { version = "0.7.18", features = ["rt"] }
 rusqlite = { version = "0.39.0", features = ["bundled"] }
 strsim = "0.11.1"
+# Cortex — self-organizing temporal graph memory for AI agents. Embedded
+# library mode (no server, no external deps). Provides HNSW vector search,
+# auto-linking, trust computation, briefing synthesis, temporal decay, and
+# contradiction detection (YYC-264).
+cortex_core = { version = "0.3.1", package = "cortex-memory-core" }
 portable-pty = "0.9.0"
 # Pure-Rust git plumbing (YYC-36). Used today only for repository
 # discovery — write ops dispatch through the `git` binary because gix's

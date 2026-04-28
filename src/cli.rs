@@ -27,6 +27,12 @@ pub struct Cli {
     /// `gateway-safe`). Overrides `tools.profile` from config.
     #[arg(long, global = true, value_name = "NAME")]
     pub profile: Option<String>,
+
+    /// YYC-264: seed the cortex knowledge graph from the last N SQLite
+    /// sessions on startup. Only applies when `[cortex].enabled = true`.
+    /// Defaults to importing the 3 most recent sessions.
+    #[arg(long, global = true)]
+    pub seed_cortex: bool,
 }
 
 #[derive(Subcommand, Debug)]
@@ -179,6 +185,13 @@ pub enum Command {
         #[command(subcommand)]
         cmd: ExtensionSubcommand,
     },
+    /// YYC-264: inspect and manage the embedded Cortex knowledge graph.
+    /// Direct access to store facts, semantic search, graph stats, and
+    /// seed from SQLite sessions.
+    Cortex {
+        #[command(subcommand)]
+        cmd: CortexSubcommand,
+    },
 }
 
 /// YYC-242 subcommands under `vulcan gateway`. `Run` is the
@@ -250,6 +263,41 @@ pub enum ExtensionSubcommand {
     /// Copy a manifest directory into the Vulcan home and
     /// register an install state row.
     Install { path: std::path::PathBuf },
+}
+
+/// YYC-264: subcommands under `vulcan cortex`.
+#[derive(Subcommand, Debug)]
+pub enum CortexSubcommand {
+    /// Store a fact node in the cortex knowledge graph.
+    Store {
+        /// Fact text to store.
+        text: String,
+        /// Importance from 0.0 to 1.0 (default 0.7).
+        #[arg(long, default_value_t = 0.7)]
+        importance: f32,
+    },
+    /// Semantic vector search across the knowledge graph.
+    Search {
+        /// Natural language query.
+        query: String,
+        /// Max results to return (default 5).
+        #[arg(long, default_value_t = 5)]
+        limit: usize,
+    },
+    /// Show graph statistics (node count, edge count, db size).
+    Stats,
+    /// Seed the cortex graph from recent SQLite sessions.
+    Seed {
+        /// Number of most recent sessions to import (default 3).
+        #[arg(long, default_value_t = 3)]
+        sessions: usize,
+    },
+    /// List recently stored facts in the graph.
+    Recall {
+        /// Max entries to show (default 20).
+        #[arg(long, default_value_t = 20)]
+        limit: usize,
+    },
 }
 
 #[cfg(all(test, feature = "gateway"))]
