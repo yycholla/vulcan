@@ -87,31 +87,20 @@ impl SkillRegistry {
     /// 1. The bundled directory (`vulcan/skills/`).
     /// 2. The XDG location (`~/.config/vulcan/skills`).
     /// 3. The configured user `primary` (defaults to `~/.vulcan/skills`).
-    /// 4. Project-root `<project>/.vulcan/skills` (when supplied).
-    /// 5. Project-root `<project>/.agents/skills` (when supplied).
+    /// 4. `~/.agents/skills` — install location for the open `npx skills`
+    ///    CLI shared across the agentskills.io ecosystem.
+    /// 5. Project-root `<project>/.vulcan/skills` (when supplied).
+    /// 6. Project-root `<project>/.agents/skills` (when supplied).
     ///
     /// `project_root` is typically the agent's working directory. Pass
     /// `None` for callers that don't have a workspace concept.
     pub fn default_for(primary: &Path, project_root: Option<&Path>) -> Self {
-        let mut dirs: Vec<PathBuf> = Vec::new();
-        let push_unique = |dirs: &mut Vec<PathBuf>, path: PathBuf| {
-            if dirs.iter().all(|p| p != &path) {
-                dirs.push(path);
-            }
-        };
-        let bundled = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("skills");
-        if bundled.is_dir() {
-            push_unique(&mut dirs, bundled);
-        }
-        if let Some(xdg) = xdg_skills_dir() {
-            push_unique(&mut dirs, xdg);
-        }
-        push_unique(&mut dirs, primary.to_path_buf());
-        if let Some(root) = project_root {
-            push_unique(&mut dirs, root.join(".vulcan").join("skills"));
-            push_unique(&mut dirs, root.join(".agents").join("skills"));
-        }
-        Self::with_dirs(dirs)
+        Self::with_dirs(resolve_default_dirs(
+            primary,
+            project_root,
+            std::env::var("HOME").ok().as_deref(),
+            std::env::var("XDG_CONFIG_HOME").ok().as_deref(),
+        ))
     }
 
     /// Empty registry — used in tests so they don't pull in bundled or
@@ -221,14 +210,58 @@ impl SkillRegistry {
     }
 }
 
+/// Pure resolver for the standard search-root list. Takes env values
+/// as arguments so tests don't need to mutate the process environment.
+fn resolve_default_dirs(
+    primary: &Path,
+    project_root: Option<&Path>,
+    home: Option<&str>,
+    xdg_config_home: Option<&str>,
+) -> Vec<PathBuf> {
+    let mut dirs: Vec<PathBuf> = Vec::new();
+    let push_unique = |dirs: &mut Vec<PathBuf>, path: PathBuf| {
+        if dirs.iter().all(|p| p != &path) {
+            dirs.push(path);
+        }
+    };
+    let bundled = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("skills");
+    if bundled.is_dir() {
+        push_unique(&mut dirs, bundled);
+    }
+    if let Some(xdg) = xdg_skills_dir(home, xdg_config_home) {
+        push_unique(&mut dirs, xdg);
+    }
+    push_unique(&mut dirs, primary.to_path_buf());
+    if let Some(home_agents) = home_agents_skills_dir(home) {
+        push_unique(&mut dirs, home_agents);
+    }
+    if let Some(root) = project_root {
+        push_unique(&mut dirs, root.join(".vulcan").join("skills"));
+        push_unique(&mut dirs, root.join(".agents").join("skills"));
+    }
+    dirs
+}
+
+/// Resolve `~/.agents/skills` — install location for the open
+/// `npx skills` CLI. Shared with other clients in the agentskills.io
+/// ecosystem so a skill installed for one tool is visible to Vulcan
+/// automatically.
+fn home_agents_skills_dir(home: Option<&str>) -> Option<PathBuf> {
+    let home = home?;
+    if home.is_empty() {
+        return None;
+    }
+    Some(PathBuf::from(home).join(".agents").join("skills"))
+}
+
 /// Resolve `~/.config/vulcan/skills` (honoring `XDG_CONFIG_HOME`).
-fn xdg_skills_dir() -> Option<PathBuf> {
-    if let Ok(xdg) = std::env::var("XDG_CONFIG_HOME") {
+fn xdg_skills_dir(home: Option<&str>, xdg_config_home: Option<&str>) -> Option<PathBuf> {
+    if let Some(xdg) = xdg_config_home {
         if !xdg.is_empty() {
             return Some(PathBuf::from(xdg).join("vulcan").join("skills"));
         }
     }
-    let home = std::env::var("HOME").ok()?;
+    let home = home?;
     if home.is_empty() {
         return None;
     }
@@ -506,6 +539,46 @@ mod tests {
         let debug = reg.list().iter().find(|s| s.name == "debug").unwrap();
         assert_eq!(debug.description, "project-version");
         assert!(debug.load_body().unwrap().contains("PROJECT_BODY"));
+    }
+
+    #[test]
+    fn resolve_default_dirs_includes_home_agents_skills_dir() {
+        let home = tempdir().unwrap();
+        let primary = tempdir().unwrap();
+        let dirs = resolve_default_dirs(primary.path(), None, home.path().to_str(), None);
+        let expected = home.path().join(".agents").join("skills");
+        assert!(
+            dirs.contains(&expected),
+            "resolve_default_dirs should include {} (got {dirs:?})",
+            expected.display()
+        );
+    }
+
+    #[test]
+    fn resolve_default_dirs_honors_xdg_config_home_override() {
+        let home = tempdir().unwrap();
+        let xdg = tempdir().unwrap();
+        let primary = tempdir().unwrap();
+        let dirs = resolve_default_dirs(
+            primary.path(),
+            None,
+            home.path().to_str(),
+            xdg.path().to_str(),
+        );
+        // XDG-derived path lives under the override, not under HOME/.config.
+        let xdg_skills = xdg.path().join("vulcan").join("skills");
+        assert!(dirs.contains(&xdg_skills));
+        let default_xdg = home.path().join(".config").join("vulcan").join("skills");
+        assert!(!dirs.contains(&default_xdg));
+    }
+
+    #[test]
+    fn resolve_default_dirs_includes_project_paths_when_supplied() {
+        let primary = tempdir().unwrap();
+        let project = tempdir().unwrap();
+        let dirs = resolve_default_dirs(primary.path(), Some(project.path()), None, None);
+        assert!(dirs.contains(&project.path().join(".vulcan").join("skills")));
+        assert!(dirs.contains(&project.path().join(".agents").join("skills")));
     }
 
     #[test]
