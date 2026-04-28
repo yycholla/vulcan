@@ -69,40 +69,44 @@ struct DdgResult {
     snippet: String,
 }
 
+/// YYC-252: parse DDG search results via `scraper` CSS selectors
+/// instead of brittle `.split().nth()` chains. The new path tolerates
+/// markup variations (extra whitespace, attribute reordering, nested
+/// inline tags) that broke the prior parser whenever DDG tweaked
+/// their HTML.
 fn extract_ddg_results(html: &str) -> Vec<DdgResult> {
+    use scraper::{Html, Selector};
+
+    let document = Html::parse_document(html);
+    // Selectors are constructed once per call. Caching them across
+    // calls is possible but `scraper`'s Selector isn't trivially
+    // cacheable (no Send). Single-call cost is negligible compared
+    // to the network round trip the caller is about to do.
+    let body_sel = match Selector::parse(".result__body") {
+        Ok(s) => s,
+        Err(_) => return Vec::new(),
+    };
+    let title_sel = Selector::parse(".result__a").ok();
+    let url_sel = Selector::parse(".result__url").ok();
+    let snippet_sel = Selector::parse(".result__snippet").ok();
+
     let mut results = Vec::new();
-    // Simple parser — looks for result_<id> divs in DuckDuckGo HTML
-    for chunk in html.split(r##"<div class="result__body">"##).skip(1) {
-        // Extract title
-        let title = chunk
-            .split(r##"class="result__a"##)
-            .nth(1)
-            .and_then(|s| s.split('>').nth(1))
-            .and_then(|s| s.split("</a>").next())
-            .unwrap_or("")
-            .trim()
-            .to_string();
-
-        // Extract URL
-        let url = chunk
-            .split(r##"class="result__url"##)
-            .nth(1)
-            .and_then(|s| s.split('>').nth(1))
-            .and_then(|s| s.split("</a>").next())
-            .unwrap_or("")
-            .trim()
-            .to_string();
-
-        // Extract snippet
-        let snippet = chunk
-            .split(r##"class="result__snippet"##)
-            .nth(1)
-            .and_then(|s| s.split('>').nth(1))
-            .and_then(|s| s.split("</a>").next())
-            .unwrap_or("")
-            .trim()
-            .to_string();
-
+    for body in document.select(&body_sel) {
+        let title = title_sel
+            .as_ref()
+            .and_then(|sel| body.select(sel).next())
+            .map(|el| collapse_ws(&el.text().collect::<String>()))
+            .unwrap_or_default();
+        let url = url_sel
+            .as_ref()
+            .and_then(|sel| body.select(sel).next())
+            .map(|el| collapse_ws(&el.text().collect::<String>()))
+            .unwrap_or_default();
+        let snippet = snippet_sel
+            .as_ref()
+            .and_then(|sel| body.select(sel).next())
+            .map(|el| collapse_ws(&el.text().collect::<String>()))
+            .unwrap_or_default();
         if !title.is_empty() {
             results.push(DdgResult {
                 title,
@@ -115,6 +119,12 @@ fn extract_ddg_results(html: &str) -> Vec<DdgResult> {
         }
     }
     results
+}
+
+/// Collapse runs of whitespace + trim. DDG inserts newlines + indent
+/// inside text nodes; the agent only needs a clean single-line string.
+fn collapse_ws(s: &str) -> String {
+    s.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 /// YYC-256: minimum spacing between consecutive web-tool requests
@@ -387,14 +397,32 @@ mod tests {
 "##;
         let results = extract_ddg_results(html);
         assert_eq!(results.len(), 2);
-        // The hand-rolled parser can leave a `</a` tail on extracted
-        // strings — known fragility flagged by M3. We assert the
-        // useful part is present rather than exact equality so this
-        // test isn't held hostage to the parser's quirks.
-        assert!(results[0].title.starts_with("First Result"));
-        assert!(results[0].url.contains("first.example"));
-        assert!(results[0].snippet.starts_with("First snippet text."));
-        assert!(results[1].title.starts_with("Second Result"));
+        // YYC-252: scraper-backed parser produces clean strings —
+        // no trailing `</a` tail anymore.
+        assert_eq!(results[0].title, "First Result");
+        assert_eq!(results[0].url, "https://first.example/");
+        assert_eq!(results[0].snippet, "First snippet text.");
+        assert_eq!(results[1].title, "Second Result");
+    }
+
+    #[test]
+    fn yyc252_extract_ddg_results_handles_whitespace_and_nested_tags() {
+        // Real-world DDG injects extra whitespace + inline `<b>`
+        // highlight tags inside snippets. The CSS-selector path
+        // extracts the combined text and collapses whitespace.
+        let html = r##"
+<div class="result__body">
+  <a class="result__a" href="x">
+    Search   Result   Title
+  </a>
+  <a class="result__url" href="x">https://example.com/</a>
+  <span class="result__snippet">Hello <b>highlighted</b> world.</span>
+</div>
+"##;
+        let results = extract_ddg_results(html);
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].title, "Search Result Title");
+        assert_eq!(results[0].snippet, "Hello highlighted world.");
     }
 
     #[test]

@@ -142,6 +142,9 @@ globset = "0.4"
 # RFC 3986 percent-encoding for query strings (YYC-253). Replaces
 # the hand-rolled urlencoding() in web.rs.
 percent-encoding = "2"
+# CSS-selector HTML parsing for the DDG scraper (YYC-252). Replaces
+# the brittle hand-rolled `.split().nth()` chain.
+scraper = "0.26"
 
 # Gateway daemon HTTP stack. Optional — only linked under `gateway`.
 axum = { version = "0.8.9", optional = true }
