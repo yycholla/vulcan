@@ -12,6 +12,20 @@ use vulcan::tui::{ResumeTarget, run_tui};
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
+    // YYC-183: `vulcan doctor` must run even if Config::load
+    // fails — diagnosing a broken config is the whole point.
+    // Run it before the load step so a parse error surfaces as
+    // a check instead of an unhandled abort.
+    if matches!(cli.command, Some(Command::Doctor)) {
+        let home = vulcan::config::vulcan_home();
+        let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+        let report = vulcan::doctor::run_checks(&home, &cwd);
+        print!("{}", vulcan::doctor::render_human(&report));
+        if matches!(report.overall(), vulcan::doctor::CheckStatus::Fail) {
+            std::process::exit(1);
+        }
+        return Ok(());
+    }
     let config = Config::load()?;
 
     match cli.command {
@@ -159,6 +173,7 @@ async fn main() -> anyhow::Result<()> {
             init_cli_logging();
             vulcan::cli_review::run(cmd).await?;
         }
+        Some(Command::Doctor) => unreachable!("handled before Config::load above"),
     }
 
     Ok(())

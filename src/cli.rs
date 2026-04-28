@@ -117,6 +117,9 @@ pub enum Command {
         #[command(subcommand)]
         cmd: ReviewSubcommand,
     },
+    /// YYC-183: structured runtime diagnostics — config,
+    /// storage, workspace, tool registry checks.
+    Doctor,
 }
 
 /// YYC-190: subcommands under `vulcan review`.
