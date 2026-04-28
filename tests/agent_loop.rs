@@ -60,6 +60,60 @@ fn agent_with_mock() -> (Agent, Arc<MockProvider>) {
 }
 
 #[tokio::test]
+async fn run_record_lifecycle_events_land_for_completed_turn() {
+    // YYC-179 acceptance: every CLI/TUI agent turn must produce a
+    // run record with a stable id, lifecycle events, and a terminal
+    // status. This test pins the contract — a successful turn yields
+    // Running → PromptReceived → ProviderRequest → ProviderResponse
+    // → StatusChanged{Completed}.
+    let (mut agent, mock) = agent_with_mock();
+    mock.enqueue_text("done.");
+    let _ = agent.run_prompt("hello").await.unwrap();
+
+    let store = agent.run_store();
+    let recent = store.recent(1).unwrap();
+    assert_eq!(recent.len(), 1);
+    let record = &recent[0];
+    assert_eq!(record.status, vulcan::run_record::RunStatus::Completed);
+    assert!(record.ended_at.is_some());
+
+    let kinds: Vec<&'static str> = record
+        .events
+        .iter()
+        .map(|e| match e {
+            vulcan::run_record::RunEvent::StatusChanged { .. } => "status",
+            vulcan::run_record::RunEvent::PromptReceived { .. } => "prompt",
+            vulcan::run_record::RunEvent::ProviderRequest { .. } => "req",
+            vulcan::run_record::RunEvent::ProviderResponse { .. } => "resp",
+            vulcan::run_record::RunEvent::ProviderError { .. } => "perr",
+            vulcan::run_record::RunEvent::HookDecision { .. } => "hook",
+            vulcan::run_record::RunEvent::ToolCall { .. } => "tool",
+            vulcan::run_record::RunEvent::SubagentSpawned { .. } => "sub",
+            vulcan::run_record::RunEvent::ArtifactCreated { .. } => "art",
+        })
+        .collect();
+    assert!(kinds.contains(&"status"), "no status events: {kinds:?}");
+    assert!(kinds.contains(&"prompt"), "no prompt event: {kinds:?}");
+    assert!(kinds.contains(&"req"), "no provider request: {kinds:?}");
+    assert!(kinds.contains(&"resp"), "no provider response: {kinds:?}");
+
+    // Raw prompt must NOT be persisted by default; the fingerprint
+    // is the redacted surface.
+    let prompt_event = record
+        .events
+        .iter()
+        .find_map(|e| match e {
+            vulcan::run_record::RunEvent::PromptReceived {
+                fingerprint, raw, ..
+            } => Some((fingerprint.as_str().to_string(), raw.clone())),
+            _ => None,
+        })
+        .expect("prompt event present");
+    assert!(prompt_event.0.starts_with("sha256:"));
+    assert!(prompt_event.1.is_none(), "raw prompt should not be stored");
+}
+
+#[tokio::test]
 async fn agent_read_file_tool_result_flows_into_next_llm_turn() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("note.txt");

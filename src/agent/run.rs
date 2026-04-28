@@ -8,6 +8,7 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use crate::provider::{ChatResponse, Message, StreamEvent, ToolCall, ToolDefinition, Usage};
+use crate::run_record::{PayloadFingerprint, RunEvent, RunOrigin, RunRecord, RunStatus};
 use crate::tools::ToolResult;
 
 use super::dispatch::{elided_lines, preview_output, summarize_tool_args, summarize_tool_result};
@@ -112,7 +113,76 @@ impl Agent {
         self.run_prompt_inner(input).await
     }
 
+    /// YYC-179: open a run record for the current turn, marking it
+    /// `Running`. Writes a `PromptReceived` event with a SHA-256
+    /// fingerprint of the input — raw text isn't persisted by
+    /// default. Returns the new `RunId` so the caller can attach
+    /// further events.
+    fn begin_run_record(&mut self, input: &str) {
+        let mut record = RunRecord::new(RunOrigin::Cli);
+        record.session_id = Some(self.session_id.clone());
+        record.model = Some(self.provider_config.model.clone());
+        let id = record.id;
+        if let Err(e) = self.run_store.create(&record) {
+            tracing::warn!("run_record create failed: {e}");
+            self.current_run_id = None;
+            return;
+        }
+        self.current_run_id = Some(id);
+        let _ = self.run_store.append_event(
+            id,
+            RunEvent::StatusChanged {
+                status: RunStatus::Running,
+            },
+        );
+        let _ = self.run_store.append_event(
+            id,
+            RunEvent::PromptReceived {
+                fingerprint: PayloadFingerprint::of(input.as_bytes()),
+                char_count: input.chars().count(),
+                raw: None,
+            },
+        );
+    }
+
+    /// YYC-179: write the terminal status for the current run and
+    /// clear `current_run_id`. Safe to call when no run is active.
+    fn end_run_record(&mut self, status: RunStatus, error: Option<String>) {
+        if let Some(id) = self.current_run_id.take() {
+            let _ = self.run_store.finalize(id, status, error);
+        }
+    }
+
+    /// YYC-179: append a typed event to the active run record, if
+    /// any. Drops silently when no run is in flight (e.g. a tool
+    /// running outside a turn) so callers don't have to gate their
+    /// emit sites.
+    pub(in crate::agent) fn record_run_event(&self, event: RunEvent) {
+        if let Some(id) = self.current_run_id {
+            if let Err(e) = self.run_store.append_event(id, event) {
+                tracing::warn!("run_record append failed: {e}");
+            }
+        }
+    }
+
     async fn run_prompt_inner(&mut self, input: &str) -> Result<String> {
+        self.begin_run_record(input);
+        let result = self.run_prompt_body(input).await;
+        match &result {
+            Ok(text) if text == "Cancelled" => {
+                self.end_run_record(RunStatus::Cancelled, None);
+            }
+            Ok(_) => {
+                self.end_run_record(RunStatus::Completed, None);
+            }
+            Err(e) => {
+                self.end_run_record(RunStatus::Failed, Some(e.to_string()));
+            }
+        }
+        result
+    }
+
+    async fn run_prompt_body(&mut self, input: &str) -> Result<String> {
         let cancel = self.turn_cancel.clone();
 
         let system = self
@@ -176,10 +246,27 @@ impl Agent {
                 .apply_before_prompt(&messages, cancel.clone())
                 .await;
 
-            let response = self
+            // YYC-179: record the provider request *before* dispatch
+            // so a transport failure still leaves a breadcrumb.
+            self.record_run_event(RunEvent::ProviderRequest {
+                model: self.provider_config.model.clone(),
+                streaming: false,
+                message_count: outgoing.len(),
+            });
+            let response = match self
                 .provider
                 .chat(&outgoing, &tool_defs, cancel.clone())
-                .await?;
+                .await
+            {
+                Ok(r) => r,
+                Err(e) => {
+                    self.record_run_event(RunEvent::ProviderError {
+                        message: e.to_string(),
+                        retryable: false,
+                    });
+                    return Err(e);
+                }
+            };
 
             if let Some(usage) = &response.usage {
                 self.context
@@ -191,6 +278,19 @@ impl Agent {
                 self.tokens_consumed = self
                     .tokens_consumed
                     .saturating_add(usage.total_tokens as u64);
+                self.record_run_event(RunEvent::ProviderResponse {
+                    prompt_tokens: usage.prompt_tokens as u32,
+                    completion_tokens: usage.completion_tokens as u32,
+                    total_tokens: usage.total_tokens as u32,
+                    finish_reason: response.finish_reason.clone(),
+                });
+            } else {
+                self.record_run_event(RunEvent::ProviderResponse {
+                    prompt_tokens: 0,
+                    completion_tokens: 0,
+                    total_tokens: 0,
+                    finish_reason: response.finish_reason.clone(),
+                });
             }
 
             if let Some(tool_calls) = &response.tool_calls {

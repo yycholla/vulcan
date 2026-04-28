@@ -142,6 +142,15 @@ pub struct Agent {
     /// grows; readers diff snapshots if they want per-run usage
     /// (e.g. spawn_subagent computes `after - before`).
     pub(in crate::agent) tokens_consumed: u64,
+    /// YYC-179: durable run-record store. Every `run_prompt` call
+    /// creates a `RunRecord` here with a stable `RunId`, accumulates
+    /// lifecycle/provider events as the turn unfolds, and finalizes
+    /// on completion/error/cancellation.
+    pub(in crate::agent) run_store: Arc<dyn crate::run_record::RunStore>,
+    /// YYC-179: id of the run currently in flight, if any. Set by
+    /// `run_prompt_inner` on entry, cleared on exit. Other parts of
+    /// the agent (hooks, tools) can read it to attach events.
+    pub(in crate::agent) current_run_id: Option<crate::run_record::RunId>,
 }
 
 #[derive(Debug, Clone)]
@@ -418,6 +427,19 @@ impl Agent {
         // YYC-107: drop tools that aren't relevant to this workspace.
         tools.filter_for_context(&tool_context);
 
+        // YYC-179: open the durable run-record store. SQLite is the
+        // happy path; an in-memory fallback keeps the agent usable
+        // when the DB can't be opened (read-only home, missing perms,
+        // etc.) without disabling the rest of the agent.
+        let run_store: Arc<dyn crate::run_record::RunStore> =
+            match crate::run_record::SqliteRunStore::try_new() {
+                Ok(s) => Arc::new(s),
+                Err(e) => {
+                    tracing::warn!("run_record store unavailable ({e}); falling back to in-memory");
+                    Arc::new(crate::run_record::InMemoryRunStore::default())
+                }
+            };
+
         Ok(Self {
             provider,
             tools,
@@ -442,6 +464,8 @@ impl Agent {
             auto_create_skills: config.auto_create_skills,
             orchestration: Arc::clone(&orchestration),
             tokens_consumed: 0,
+            run_store,
+            current_run_id: None,
         })
     }
 
@@ -510,6 +534,21 @@ impl Agent {
         self.tokens_consumed
     }
 
+    /// YYC-179: handle to the run-record store this Agent appends
+    /// turn lifecycle / provider / tool / hook events to. Cloned
+    /// `Arc` so external readers (TUI debug pane, future
+    /// `vulcan run show` CLI) share the same store.
+    pub fn run_store(&self) -> Arc<dyn crate::run_record::RunStore> {
+        Arc::clone(&self.run_store)
+    }
+
+    /// YYC-179: id of the run currently in flight, or `None` between
+    /// turns. The TUI uses this to correlate live events with the
+    /// timeline view.
+    pub fn current_run_id(&self) -> Option<crate::run_record::RunId> {
+        self.current_run_id
+    }
+
     pub fn for_test(
         provider: Box<dyn LLMProvider>,
         tools: ToolRegistry,
@@ -545,6 +584,8 @@ impl Agent {
             auto_create_skills: false,
             orchestration: Arc::new(crate::orchestration::OrchestrationStore::new()),
             tokens_consumed: 0,
+            run_store: Arc::new(crate::run_record::InMemoryRunStore::default()),
+            current_run_id: None,
         }
     }
 
