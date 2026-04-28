@@ -135,6 +135,10 @@ async fn main() -> anyhow::Result<()> {
             let mut cmd = Cli::command();
             generate(shell, &mut cmd, "vulcan", &mut std::io::stdout());
         }
+        Some(Command::Run { cmd }) => {
+            init_cli_logging();
+            vulcan::cli_run::run(cmd).await?;
+        }
     }
 
     Ok(())
