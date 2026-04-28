@@ -167,4 +167,29 @@ impl SkillRegistry {
     pub fn list(&self) -> &[Skill] {
         &self.skills
     }
+
+    /// YYC-225: walk skill markdown files and return any
+    /// `extension:` metadata they declare. Skills without an
+    /// `extension:` block are silently ignored — backward
+    /// compatibility is by construction.
+    pub fn drafts(&self) -> Vec<crate::extensions::ExtensionMetadata> {
+        let mut out = Vec::new();
+        let entries = match std::fs::read_dir(&self.skills_dir) {
+            Ok(e) => e,
+            Err(_) => return out,
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !path.extension().is_some_and(|e| e == "md") {
+                continue;
+            }
+            let Ok(content) = std::fs::read_to_string(&path) else {
+                continue;
+            };
+            if let Some(meta) = crate::extensions::parse_skill_extension(&content) {
+                out.push(meta);
+            }
+        }
+        out
+    }
 }
