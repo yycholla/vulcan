@@ -9,6 +9,7 @@ pub mod context;
 pub mod gateway;
 pub mod hooks;
 pub mod memory;
+pub mod orchestration;
 pub mod pause;
 pub mod platform;
 pub mod prompt_builder;
