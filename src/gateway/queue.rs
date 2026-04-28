@@ -522,6 +522,72 @@ mod tests {
         assert_eq!(timeout, 5_000);
     }
 
+    /// YYC-274: contention model documentation in test form. The
+    /// `claim_next` UPDATE...RETURNING is a single atomic statement,
+    /// and the gateway pool stamps `busy_timeout = 5s` on every
+    /// connection. Concurrent workers therefore serialize on the
+    /// SQLite write lock without dropping or double-claiming rows;
+    /// the only failure mode is timing out under heavy contention,
+    /// which surfaces as a `Result::Err` rather than data corruption.
+    ///
+    /// The audit (`codebase-analysis.md` C2) flagged this as a
+    /// theoretical concern for multi-worker scale-out. At the
+    /// current single-daemon scale this is fine — the test below
+    /// pins that property: 8 concurrent workers each get a unique
+    /// row from a pre-populated queue, exactly 8 rows are claimed,
+    /// none lost, none double-claimed. The test is a regression
+    /// guard, not a bench (no perf assertions).
+    ///
+    /// If a future scale-out target needs higher concurrency,
+    /// candidate next steps:
+    /// - Move to WAL with explicit `COMMIT` batching.
+    /// - Per-platform partitioned queues (one DB per platform).
+    /// - Postgres backend.
+    #[tokio::test]
+    async fn yyc274_concurrent_claim_next_yields_unique_rows() {
+        let pool = test_conn();
+        let queue = InboundQueue::new(pool.clone());
+        // Pre-populate 8 rows.
+        for i in 0..8 {
+            queue
+                .enqueue(InboundMessage {
+                    platform: "loopback".into(),
+                    chat_id: format!("c{i}"),
+                    user_id: "u1".into(),
+                    text: format!("msg-{i}"),
+                    message_id: None,
+                    reply_to: None,
+                    attachments: vec![],
+                })
+                .await
+                .expect("enqueue");
+        }
+        let queue = std::sync::Arc::new(queue);
+        let mut handles = Vec::with_capacity(8);
+        for _ in 0..8 {
+            let q = std::sync::Arc::clone(&queue);
+            handles.push(tokio::spawn(async move {
+                q.claim_next().await.expect("claim ok")
+            }));
+        }
+        let mut claimed_ids: Vec<i64> = Vec::with_capacity(8);
+        for h in handles {
+            if let Some(row) = h.await.expect("join ok") {
+                claimed_ids.push(row.id);
+            }
+        }
+        // All 8 rows must have been claimed (none dropped).
+        assert_eq!(claimed_ids.len(), 8);
+        // And every id must be unique (no row claimed twice).
+        let mut sorted = claimed_ids.clone();
+        sorted.sort_unstable();
+        sorted.dedup();
+        assert_eq!(sorted.len(), 8);
+        // Subsequent claim returns None — queue is drained.
+        let none = queue.claim_next().await.expect("claim ok");
+        assert!(none.is_none());
+    }
+
     fn sample_msg() -> InboundMessage {
         InboundMessage {
             platform: "loopback".into(),
