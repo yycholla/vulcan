@@ -126,6 +126,53 @@ fn short_sha(sha: &str) -> String {
     sha.chars().take(8).collect()
 }
 
+/// YYC-221: shell out to `git log` and return the
+/// `(sha, author, date, subject)` tuples `build_summary` wants.
+/// Uses `--format=%H%x09%an%x09%aI%x09%s` so each line is
+/// tab-separated and parses without quoting hazards. Falls back
+/// to a clear error if git itself isn't on PATH or the range
+/// resolves to nothing.
+pub fn ingest_git_log(range: &str) -> anyhow::Result<Vec<(String, String, String, String)>> {
+    let output = std::process::Command::new("git")
+        .arg("log")
+        .arg("--format=%H%x09%an%x09%aI%x09%s")
+        .arg(range)
+        .output()
+        .map_err(|e| anyhow::anyhow!("invoke `git log`: {e}"))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        anyhow::bail!("`git log {range}` failed: {}", stderr.trim());
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    parse_git_log_lines(&stdout)
+}
+
+/// Pure parser for the tab-separated `git log` output `ingest_git_log`
+/// produces. Split out for unit tests so we don't need a real repo.
+pub fn parse_git_log_lines(raw: &str) -> anyhow::Result<Vec<(String, String, String, String)>> {
+    let mut out = Vec::new();
+    for line in raw.lines() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let mut parts = line.splitn(4, '\t');
+        let sha = parts.next().unwrap_or_default();
+        let author = parts.next().unwrap_or_default();
+        let date = parts.next().unwrap_or_default();
+        let subject = parts.next().unwrap_or_default();
+        if sha.is_empty() {
+            continue;
+        }
+        out.push((
+            sha.to_string(),
+            author.to_string(),
+            date.to_string(),
+            subject.to_string(),
+        ));
+    }
+    Ok(out)
+}
+
 pub fn render_markdown(summary: &ReleaseSummary) -> String {
     let mut out = String::new();
     out.push_str(&format!("# Release summary: {}\n\n", summary.range));
@@ -180,6 +227,48 @@ pub fn render_markdown(summary: &ReleaseSummary) -> String {
     }
 
     out
+}
+
+#[cfg(test)]
+mod yyc221_ingest_tests {
+    use super::*;
+
+    #[test]
+    fn parse_git_log_lines_handles_canonical_format() {
+        let raw = "abc123\tAlice\t2026-04-28T12:00:00Z\tYYC-221: ship release CLI\n\
+                   def456\tBob\t2026-04-28T13:00:00Z\tunrelated cleanup\n";
+        let parsed = parse_git_log_lines(raw).unwrap();
+        assert_eq!(parsed.len(), 2);
+        assert_eq!(parsed[0].0, "abc123");
+        assert_eq!(parsed[0].1, "Alice");
+        assert_eq!(parsed[0].3, "YYC-221: ship release CLI");
+        assert_eq!(parsed[1].0, "def456");
+    }
+
+    #[test]
+    fn parse_git_log_lines_skips_blank_lines() {
+        let raw = "\n\nsha\tA\td\ts\n\n";
+        let parsed = parse_git_log_lines(raw).unwrap();
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].0, "sha");
+    }
+
+    #[test]
+    fn parse_git_log_lines_preserves_tabs_only_in_subject() {
+        // Subject is the only field that might include further tabs
+        // (a copy-pasted ascii-table commit message). `splitn(4, '\t')`
+        // keeps that intact.
+        let raw = "sha\tA\t2026-01-01\tsubject\twith\textra\ttabs";
+        let parsed = parse_git_log_lines(raw).unwrap();
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].3, "subject\twith\textra\ttabs");
+    }
+
+    #[test]
+    fn parse_git_log_lines_returns_empty_for_empty_input() {
+        assert_eq!(parse_git_log_lines("").unwrap().len(), 0);
+        assert_eq!(parse_git_log_lines("   \n\n").unwrap().len(), 0);
+    }
 }
 
 #[cfg(test)]
