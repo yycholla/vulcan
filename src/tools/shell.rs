@@ -34,6 +34,51 @@ struct BashParams {
     #[serde(default)]
     cols: Option<u64>,
 }
+
+#[derive(Deserialize)]
+struct PtyCreateParams {
+    #[serde(default)]
+    shell: Option<String>,
+    #[serde(default)]
+    workdir: Option<String>,
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    rows: Option<u64>,
+    #[serde(default)]
+    cols: Option<u64>,
+}
+
+#[derive(Deserialize)]
+struct PtyWriteParams {
+    session_id: String,
+    input: String,
+}
+
+fn default_pty_max_bytes() -> u64 {
+    DEFAULT_READ_BYTES as u64
+}
+
+#[derive(Deserialize)]
+struct PtyReadParams {
+    session_id: String,
+    #[serde(default)]
+    cursor: u64,
+    #[serde(default = "default_pty_max_bytes")]
+    max_bytes: u64,
+}
+
+#[derive(Deserialize)]
+struct PtyResizeParams {
+    session_id: String,
+    rows: u64,
+    cols: u64,
+}
+
+#[derive(Deserialize)]
+struct PtyCloseParams {
+    session_id: String,
+}
 /// YYC-261: ceiling on the bash tool timeout. Past this, the LLM
 /// would effectively be running the command without supervision —
 /// long enough for an oversight by the user to lose minutes of
@@ -608,12 +653,16 @@ impl Tool for PtyCreateTool {
     }
 
     async fn call(&self, params: Value, _cancel: CancellationToken) -> Result<ToolResult> {
+        let p: PtyCreateParams = match parse_tool_params(params) {
+            Ok(p) => p,
+            Err(e) => return Ok(e),
+        };
         let summary = self.registry.create(
-            params["shell"].as_str(),
-            params["workdir"].as_str(),
-            params["name"].as_str(),
-            params["rows"].as_u64().map(|v| v as u16),
-            params["cols"].as_u64().map(|v| v as u16),
+            p.shell.as_deref(),
+            p.workdir.as_deref(),
+            p.name.as_deref(),
+            p.rows.map(|v| v as u16),
+            p.cols.map(|v| v as u16),
         )?;
         Ok(ToolResult::ok(serde_json::to_string(&summary)?))
     }
@@ -651,15 +700,14 @@ impl Tool for PtyWriteTool {
     }
 
     async fn call(&self, params: Value, _cancel: CancellationToken) -> Result<ToolResult> {
-        let session_id = params["session_id"]
-            .as_str()
-            .ok_or_else(|| anyhow::anyhow!("session_id required"))?;
-        let input = params["input"]
-            .as_str()
-            .ok_or_else(|| anyhow::anyhow!("input required"))?;
-        let written = self.registry.write(session_id, input)?;
+        let p: PtyWriteParams = match parse_tool_params(params) {
+            Ok(p) => p,
+            Err(e) => return Ok(e),
+        };
+        let written = self.registry.write(&p.session_id, &p.input)?;
         Ok(ToolResult::ok(format!(
-            "Wrote {written} bytes to PTY session {session_id}"
+            "Wrote {written} bytes to PTY session {}",
+            p.session_id
         )))
     }
 }
@@ -697,16 +745,13 @@ impl Tool for PtyReadTool {
     }
 
     async fn call(&self, params: Value, _cancel: CancellationToken) -> Result<ToolResult> {
-        let session_id = params["session_id"]
-            .as_str()
-            .ok_or_else(|| anyhow::anyhow!("session_id required"))?;
-        let payload = self.registry.read(
-            session_id,
-            params["cursor"].as_u64().unwrap_or(0),
-            params["max_bytes"]
-                .as_u64()
-                .unwrap_or(DEFAULT_READ_BYTES as u64) as usize,
-        )?;
+        let p: PtyReadParams = match parse_tool_params(params) {
+            Ok(p) => p,
+            Err(e) => return Ok(e),
+        };
+        let payload = self
+            .registry
+            .read(&p.session_id, p.cursor, p.max_bytes as usize)?;
         Ok(ToolResult::ok(serde_json::to_string(&payload)?))
     }
 }
@@ -744,18 +789,16 @@ impl Tool for PtyResizeTool {
     }
 
     async fn call(&self, params: Value, _cancel: CancellationToken) -> Result<ToolResult> {
-        let session_id = params["session_id"]
-            .as_str()
-            .ok_or_else(|| anyhow::anyhow!("session_id required"))?;
-        let rows = params["rows"]
-            .as_u64()
-            .ok_or_else(|| anyhow::anyhow!("rows required"))? as u16;
-        let cols = params["cols"]
-            .as_u64()
-            .ok_or_else(|| anyhow::anyhow!("cols required"))? as u16;
-        self.registry.resize(session_id, rows, cols)?;
+        let p: PtyResizeParams = match parse_tool_params(params) {
+            Ok(p) => p,
+            Err(e) => return Ok(e),
+        };
+        let rows = p.rows as u16;
+        let cols = p.cols as u16;
+        self.registry.resize(&p.session_id, rows, cols)?;
         Ok(ToolResult::ok(format!(
-            "Resized PTY session {session_id} to {rows}x{cols}"
+            "Resized PTY session {} to {rows}x{cols}",
+            p.session_id
         )))
     }
 }
@@ -791,10 +834,11 @@ impl Tool for PtyCloseTool {
     }
 
     async fn call(&self, params: Value, _cancel: CancellationToken) -> Result<ToolResult> {
-        let session_id = params["session_id"]
-            .as_str()
-            .ok_or_else(|| anyhow::anyhow!("session_id required"))?;
-        let summary = self.registry.close(session_id)?;
+        let p: PtyCloseParams = match parse_tool_params(params) {
+            Ok(p) => p,
+            Err(e) => return Ok(e),
+        };
+        let summary = self.registry.close(&p.session_id)?;
         Ok(ToolResult::ok(serde_json::to_string(&summary)?))
     }
 }
@@ -1056,6 +1100,37 @@ mod tests {
     use std::time::Instant;
     use tokio::time::sleep;
     use tokio_util::sync::CancellationToken;
+
+    #[tokio::test]
+    async fn yyc263_pty_write_missing_session_id_surfaces_as_toolresult_err() {
+        let registry = PtyRegistry::new();
+        let tool = PtyWriteTool::new(registry);
+        let result = tool
+            .call(json!({ "input": "echo hi\n" }), CancellationToken::new())
+            .await
+            .expect("call returns Ok(ToolResult)");
+        assert!(result.is_error);
+        assert!(
+            result.output.contains("tool params failed to validate"),
+            "expected serde-shaped error, got: {}",
+            result.output
+        );
+    }
+
+    #[tokio::test]
+    async fn yyc263_pty_resize_missing_rows_surfaces_as_toolresult_err() {
+        let registry = PtyRegistry::new();
+        let tool = PtyResizeTool::new(registry);
+        let result = tool
+            .call(
+                json!({ "session_id": "anything", "cols": 80 }),
+                CancellationToken::new(),
+            )
+            .await
+            .expect("call returns Ok(ToolResult)");
+        assert!(result.is_error);
+        assert!(result.output.contains("tool params failed to validate"));
+    }
 
     #[tokio::test]
     async fn yyc263_bash_missing_command_surfaces_as_toolresult_err() {
