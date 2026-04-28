@@ -155,8 +155,7 @@ pub enum Command {
     },
 }
 
-/// YYC-167 PR-1 subcommands. `new` / `validate` / `install`
-/// land in PR-2.
+/// YYC-167 subcommands.
 #[derive(Subcommand, Debug)]
 pub enum ExtensionSubcommand {
     /// List installed extensions with status + last load error.
@@ -174,6 +173,20 @@ pub enum ExtensionSubcommand {
         #[arg(long)]
         yes: bool,
     },
+    /// Scaffold a new extension directory in `<cwd>/<name>/`.
+    New {
+        name: String,
+        /// Skeleton kind. `prompt` = builtin manifest only;
+        /// `rust` = builtin manifest + Cargo project stub.
+        #[arg(long, default_value = "prompt")]
+        kind: String,
+    },
+    /// Parse + verify a manifest at the given path without
+    /// touching the install state.
+    Validate { path: std::path::PathBuf },
+    /// Copy a manifest directory into the Vulcan home and
+    /// register an install state row.
+    Install { path: std::path::PathBuf },
 }
 
 /// YYC-220: subcommands under `vulcan playbook`.
