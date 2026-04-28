@@ -295,6 +295,9 @@ pub fn prompt_row_height(input: &str, width: u16, mode: &str) -> u16 {
     1 + input_lines + 1
 }
 
+// YYC-275: Frame + Rect + mode + input + 5 cosmetic fields per draw
+// call. A builder would allocate every frame; allowed here.
+#[allow(clippy::too_many_arguments)]
 pub fn prompt_row(
     f: &mut TuiFrame,
     area: Rect,
@@ -445,6 +448,9 @@ pub fn ticker(f: &mut TuiFrame, area: Rect, cells: &[(String, String, Color)]) {
 /// follow the active theme. Diff coloring inside the body preview also
 /// stays on the structural diff palette so `+` / `-` lines remain
 /// instantly recognizable across themes.
+// YYC-275: tool-card render takes 9 distinct cosmetic inputs every
+// draw. Allowed here; revisit if `tool_card` grows further.
+#[allow(clippy::too_many_arguments)]
 pub fn tool_card(
     name: &str,
     status: super::state::ToolStatus,

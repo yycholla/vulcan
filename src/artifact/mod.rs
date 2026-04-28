@@ -313,6 +313,10 @@ impl SqliteArtifactStore {
         Ok(())
     }
 
+    // YYC-275: 11 fields come straight from a SQLite row decode;
+    // collapsing them into a struct here would just rename the
+    // problem at the call site. Allowed at this site only.
+    #[allow(clippy::too_many_arguments)]
     fn row_to_artifact(
         id: String,
         kind: String,
