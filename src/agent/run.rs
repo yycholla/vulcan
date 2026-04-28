@@ -202,41 +202,16 @@ impl Agent {
     async fn run_prompt_body(&mut self, input: &str) -> Result<String> {
         let cancel = self.turn_cancel.clone();
 
-        let system = self
-            .prompt_builder
-            .build_system_prompt_with_context(&self.tools, Some(&self.tool_context));
-        let tool_defs = self
-            .tools
-            .definitions_with_context(Some(&self.tool_context));
-        let mut messages = vec![Message::System { content: system }];
-
-        // Load history for *this* agent's session — set by `resume_session` or
-        // `continue_last_session`; defaults to a fresh UUID so a new agent has
-        // empty history.
-        if let Some(history) = self.memory.load_history(&self.session_id)? {
-            for msg in history {
-                messages.push(msg);
-            }
-        }
-        // YYC-138: orphan Tool rows from a truncated previous turn would
-        // make the provider reject this request with "Tool message must
-        // follow tool_calls". Drop them on read; surface a warning so
-        // the underlying truncation can still be diagnosed.
-        let dropped = sanitize_orphan_tool_messages(&mut messages);
-        if dropped > 0 {
-            tracing::warn!("agent: dropped {dropped} orphan Tool message(s) from loaded history");
-            // Persist the cleaned snapshot so subsequent loads start clean.
-            self.replace_history(&messages)?;
-        }
-        self.last_saved_count = messages.len();
-
-        messages.push(Message::User {
-            content: input.to_string(),
-        });
-
-        // YYC-106: persist the user message immediately (mirrors the streaming
-        // path) so a non-terminal exit doesn't leave the turn unrecorded.
-        self.save_messages(&messages)?;
+        // YYC-269: share session init (system prompt + tool defs +
+        // history load + orphan-Tool sanitize + user-message persist)
+        // with the streaming path. The two used to duplicate ~30
+        // lines; bug fixes in one didn't propagate. Now both call
+        // `prepare_stream_turn` (a misnomer kept for now — the body
+        // is identical for both paths).
+        let StreamTurn {
+            mut messages,
+            tool_defs,
+        } = self.prepare_stream_turn(input, cancel.clone()).await?;
 
         let max_iter = if self.max_iterations > 0 {
             self.max_iterations as usize
