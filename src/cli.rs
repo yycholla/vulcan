@@ -1,4 +1,5 @@
 use clap::{Parser, Subcommand};
+use clap_complete::Shell;
 
 use crate::cli_auth::AuthArgs;
 use crate::cli_provider::ProviderCommand;
@@ -72,4 +73,11 @@ pub enum Command {
     /// Guided interactive provider setup (YYC-100). Picker + prompts for
     /// name, API key, and default model; writes to providers.toml.
     Auth(AuthArgs),
+    /// YYC-213: print a shell-completion script. Source the output
+    /// to enable tab completion for subcommands and global flags.
+    /// Example: `vulcan completions bash > /etc/bash_completion.d/vulcan`.
+    Completions {
+        /// Target shell (bash, zsh, fish, powershell, elvish).
+        shell: Shell,
+    },
 }

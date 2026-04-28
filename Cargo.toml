@@ -83,6 +83,9 @@ toml_edit = "0.25"
 
 # CLI + TUI
 clap = { version = "4", features = ["derive"] }
+# YYC-213: shell-completion script generator for the
+# `vulcan completions <shell>` subcommand.
+clap_complete = "4.6"
 # Interactive prompts for `vulcan auth` (YYC-100). Fuzzy select +
 # password input + confirm modals. Optional dep — only the auth flow
 # uses it, but cheap enough to leave in default deps.
