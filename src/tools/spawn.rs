@@ -18,9 +18,14 @@
 //! ## Deliberately deferred
 //!
 //! - Token budget tracking (max_iterations is the proxy today).
-//! - Parent cancellation propagation into the child loop.
 //! - Transcript/artifact handle for inspection.
 //! - TUI subagent tile (lands with YYC-68).
+//!
+//! Parent cancellation propagation lives at the call site:
+//! `cancel.child_token()` derives a child token from the parent's,
+//! so cancelling the parent's turn aborts the child's loop within
+//! one iteration. YYC-209 also exposes the child-side handle through
+//! the orchestration store so the TUI can target a specific child.
 
 use std::sync::Arc;
 
