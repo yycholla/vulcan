@@ -1,188 +1,215 @@
-use anyhow::Result;
-use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
+//! YYC-243: spec-compliant Agent Skills loader (agentskills.io / Anthropic
+//! SKILL.md format).
+//!
+//! Layout per skill: `<root>/<name>/SKILL.md` with YAML frontmatter
+//! (`name`, `description`, optional `version`, `license`, `allowed-tools`)
+//! followed by a markdown body. Optional `scripts/`, `references/`, and
+//! `assets/` subdirectories are not parsed by the loader — the agent
+//! discovers and reads them on demand via existing tools, with
+//! `skill_root` exposed alongside the body.
+//!
+//! Three search roots merge into one registry, in this order:
+//!
+//! 1. The configured `skills_dir` (defaults to `~/.vulcan/skills`).
+//! 2. The XDG-compliant location `~/.config/vulcan/skills`.
+//! 3. The bundled fallback `vulcan/skills/`.
+//!
+//! Later roots shadow earlier ones by skill `name` so a user copy in
+//! `~/.config` overrides a bundled default.
+//!
+//! Discovery is metadata-only — bodies load lazily through
+//! [`Skill::load_body`] when `SkillsHook` activates a skill.
 
-/// A loaded skill — reusable knowledge for specific task types
+use anyhow::{Context, Result, anyhow};
+use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
+
+const SKILL_FILENAME: &str = "SKILL.md";
+
+/// One discovered skill. Body is *not* loaded at discovery — call
+/// [`Skill::load_body`] when the skill is activated.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Skill {
     pub name: String,
     pub description: String,
-    pub triggers: Vec<String>,
-    pub content: String,
+    /// Spec-optional metadata.
+    #[serde(default)]
+    pub version: Option<String>,
+    #[serde(default)]
+    pub license: Option<String>,
+    #[serde(default)]
+    pub allowed_tools: Vec<String>,
+    /// Directory containing this skill's `SKILL.md` (and any optional
+    /// `scripts/`, `references/`, `assets/` subdirs). Exposed so the
+    /// agent can load referenced files via `read_file` / `bash`.
+    pub skill_root: PathBuf,
 }
 
-/// Manages loading, listing, and auto-creating skills
+impl Skill {
+    /// Read the body of `<skill_root>/SKILL.md` with the YAML
+    /// frontmatter removed. Lazy — the registry never calls this at
+    /// discovery time.
+    pub fn load_body(&self) -> Result<String> {
+        let path = self.skill_root.join(SKILL_FILENAME);
+        let raw =
+            std::fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?;
+        Ok(strip_frontmatter(&raw))
+    }
+}
+
+/// Discovered set of skills across configured search roots.
 pub struct SkillRegistry {
-    skills_dir: PathBuf,
+    dirs: Vec<PathBuf>,
     skills: Vec<Skill>,
 }
 
 impl SkillRegistry {
-    pub fn new(skills_dir: &PathBuf) -> Self {
-        let dir = if skills_dir.exists() {
-            skills_dir.clone()
-        } else {
-            // Fall back to bundled skills
-            let bundled = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("skills");
-            if bundled.exists() {
-                bundled
-            } else {
-                skills_dir.clone()
-            }
-        };
-
+    /// Build a registry from an explicit list of search roots. Order
+    /// matters: a skill name appearing in a later root replaces the
+    /// same name from an earlier root.
+    pub fn with_dirs(dirs: Vec<PathBuf>) -> Self {
         let mut registry = Self {
-            skills_dir: dir,
+            dirs,
             skills: Vec::new(),
         };
-        registry.load_all().ok();
+        if let Err(e) = registry.discover() {
+            tracing::warn!("skill discovery failed: {e}");
+        }
         registry
     }
 
-    /// Load all skill markdown files from the skills directory
-    fn load_all(&mut self) -> Result<()> {
-        if !self.skills_dir.exists() {
-            return Ok(());
-        }
-
-        let mut skills = Vec::new();
-
-        for entry in std::fs::read_dir(&self.skills_dir)? {
-            let entry = entry?;
-            let path = entry.path();
-            if path.extension().is_some_and(|e| e == "md")
-                && let Some(skill) = Self::load_skill(&path)?
-            {
-                skills.push(skill);
+    /// Build a registry covering the standard search locations.
+    ///
+    /// Search order (earliest is shadowed by later entries on name
+    /// collision, so the most-specific source wins):
+    ///
+    /// 1. The bundled directory (`vulcan/skills/`).
+    /// 2. The XDG location (`~/.config/vulcan/skills`).
+    /// 3. The configured user `primary` (defaults to `~/.vulcan/skills`).
+    /// 4. Project-root `<project>/.vulcan/skills` (when supplied).
+    /// 5. Project-root `<project>/.agents/skills` (when supplied).
+    ///
+    /// `project_root` is typically the agent's working directory. Pass
+    /// `None` for callers that don't have a workspace concept.
+    pub fn default_for(primary: &Path, project_root: Option<&Path>) -> Self {
+        let mut dirs: Vec<PathBuf> = Vec::new();
+        let push_unique = |dirs: &mut Vec<PathBuf>, path: PathBuf| {
+            if dirs.iter().all(|p| p != &path) {
+                dirs.push(path);
             }
+        };
+        let bundled = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("skills");
+        if bundled.is_dir() {
+            push_unique(&mut dirs, bundled);
         }
-
-        self.skills = skills;
-        Ok(())
+        if let Some(xdg) = xdg_skills_dir() {
+            push_unique(&mut dirs, xdg);
+        }
+        push_unique(&mut dirs, primary.to_path_buf());
+        if let Some(root) = project_root {
+            push_unique(&mut dirs, root.join(".vulcan").join("skills"));
+            push_unique(&mut dirs, root.join(".agents").join("skills"));
+        }
+        Self::with_dirs(dirs)
     }
 
-    /// Parse a single skill markdown file
-    fn load_skill(path: &PathBuf) -> Result<Option<Skill>> {
-        let content = std::fs::read_to_string(path)?;
-
-        // Parse YAML frontmatter
-        if let Some(frontmatter) = Self::parse_frontmatter(&content) {
-            let name = frontmatter
-                .get("name")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string();
-            let description = frontmatter
-                .get("description")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string();
-            let triggers: Vec<String> = frontmatter
-                .get("triggers")
-                .and_then(|v| v.as_array())
-                .map(|arr| {
-                    arr.iter()
-                        .filter_map(|v| v.as_str().map(String::from))
-                        .collect()
-                })
-                .unwrap_or_default();
-
-            // Content is everything after the frontmatter
-            let body = Self::strip_frontmatter(&content);
-
-            if !name.is_empty() {
-                return Ok(Some(Skill {
-                    name,
-                    description,
-                    triggers,
-                    content: body,
-                }));
-            }
+    /// Empty registry — used in tests so they don't pull in bundled or
+    /// user-state skills implicitly.
+    pub fn empty() -> Self {
+        Self {
+            dirs: Vec::new(),
+            skills: Vec::new(),
         }
-
-        Ok(None)
     }
 
-    /// Parse YAML frontmatter from markdown (basic — no full YAML parser dependency)
-    fn parse_frontmatter(content: &str) -> Option<serde_json::Value> {
-        let content = content.trim();
-        if !content.starts_with("---") {
-            return None;
-        }
-
-        let end = content[3..].find("\n---")?;
-        let yaml_str = &content[3..3 + end];
-
-        // Simple YAML to JSON conversion — handles our limited skill format
-        let mut map = serde_json::Map::new();
-        for line in yaml_str.lines() {
-            if let Some((key, value)) = line.split_once(':') {
-                let key = key.trim().to_string();
-                let value = value.trim().to_string();
-
-                if value.starts_with('[') && value.ends_with(']') {
-                    // Array value
-                    let items: Vec<serde_json::Value> = value[1..value.len() - 1]
-                        .split(',')
-                        .map(|s| {
-                            serde_json::Value::String(
-                                s.trim().trim_matches('"').trim_matches('\'').to_string(),
-                            )
-                        })
-                        .collect();
-                    map.insert(key, serde_json::Value::Array(items));
-                } else {
-                    map.insert(key, serde_json::Value::String(value));
+    fn discover(&mut self) -> Result<()> {
+        let mut by_name: BTreeMap<String, Skill> = BTreeMap::new();
+        for root in &self.dirs {
+            if !root.is_dir() {
+                continue;
+            }
+            let entries = match std::fs::read_dir(root) {
+                Ok(e) => e,
+                Err(e) => {
+                    tracing::warn!("read_dir {}: {e}", root.display());
+                    continue;
+                }
+            };
+            for entry in entries.flatten() {
+                let dir = entry.path();
+                if !dir.is_dir() {
+                    continue;
+                }
+                if !dir.join(SKILL_FILENAME).is_file() {
+                    continue;
+                }
+                match Self::load_metadata(&dir) {
+                    Ok(skill) => {
+                        by_name.insert(skill.name.clone(), skill);
+                    }
+                    Err(e) => {
+                        tracing::warn!("skip skill at {}: {e}", dir.display());
+                    }
                 }
             }
         }
-
-        Some(serde_json::Value::Object(map))
+        self.skills = by_name.into_values().collect();
+        Ok(())
     }
 
-    /// Get the body text after stripping frontmatter
-    fn strip_frontmatter(content: &str) -> String {
-        let content = content.trim();
-        if content.starts_with("---")
-            && let Some(end) = content[3..].find("\n---")
-        {
-            return content[3 + end + 5..].trim().to_string();
-        }
-        content.to_string()
+    fn load_metadata(skill_root: &Path) -> Result<Skill> {
+        let path = skill_root.join(SKILL_FILENAME);
+        let raw =
+            std::fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?;
+        let fm = parse_frontmatter(&raw)
+            .ok_or_else(|| anyhow!("missing YAML frontmatter in {}", path.display()))?;
+        let name = fm
+            .get_str("name")
+            .ok_or_else(|| anyhow!("frontmatter missing `name` in {}", path.display()))?
+            .to_string();
+        let description = fm
+            .get_str("description")
+            .ok_or_else(|| anyhow!("frontmatter missing `description` in {}", path.display()))?
+            .to_string();
+        Ok(Skill {
+            name,
+            description,
+            version: fm.get_str("version").map(str::to_string),
+            license: fm.get_str("license").map(str::to_string),
+            allowed_tools: fm.get_list("allowed-tools").unwrap_or_default(),
+            skill_root: skill_root.to_path_buf(),
+        })
     }
 
-    /// Check if we have any skills loaded
-    pub fn is_empty(&self) -> bool {
-        self.skills.is_empty()
-    }
-
-    /// Where this registry reads skill files from. Used by YYC-20's
-    /// auto-creation path to write drafts under
-    /// `<skills_dir>/_pending/<name>.md`.
-    pub fn skills_dir(&self) -> &PathBuf {
-        &self.skills_dir
-    }
-
-    /// List all loaded skills
     pub fn list(&self) -> &[Skill] {
         &self.skills
     }
 
-    /// YYC-225: walk skill markdown files and return any
-    /// `extension:` metadata they declare. Skills without an
-    /// `extension:` block are silently ignored — backward
-    /// compatibility is by construction.
+    pub fn is_empty(&self) -> bool {
+        self.skills.is_empty()
+    }
+
+    /// All configured search roots, in order.
+    pub fn dirs(&self) -> &[PathBuf] {
+        &self.dirs
+    }
+
+    /// Primary path for writing new skill drafts. Falls back to
+    /// `~/.vulcan/skills` when the registry was built with no dirs.
+    pub fn skills_dir(&self) -> PathBuf {
+        self.dirs
+            .first()
+            .cloned()
+            .unwrap_or_else(|| crate::config::vulcan_home().join("skills"))
+    }
+
+    /// YYC-225: walk SKILL.md files for declared `extension:` blocks.
+    /// Skills without an `extension:` block are silently ignored.
     pub fn drafts(&self) -> Vec<crate::extensions::ExtensionMetadata> {
         let mut out = Vec::new();
-        let entries = match std::fs::read_dir(&self.skills_dir) {
-            Ok(e) => e,
-            Err(_) => return out,
-        };
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if !path.extension().is_some_and(|e| e == "md") {
-                continue;
-            }
+        for skill in &self.skills {
+            let path = skill.skill_root.join(SKILL_FILENAME);
             let Ok(content) = std::fs::read_to_string(&path) else {
                 continue;
             };
@@ -191,5 +218,308 @@ impl SkillRegistry {
             }
         }
         out
+    }
+}
+
+/// Resolve `~/.config/vulcan/skills` (honoring `XDG_CONFIG_HOME`).
+fn xdg_skills_dir() -> Option<PathBuf> {
+    if let Ok(xdg) = std::env::var("XDG_CONFIG_HOME") {
+        if !xdg.is_empty() {
+            return Some(PathBuf::from(xdg).join("vulcan").join("skills"));
+        }
+    }
+    let home = std::env::var("HOME").ok()?;
+    if home.is_empty() {
+        return None;
+    }
+    Some(
+        PathBuf::from(home)
+            .join(".config")
+            .join("vulcan")
+            .join("skills"),
+    )
+}
+
+#[derive(Debug, Default)]
+struct Frontmatter {
+    map: BTreeMap<String, FrontmatterValue>,
+}
+
+#[derive(Debug, Clone)]
+enum FrontmatterValue {
+    String(String),
+    List(Vec<String>),
+}
+
+impl Frontmatter {
+    fn get_str(&self, key: &str) -> Option<&str> {
+        match self.map.get(key)? {
+            FrontmatterValue::String(s) => Some(s.as_str()),
+            FrontmatterValue::List(_) => None,
+        }
+    }
+    fn get_list(&self, key: &str) -> Option<Vec<String>> {
+        match self.map.get(key)? {
+            FrontmatterValue::List(v) => Some(v.clone()),
+            FrontmatterValue::String(_) => None,
+        }
+    }
+}
+
+/// Minimal flat-YAML parser sufficient for the SKILL.md frontmatter
+/// keys defined by the spec. Strings (optionally quoted) and bracketed
+/// lists are supported. Nested blocks are not — the agent-skills spec
+/// doesn't require them.
+fn parse_frontmatter(raw: &str) -> Option<Frontmatter> {
+    let raw = raw.trim_start_matches('\u{feff}').trim_start();
+    let after = raw.strip_prefix("---")?;
+    let end = after.find("\n---")?;
+    let body = &after[..end];
+    let mut fm = Frontmatter::default();
+    for line in body.lines() {
+        let line = line.trim_end();
+        if line.trim().is_empty() || line.trim_start().starts_with('#') {
+            continue;
+        }
+        // Skip indented sub-blocks (e.g. `extension:` declarations parsed
+        // separately by `extensions::parse_skill_extension`).
+        if line.starts_with(' ') || line.starts_with('\t') {
+            continue;
+        }
+        let (key, value) = line.split_once(':')?;
+        let key = key.trim().to_string();
+        let value = value.trim();
+        if value.is_empty() {
+            continue;
+        }
+        if value.starts_with('[') && value.ends_with(']') {
+            let inner = &value[1..value.len() - 1];
+            let items: Vec<String> = inner
+                .split(',')
+                .map(|s| s.trim().trim_matches('"').trim_matches('\'').to_string())
+                .filter(|s| !s.is_empty())
+                .collect();
+            fm.map.insert(key, FrontmatterValue::List(items));
+        } else {
+            let unquoted = value.trim_matches('"').trim_matches('\'').to_string();
+            fm.map.insert(key, FrontmatterValue::String(unquoted));
+        }
+    }
+    Some(fm)
+}
+
+fn strip_frontmatter(raw: &str) -> String {
+    let trimmed = raw.trim_start_matches('\u{feff}').trim_start();
+    if let Some(rest) = trimmed.strip_prefix("---") {
+        if let Some(end) = rest.find("\n---") {
+            // `---` closer is 4 bytes including the leading newline; skip
+            // it then trim whatever leading whitespace the body has.
+            let after = &rest[end + 4..];
+            return after.trim_start().to_string();
+        }
+    }
+    raw.trim().to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    fn write_skill(root: &Path, name: &str, frontmatter: &str, body: &str) {
+        let dir = root.join(name);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join(SKILL_FILENAME),
+            format!("---\n{frontmatter}\n---\n\n{body}\n"),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn discovers_folder_layout_skill() {
+        let dir = tempdir().unwrap();
+        write_skill(
+            dir.path(),
+            "debug",
+            "name: debug\ndescription: Systematic debugging workflow",
+            "## Phase 1\nReproduce.",
+        );
+        let reg = SkillRegistry::with_dirs(vec![dir.path().to_path_buf()]);
+        assert_eq!(reg.list().len(), 1);
+        assert_eq!(reg.list()[0].name, "debug");
+        assert_eq!(reg.list()[0].description, "Systematic debugging workflow");
+        assert_eq!(reg.list()[0].skill_root, dir.path().join("debug"));
+    }
+
+    #[test]
+    fn body_loads_lazily_after_metadata_discovery() {
+        let dir = tempdir().unwrap();
+        write_skill(
+            dir.path(),
+            "debug",
+            "name: debug\ndescription: d",
+            "BODY_TEXT",
+        );
+        let reg = SkillRegistry::with_dirs(vec![dir.path().to_path_buf()]);
+        let body = reg.list()[0].load_body().unwrap();
+        assert!(body.contains("BODY_TEXT"));
+        assert!(!body.contains("---"));
+    }
+
+    #[test]
+    fn parses_optional_spec_fields() {
+        let dir = tempdir().unwrap();
+        write_skill(
+            dir.path(),
+            "review",
+            "name: review\ndescription: d\nversion: 1.2.3\nlicense: MIT\nallowed-tools: [read_file, bash]",
+            "body",
+        );
+        let reg = SkillRegistry::with_dirs(vec![dir.path().to_path_buf()]);
+        let s = &reg.list()[0];
+        assert_eq!(s.version.as_deref(), Some("1.2.3"));
+        assert_eq!(s.license.as_deref(), Some("MIT"));
+        assert_eq!(
+            s.allowed_tools,
+            vec!["read_file".to_string(), "bash".to_string()]
+        );
+    }
+
+    #[test]
+    fn missing_frontmatter_is_skipped_with_warning() {
+        let dir = tempdir().unwrap();
+        let skill_dir = dir.path().join("broken");
+        std::fs::create_dir_all(&skill_dir).unwrap();
+        std::fs::write(skill_dir.join(SKILL_FILENAME), "# just a markdown body").unwrap();
+        // also a valid one so the registry doesn't trivially pass on emptiness
+        write_skill(dir.path(), "ok", "name: ok\ndescription: d", "body");
+        let reg = SkillRegistry::with_dirs(vec![dir.path().to_path_buf()]);
+        let names: Vec<_> = reg.list().iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(names, vec!["ok"]);
+    }
+
+    #[test]
+    fn directory_without_skill_md_is_ignored() {
+        let dir = tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("empty-dir")).unwrap();
+        write_skill(dir.path(), "ok", "name: ok\ndescription: d", "body");
+        let reg = SkillRegistry::with_dirs(vec![dir.path().to_path_buf()]);
+        assert_eq!(reg.list().len(), 1);
+        assert_eq!(reg.list()[0].name, "ok");
+    }
+
+    #[test]
+    fn later_dir_shadows_earlier_dir_by_name() {
+        let bundled = tempdir().unwrap();
+        let user = tempdir().unwrap();
+        write_skill(
+            bundled.path(),
+            "debug",
+            "name: debug\ndescription: bundled-default",
+            "BUNDLED_BODY",
+        );
+        write_skill(
+            user.path(),
+            "debug",
+            "name: debug\ndescription: user-override",
+            "USER_BODY",
+        );
+        // bundled goes first; user's later entry should win.
+        let reg = SkillRegistry::with_dirs(vec![
+            bundled.path().to_path_buf(),
+            user.path().to_path_buf(),
+        ]);
+        assert_eq!(reg.list().len(), 1);
+        assert_eq!(reg.list()[0].description, "user-override");
+        let body = reg.list()[0].load_body().unwrap();
+        assert!(body.contains("USER_BODY"));
+    }
+
+    #[test]
+    fn empty_registry_has_no_skills() {
+        let reg = SkillRegistry::empty();
+        assert!(reg.is_empty());
+        assert_eq!(reg.list().len(), 0);
+    }
+
+    #[test]
+    fn nonexistent_dir_is_silently_skipped() {
+        let dir = tempdir().unwrap();
+        let missing = dir.path().join("nope");
+        let reg = SkillRegistry::with_dirs(vec![missing]);
+        assert!(reg.is_empty());
+    }
+
+    #[test]
+    fn default_for_includes_project_root_paths() {
+        let primary = tempdir().unwrap();
+        let project = tempdir().unwrap();
+        write_skill(
+            primary.path(),
+            "user",
+            "name: user\ndescription: user-global",
+            "USER",
+        );
+        let project_vulcan = project.path().join(".vulcan").join("skills");
+        std::fs::create_dir_all(&project_vulcan).unwrap();
+        write_skill(
+            &project_vulcan,
+            "proj-vulcan",
+            "name: proj-vulcan\ndescription: project .vulcan",
+            "P_VULCAN",
+        );
+        let project_agents = project.path().join(".agents").join("skills");
+        std::fs::create_dir_all(&project_agents).unwrap();
+        write_skill(
+            &project_agents,
+            "proj-agents",
+            "name: proj-agents\ndescription: project .agents",
+            "P_AGENTS",
+        );
+        let reg = SkillRegistry::default_for(primary.path(), Some(project.path()));
+        let names: Vec<_> = reg.list().iter().map(|s| s.name.clone()).collect();
+        assert!(names.contains(&"user".to_string()));
+        assert!(names.contains(&"proj-vulcan".to_string()));
+        assert!(names.contains(&"proj-agents".to_string()));
+    }
+
+    #[test]
+    fn project_agents_skill_overrides_user_skill_with_same_name() {
+        let primary = tempdir().unwrap();
+        let project = tempdir().unwrap();
+        write_skill(
+            primary.path(),
+            "debug",
+            "name: debug\ndescription: user-version",
+            "USER_BODY",
+        );
+        let project_agents = project.path().join(".agents").join("skills");
+        std::fs::create_dir_all(&project_agents).unwrap();
+        write_skill(
+            &project_agents,
+            "debug",
+            "name: debug\ndescription: project-version",
+            "PROJECT_BODY",
+        );
+        let reg = SkillRegistry::default_for(primary.path(), Some(project.path()));
+        let debug = reg.list().iter().find(|s| s.name == "debug").unwrap();
+        assert_eq!(debug.description, "project-version");
+        assert!(debug.load_body().unwrap().contains("PROJECT_BODY"));
+    }
+
+    #[test]
+    fn parse_frontmatter_handles_quoted_values() {
+        let raw = "---\nname: \"quoted\"\ndescription: 'single'\n---\nbody";
+        let fm = parse_frontmatter(raw).unwrap();
+        assert_eq!(fm.get_str("name"), Some("quoted"));
+        assert_eq!(fm.get_str("description"), Some("single"));
+    }
+
+    #[test]
+    fn strip_frontmatter_returns_body_only() {
+        let raw = "---\nname: x\ndescription: y\n---\n\n## Body\nhello";
+        let body = strip_frontmatter(raw);
+        assert_eq!(body, "## Body\nhello");
     }
 }

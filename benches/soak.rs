@@ -63,14 +63,10 @@ fn out_path() -> PathBuf {
         .join("bench-results.json")
 }
 
-/// Build an empty `SkillRegistry` by pointing at a path that doesn't exist —
-/// `SkillRegistry::new` falls through to bundled skills only when the dir
-/// it's pointed at exists, so a guaranteed-missing path yields an empty
-/// registry without touching the filesystem.
+/// Build an empty `SkillRegistry` for the soak bench so it doesn't pull
+/// in user skills or bundled defaults.
 fn empty_skills() -> Arc<SkillRegistry> {
-    Arc::new(SkillRegistry::new(&PathBuf::from(
-        "/tmp/vulcan-soak-skills-nonexistent",
-    )))
+    Arc::new(SkillRegistry::empty())
 }
 
 #[tokio::main]

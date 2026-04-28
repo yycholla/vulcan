@@ -260,9 +260,7 @@ mod tests {
     }
 
     fn empty_skills() -> Arc<SkillRegistry> {
-        Arc::new(SkillRegistry::new(&std::path::PathBuf::from(
-            "/tmp/vulcan-test-skills-nonexistent",
-        )))
+        Arc::new(SkillRegistry::empty())
     }
 
     /// Wraps an Arc<MockProvider> so multiple Agents can share the same
