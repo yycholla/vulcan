@@ -1131,6 +1131,9 @@ impl Config {
             "keybinds",
             "recall",
             "scheduler",
+            "workspace_trust",
+            "extensions",
+            "active_profile",
         ];
         let Ok(value) = toml::from_str::<toml::Value>(raw) else {
             return Vec::new();

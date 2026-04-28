@@ -51,10 +51,15 @@ pub enum Command {
         #[arg(long, default_value_t = 10)]
         limit: usize,
     },
-    /// Run the long-lived gateway daemon (axum server + platform connectors)
+    /// Run the long-lived gateway daemon (axum server + platform
+    /// connectors). Defaults to `run`; YYC-242 adds `init` for
+    /// first-run config bootstrap.
     #[cfg(feature = "gateway")]
     Gateway {
-        /// Override bind address from config (e.g. 127.0.0.1:7777)
+        #[command(subcommand)]
+        cmd: Option<GatewaySubcommand>,
+        /// Override bind address from config (e.g. 127.0.0.1:7777).
+        /// Equivalent to `vulcan gateway run --bind <addr>`.
         #[arg(long)]
         bind: Option<String>,
     },
@@ -69,6 +74,11 @@ pub enum Command {
     Provider {
         #[command(subcommand)]
         cmd: ProviderCommand,
+    },
+    /// YYC-241: list + select models on the active provider.
+    Model {
+        #[command(subcommand)]
+        cmd: ModelSubcommand,
     },
     /// Guided interactive provider setup (YYC-100). Picker + prompts for
     /// name, API key, and default model; writes to providers.toml.
@@ -155,6 +165,43 @@ pub enum Command {
     },
 }
 
+/// YYC-242 subcommands under `vulcan gateway`. `Run` is the
+/// default when the user just types `vulcan gateway`.
+#[cfg(feature = "gateway")]
+#[derive(Subcommand, Debug)]
+pub enum GatewaySubcommand {
+    /// Run the long-lived daemon (default).
+    Run {
+        /// Override bind address from config (e.g. 127.0.0.1:7777).
+        #[arg(long)]
+        bind: Option<String>,
+    },
+    /// Bootstrap `[gateway]` config + a fresh `api_token` on
+    /// first run.
+    Init {
+        /// Overwrite an existing `[gateway]` section.
+        #[arg(long)]
+        force: bool,
+    },
+}
+
+/// YYC-241 subcommands under `vulcan model`.
+#[derive(Subcommand, Debug)]
+pub enum ModelSubcommand {
+    /// Query the active provider's `/models` catalog.
+    List,
+    /// Show the currently-active provider + model.
+    Show,
+    /// Persist a new `model = "<id>"` on the active provider.
+    Use {
+        id: String,
+        /// Skip catalog membership validation (useful for
+        /// self-hosted endpoints with no `/models` endpoint).
+        #[arg(long)]
+        force: bool,
+    },
+}
+
 /// YYC-167 subcommands.
 #[derive(Subcommand, Debug)]
 pub enum ExtensionSubcommand {
@@ -187,6 +234,48 @@ pub enum ExtensionSubcommand {
     /// Copy a manifest directory into the Vulcan home and
     /// register an install state row.
     Install { path: std::path::PathBuf },
+}
+
+#[cfg(all(test, feature = "gateway"))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn gateway_run_accepts_bind_on_run_subcommand() {
+        let cli = Cli::parse_from(["vulcan", "gateway", "run", "--bind", "127.0.0.1:0"]);
+
+        match cli.command {
+            Some(Command::Gateway {
+                cmd: Some(GatewaySubcommand::Run { bind }),
+                bind: parent_bind,
+            }) => {
+                assert_eq!(bind.as_deref(), Some("127.0.0.1:0"));
+                assert!(parent_bind.is_none());
+            }
+            other => panic!("unexpected parse: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn gateway_legacy_bind_form_still_defaults_to_run() {
+        let cli = Cli::parse_from(["vulcan", "gateway", "--bind", "127.0.0.1:0"]);
+
+        match cli.command {
+            Some(Command::Gateway { cmd, bind }) => {
+                assert!(cmd.is_none());
+                assert_eq!(bind.as_deref(), Some("127.0.0.1:0"));
+            }
+            other => panic!("unexpected parse: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn gateway_init_has_no_bind_option() {
+        let err = Cli::try_parse_from(["vulcan", "gateway", "init", "--bind", "127.0.0.1:0"])
+            .expect_err("init should not accept --bind");
+
+        assert_eq!(err.kind(), clap::error::ErrorKind::UnknownArgument);
+    }
 }
 
 /// YYC-220: subcommands under `vulcan playbook`.

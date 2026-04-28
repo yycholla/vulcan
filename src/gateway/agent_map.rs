@@ -229,7 +229,9 @@ impl AgentMap {
     /// from the active provider config so operators can tune
     /// backpressure without recompiling.
     pub fn stream_channel_capacity(&self) -> usize {
-        self.config.provider.effective_stream_channel_capacity()
+        self.config
+            .active_provider_config()
+            .effective_stream_channel_capacity()
     }
 
     /// Spawn a background task that periodically evicts lanes idle longer
@@ -446,6 +448,24 @@ mod tests {
         let a2 = map.get_or_spawn(&lane).await.expect("second get");
         assert!(Arc::ptr_eq(&a1, &a2), "same lane must return the same Arc");
         assert_eq!(map.active_lanes().await, 1);
+    }
+
+    #[test]
+    fn stream_channel_capacity_uses_active_provider_profile() {
+        let mut config = Config::default();
+        config.provider.stream_channel_capacity = 1024;
+        config.active_profile = Some("fast".into());
+        config.providers.insert(
+            "fast".into(),
+            crate::config::ProviderConfig {
+                stream_channel_capacity: 4096,
+                ..crate::config::ProviderConfig::default()
+            },
+        );
+
+        let map = AgentMap::new(Arc::new(config), Duration::from_secs(60));
+
+        assert_eq!(map.stream_channel_capacity(), 4096);
     }
 
     #[tokio::test]
