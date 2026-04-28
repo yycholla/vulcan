@@ -16,6 +16,7 @@ pub mod context;
 #[cfg(feature = "gateway")]
 pub mod gateway;
 pub mod hooks;
+pub mod impact;
 pub mod knowledge;
 pub mod memory;
 pub mod orchestration;
