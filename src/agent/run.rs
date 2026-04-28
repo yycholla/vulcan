@@ -384,6 +384,33 @@ impl Agent {
             .await
     }
 
+    /// YYC-179: streaming entry point for gateway lanes. Identical
+    /// to `run_prompt_stream_with_cancel` but tags the run record's
+    /// origin as `RunOrigin::Gateway { lane }` so the timeline
+    /// surfaces lane attribution.
+    pub async fn run_prompt_stream_for_gateway(
+        &mut self,
+        input: &str,
+        ui_tx: mpsc::Sender<StreamEvent>,
+        cancel: CancellationToken,
+        lane: String,
+    ) -> Result<String> {
+        self.begin_run_record_with_origin(input, RunOrigin::Gateway { lane });
+        let result = self.run_prompt_stream_body(input, ui_tx, cancel).await;
+        match &result {
+            Ok(text) if text == "Cancelled" => {
+                self.end_run_record(RunStatus::Cancelled, None);
+            }
+            Ok(_) => {
+                self.end_run_record(RunStatus::Completed, None);
+            }
+            Err(e) => {
+                self.end_run_record(RunStatus::Failed, Some(e.to_string()));
+            }
+        }
+        result
+    }
+
     /// Streaming variant that accepts an external cancel token. The TUI uses
     /// this so the Ctrl+C handler can fire the token directly without
     /// blocking on the agent mutex held by the in-flight prompt task.

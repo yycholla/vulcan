@@ -139,7 +139,18 @@ pub async fn process_one(
     let unwind = AssertUnwindSafe(async {
         let agent = agent_map.get_or_spawn(&lane).await?;
         let mut agent = agent.lock().await;
-        agent.run_prompt_stream(&row.text, tx).await
+        // YYC-179: tag the run record with the gateway lane so the
+        // timeline view (and `vulcan run list`) can attribute traffic
+        // back to the platform/lane it came in on.
+        let cancel = tokio_util::sync::CancellationToken::new();
+        agent
+            .run_prompt_stream_for_gateway(
+                &row.text,
+                tx,
+                cancel,
+                format!("{}/{}", lane.platform, lane.chat_id),
+            )
+            .await
     })
     .catch_unwind()
     .await;

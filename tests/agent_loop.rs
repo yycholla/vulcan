@@ -114,6 +114,30 @@ async fn run_record_lifecycle_events_land_for_completed_turn() {
 }
 
 #[tokio::test]
+async fn run_record_gateway_origin_carries_lane_string() {
+    // YYC-179 PR-6: gateway lane streaming entry point tags the
+    // run record with `RunOrigin::Gateway { lane }` so timeline
+    // queries can attribute traffic per platform/lane.
+    let (mut agent, mock) = agent_with_mock();
+    mock.enqueue_text("gateway reply.");
+    let (tx, _rx) = mpsc::channel(vulcan::provider::STREAM_CHANNEL_CAPACITY);
+    let cancel = CancellationToken::new();
+    let _ = agent
+        .run_prompt_stream_for_gateway("ping", tx, cancel, "discord/general".to_string())
+        .await
+        .unwrap();
+    let store = agent.run_store();
+    let recent = store.recent(1).unwrap();
+    let record = &recent[0];
+    match &record.origin {
+        vulcan::run_record::RunOrigin::Gateway { lane } => {
+            assert_eq!(lane, "discord/general");
+        }
+        other => panic!("expected Gateway origin, got {other:?}"),
+    }
+}
+
+#[tokio::test]
 async fn run_record_captures_streaming_turn_with_tui_origin() {
     // YYC-179 acceptance: the streaming path (TUI primary consumer)
     // produces a run record with `RunOrigin::Tui`, lifecycle events,
