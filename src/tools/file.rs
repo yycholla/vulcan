@@ -667,6 +667,14 @@ pub struct PatchFile {
     pause_tx: Option<PauseSender>,
 }
 
+#[derive(Deserialize)]
+struct PatchFileParams {
+    path: String,
+    old_string: String,
+    #[serde(default)]
+    new_string: String,
+}
+
 impl PatchFile {
     pub fn new(diff_sink: Option<crate::tools::EditDiffSink>) -> Self {
         Self {
@@ -706,13 +714,13 @@ impl Tool for PatchFile {
         })
     }
     async fn call(&self, params: Value, _cancel: CancellationToken) -> Result<ToolResult> {
-        let path = params["path"]
-            .as_str()
-            .ok_or_else(|| anyhow::anyhow!("path required"))?;
-        let old = params["old_string"]
-            .as_str()
-            .ok_or_else(|| anyhow::anyhow!("old_string required"))?;
-        let new = params["new_string"].as_str().unwrap_or("");
+        let p: PatchFileParams = match parse_tool_params(params) {
+            Ok(p) => p,
+            Err(e) => return Ok(e),
+        };
+        let path = p.path.as_str();
+        let old = p.old_string.as_str();
+        let new = p.new_string.as_str();
 
         // YYC-248: edit_file reads then writes — refuse blocked paths
         // for both directions.
@@ -967,6 +975,43 @@ mod tests {
             "expected serde-shaped error, got: {}",
             result.output
         );
+    }
+
+    #[tokio::test]
+    async fn yyc263_edit_file_missing_old_string_surfaces_as_toolresult_err() {
+        let result = PatchFile::new(None)
+            .call(
+                json!({ "path": "/tmp/anything", "new_string": "x" }),
+                CancellationToken::new(),
+            )
+            .await
+            .expect("call returns Ok(ToolResult)");
+        assert!(result.is_error);
+        assert!(
+            result.output.contains("tool params failed to validate"),
+            "expected serde-shaped error, got: {}",
+            result.output
+        );
+    }
+
+    #[tokio::test]
+    async fn yyc263_edit_file_typed_default_new_string_replaces_with_empty() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("p.txt");
+        std::fs::write(&path, "remove_me leave_me").unwrap();
+        let result = PatchFile::new(None)
+            .call(
+                json!({
+                    "path": path.to_str().unwrap(),
+                    "old_string": "remove_me ",
+                }),
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+        assert!(!result.is_error);
+        let on_disk = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(on_disk, "leave_me");
     }
 
     #[tokio::test]
