@@ -114,6 +114,46 @@ async fn run_record_lifecycle_events_land_for_completed_turn() {
 }
 
 #[tokio::test]
+async fn run_record_captures_tool_call_with_error_distinguishable_from_success() {
+    // YYC-179 acceptance: tool errors must be distinguishable from
+    // successful tool calls in the run record (is_error: true). This
+    // also exercises the full Running → ToolCall → ProviderResponse
+    // → Completed timeline ordering.
+    let dir = tempdir().unwrap();
+    let missing = dir.path().join("does-not-exist.txt");
+    let (mut agent, mock) = agent_with_mock();
+
+    mock.enqueue_tool_call(
+        "read_file",
+        "read_missing",
+        serde_json::json!({"path": missing}),
+    );
+    mock.enqueue_text("could not read file.");
+
+    let _ = agent.run_prompt("read missing").await.unwrap();
+
+    let store = agent.run_store();
+    let recent = store.recent(1).unwrap();
+    let record = &recent[0];
+    let tool_events: Vec<(String, bool)> = record
+        .events
+        .iter()
+        .filter_map(|e| match e {
+            vulcan::run_record::RunEvent::ToolCall { name, is_error, .. } => {
+                Some((name.clone(), *is_error))
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(tool_events.len(), 1);
+    assert_eq!(tool_events[0].0, "read_file");
+    assert!(
+        tool_events[0].1,
+        "missing-file read should be flagged is_error=true"
+    );
+}
+
+#[tokio::test]
 async fn agent_read_file_tool_result_flows_into_next_llm_turn() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("note.txt");
