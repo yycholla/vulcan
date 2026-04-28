@@ -19,6 +19,9 @@
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
+mod generator;
+pub use generator::generate_for_file;
+
 /// How confident the planner is about an entry. `Evidence` means
 /// the item was sourced from a deterministic index hit (call
 /// graph / references / search). `Guess` means the planner

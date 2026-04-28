@@ -182,6 +182,10 @@ async fn main() -> anyhow::Result<()> {
             init_cli_logging();
             vulcan::cli_replay::run(cmd).await?;
         }
+        Some(Command::Impact { target, save }) => {
+            init_cli_logging();
+            vulcan::cli_impact::run(&target, save).await?;
+        }
     }
 
     Ok(())
