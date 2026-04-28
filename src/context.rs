@@ -181,19 +181,33 @@ impl ContextManager {
             return cheap_estimate;
         }
 
-        // Within striking distance — pay for real BPE precision.
-        let text: String = messages
+        // YYC-198: within striking distance — pay for real BPE
+        // precision, but stream the count per-message instead of
+        // cloning every content string and joining the whole history
+        // into one allocation. The previous implementation built a
+        // temporary `String` roughly the size of the conversation —
+        // exactly when memory pressure matters most.
+        //
+        // Per-message counts can drift very slightly from a single
+        // joined encode because BPE merges don't cross message
+        // boundaries; we re-add one token per separator (the joined
+        // path used a single space, which encodes to one token in
+        // cl100k_base) so the result stays within a handful of tokens
+        // of the previous behavior — well inside the noise floor for
+        // compaction threshold decisions.
+        let per_message: usize = messages
             .iter()
             .map(|m| match m {
-                Message::User { content } => content.clone(),
-                Message::Assistant { content, .. } => content.clone().unwrap_or_default(),
-                Message::Tool { content, .. } => content.clone(),
-                Message::System { content } => content.clone(),
+                Message::User { content } => count_tokens(content),
+                Message::Assistant { content, .. } => {
+                    content.as_deref().map(count_tokens).unwrap_or(0)
+                }
+                Message::Tool { content, .. } => count_tokens(content),
+                Message::System { content } => count_tokens(content),
             })
-            .collect::<Vec<_>>()
-            .join(" ");
-
-        self.estimate_tokens_str(&text)
+            .sum();
+        let separator_tokens = messages.len().saturating_sub(1);
+        per_message + separator_tokens
     }
 
     fn estimate_tokens_str(&self, text: &str) -> usize {
@@ -507,6 +521,29 @@ mod tests {
         assert!(
             estimated <= 250,
             "CJK estimate suspiciously high: {estimated}",
+        );
+    }
+
+    #[test]
+    fn token_estimation_streams_per_message_for_large_histories() {
+        // YYC-198: verify the precise path sums per-message BPE counts
+        // + separators instead of cloning every content into a single
+        // joined `String`. We assert the result equals the expected
+        // closed-form: N * tokens(content) + (N-1) separator tokens.
+        // This shape only holds if no full-history clone/join occurred
+        // (the joined path would let BPE merge across boundaries and
+        // produce a different total).
+        let ctx = manager(1_000); // small max so we hit the precise path
+        let body = "hello world ".repeat(20);
+        let single = count_tokens(&body);
+        let n = 32;
+        let messages: Vec<Message> = (0..n).map(|_| user(body.clone())).collect();
+
+        let estimated = ctx.estimate_tokens(&messages);
+        let expected = single * n + (n - 1); // per-message + separators
+        assert_eq!(
+            estimated, expected,
+            "precise estimator should sum per-message counts (got {estimated}, expected {expected})",
         );
     }
 
