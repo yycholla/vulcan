@@ -68,8 +68,13 @@ jobs:
       - uses: taiki-e/install-action@nextest
       - name: Build
         run: cargo build --all-targets --features "${{ matrix.features }}"
+      # Test target set excludes `--benches` deliberately. The divan
+      # benches (`tui_render`, `agent_core`) are measurement loops, not
+      # tests — under nextest they hit the 120s per-test timeout, retry
+      # 3x, and break the test run. Benches get exercised by `cargo bench`
+      # in `bench.yml`, not here.
       - name: Test (nextest)
-        run: cargo nextest run --profile ci --all-targets --features "${{ matrix.features }}"
+        run: cargo nextest run --profile ci --lib --bins --tests --features "${{ matrix.features }}"
       - name: Doc tests
         run: cargo test --doc --features "${{ matrix.features }}"
       - name: Upload junit
