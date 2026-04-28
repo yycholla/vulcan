@@ -8,6 +8,14 @@
 //! discovers and reads them on demand via existing tools, with
 //! `skill_root` exposed alongside the body.
 //!
+//! The loader also accepts the *collection* layout the `npx skills` CLI
+//! produces, where a single package (e.g. `superpowers`) installs a
+//! whole bundle of related skills under a shared parent directory:
+//! `<root>/<collection>/<skill>/SKILL.md`. When an immediate subdir of
+//! a search root has no `SKILL.md` of its own, the loader peeks one
+//! level deeper for skill folders. Two levels is the cap — going
+//! further would over-match arbitrary repos.
+//!
 //! Three search roots merge into one registry, in this order:
 //!
 //! 1. The configured `skills_dir` (defaults to `~/.vulcan/skills`).
@@ -130,21 +138,39 @@ impl SkillRegistry {
                 if !dir.is_dir() {
                     continue;
                 }
-                if !dir.join(SKILL_FILENAME).is_file() {
+                if dir.join(SKILL_FILENAME).is_file() {
+                    Self::ingest(&dir, &mut by_name);
                     continue;
                 }
-                match Self::load_metadata(&dir) {
-                    Ok(skill) => {
-                        by_name.insert(skill.name.clone(), skill);
-                    }
-                    Err(e) => {
-                        tracing::warn!("skip skill at {}: {e}", dir.display());
+                // Collection layout: `<root>/<collection>/<skill>/SKILL.md`.
+                // The `npx skills` CLI installs packages this way (e.g.
+                // `~/.agents/skills/superpowers/<each-skill>/SKILL.md`), so
+                // peek one level deeper before giving up.
+                let inner_entries = match std::fs::read_dir(&dir) {
+                    Ok(e) => e,
+                    Err(_) => continue,
+                };
+                for inner in inner_entries.flatten() {
+                    let inner_dir = inner.path();
+                    if inner_dir.is_dir() && inner_dir.join(SKILL_FILENAME).is_file() {
+                        Self::ingest(&inner_dir, &mut by_name);
                     }
                 }
             }
         }
         self.skills = by_name.into_values().collect();
         Ok(())
+    }
+
+    fn ingest(skill_root: &Path, by_name: &mut BTreeMap<String, Skill>) {
+        match Self::load_metadata(skill_root) {
+            Ok(skill) => {
+                by_name.insert(skill.name.clone(), skill);
+            }
+            Err(e) => {
+                tracing::warn!("skip skill at {}: {e}", skill_root.display());
+            }
+        }
     }
 
     fn load_metadata(skill_root: &Path) -> Result<Skill> {
@@ -579,6 +605,72 @@ mod tests {
         let dirs = resolve_default_dirs(primary.path(), Some(project.path()), None, None);
         assert!(dirs.contains(&project.path().join(".vulcan").join("skills")));
         assert!(dirs.contains(&project.path().join(".agents").join("skills")));
+    }
+
+    #[test]
+    fn discovers_skills_in_collection_layout() {
+        // Mirrors the `npx skills` superpowers layout:
+        //   <root>/superpowers/brainstorming/SKILL.md
+        //   <root>/superpowers/executing-plans/SKILL.md
+        let dir = tempdir().unwrap();
+        let collection = dir.path().join("superpowers");
+        std::fs::create_dir_all(&collection).unwrap();
+        write_skill(
+            &collection,
+            "brainstorming",
+            "name: brainstorming\ndescription: explores ideas before implementation",
+            "BS",
+        );
+        write_skill(
+            &collection,
+            "executing-plans",
+            "name: executing-plans\ndescription: walks an implementation plan to completion",
+            "EX",
+        );
+        // Sibling top-level skill should still be picked up.
+        write_skill(
+            dir.path(),
+            "find-skills",
+            "name: find-skills\ndescription: helps find new skills to install",
+            "FS",
+        );
+        let reg = SkillRegistry::with_dirs(vec![dir.path().to_path_buf()]);
+        let mut names: Vec<_> = reg.list().iter().map(|s| s.name.clone()).collect();
+        names.sort();
+        assert_eq!(
+            names,
+            vec![
+                "brainstorming".to_string(),
+                "executing-plans".to_string(),
+                "find-skills".to_string(),
+            ]
+        );
+        let bs = reg
+            .list()
+            .iter()
+            .find(|s| s.name == "brainstorming")
+            .unwrap();
+        assert_eq!(bs.skill_root, collection.join("brainstorming"));
+    }
+
+    #[test]
+    fn collection_recursion_is_capped_at_one_level() {
+        // <root>/level1/level2/level3/SKILL.md should NOT be found —
+        // only one extra level of nesting is allowed beyond the root.
+        let dir = tempdir().unwrap();
+        let level2 = dir.path().join("level1").join("level2");
+        std::fs::create_dir_all(&level2).unwrap();
+        write_skill(
+            &level2,
+            "deep",
+            "name: deep\ndescription: too deep to discover",
+            "D",
+        );
+        let reg = SkillRegistry::with_dirs(vec![dir.path().to_path_buf()]);
+        assert!(
+            reg.list().iter().all(|s| s.name != "deep"),
+            "skill nested 3 levels deep should not be discovered"
+        );
     }
 
     #[test]
