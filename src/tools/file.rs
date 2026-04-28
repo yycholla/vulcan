@@ -371,6 +371,13 @@ impl WriteFile {
     }
 }
 
+#[derive(Deserialize)]
+struct WriteFileParams {
+    path: String,
+    #[serde(default)]
+    content: String,
+}
+
 #[async_trait]
 impl Tool for WriteFile {
     fn name(&self) -> &str {
@@ -390,10 +397,12 @@ impl Tool for WriteFile {
         })
     }
     async fn call(&self, params: Value, _cancel: CancellationToken) -> Result<ToolResult> {
-        let path = params["path"]
-            .as_str()
-            .ok_or_else(|| anyhow::anyhow!("path required"))?;
-        let content = params["content"].as_str().unwrap_or("");
+        let p: WriteFileParams = match parse_tool_params(params) {
+            Ok(p) => p,
+            Err(e) => return Ok(e),
+        };
+        let path = p.path.as_str();
+        let content = p.content.as_str();
 
         // YYC-259: cap LLM-supplied content size before any I/O so an
         // oversized payload can't OOM the host or wedge the agent on
@@ -939,6 +948,36 @@ mod tests {
             "expected serde-shaped error, got: {}",
             result.output
         );
+    }
+
+    #[tokio::test]
+    async fn yyc263_write_file_missing_path_surfaces_as_toolresult_err() {
+        let result = WriteFile::new(None)
+            .call(json!({ "content": "hi" }), CancellationToken::new())
+            .await
+            .expect("call returns Ok(ToolResult)");
+        assert!(result.is_error);
+        assert!(
+            result.output.contains("tool params failed to validate"),
+            "expected serde-shaped error, got: {}",
+            result.output
+        );
+    }
+
+    #[tokio::test]
+    async fn yyc263_write_file_typed_default_content_writes_empty_file() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("empty.txt");
+        let result = WriteFile::new(None)
+            .call(
+                json!({ "path": path.to_str().unwrap() }),
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+        assert!(!result.is_error);
+        let on_disk = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(on_disk, "");
     }
 
     #[tokio::test]
