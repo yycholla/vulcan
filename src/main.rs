@@ -191,6 +191,10 @@ async fn main() -> anyhow::Result<()> {
             init_cli_logging();
             vulcan::cli_knowledge::run(cmd).await?;
         }
+        Some(Command::ContextPack { cmd }) => {
+            init_cli_logging();
+            vulcan::cli_context_pack::run(cmd).await?;
+        }
         Some(Command::Config { cmd }) => {
             init_cli_logging();
             vulcan::cli_config::run(cmd).await?;

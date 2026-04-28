@@ -110,6 +110,14 @@ pub enum Command {
         #[command(subcommand)]
         cmd: KnowledgeSubcommand,
     },
+    /// YYC-219: inspect named context packs (curated bundles of
+    /// project files + notes used to brief the agent on a task
+    /// area). `list` shows every pack; `show <name>` prints the
+    /// resolved citation list.
+    ContextPack {
+        #[command(subcommand)]
+        cmd: ContextPackSubcommand,
+    },
     /// YYC-212: unified config CLI. List, get, and inspect every
     /// known config field by dotted path.
     Config {
@@ -396,6 +404,18 @@ pub enum ConfigSubcommand {
     Unset {
         /// Dotted field path.
         key: String,
+    },
+}
+
+/// YYC-219: subcommands under `vulcan context-pack`.
+#[derive(Subcommand, Debug)]
+pub enum ContextPackSubcommand {
+    /// List every available context pack (built-in + user-defined).
+    List,
+    /// Render a single pack's citation list to stdout.
+    Show {
+        /// Pack name. Case-insensitive match against the catalog.
+        name: String,
     },
 }
 
