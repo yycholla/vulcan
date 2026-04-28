@@ -93,6 +93,21 @@ pub enum Command {
         #[command(subcommand)]
         cmd: ArtifactSubcommand,
     },
+    /// YYC-194: governance + purge controls for local knowledge
+    /// indexes (code graph, embeddings, sessions, run records,
+    /// artifacts).
+    Knowledge {
+        #[command(subcommand)]
+        cmd: KnowledgeSubcommand,
+    },
+}
+
+/// YYC-194: subcommands under `vulcan knowledge`.
+#[derive(Subcommand, Debug)]
+pub enum KnowledgeSubcommand {
+    /// List all discovered local knowledge stores with size +
+    /// last-modified time.
+    List,
 }
 
 /// YYC-180: subcommands under `vulcan artifact`.

@@ -1,6 +1,8 @@
 # Vulcan
 
-> A Rust AI agent — forged in iron, tempered at compile time.
+> Vulcan's hammer, Rust's steel.
+> 
+> *Command AI like a tool, not a conversation.*
 
 **Vulcan** is a pure-Rust AI agent that lives in your terminal. It gives you a powerful, interactive LLM-powered assistant with file editing, shell access, web search, persistent sessions, and a beautiful TUI — all in a single binary.
 

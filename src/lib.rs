@@ -3,6 +3,7 @@ pub mod artifact;
 pub mod cli;
 pub mod cli_artifact;
 pub mod cli_auth;
+pub mod cli_knowledge;
 pub mod cli_provider;
 pub mod cli_run;
 pub mod code;
@@ -11,6 +12,7 @@ pub mod context;
 #[cfg(feature = "gateway")]
 pub mod gateway;
 pub mod hooks;
+pub mod knowledge;
 pub mod memory;
 pub mod orchestration;
 pub mod pause;
