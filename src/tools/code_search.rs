@@ -4,12 +4,24 @@
 //! call); `code_search_semantic` answers ranked queries.
 
 use crate::code::embed::EmbeddingIndex;
-use crate::tools::{Tool, ToolResult};
+use crate::tools::{Tool, ToolResult, parse_tool_params};
 use anyhow::Result;
 use async_trait::async_trait;
+use serde::Deserialize;
 use serde_json::{Value, json};
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
+
+fn default_semantic_top_k() -> u64 {
+    8
+}
+
+#[derive(Deserialize)]
+struct CodeSearchSemanticParams {
+    query: String,
+    #[serde(default = "default_semantic_top_k")]
+    top_k: u64,
+}
 
 #[derive(Clone)]
 pub struct IndexEmbeddingsTool {
@@ -81,11 +93,12 @@ impl Tool for CodeSearchSemanticTool {
         })
     }
     async fn call(&self, params: Value, _cancel: CancellationToken) -> Result<ToolResult> {
-        let query = params["query"]
-            .as_str()
-            .ok_or_else(|| anyhow::anyhow!("query required"))?;
-        let top_k = params["top_k"].as_u64().map(|n| n as usize).unwrap_or(8);
-        match self.index.search(query, top_k).await {
+        let p: CodeSearchSemanticParams = match parse_tool_params(params) {
+            Ok(p) => p,
+            Err(e) => return Ok(e),
+        };
+        let top_k = p.top_k as usize;
+        match self.index.search(&p.query, top_k).await {
             Err(e) => Ok(ToolResult::err(format!("Search failed: {e}"))),
             Ok(hits) if hits.is_empty() => Ok(ToolResult::ok(
                 "No matches. Run `index_code_embeddings` if the index is empty or stale."
@@ -93,7 +106,7 @@ impl Tool for CodeSearchSemanticTool {
             )),
             Ok(hits) => {
                 let payload = json!({
-                    "query": query,
+                    "query": p.query,
                     "matches": hits,
                 });
                 Ok(ToolResult::ok(serde_json::to_string_pretty(&payload)?))
