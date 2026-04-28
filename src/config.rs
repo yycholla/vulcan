@@ -203,6 +203,34 @@ pub struct Config {
     /// `[extensions.<id>] enabled = false`) to force `Inactive`.
     #[serde(default)]
     pub extensions: ExtensionsConfig,
+
+    /// YYC-239 (YYC-238 PR-1): name of the active provider
+    /// profile. When set + present in `providers`, both TUI and
+    /// gateway resolve their starting provider from
+    /// `[providers.<name>]` instead of `[provider]`. `None` →
+    /// legacy `[provider]` block (today's default).
+    #[serde(default)]
+    pub active_profile: Option<String>,
+}
+
+impl Config {
+    /// YYC-239: resolve the provider config the agent should boot
+    /// against. Honors `active_profile` when set + present in
+    /// `providers`; otherwise falls back to the legacy `[provider]`
+    /// block. Logs a warning when `active_profile` names a profile
+    /// that isn't declared so misconfiguration surfaces at
+    /// startup instead of silently using the wrong provider.
+    pub fn active_provider_config(&self) -> &ProviderConfig {
+        if let Some(name) = self.active_profile.as_deref() {
+            if let Some(profile) = self.providers.get(name) {
+                return profile;
+            }
+            tracing::warn!(
+                "active_profile = `{name}` not found in [providers]; falling back to [provider]"
+            );
+        }
+        &self.provider
+    }
 }
 
 /// YYC-165 PR-3: top-level config gate for extensions.
@@ -1016,6 +1044,7 @@ impl Default for Config {
             scheduler: SchedulerConfig::default(),
             workspace_trust: crate::trust::WorkspaceTrustConfig::default(),
             extensions: ExtensionsConfig::default(),
+            active_profile: None,
         }
     }
 }
@@ -1349,9 +1378,12 @@ impl Config {
         Ok(report)
     }
 
-    /// Resolve the API key: env var > config > compile-time warning
+    /// Resolve the API key: env var > active provider > compile-time warning.
+    /// YYC-239: pulls the key from the active provider profile (via
+    /// `active_provider_config`) instead of always the legacy
+    /// `[provider]` block.
     pub fn api_key(&self) -> Option<String> {
-        self.api_key_for(&self.provider)
+        self.api_key_for(self.active_provider_config())
     }
 
     /// Resolve the API key for a provider profile: env var wins, then the
@@ -1367,6 +1399,70 @@ impl Config {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── YYC-239 (YYC-238 PR-1): active_profile resolution ──────────
+
+    #[test]
+    fn active_profile_unset_falls_back_to_legacy_provider() {
+        let cfg: Config = toml::from_str(
+            r#"
+[provider]
+type = "openai-compat"
+base_url = "https://default.example.com"
+model = "default-model"
+"#,
+        )
+        .expect("parses");
+        assert_eq!(
+            cfg.active_provider_config().base_url,
+            "https://default.example.com"
+        );
+        assert_eq!(cfg.active_provider_config().model, "default-model");
+    }
+
+    #[test]
+    fn active_profile_set_resolves_to_named_provider() {
+        let cfg: Config = toml::from_str(
+            r#"
+active_profile = "fast-model"
+
+[provider]
+type = "openai-compat"
+base_url = "https://default.example.com"
+model = "default-model"
+
+[providers.fast-model]
+type = "openai-compat"
+base_url = "https://fast.example.com"
+model = "speedy"
+"#,
+        )
+        .expect("parses");
+        let active = cfg.active_provider_config();
+        assert_eq!(active.base_url, "https://fast.example.com");
+        assert_eq!(active.model, "speedy");
+    }
+
+    #[test]
+    fn active_profile_pointing_at_missing_falls_back_to_legacy() {
+        let cfg: Config = toml::from_str(
+            r#"
+active_profile = "ghost"
+
+[provider]
+type = "openai-compat"
+base_url = "https://default.example.com"
+model = "default-model"
+"#,
+        )
+        .expect("parses");
+        // Falls back rather than panicking — verifies the
+        // graceful-degradation contract from the issue.
+        assert_eq!(
+            cfg.active_provider_config().base_url,
+            "https://default.example.com"
+        );
+    }
 
     // ── YYC-226 (YYC-165 PR-3): [extensions] gating ────────────────
 
