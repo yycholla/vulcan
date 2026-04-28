@@ -213,6 +213,27 @@ async fn tool_errors_are_distinguishable_from_successes() {
     assert_eq!(errs, vec![true]);
 }
 
+/// Contract 7: trust profile resolution falls through to a
+/// conservative default when no rule matches. Pin the
+/// resolver-side contract; downstream Agent integration is
+/// covered separately.
+#[tokio::test]
+async fn trust_resolver_unknown_workspace_defaults_to_untrusted() {
+    use std::path::PathBuf;
+    use vulcan::trust::{TrustLevel, WorkspaceTrustConfig};
+
+    let cfg = WorkspaceTrustConfig::default();
+    // A path that doesn't exist on disk still resolves — the
+    // resolver canonicalizes best-effort and falls back when no
+    // rule matches.
+    let nowhere = PathBuf::from("/tmp/yyc-182-contract-no-such-path");
+    let p = cfg.resolve_for(&nowhere);
+    assert_eq!(p.level, TrustLevel::Untrusted);
+    assert_eq!(p.capability_profile, "readonly");
+    assert!(!p.allow_indexing);
+    assert!(!p.allow_persistence);
+}
+
 /// Contract 6: a successful turn produces no `ProviderError`
 /// events. The negative-space contract — guards against future
 /// refactors that swallow real provider errors but keep
