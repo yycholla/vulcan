@@ -5505,6 +5505,7 @@ dependencies = [
  "divan",
  "futures-util",
  "gix",
+ "globset",
  "hdrhistogram",
  "hmac",
  "http",
