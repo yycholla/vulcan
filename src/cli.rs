@@ -108,6 +108,24 @@ pub enum KnowledgeSubcommand {
     /// List all discovered local knowledge stores with size +
     /// last-modified time.
     List,
+    /// Permanently delete one or more local knowledge stores.
+    /// Asks for confirmation unless `--yes` is set.
+    Purge {
+        /// Index kind to purge. Required for safety — purging all
+        /// stores is a separate `--all` opt-in.
+        #[arg(long)]
+        kind: Option<String>,
+        /// Workspace key (filename stem) when targeting a single
+        /// per-workspace store.
+        #[arg(long)]
+        workspace: Option<String>,
+        /// Purge every discovered store regardless of kind.
+        #[arg(long, conflicts_with_all = ["kind", "workspace"])]
+        all: bool,
+        /// Skip the confirmation prompt.
+        #[arg(long)]
+        yes: bool,
+    },
 }
 
 /// YYC-180: subcommands under `vulcan artifact`.

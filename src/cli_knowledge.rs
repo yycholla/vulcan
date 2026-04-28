@@ -1,14 +1,21 @@
 //! YYC-194: `vulcan knowledge list` — display local knowledge
 //! stores with size + last-modified.
 
-use anyhow::Result;
+use anyhow::{Result, anyhow};
+use std::io::{self, BufRead as _, Write};
 
 use crate::cli::KnowledgeSubcommand;
-use crate::knowledge;
+use crate::knowledge::{self, KnowledgeStoreInfo};
 
 pub async fn run(cmd: KnowledgeSubcommand) -> Result<()> {
     match cmd {
         KnowledgeSubcommand::List => list(),
+        KnowledgeSubcommand::Purge {
+            kind,
+            workspace,
+            all,
+            yes,
+        } => purge(kind.as_deref(), workspace.as_deref(), all, yes),
     }
 }
 
@@ -38,6 +45,86 @@ fn list() -> Result<()> {
     println!();
     println!("{} stores · total {}", stores.len(), format_bytes(total));
     Ok(())
+}
+
+fn purge(kind: Option<&str>, workspace: Option<&str>, all: bool, skip_prompt: bool) -> Result<()> {
+    if !all && kind.is_none() {
+        return Err(anyhow!(
+            "specify --kind <name>, --all, or both --kind + --workspace"
+        ));
+    }
+    let stores = knowledge::discover()?;
+    if stores.is_empty() {
+        println!("No local knowledge stores found.");
+        return Ok(());
+    }
+    let targets: Vec<KnowledgeStoreInfo> = stores
+        .into_iter()
+        .filter(|s| {
+            if all {
+                return true;
+            }
+            if let Some(k) = kind {
+                if s.kind.as_str() != k {
+                    return false;
+                }
+            }
+            if let Some(w) = workspace {
+                if s.workspace_key.as_deref() != Some(w) {
+                    return false;
+                }
+            }
+            true
+        })
+        .collect();
+    if targets.is_empty() {
+        println!("No stores matched.");
+        return Ok(());
+    }
+    println!("About to purge {} store(s):", targets.len());
+    let mut total: u64 = 0;
+    for t in &targets {
+        let ws = t.workspace_key.clone().unwrap_or_else(|| "-".into());
+        println!(
+            "  {}  {}  {}  {}",
+            t.kind.as_str(),
+            ws,
+            format_bytes(t.size_bytes),
+            t.path.display()
+        );
+        total += t.size_bytes;
+    }
+    println!("Total: {}", format_bytes(total));
+    if !skip_prompt && !confirm("Proceed? Type `purge` to confirm: ", "purge")? {
+        println!("Aborted.");
+        return Ok(());
+    }
+    let mut freed: u64 = 0;
+    let mut errors: Vec<String> = Vec::new();
+    for t in &targets {
+        match knowledge::purge(t) {
+            Ok(n) => freed += n,
+            Err(e) => errors.push(format!("{}: {e}", t.path.display())),
+        }
+    }
+    println!("Purged {}.", format_bytes(freed));
+    if !errors.is_empty() {
+        eprintln!("Errors:");
+        for e in &errors {
+            eprintln!("  {e}");
+        }
+        return Err(anyhow!("{} purge failure(s)", errors.len()));
+    }
+    Ok(())
+}
+
+fn confirm(prompt: &str, expect: &str) -> Result<bool> {
+    let mut stdout = io::stdout().lock();
+    stdout.write_all(prompt.as_bytes())?;
+    stdout.flush()?;
+    let mut line = String::new();
+    io::stdin().lock().read_line(&mut line)?;
+    Ok(line.trim() == expect)
 }
 
 fn format_bytes(n: u64) -> String {
