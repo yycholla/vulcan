@@ -1,11 +1,28 @@
 use crate::pause::{AgentPause, AgentResume, DiffScrubHunk, PauseKind, PauseSender};
-use crate::tools::{ReplaySafety, Tool, ToolResult, fs_sandbox};
+use crate::tools::{ReplaySafety, Tool, ToolResult, fs_sandbox, parse_tool_params};
 use anyhow::Result;
 use async_trait::async_trait;
+use serde::Deserialize;
 use serde_json::{Value, json};
 use std::time::Duration;
 use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
+
+fn default_read_offset() -> i64 {
+    1
+}
+fn default_read_limit() -> i64 {
+    500
+}
+
+#[derive(Deserialize)]
+struct ReadFileParams {
+    path: String,
+    #[serde(default = "default_read_offset")]
+    offset: i64,
+    #[serde(default = "default_read_limit")]
+    limit: i64,
+}
 
 pub struct ReadFile;
 
@@ -55,15 +72,16 @@ impl Tool for ReadFile {
         use tokio::fs::File;
         use tokio::io::{AsyncBufReadExt, BufReader};
 
-        let path = params["path"]
-            .as_str()
-            .ok_or_else(|| anyhow::anyhow!("path required"))?;
-        let offset = params["offset"].as_i64().unwrap_or(1);
-        let limit = params["limit"].as_i64().unwrap_or(500);
+        let p: ReadFileParams = match parse_tool_params(params) {
+            Ok(p) => p,
+            Err(e) => return Ok(e),
+        };
+        let offset = p.offset;
+        let limit = p.limit;
 
         // YYC-248: refuse reads of system credential / pseudo-fs paths
         // before any I/O happens.
-        let path = match fs_sandbox::validate_read(path) {
+        let path = match fs_sandbox::validate_read(&p.path) {
             Ok(p) => p,
             Err(e) => return Ok(ToolResult::err(e.to_string())),
         };
@@ -889,6 +907,41 @@ mod tests {
         // trait default (Mutating), which is the correct posture.
         assert_eq!(WriteFile::new(None).replay_safety(), ReplaySafety::Mutating);
         assert_eq!(PatchFile::new(None).replay_safety(), ReplaySafety::Mutating);
+    }
+
+    #[tokio::test]
+    async fn yyc278_read_file_missing_path_surfaces_as_toolresult_err() {
+        let result = ReadFile
+            .call(
+                json!({ "offset": 1, "limit": 10 }),
+                CancellationToken::new(),
+            )
+            .await
+            .expect("call returns Ok(ToolResult)");
+        assert!(result.is_error);
+        assert!(
+            result.output.contains("tool params failed to validate"),
+            "expected serde-shaped error, got: {}",
+            result.output
+        );
+    }
+
+    #[tokio::test]
+    async fn yyc278_read_file_typed_defaults_match_legacy_behavior() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("greet.txt");
+        std::fs::write(&path, "alpha\nbeta\ngamma\n").unwrap();
+        let result = ReadFile
+            .call(
+                json!({ "path": path.to_str().unwrap() }),
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+        assert!(!result.is_error);
+        assert!(result.output.contains("alpha"));
+        assert!(result.output.contains("beta"));
+        assert!(result.output.contains("gamma"));
     }
 
     #[tokio::test]
