@@ -80,6 +80,39 @@ impl From<&str> for ToolResult {
     }
 }
 
+/// YYC-222: replay-safety classification for a tool.
+///
+/// `ReadOnly` — pure observation; safe to actually re-run during a
+///   tool-replay pass (file reads, list dirs, search, embeddings
+///   queries). The tool's output may differ from the recording if
+///   the workspace has changed since the original run; replay
+///   diffing surfaces that drift.
+///
+/// `Mutating` — touches local state (writes a file, edits a config,
+///   spawns a child process whose effect outlives the call). Replay
+///   refuses to re-run these live; the mock output is used.
+///
+/// `External` — reaches the network or any third-party system whose
+///   side-effects can't be undone (web fetch, gateway dispatch). A
+///   live re-run requires explicit user opt-in beyond the normal
+///   replay confirmation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReplaySafety {
+    ReadOnly,
+    Mutating,
+    External,
+}
+
+impl ReplaySafety {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ReplaySafety::ReadOnly => "read_only",
+            ReplaySafety::Mutating => "mutating",
+            ReplaySafety::External => "external",
+        }
+    }
+}
+
 #[async_trait::async_trait]
 pub trait Tool: Send + Sync {
     fn name(&self) -> &str;
@@ -103,6 +136,17 @@ pub trait Tool: Send + Sync {
     /// workspace-derived context (e.g. discovered bin targets).
     fn dynamic_description(&self, _ctx: &ToolContext) -> Option<String> {
         None
+    }
+
+    /// YYC-222: classify how a replay engine should treat this tool.
+    /// The default is the conservative one — if a tool's author
+    /// hasn't thought about replay safety, the replay machinery
+    /// should refuse to re-run it live and stick to mocked output.
+    /// Read-only tools (file reads, code-graph queries) can be
+    /// re-run safely against the recorded inputs; external tools
+    /// (web fetch, network ops) need explicit user consent.
+    fn replay_safety(&self) -> ReplaySafety {
+        ReplaySafety::Mutating
     }
 }
 

@@ -1,4 +1,4 @@
-use crate::tools::{Tool, ToolResult, web_ssrf};
+use crate::tools::{ReplaySafety, Tool, ToolResult, web_ssrf};
 use anyhow::Result;
 use async_trait::async_trait;
 use serde_json::{Value, json};
@@ -13,6 +13,11 @@ pub struct WebSearch;
 impl Tool for WebSearch {
     fn name(&self) -> &str {
         "web_search"
+    }
+    fn replay_safety(&self) -> ReplaySafety {
+        // Hits an external service; replay should not silently
+        // re-run without explicit user opt-in.
+        ReplaySafety::External
     }
     fn description(&self) -> &str {
         "Search the web for information. Returns up to 5 results with titles, URLs, and descriptions."
@@ -235,6 +240,9 @@ impl Tool for WebFetch {
     fn name(&self) -> &str {
         "web_fetch"
     }
+    fn replay_safety(&self) -> ReplaySafety {
+        ReplaySafety::External
+    }
     fn description(&self) -> &str {
         "Fetch the content of a URL and extract it as markdown text."
     }
@@ -363,6 +371,12 @@ fn naive_strip_tags(html: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn yyc222_web_tools_are_classified_external() {
+        assert_eq!(WebSearch.replay_safety(), ReplaySafety::External);
+        assert_eq!(WebFetch.replay_safety(), ReplaySafety::External);
+    }
 
     #[test]
     fn yyc257_extract_ddg_results_parses_titles_urls_snippets() {
