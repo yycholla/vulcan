@@ -243,7 +243,17 @@ async fn atomic_write_async(path: &std::path::Path, content: &[u8]) -> Result<()
             path.display()
         )
     })?;
-    let tmp = path.with_file_name(format!("{file_name}.vulcan-tmp"));
+    // YYC-264: unique per-call suffix so two concurrent writes to the
+    // same target don't both stamp on `<path>.vulcan-tmp` and race on
+    // who renames last. PID + monotonic counter gives uniqueness
+    // within the process; `rename(2)` is atomic on the destination.
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static TMP_COUNTER: AtomicU64 = AtomicU64::new(0);
+    let suffix = TMP_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let tmp = path.with_file_name(format!(
+        "{file_name}.vulcan-tmp.{}.{suffix}",
+        std::process::id()
+    ));
     let write_result = async {
         let mut f = tokio::fs::File::create(&tmp).await?;
         use tokio::io::AsyncWriteExt;
@@ -839,6 +849,25 @@ mod tests {
     use tempfile::tempdir;
     use tokio_util::sync::CancellationToken;
 
+    /// YYC-264: helper for tests that assert no atomic-write tmp file
+    /// is left behind. The unique-suffix scheme means we can't predict
+    /// the exact tmp path, so scan the directory for matching prefixes.
+    fn any_tmp_lingers(parent: &std::path::Path, base: &str) -> bool {
+        let needle = format!("{base}.vulcan-tmp.");
+        let entries = match std::fs::read_dir(parent) {
+            Ok(e) => e,
+            Err(_) => return false,
+        };
+        for entry in entries.flatten() {
+            if let Some(name) = entry.file_name().to_str()
+                && name.starts_with(&needle)
+            {
+                return true;
+            }
+        }
+        false
+    }
+
     #[tokio::test]
     async fn search_in_process_finds_pattern_in_text_file() {
         let dir = tempdir().unwrap();
@@ -970,8 +999,8 @@ mod tests {
         atomic_write_async(&path, b"new contents").await.unwrap();
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "new contents");
         // Temp file should not linger on success.
-        let tmp = dir.path().join("a.txt.vulcan-tmp");
-        assert!(!tmp.exists(), "leftover tmp file");
+        // No leftover tmp file with our prefix in the parent dir.
+        assert!(!any_tmp_lingers(dir.path(), "a.txt"));
     }
 
     #[tokio::test]
@@ -992,8 +1021,57 @@ mod tests {
         let bad = dir.path().join("missing-parent").join("x.txt");
         let result = atomic_write_async(&bad, b"hi").await;
         assert!(result.is_err());
-        let tmp = dir.path().join("missing-parent").join("x.txt.vulcan-tmp");
-        assert!(!tmp.exists());
+        // No leftover tmp inside the (non-existent) parent.
+        let parent = dir.path().join("missing-parent");
+        assert!(!parent.exists() || !any_tmp_lingers(&parent, "x.txt"));
+    }
+
+    #[tokio::test]
+    async fn yyc264_concurrent_write_file_to_same_path_lands_deterministically() {
+        // Two concurrent `write_file` calls targeting the same path
+        // must land cleanly — never half-written content. Atomic
+        // rename guarantees the final file is exactly one of the
+        // submitted payloads, not a mash-up.
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("contended.txt");
+        let path_str = path.to_string_lossy().to_string();
+        let payload_a = "a".repeat(10_000);
+        let payload_b = "b".repeat(10_000);
+        let tool_a = WriteFile::new(None);
+        let tool_b = WriteFile::new(None);
+        let path_a = path_str.clone();
+        let path_b = path_str.clone();
+        let pa = payload_a.clone();
+        let pb = payload_b.clone();
+        let h1 = tokio::spawn(async move {
+            tool_a
+                .call(
+                    json!({"path": path_a, "content": pa}),
+                    CancellationToken::new(),
+                )
+                .await
+                .unwrap()
+        });
+        let h2 = tokio::spawn(async move {
+            tool_b
+                .call(
+                    json!({"path": path_b, "content": pb}),
+                    CancellationToken::new(),
+                )
+                .await
+                .unwrap()
+        });
+        let _ = h1.await.unwrap();
+        let _ = h2.await.unwrap();
+
+        let final_content = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            final_content == payload_a || final_content == payload_b,
+            "expected file to be exactly one payload, got mash-up of length {}",
+            final_content.len()
+        );
+        // Both temp files must be gone after the renames.
+        assert!(!any_tmp_lingers(dir.path(), "contended.txt"));
     }
 
     #[tokio::test]
@@ -1010,8 +1088,7 @@ mod tests {
         .unwrap();
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "atomic-payload");
         // No leftover temp file in the parent dir.
-        let tmp = dir.path().join("transactional.txt.vulcan-tmp");
-        assert!(!tmp.exists());
+        assert!(!any_tmp_lingers(dir.path(), "transactional.txt"));
     }
 
     #[tokio::test]
