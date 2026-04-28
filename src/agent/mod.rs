@@ -247,12 +247,18 @@ impl Agent {
         max_iterations: Option<u32>,
         tool_profile_override: Option<String>,
     ) -> Result<Self> {
+        // YYC-239: TUI + gateway resolve their starting provider
+        // through the same `active_provider_config` indirection.
+        // When `active_profile` is set + present in `[providers]`,
+        // that wins; otherwise the legacy `[provider]` block.
+        let active_provider = config.active_provider_config();
+
         // Local / self-hosted endpoints don't require auth; allow empty
         // string in that case (matches `switch_provider` semantics).
         let api_key = match config.api_key() {
             Some(k) => k,
-            None if config.provider.disable_catalog
-                || is_local_base_url(&config.provider.base_url) =>
+            None if active_provider.disable_catalog
+                || is_local_base_url(&active_provider.base_url) =>
             {
                 String::new()
             }
@@ -267,14 +273,14 @@ impl Agent {
         // max_context with whatever the catalog says it actually is. Non-fatal:
         // if the catalog endpoint fails, we log + continue with the configured
         // values rather than blocking startup over a metadata fetch.
-        let selection = Self::resolve_model_selection(&config.provider, &api_key).await?;
+        let selection = Self::resolve_model_selection(active_provider, &api_key).await?;
         let effective_max_context = selection.max_context;
         let supports_json_mode = selection.model.features.json_mode;
         let pricing = selection.pricing.clone();
 
         let provider_factory: Arc<dyn ProviderFactory> = Arc::new(DefaultProviderFactory);
         let provider = provider_factory.build(
-            &config.provider,
+            active_provider,
             &api_key,
             effective_max_context,
             supports_json_mode,
@@ -334,7 +340,7 @@ impl Agent {
                 cwd,
                 parser_cache,
                 config.embeddings.clone(),
-                config.provider.base_url.clone(),
+                active_provider.base_url.clone(),
                 api_key.clone().into(),
             ) {
                 Ok(index) => {
@@ -510,13 +516,13 @@ impl Agent {
             diff_sink,
             pricing,
             compaction_config: config.compaction.clone(),
-            provider_config: config.provider.clone(),
+            provider_config: active_provider.clone(),
             provider_api_key: api_key,
-            active_profile: None,
+            active_profile: config.active_profile.clone(),
             lsp_manager,
             last_saved_count: 0,
             tool_context,
-            max_iterations: max_iterations.unwrap_or(config.provider.max_iterations),
+            max_iterations: max_iterations.unwrap_or(active_provider.max_iterations),
             auto_create_skills: config.auto_create_skills,
             orchestration: Arc::clone(&orchestration),
             tokens_consumed: 0,

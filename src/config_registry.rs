@@ -84,6 +84,13 @@ pub struct ConfigField {
 /// (YYC-165) will append at registration time once that lands.
 const BUILTIN_FIELDS: &[ConfigField] = &[
     ConfigField {
+        path: "active_profile",
+        kind: FieldKind::String { secret: false },
+        default: "(unset)",
+        help: "Persisted active provider profile name. Both TUI and gateway resolve their starting provider from `[providers.<name>]` when set.",
+        file: ConfigFile::Config,
+    },
+    ConfigField {
         path: "auto_create_skills",
         kind: FieldKind::Bool,
         default: "false",
