@@ -1,5 +1,7 @@
 use clap::Parser;
+use std::fs::File;
 use std::io::Write;
+use std::path::PathBuf;
 use tracing_subscriber::EnvFilter;
 use vulcan::cli::{Cli, Command};
 use vulcan::config::Config;
@@ -135,21 +137,81 @@ fn init_cli_logging() {
         .init();
 }
 
+/// YYC-200: outcome of selecting the TUI log destination. The
+/// `Sink` variant carries the original error so the user-facing
+/// banner can explain *why* file logging is disabled instead of
+/// silently dropping logs.
+enum TuiLogTarget {
+    File { file: File, path: PathBuf },
+    Sink { reason: std::io::Error },
+}
+
+/// YYC-200: pick the writer for TUI logging without panicking. The
+/// previous fallback opened `/dev/null`, which doesn't exist on
+/// Windows and panicked via `unwrap()`. We now degrade to
+/// `std::io::sink` and surface the failure reason.
+fn pick_tui_log_target(log_path: PathBuf) -> TuiLogTarget {
+    if let Some(parent) = log_path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    match File::create(&log_path) {
+        Ok(file) => TuiLogTarget::File {
+            file,
+            path: log_path,
+        },
+        Err(reason) => TuiLogTarget::Sink { reason },
+    }
+}
+
 /// Log to a file for TUI mode so the alternate screen stays clean
 fn init_tui_logging() {
-    let log_dir = vulcan::config::vulcan_home();
-    std::fs::create_dir_all(&log_dir).ok();
-    let log_path = log_dir.join("vulcan.log");
-
-    let file = std::fs::File::create(&log_path)
-        .unwrap_or_else(|_| std::fs::File::open("/dev/null").unwrap());
-
+    let log_path = vulcan::config::vulcan_home().join("vulcan.log");
     let filter = EnvFilter::try_from_env("VULCAN_LOG").unwrap_or_else(|_| EnvFilter::new("info"));
-    tracing_subscriber::fmt()
-        .with_env_filter(filter)
-        .with_writer(file)
-        .with_ansi(false)
-        .init();
 
-    eprintln!("Vulcan TUI starting... logs → {log_path:?}");
+    match pick_tui_log_target(log_path) {
+        TuiLogTarget::File { file, path } => {
+            tracing_subscriber::fmt()
+                .with_env_filter(filter)
+                .with_writer(file)
+                .with_ansi(false)
+                .init();
+            eprintln!("Vulcan TUI starting... logs → {path:?}");
+        }
+        TuiLogTarget::Sink { reason } => {
+            tracing_subscriber::fmt()
+                .with_env_filter(filter)
+                .with_writer(std::io::sink)
+                .with_ansi(false)
+                .init();
+            eprintln!("Vulcan TUI starting... log file unavailable ({reason}); logs disabled.");
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pick_tui_log_target_uses_sink_when_path_invalid() {
+        // Use a path whose parent contains a NUL byte — File::create
+        // rejects this on every platform, exercising the fallback
+        // without depending on filesystem perms.
+        let bad: PathBuf = ["\0bad", "vulcan.log"].iter().collect();
+        match pick_tui_log_target(bad) {
+            TuiLogTarget::Sink { .. } => {}
+            TuiLogTarget::File { .. } => panic!("expected Sink fallback for invalid path"),
+        }
+    }
+
+    #[test]
+    fn pick_tui_log_target_returns_file_when_writable() {
+        let tmp = std::env::temp_dir().join(format!("vulcan-tui-log-{}.log", std::process::id()));
+        let outcome = pick_tui_log_target(tmp.clone());
+        let _ = std::fs::remove_file(&tmp);
+        match outcome {
+            TuiLogTarget::File { path, .. } => assert_eq!(path, tmp),
+            TuiLogTarget::Sink { reason } => panic!("expected File variant, got sink: {reason}"),
+        }
+    }
 }
