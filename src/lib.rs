@@ -19,6 +19,7 @@ pub mod config_registry;
 pub mod context;
 pub mod context_pack;
 pub mod doctor;
+pub mod extensions;
 #[cfg(feature = "gateway")]
 pub mod gateway;
 pub mod hooks;
