@@ -9,14 +9,32 @@
 //! avoid re-initializing parsers per call.
 
 use crate::code::{Language, ParserCache};
-use crate::tools::{Tool, ToolResult};
+use crate::tools::{Tool, ToolResult, parse_tool_params};
 use anyhow::Result;
 use async_trait::async_trait;
+use serde::Deserialize;
 use serde_json::{Value, json};
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 use tree_sitter::{Query, QueryCursor, StreamingIterator};
+
+#[derive(Deserialize)]
+struct CodeOutlineParams {
+    path: String,
+}
+
+#[derive(Deserialize)]
+struct CodeExtractParams {
+    path: String,
+    symbol: String,
+}
+
+#[derive(Deserialize)]
+struct CodeQueryParams {
+    path: String,
+    query: String,
+}
 
 /// Cap output size so the LLM doesn't get megabyte responses on large
 /// repos. The agent can narrow with paths or query refinements.
@@ -52,9 +70,11 @@ impl Tool for CodeOutlineTool {
         })
     }
     async fn call(&self, params: Value, _cancel: CancellationToken) -> Result<ToolResult> {
-        let path = params["path"]
-            .as_str()
-            .ok_or_else(|| anyhow::anyhow!("path required"))?;
+        let p: CodeOutlineParams = match parse_tool_params(params) {
+            Ok(p) => p,
+            Err(e) => return Ok(e),
+        };
+        let path = p.path.as_str();
         let pb = PathBuf::from(path);
         let lang = match Language::from_path(&pb) {
             Some(l) => l,
@@ -106,12 +126,12 @@ impl Tool for CodeExtractTool {
         })
     }
     async fn call(&self, params: Value, _cancel: CancellationToken) -> Result<ToolResult> {
-        let path = params["path"]
-            .as_str()
-            .ok_or_else(|| anyhow::anyhow!("path required"))?;
-        let symbol = params["symbol"]
-            .as_str()
-            .ok_or_else(|| anyhow::anyhow!("symbol required"))?;
+        let p: CodeExtractParams = match parse_tool_params(params) {
+            Ok(p) => p,
+            Err(e) => return Ok(e),
+        };
+        let path = p.path.as_str();
+        let symbol = p.symbol.as_str();
         let pb = PathBuf::from(path);
         let lang = Language::from_path(&pb)
             .ok_or_else(|| anyhow::anyhow!("Unsupported file type for code_extract: {path}"))?;
@@ -171,12 +191,12 @@ impl Tool for CodeQueryTool {
         })
     }
     async fn call(&self, params: Value, _cancel: CancellationToken) -> Result<ToolResult> {
-        let path = params["path"]
-            .as_str()
-            .ok_or_else(|| anyhow::anyhow!("path required"))?;
-        let query_text = params["query"]
-            .as_str()
-            .ok_or_else(|| anyhow::anyhow!("query required"))?;
+        let p: CodeQueryParams = match parse_tool_params(params) {
+            Ok(p) => p,
+            Err(e) => return Ok(e),
+        };
+        let path = p.path.as_str();
+        let query_text = p.query.as_str();
         let pb = PathBuf::from(path);
         let lang = Language::from_path(&pb)
             .ok_or_else(|| anyhow::anyhow!("Unsupported file type for code_query: {path}"))?;
