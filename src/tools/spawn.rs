@@ -31,6 +31,7 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use async_trait::async_trait;
+use serde::Deserialize;
 use serde_json::{Value, json};
 use tokio_util::sync::CancellationToken;
 
@@ -38,7 +39,18 @@ use crate::agent::Agent;
 use crate::config::Config;
 use crate::hooks::HookRegistry;
 use crate::orchestration::OrchestrationStore;
-use crate::tools::{Tool, ToolResult};
+use crate::tools::{Tool, ToolResult, parse_tool_params};
+
+#[derive(Deserialize)]
+struct SpawnSubagentParams {
+    task: String,
+    #[serde(default)]
+    profile: Option<String>,
+    #[serde(default)]
+    allowed_tools: Option<Vec<String>>,
+    #[serde(default)]
+    max_iterations: Option<u64>,
+}
 
 /// YYC-82: conservative default tool set for a child agent. Read-
 /// only inspection only — file writes, shell, pty, and recursive
@@ -155,23 +167,23 @@ impl Tool for SpawnSubagentTool {
     }
 
     async fn call(&self, params: Value, cancel: CancellationToken) -> Result<ToolResult> {
-        let task = match params["task"].as_str() {
-            Some(t) if !t.trim().is_empty() => t.to_string(),
-            _ => {
-                return Ok(ToolResult::err("task required + non-empty".to_string()));
-            }
+        let p: SpawnSubagentParams = match parse_tool_params(params) {
+            Ok(p) => p,
+            Err(e) => return Ok(e),
+        };
+        let task = if p.task.trim().is_empty() {
+            return Ok(ToolResult::err("task required + non-empty".to_string()));
+        } else {
+            p.task.clone()
         };
         // YYC-181: a named `profile` (built-in or user-defined in
         // `[tools.profiles]`) supersedes `allowed_tools`. Unknown
         // profile names surface as a tool error so the calling agent
         // sees a typed signal it can self-correct from.
-        let profile_name = params
-            .get("profile")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string());
+        let profile_name = p.profile.clone();
         let allowed: Vec<String> = if let Some(name) = &profile_name {
             match self.config.tools.resolve_profile(name) {
-                Some(p) => p.allowed.iter().map(|s| s.to_string()).collect(),
+                Some(prof) => prof.allowed.iter().map(|s| s.to_string()).collect(),
                 None => {
                     return Ok(ToolResult::err(format!(
                         "unknown tool capability profile `{name}`. \
@@ -180,16 +192,13 @@ impl Tool for SpawnSubagentTool {
                 }
             }
         } else {
-            match params.get("allowed_tools") {
-                Some(Value::Array(arr)) => arr
-                    .iter()
-                    .filter_map(|v| v.as_str().map(String::from))
-                    .collect(),
-                _ => default_allowed_tools(),
+            match p.allowed_tools.as_ref() {
+                Some(arr) => arr.clone(),
+                None => default_allowed_tools(),
             }
         };
-        let max_iter_raw = params["max_iterations"]
-            .as_u64()
+        let max_iter_raw = p
+            .max_iterations
             .unwrap_or(SUBAGENT_DEFAULT_ITERATIONS as u64) as u32;
         let max_iter = max_iter_raw.min(SUBAGENT_MAX_ITERATIONS_CAP);
 
@@ -372,7 +381,9 @@ mod tests {
             .await
             .expect("call ok");
         assert!(result.is_error);
-        assert!(result.output.contains("task required"));
+        // YYC-263: missing required field surfaces via parse_tool_params
+        // as a serde-shaped "tool params failed to validate" message.
+        assert!(result.output.contains("tool params failed to validate"));
     }
 
     #[tokio::test]
