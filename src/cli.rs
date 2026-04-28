@@ -106,6 +106,20 @@ pub enum Command {
         #[command(subcommand)]
         cmd: ConfigSubcommand,
     },
+    /// YYC-182: inspect workspace trust resolution.
+    Trust {
+        #[command(subcommand)]
+        cmd: TrustSubcommand,
+    },
+}
+
+/// YYC-182: subcommands under `vulcan trust`.
+#[derive(Subcommand, Debug)]
+pub enum TrustSubcommand {
+    /// Explain why a workspace path resolved to its current trust
+    /// profile. Defaults to the current working directory when no
+    /// path is given.
+    Why { path: Option<std::path::PathBuf> },
 }
 
 /// YYC-212: subcommands under `vulcan config`. PR-1 shipped the

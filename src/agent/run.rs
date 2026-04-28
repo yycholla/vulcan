@@ -139,6 +139,19 @@ impl Agent {
                 status: RunStatus::Running,
             },
         );
+        // YYC-182: stamp the trust profile up front so timeline
+        // viewers can see the policy posture for this turn.
+        let trust = &self.trust_profile;
+        let _ = self.run_store.append_event(
+            id,
+            RunEvent::TrustResolved {
+                level: trust.level.as_str().to_string(),
+                capability_profile: trust.capability_profile.clone(),
+                reason: trust.reason.clone(),
+                allow_indexing: trust.allow_indexing,
+                allow_persistence: trust.allow_persistence,
+            },
+        );
         let _ = self.run_store.append_event(
             id,
             RunEvent::PromptReceived {

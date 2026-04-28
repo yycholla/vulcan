@@ -160,6 +160,15 @@ fn format_event(ev: &RunEvent) -> String {
             artifact_id,
             artifact_type,
         } => format!("artifact {artifact_type} id={artifact_id}"),
+        RunEvent::TrustResolved {
+            level,
+            capability_profile,
+            reason,
+            allow_indexing,
+            allow_persistence,
+        } => format!(
+            "trust level={level} capability={capability_profile} indexing={allow_indexing} persistence={allow_persistence} ({reason})"
+        ),
     }
 }
 
