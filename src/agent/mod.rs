@@ -156,6 +156,10 @@ pub struct Agent {
     /// subagent summaries) here; an `ArtifactCreated` run-record
     /// event references them by id.
     pub(in crate::agent) artifact_store: Arc<dyn crate::artifact::ArtifactStore>,
+    /// YYC-182: trust profile resolved for the active workspace
+    /// at session start. Drives the default capability profile and
+    /// downstream persistence/indexing choices.
+    pub(in crate::agent) trust_profile: crate::trust::TrustProfile,
 }
 
 #[derive(Debug, Clone)]
@@ -412,14 +416,36 @@ impl Agent {
             ));
         }
 
-        // YYC-181: apply the requested tool capability profile (CLI
-        // flag wins over `tools.profile` in config). An unknown name
-        // is a hard error so misconfiguration surfaces at startup
-        // instead of as a silent missing tool later.
+        // YYC-182: resolve the workspace trust profile from config
+        // before tool-profile selection. The trust profile feeds
+        // the default capability profile when neither CLI flag nor
+        // `tools.profile` is set, so a sensitive workspace falls
+        // back to `readonly` instead of unrestricted.
+        let trust_profile = config.workspace_trust.resolve_for(&tool_context.cwd);
+
+        // YYC-181: apply the requested tool capability profile.
+        // Precedence: CLI flag > `tools.profile` in config > trust
+        // profile's default. An unknown name surfaces as a startup
+        // error so misconfiguration doesn't disguise itself as a
+        // silently missing tool later.
         let resolved_profile_name = tool_profile_override
             .as_deref()
-            .or(config.tools.profile.as_deref());
-        if let Some(name) = resolved_profile_name {
+            .map(str::to_string)
+            .or_else(|| config.tools.profile.clone())
+            .or_else(|| {
+                // YYC-182: only fall back to the trust profile's
+                // capability profile when the workspace was
+                // explicitly classified. Unknown workspaces still
+                // get the unrestricted registry today — locking
+                // them down by default ships in a follow-up once
+                // the user-facing migration story is in place.
+                if trust_profile.reason.contains("matched") {
+                    Some(trust_profile.capability_profile.clone())
+                } else {
+                    None
+                }
+            });
+        if let Some(name) = &resolved_profile_name {
             let profile = config.tools.resolve_profile(name).ok_or_else(|| {
                 anyhow::anyhow!(
                     "unknown tool capability profile `{name}`. Built-in: readonly, coding, \
@@ -497,6 +523,7 @@ impl Agent {
             run_store,
             current_run_id: None,
             artifact_store,
+            trust_profile,
         })
     }
 
@@ -596,6 +623,13 @@ impl Agent {
             .definitions_with_context(Some(&self.tool_context))
     }
 
+    /// YYC-182: resolved workspace trust profile. The TUI status
+    /// area, run-record provenance, and `vulcan trust why` (later)
+    /// all read from this.
+    pub fn trust_profile(&self) -> &crate::trust::TrustProfile {
+        &self.trust_profile
+    }
+
     /// YYC-180: persist a typed artifact and (when a run is in
     /// flight) emit a `RunEvent::ArtifactCreated` so the timeline
     /// references it. The artifact's `run_id` and `session_id` are
@@ -667,6 +701,10 @@ impl Agent {
             run_store: Arc::new(crate::run_record::InMemoryRunStore::default()),
             current_run_id: None,
             artifact_store: Arc::new(crate::artifact::InMemoryArtifactStore::new()),
+            trust_profile: crate::trust::TrustProfile::for_level_with_reason(
+                crate::trust::TrustLevel::Trusted,
+                "test fixture",
+            ),
         }
     }
 
