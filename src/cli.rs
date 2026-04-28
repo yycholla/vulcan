@@ -108,8 +108,10 @@ pub enum Command {
     },
 }
 
-/// YYC-212: subcommands under `vulcan config`. PR-1 implements
-/// the read-only paths; `set`/`unset`/`edit` land in follow-ups.
+/// YYC-212: subcommands under `vulcan config`. PR-1 shipped the
+/// read-only paths; PR-2 adds `set` / `unset` writers; future PRs
+/// land `edit` (interactive) and the `auth`/`provider`/`skills`
+/// nested namespaces.
 #[derive(Subcommand, Debug)]
 pub enum ConfigSubcommand {
     /// List every declared config field with its kind, default,
@@ -134,6 +136,22 @@ pub enum ConfigSubcommand {
     Show {
         #[arg(long)]
         reveal: bool,
+    },
+    /// Validate a value against the field's declared kind, then
+    /// write it to the right TOML file with comments preserved.
+    Set {
+        /// Dotted field path.
+        key: String,
+        /// New value. Bools accept `true|false|on|off|yes|no`;
+        /// ints parse as base 10; enums must match a declared
+        /// variant exactly.
+        value: String,
+    },
+    /// Remove a field's override from disk. Subsequent reads fall
+    /// back to the declared default.
+    Unset {
+        /// Dotted field path.
+        key: String,
     },
 }
 

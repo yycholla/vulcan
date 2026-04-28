@@ -27,7 +27,7 @@ use serde::Serialize;
 /// formatting on `get`, and the widget choice on `edit` (later
 /// PR). Kept intentionally simple — open-set strings cover the
 /// long tail.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub enum FieldKind {
     Bool,
     /// Bounded integer. `min`/`max` are inclusive, `None` means
@@ -35,6 +35,11 @@ pub enum FieldKind {
     Int {
         min: Option<i64>,
         max: Option<i64>,
+    },
+    /// Bounded float — for ratios and thresholds.
+    Float {
+        min: Option<f64>,
+        max: Option<f64>,
     },
     /// String picked from a fixed set.
     Enum {
@@ -145,7 +150,10 @@ const BUILTIN_FIELDS: &[ConfigField] = &[
     },
     ConfigField {
         path: "compaction.trigger_ratio",
-        kind: FieldKind::String { secret: false },
+        kind: FieldKind::Float {
+            min: Some(0.0),
+            max: Some(1.0),
+        },
         default: "0.85",
         help: "Token ratio (0.0 - 1.0) at which compaction fires.",
         file: ConfigFile::Config,
