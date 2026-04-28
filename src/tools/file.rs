@@ -16,6 +16,18 @@ pub struct ReadFile;
 /// realistic source file or text dump still passes.
 const READ_FILE_MAX_BYTES: u64 = 50 * 1024 * 1024;
 
+/// YYC-259: caps on the file-mutating tools so an oversized target
+/// (`edit_file` reads the whole file before patching) or oversized
+/// LLM-supplied payload (`write_file`) can't OOM the host.
+///
+/// `edit_file` matches `read_file`'s 50 MiB cap — same code path
+/// (read entire content into memory) so the same ceiling applies.
+/// `write_file` is tighter (5 MiB) because the LLM-controlled
+/// `content` parameter is the size we're actually concerned about;
+/// 5 MiB of generated content is already implausibly large.
+const EDIT_FILE_MAX_BYTES: u64 = READ_FILE_MAX_BYTES;
+const WRITE_FILE_MAX_CONTENT_BYTES: usize = 5 * 1024 * 1024;
+
 #[async_trait]
 impl Tool for ReadFile {
     fn name(&self) -> &str {
@@ -333,6 +345,18 @@ impl Tool for WriteFile {
             .ok_or_else(|| anyhow::anyhow!("path required"))?;
         let content = params["content"].as_str().unwrap_or("");
 
+        // YYC-259: cap LLM-supplied content size before any I/O so an
+        // oversized payload can't OOM the host or wedge the agent on
+        // a multi-second write.
+        if content.len() > WRITE_FILE_MAX_CONTENT_BYTES {
+            let mib = content.len() as f64 / (1024.0 * 1024.0);
+            let cap_mib = WRITE_FILE_MAX_CONTENT_BYTES as f64 / (1024.0 * 1024.0);
+            return Ok(ToolResult::err(format!(
+                "write_file refused: content is {} bytes ({mib:.1} MiB), exceeds cap of {cap_mib:.0} MiB. Split the write across smaller files or write incrementally.",
+                content.len()
+            )));
+        }
+
         // YYC-248: refuse writes to system credential / pseudo-fs paths
         // and to any user-credential or agent-state directory.
         if let Err(e) = fs_sandbox::validate_write(path) {
@@ -521,6 +545,21 @@ impl Tool for PatchFile {
             return Ok(ToolResult::err(e.to_string()));
         }
 
+        // YYC-259: refuse oversized targets before reading them into
+        // memory. Same cap as `read_file` since `edit_file` follows the
+        // same load-into-RAM path.
+        match tokio::fs::metadata(path).await {
+            Ok(meta) if meta.len() > EDIT_FILE_MAX_BYTES => {
+                let mib = meta.len() as f64 / (1024.0 * 1024.0);
+                let cap_mib = EDIT_FILE_MAX_BYTES as f64 / (1024.0 * 1024.0);
+                return Ok(ToolResult::err(format!(
+                    "edit_file refused: target {path} is {} bytes ({mib:.1} MiB), exceeds cap of {cap_mib:.0} MiB. Use targeted line-range edits via a different approach for files this large.",
+                    meta.len()
+                )));
+            }
+            Ok(_) | Err(_) => {} // missing target falls through to the existing read error.
+        }
+
         let content = tokio::fs::read_to_string(path).await?;
 
         if !content.contains(old) {
@@ -702,6 +741,66 @@ mod tests {
     use serde_json::json;
     use tempfile::tempdir;
     use tokio_util::sync::CancellationToken;
+
+    #[tokio::test]
+    async fn write_file_refuses_oversized_content() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("big.bin");
+        let path_str = path.to_string_lossy().to_string();
+        let oversized = "a".repeat(WRITE_FILE_MAX_CONTENT_BYTES + 1);
+        let tool = WriteFile::new(None);
+        let result = tool
+            .call(
+                json!({"path": path_str, "content": oversized}),
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+        assert!(result.is_error, "expected ToolResult::err");
+        assert!(result.output.contains("exceeds cap"));
+        assert!(!path.exists(), "file should not have been created");
+    }
+
+    #[tokio::test]
+    async fn write_file_accepts_at_cap_content() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("at-cap.bin");
+        let path_str = path.to_string_lossy().to_string();
+        // Exactly at cap is allowed; only > cap is refused.
+        let payload = "a".repeat(WRITE_FILE_MAX_CONTENT_BYTES);
+        let tool = WriteFile::new(None);
+        let result = tool
+            .call(
+                json!({"path": path_str, "content": payload}),
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+        assert!(!result.is_error);
+        assert!(path.exists());
+    }
+
+    #[tokio::test]
+    async fn edit_file_refuses_oversized_target() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("huge.txt");
+        // Build a sparse-style large file; on most filesystems this
+        // returns immediately without filling the disk.
+        let f = std::fs::File::create(&path).unwrap();
+        f.set_len(EDIT_FILE_MAX_BYTES + 1).unwrap();
+        drop(f);
+        let path_str = path.to_string_lossy().to_string();
+        let tool = PatchFile::new(None);
+        let result = tool
+            .call(
+                json!({"path": path_str, "old_string": "x", "new_string": "y"}),
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+        assert!(result.is_error, "expected ToolResult::err");
+        assert!(result.output.contains("exceeds cap"));
+    }
 
     #[tokio::test]
     async fn atomic_write_replaces_existing_file_atomically() {
