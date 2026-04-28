@@ -230,6 +230,7 @@ pub mod profile;
 pub mod shell;
 pub mod spawn;
 pub mod web;
+pub mod web_ssrf;
 
 pub use profile::{ToolProfile, builtin_profile, builtin_profiles};
 
