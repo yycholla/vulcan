@@ -16,14 +16,31 @@
 
 use crate::code::Language;
 use crate::code::lsp::LspManager;
-use crate::tools::{Tool, ToolResult};
+use crate::tools::{Tool, ToolResult, parse_tool_params};
 use anyhow::Result;
 use async_trait::async_trait;
+use serde::Deserialize;
 use serde_json::{Value, json};
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 use tree_sitter::{Parser as TsParser, Query, QueryCursor, StreamingIterator};
+
+#[derive(Deserialize)]
+struct ReplaceFunctionBodyParams {
+    path: String,
+    symbol: String,
+    new_body: String,
+}
+
+#[derive(Deserialize)]
+struct RenameSymbolParams {
+    path: String,
+    line: u64,
+    #[serde(default)]
+    character: u64,
+    new_name: String,
+}
 
 /// Find the body node of a function/method named `symbol` in `source`.
 /// Returns `(body_start_byte, body_end_byte)` so the caller can splice.
@@ -111,15 +128,13 @@ impl Tool for ReplaceFunctionBodyTool {
         })
     }
     async fn call(&self, params: Value, _cancel: CancellationToken) -> Result<ToolResult> {
-        let path = params["path"]
-            .as_str()
-            .ok_or_else(|| anyhow::anyhow!("path required"))?;
-        let symbol = params["symbol"]
-            .as_str()
-            .ok_or_else(|| anyhow::anyhow!("symbol required"))?;
-        let new_body = params["new_body"]
-            .as_str()
-            .ok_or_else(|| anyhow::anyhow!("new_body required"))?;
+        let p: ReplaceFunctionBodyParams = match parse_tool_params(params) {
+            Ok(p) => p,
+            Err(e) => return Ok(e),
+        };
+        let path = p.path.as_str();
+        let symbol = p.symbol.as_str();
+        let new_body = p.new_body.as_str();
         let pb = PathBuf::from(path);
         let lang = match Language::from_path(&pb) {
             Some(l) => l,
@@ -184,16 +199,14 @@ impl Tool for RenameSymbolTool {
         })
     }
     async fn call(&self, params: Value, _cancel: CancellationToken) -> Result<ToolResult> {
-        let path = params["path"]
-            .as_str()
-            .ok_or_else(|| anyhow::anyhow!("path required"))?;
-        let line = params["line"]
-            .as_u64()
-            .ok_or_else(|| anyhow::anyhow!("line required"))?;
-        let character = params["character"].as_u64().unwrap_or(0);
-        let new_name = params["new_name"]
-            .as_str()
-            .ok_or_else(|| anyhow::anyhow!("new_name required"))?;
+        let p: RenameSymbolParams = match parse_tool_params(params) {
+            Ok(p) => p,
+            Err(e) => return Ok(e),
+        };
+        let path = p.path.as_str();
+        let line = p.line;
+        let character = p.character;
+        let new_name = p.new_name.as_str();
         let pb = PathBuf::from(path);
         let lang = match Language::from_path(&pb) {
             Some(l) => l,
