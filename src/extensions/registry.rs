@@ -195,6 +195,17 @@ impl ExtensionRegistry {
         home: &std::path::Path,
         install_state: &dyn super::install_state::InstallStateStore,
     ) -> (usize, usize) {
+        self.load_from_store_with_version(home, install_state, env!("CARGO_PKG_VERSION"))
+    }
+
+    /// Test-friendly variant — `running_version` lets fixtures
+    /// pin a value instead of inheriting `CARGO_PKG_VERSION`.
+    pub fn load_from_store_with_version(
+        &self,
+        home: &std::path::Path,
+        install_state: &dyn super::install_state::InstallStateStore,
+        running_version: &str,
+    ) -> (usize, usize) {
         let discovered = super::store::discover(home);
         let mut ok = 0usize;
         let mut broken = 0usize;
@@ -202,6 +213,26 @@ impl ExtensionRegistry {
             let dir_id = entry.dir_id.clone();
             match (entry.manifest, entry.parse_error) {
                 (Some(manifest), _) => {
+                    // YYC-233: refuse manifests demanding a
+                    // newer Vulcan than the runtime. Surface as
+                    // Broken with the verifier's reason; record
+                    // the same on the install_state row.
+                    if let Err(err) = super::verify::verify_compatible(&manifest, running_version) {
+                        let reason = err.to_string();
+                        let mut meta = ExtensionMetadata::new(
+                            manifest.id.clone(),
+                            manifest.name.clone(),
+                            manifest.version.clone(),
+                            crate::extensions::ExtensionSource::LocalManifest,
+                        );
+                        meta.status = ExtensionStatus::Broken;
+                        meta.broken_reason = Some(reason.clone());
+                        self.upsert(meta);
+                        let _ = install_state.record_load_error(&manifest.id, &reason);
+                        broken += 1;
+                        continue;
+                    }
+
                     let mut meta = ExtensionMetadata::new(
                         manifest.id.clone(),
                         manifest.name.clone(),
@@ -581,6 +612,33 @@ kind = "builtin"
             reg.get("active-tool").unwrap().status,
             ExtensionStatus::Active
         );
+    }
+
+    #[test]
+    fn load_from_store_rejects_manifest_demanding_newer_vulcan() {
+        let dir = tempfile::tempdir().unwrap();
+        write_manifest(
+            dir.path().join("extensions/needs-future/extension.toml"),
+            r#"
+id = "needs-future"
+name = "Needs Future"
+version = "0.1.0"
+min_vulcan_version = "9.0.0"
+
+[entry]
+kind = "builtin"
+"#,
+        );
+        let install =
+            crate::extensions::install_state::SqliteInstallStateStore::try_open_in_memory()
+                .unwrap();
+        let reg = ExtensionRegistry::new();
+        let (ok, broken) = reg.load_from_store_with_version(dir.path(), &install, "0.1.0");
+        assert_eq!(ok, 0);
+        assert_eq!(broken, 1);
+        let got = reg.get("needs-future").unwrap();
+        assert_eq!(got.status, ExtensionStatus::Broken);
+        assert!(got.broken_reason.as_deref().unwrap().contains("Vulcan ≥"));
     }
 
     #[test]
