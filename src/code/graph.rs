@@ -12,10 +12,10 @@
 
 use crate::code::{Language, ParserCache};
 use anyhow::{Context, Result};
+use parking_lot::Mutex;
 use rusqlite::{Connection, params};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::Mutex;
 use tree_sitter::{Query, QueryCursor, StreamingIterator};
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -93,7 +93,7 @@ impl CodeGraph {
         let walker = ignore::WalkBuilder::new(&self.workspace_root)
             .standard_filters(true)
             .build();
-        let mut conn = self.conn.lock().unwrap();
+        let mut conn = self.conn.lock();
         let tx = conn.transaction()?;
         let mut files = 0usize;
         let mut symbols = 0usize;
@@ -145,7 +145,7 @@ impl CodeGraph {
 
     /// Look up symbols by exact name. Used by `find_symbol` tool.
     pub fn find_by_name(&self, name: &str, limit: usize) -> Result<Vec<SymbolRow>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock();
         let mut stmt = conn.prepare(
             "SELECT file, language, kind, name, start_line, end_line
              FROM symbols WHERE name = ? ORDER BY file LIMIT ?",
@@ -167,7 +167,7 @@ impl CodeGraph {
 
     /// Total indexed symbol count — used by the index status report.
     pub fn count(&self) -> Result<usize> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock();
         let n: i64 = conn.query_row("SELECT COUNT(*) FROM symbols", [], |r| r.get(0))?;
         Ok(n as usize)
     }
