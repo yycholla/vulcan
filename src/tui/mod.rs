@@ -61,7 +61,11 @@ fn short_id(id: &str) -> String {
     id.chars().take(8).collect()
 }
 
-pub async fn run_tui(config: &Config, resume: ResumeTarget) -> Result<()> {
+pub async fn run_tui(
+    config: &Config,
+    resume: ResumeTarget,
+    tool_profile: Option<String>,
+) -> Result<()> {
     let mut terminal = init::init_terminal()?;
 
     // keyboard
@@ -107,6 +111,7 @@ pub async fn run_tui(config: &Config, resume: ResumeTarget) -> Result<()> {
         Agent::builder(config)
             .with_hooks(hook_reg)
             .with_pause_channel(pause_tx_for_agent)
+            .with_tool_profile(tool_profile)
             .build()
             .await?,
     ));

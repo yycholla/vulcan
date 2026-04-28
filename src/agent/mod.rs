@@ -161,6 +161,10 @@ pub struct AgentBuilder<'a> {
     hooks: HookRegistry,
     pause_tx: Option<PauseSender>,
     max_iterations: Option<u32>,
+    /// YYC-181: tool capability profile name to apply at session
+    /// start. CLI flag overrides config; `None` means use whatever
+    /// the config supplies (or no profile if unset).
+    tool_profile: Option<String>,
 }
 
 impl<'a> AgentBuilder<'a> {
@@ -179,8 +183,23 @@ impl<'a> AgentBuilder<'a> {
         self
     }
 
+    /// YYC-181: apply a named tool capability profile at session
+    /// start. Pass `None` to fall back to `tools.profile` from
+    /// config; pass `Some(name)` to override.
+    pub fn with_tool_profile(mut self, profile: Option<String>) -> Self {
+        self.tool_profile = profile;
+        self
+    }
+
     pub async fn build(self) -> Result<Agent> {
-        Agent::build_from_parts(self.config, self.hooks, self.pause_tx, self.max_iterations).await
+        Agent::build_from_parts(
+            self.config,
+            self.hooks,
+            self.pause_tx,
+            self.max_iterations,
+            self.tool_profile,
+        )
+        .await
     }
 }
 
@@ -191,6 +210,7 @@ impl Agent {
             hooks: HookRegistry::new(),
             pause_tx: None,
             max_iterations: None,
+            tool_profile: None,
         }
     }
 
@@ -207,6 +227,7 @@ impl Agent {
         mut hooks: HookRegistry,
         pause_tx: Option<PauseSender>,
         max_iterations: Option<u32>,
+        tool_profile_override: Option<String>,
     ) -> Result<Self> {
         // Local / self-hosted endpoints don't require auth; allow empty
         // string in that case (matches `switch_provider` semantics).
@@ -375,6 +396,23 @@ impl Agent {
                     config.tools.native_enforcement,
                 ),
             ));
+        }
+
+        // YYC-181: apply the requested tool capability profile (CLI
+        // flag wins over `tools.profile` in config). An unknown name
+        // is a hard error so misconfiguration surfaces at startup
+        // instead of as a silent missing tool later.
+        let resolved_profile_name = tool_profile_override
+            .as_deref()
+            .or(config.tools.profile.as_deref());
+        if let Some(name) = resolved_profile_name {
+            let profile = config.tools.resolve_profile(name).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "unknown tool capability profile `{name}`. Built-in: readonly, coding, \
+                     reviewer, gateway-safe. User-defined go under [tools.profiles.<name>]."
+                )
+            })?;
+            tools.apply_profile(&profile);
         }
 
         // YYC-107: drop tools that aren't relevant to this workspace.

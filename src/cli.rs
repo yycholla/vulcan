@@ -20,6 +20,12 @@ pub struct Cli {
     /// Lists recent sessions — arrow-key to select, Enter to resume.
     #[arg(long, global = true)]
     pub resume: bool,
+
+    /// YYC-181: start the session under a named tool capability
+    /// profile (e.g. `readonly`, `coding`, `reviewer`,
+    /// `gateway-safe`). Overrides `tools.profile` from config.
+    #[arg(long, global = true, value_name = "NAME")]
+    pub profile: Option<String>,
 }
 
 #[derive(Subcommand, Debug)]
