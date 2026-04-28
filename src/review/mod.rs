@@ -9,13 +9,62 @@
 //!
 //! ## Deliberately deferred
 //!
-//! - Built-in critic prompt template + agent driver (PR-2).
 //! - `vulcan review plan|diff|run` CLI surface (PR-3).
-//! - Persisting the report as a YYC-180 `Report` artifact at the
-//!   end of a review run (PR-2).
 
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
+
+mod runner;
+pub use runner::{ReviewOutcome, persist_report, run_review};
+
+/// System prompt for a bounded critic pass. Drives a tight,
+/// findings-first markdown response that [`parse_markdown`]
+/// understands. Tone is direct because review mode is meant to
+/// surface concrete risk, not generic praise.
+pub const CRITIC_SYSTEM_PROMPT: &str = "\
+You are a bounded code-review critic. The user shows you a plan, diff, run record, \
+or issue spec; your job is to surface concrete risk and gaps. Do not apply patches \
+or claim to mutate files — review mode disables write tools.
+
+Reply in this exact Markdown shape:
+
+# <Kind> review
+
+## Findings
+
+- **[severity]** one-line summary (`path/to/file.rs:LINE`)
+  - evidence: short factual quote or observation
+  - suggestion: concrete remediation, ideally a specific change
+
+## Open questions
+
+- one bullet per honest unknown that would change your judgement
+
+## Residual risks
+
+- one bullet per risk that survives even if your suggestions land
+
+Severities: info, low, medium, high, critical. Be direct; if the change is fine, \
+say so under Findings as `_No findings._` and keep Open questions / Residual risks \
+empty. Never invent file paths.";
+
+/// Build the user-message body sent alongside [`CRITIC_SYSTEM_PROMPT`].
+/// The kind tag goes in the heading the model is asked to mirror;
+/// the target text is the plan/diff/run summary the user wants
+/// reviewed.
+pub fn build_critic_user_message(kind: &ReviewKind, target: &str) -> String {
+    let kind_str = match kind {
+        ReviewKind::Plan => "plan",
+        ReviewKind::Diff => "diff",
+        ReviewKind::Run => "run",
+        ReviewKind::Issue => "issue",
+        ReviewKind::Other(s) => s.as_str(),
+    };
+    format!(
+        "Review this {kind_str}. Reply in the structured Markdown format. \
+         Do not echo the input back.\n\n--- begin {kind_str} ---\n{target}\n--- end {kind_str} ---\n"
+    )
+}
 
 /// Coarse severity ladder. Higher tiers are blocking; lower tiers
 /// are advisory. Kept simple — finer grades can land per-team

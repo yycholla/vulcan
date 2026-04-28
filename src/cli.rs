@@ -111,6 +111,30 @@ pub enum Command {
         #[command(subcommand)]
         cmd: TrustSubcommand,
     },
+    /// YYC-190: bounded critic pass on a plan, diff, run id, or
+    /// arbitrary text. Runs read-only (`reviewer` profile).
+    Review {
+        #[command(subcommand)]
+        cmd: ReviewSubcommand,
+    },
+}
+
+/// YYC-190: subcommands under `vulcan review`.
+#[derive(Subcommand, Debug)]
+pub enum ReviewSubcommand {
+    /// Critique an implementation plan supplied as a path or `-`
+    /// for stdin.
+    Plan {
+        /// File path containing the plan, or `-` for stdin.
+        target: String,
+    },
+    /// Critique a diff supplied as a path or `-` for stdin.
+    Diff {
+        /// File path containing the diff, or `-` for stdin.
+        target: String,
+    },
+    /// Critique a past run by id (UUID or 8-char prefix).
+    Run { id: String },
 }
 
 /// YYC-182: subcommands under `vulcan trust`.
