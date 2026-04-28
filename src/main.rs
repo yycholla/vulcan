@@ -178,6 +178,10 @@ async fn main() -> anyhow::Result<()> {
             init_cli_logging();
             vulcan::cli_policy::run(cmd).await?;
         }
+        Some(Command::Replay { cmd }) => {
+            init_cli_logging();
+            vulcan::cli_replay::run(cmd).await?;
+        }
     }
 
     Ok(())
