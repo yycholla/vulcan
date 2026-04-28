@@ -296,7 +296,7 @@ impl Agent {
         let mut tools = ToolRegistry::new_with_diff_and_lsp(
             Some(diff_sink.clone()),
             Some(lsp_manager.clone()),
-            cwd,
+            cwd.clone(),
         );
 
         // YYC-81: ask_user is only useful in interactive (TUI) mode.
@@ -355,7 +355,7 @@ impl Agent {
                 Err(e) => tracing::warn!("embedding index unavailable: {e}"),
             }
         }
-        let skills = Arc::new(SkillRegistry::new(&config.skills_dir));
+        let skills = Arc::new(SkillRegistry::default_for(&config.skills_dir, Some(&cwd)));
         let memory = SessionStore::try_new()?;
         let context =
             ContextManager::with_config(provider.max_context(), config.compaction.clone());

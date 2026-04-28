@@ -10,10 +10,7 @@ use serde_json::Value;
 use std::sync::Arc;
 
 fn empty_skills() -> Arc<SkillRegistry> {
-    // Point at a path that doesn't exist so the registry is empty.
-    Arc::new(SkillRegistry::new(&std::path::PathBuf::from(
-        "/tmp/vulcan-test-skills-nonexistent",
-    )))
+    Arc::new(SkillRegistry::empty())
 }
 
 fn asst_with_tool_calls(ids: &[&str]) -> Message {

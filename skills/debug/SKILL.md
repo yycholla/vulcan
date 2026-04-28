@@ -1,7 +1,6 @@
 ---
 name: debug
-description: Systematic 4-phase debugging workflow
-triggers: ["debug this", "bug", "error", "doesn't work", "failing"]
+description: Systematic 4-phase debugging workflow — use when the user reports a bug, error, failure, regression, or asks for help locating a root cause
 ---
 
 ## Debugging Workflow

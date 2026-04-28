@@ -43,9 +43,7 @@ impl LLMProvider for ProviderHandle {
 }
 
 fn empty_skills() -> Arc<SkillRegistry> {
-    Arc::new(SkillRegistry::new(&std::path::PathBuf::from(
-        "/tmp/vulcan-integration-skills-nonexistent",
-    )))
+    Arc::new(SkillRegistry::empty())
 }
 
 fn agent_with_mock() -> (Agent, Arc<MockProvider>) {
