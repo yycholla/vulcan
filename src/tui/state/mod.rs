@@ -546,7 +546,7 @@ impl AppState {
     /// value so the renderer doesn't hold the mutex across draws.
     pub fn latest_diff(&self) -> Option<crate::tools::EditDiff> {
         let sink = self.diff_sink.as_ref()?;
-        sink.lock().clone()
+        sink.latest()
     }
 
     /// Cumulative token count (input + output across all turns). Used by

@@ -78,9 +78,9 @@ impl HookHandler for DiagnosticsHook {
             // a per-call diff (older paths or tools we haven't migrated).
             // Validate against the matching tool name so a stale entry
             // can't trigger diagnostics for an unrelated call.
-            match self.diff_sink.lock().clone() {
-                Some(d) if d.tool == tool => d,
-                _ => return Ok(HookOutcome::Continue),
+            match self.diff_sink.latest_for_tool(tool) {
+                Some(d) => d,
+                None => return Ok(HookOutcome::Continue),
             }
         };
         // Defense against stale sink contents on the fallback path —
