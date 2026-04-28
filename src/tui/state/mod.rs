@@ -205,6 +205,12 @@ pub struct AppState {
     /// When the TUI session started — used for elapsed-time displays.
     pub session_started: std::time::Instant,
     pub orchestration: OrchestrationState,
+    /// YYC-207: live snapshot store for child agent runs. When
+    /// populated, `subagent_tiles` / `tree_nodes` consult it for
+    /// real records; when `None`, those methods fall back to the
+    /// legacy single-"main" tile shape so demo / test paths still
+    /// render coherently.
+    pub orchestration_store: Option<std::sync::Arc<crate::orchestration::OrchestrationStore>>,
 
     /// Optional shared handle to the audit-log hook's ring buffer. When
     /// present, the trading-floor tool-log pane renders from it; otherwise it
@@ -366,6 +372,7 @@ impl AppState {
             provider_errors_total: 0,
             session_started: std::time::Instant::now(),
             orchestration: OrchestrationState::default(),
+            orchestration_store: None,
 
             audit_log: None,
             pending_pause: None,
@@ -671,6 +678,8 @@ impl AppState {
     }
 
     pub fn subagent_tiles(&self) -> Vec<SubAgentTile> {
+        // Build the orchestrator's own tile from current phase /
+        // task / events.
         let mut log = Vec::new();
         log.push(self.orchestration.active_task.clone());
         if let Some(tool) = &self.orchestration.current_tool {
@@ -682,14 +691,24 @@ impl AppState {
         if let Some(reasoning) = self.latest_reasoning() {
             log.push(format!("reasoning · {}", short_text(reasoning, 48)));
         }
-        vec![SubAgentTile {
+        let mut tiles = vec![SubAgentTile {
             name: "main".into(),
             role: "orchestrator".into(),
             state: self.orchestration.phase.label().into(),
             color: self.orchestration.phase.color(),
             log,
             cpu: Vec::new(),
-        }]
+        }];
+
+        // YYC-207: append a tile per recent child run from the
+        // orchestration store, when wired. Newest first so active
+        // children show up at the top of the mesh.
+        if let Some(store) = &self.orchestration_store {
+            for record in store.recent(8) {
+                tiles.push(child_tile_from(&record));
+            }
+        }
+        tiles
     }
 
     pub fn ticker_cells(&self) -> Vec<TickerCell> {
@@ -736,11 +755,27 @@ impl AppState {
                 active: true,
             });
         }
+        // YYC-207: append child runs as depth-1 nodes under root.
+        // Active (non-terminal) records highlight; terminal ones
+        // surface their final status symbol.
+        if let Some(store) = &self.orchestration_store {
+            for record in store.recent(8) {
+                nodes.push(child_tree_node(&record));
+            }
+        }
         nodes
     }
 
     pub fn delegated_worker_count(&self) -> usize {
-        0
+        // YYC-207: live child count — non-terminal records only.
+        match &self.orchestration_store {
+            Some(store) => store
+                .list()
+                .iter()
+                .filter(|r| !r.status.is_terminal())
+                .count(),
+            None => 0,
+        }
     }
 
     pub fn branch_count(&self) -> usize {
@@ -869,6 +904,69 @@ fn short_text(text: &str, max: usize) -> String {
         let mut out: String = text.chars().take(max).collect();
         out.push('…');
         out
+    }
+}
+
+/// YYC-207: project a `ChildAgentRecord` into the SubAgentTile
+/// shape the TiledMesh view renders.
+fn child_tile_from(record: &crate::orchestration::ChildAgentRecord) -> SubAgentTile {
+    use crate::orchestration::ChildStatus;
+    let (state_label, color) = match record.status {
+        ChildStatus::Pending => ("pending", Palette::MUTED),
+        ChildStatus::Running => ("running", Palette::BLUE),
+        ChildStatus::Blocked => ("blocked", Palette::YELLOW),
+        ChildStatus::Completed => ("done", Palette::GREEN),
+        ChildStatus::Failed => ("error", Palette::RED),
+        ChildStatus::Cancelled => ("cancelled", Palette::MUTED),
+    };
+    let mut log = Vec::new();
+    log.push(short_text(&record.task_summary, 60).to_string());
+    if let Some(phase) = &record.current_phase {
+        log.push(format!("phase · {phase}"));
+    }
+    log.push(format!(
+        "budget · {}/{}",
+        record.iterations_used, record.max_iterations
+    ));
+    if let Some(err) = &record.error {
+        log.push(format!("error · {}", short_text(err, 48)));
+    } else if let Some(summary) = &record.final_summary {
+        log.push(format!("summary · {}", short_text(summary, 48)));
+    }
+    let id_short: String = record.id.to_string().chars().take(8).collect();
+    SubAgentTile {
+        name: format!("child:{id_short}"),
+        role: "subagent".into(),
+        state: state_label.into(),
+        color,
+        log,
+        cpu: Vec::new(),
+    }
+}
+
+/// YYC-207: project a `ChildAgentRecord` into a TreeNode for the
+/// TreeOfThought view. Non-terminal records are marked active so
+/// the tree highlights the live frontier.
+fn child_tree_node(record: &crate::orchestration::ChildAgentRecord) -> TreeNode {
+    use crate::orchestration::ChildStatus;
+    let (symbol, color) = match record.status {
+        ChildStatus::Pending => ("○", Palette::MUTED),
+        ChildStatus::Running => ("●", Palette::BLUE),
+        ChildStatus::Blocked => ("⏸", Palette::YELLOW),
+        ChildStatus::Completed => ("✓", Palette::GREEN),
+        ChildStatus::Failed => ("✗", Palette::RED),
+        ChildStatus::Cancelled => ("⊘", Palette::MUTED),
+    };
+    let id_short: String = record.id.to_string().chars().take(8).collect();
+    TreeNode {
+        depth: 1,
+        label: format!(
+            "└─ child:{id_short} · {}",
+            short_text(&record.task_summary, 40)
+        ),
+        state: symbol.into(),
+        color,
+        active: !record.status.is_terminal(),
     }
 }
 

@@ -359,6 +359,77 @@ fn push_tool_start_with_carries_params_summary() {
     }
 }
 
+// YYC-207: with no orchestration store wired, subagent_tiles
+// returns the legacy single "main" tile so demo / first-launch
+// rendering stays coherent.
+#[test]
+fn subagent_tiles_legacy_when_no_store() {
+    let app = AppState::new("test-model".into(), 128_000);
+    let tiles = app.subagent_tiles();
+    assert_eq!(tiles.len(), 1);
+    assert_eq!(tiles[0].name, "main");
+}
+
+// YYC-207: a populated store surfaces one tile per recent record
+// alongside the orchestrator's "main" tile.
+#[test]
+fn subagent_tiles_include_child_records_from_store() {
+    use crate::orchestration::OrchestrationStore;
+    use std::sync::Arc;
+    let store = Arc::new(OrchestrationStore::new());
+    let r1 = store.register(None, "summarize provider parser", 8);
+    store.update_status(r1.id, crate::orchestration::ChildStatus::Running);
+    store.update_phase(r1.id, "thinking");
+    let r2 = store.register(None, "review hooks", 4);
+    store.mark_completed(r2.id, "no hot spots", 3);
+
+    let mut app = AppState::new("test-model".into(), 128_000);
+    app.orchestration_store = Some(store);
+    let tiles = app.subagent_tiles();
+    assert_eq!(tiles.len(), 3, "main + 2 children");
+    assert_eq!(tiles[0].name, "main");
+    // Newest first: r2 (completed) before r1 (running) since
+    // recent() reverses insertion order.
+    assert!(tiles[1].name.starts_with("child:"));
+    assert_eq!(tiles[1].state, "done");
+    assert_eq!(tiles[2].state, "running");
+}
+
+// YYC-207: tree_nodes appends child records as depth-1 nodes; the
+// non-terminal record is marked active.
+#[test]
+fn tree_nodes_include_child_records_from_store() {
+    use crate::orchestration::OrchestrationStore;
+    use std::sync::Arc;
+    let store = Arc::new(OrchestrationStore::new());
+    let r = store.register(None, "review", 4);
+    store.update_status(r.id, crate::orchestration::ChildStatus::Running);
+    let mut app = AppState::new("test-model".into(), 128_000);
+    app.orchestration_store = Some(store);
+    let nodes = app.tree_nodes();
+    let child = nodes
+        .iter()
+        .find(|n| n.label.contains("child:"))
+        .expect("child node");
+    assert_eq!(child.depth, 1);
+    assert!(child.active);
+}
+
+// YYC-207: delegated_worker_count counts only non-terminal records.
+#[test]
+fn delegated_worker_count_filters_terminal_records() {
+    use crate::orchestration::OrchestrationStore;
+    use std::sync::Arc;
+    let store = Arc::new(OrchestrationStore::new());
+    let r1 = store.register(None, "live", 4);
+    store.update_status(r1.id, crate::orchestration::ChildStatus::Running);
+    let r2 = store.register(None, "done", 4);
+    store.mark_completed(r2.id, "ok", 1);
+    let mut app = AppState::new("test-model".into(), 128_000);
+    app.orchestration_store = Some(store);
+    assert_eq!(app.delegated_worker_count(), 1);
+}
+
 #[test]
 fn finish_tool_with_stamps_preview_and_timing() {
     let mut m = ChatMessage::new(ChatRole::Agent, "");
