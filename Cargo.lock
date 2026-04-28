@@ -5513,6 +5513,7 @@ dependencies = [
  "insta",
  "lsp-types",
  "parking_lot",
+ "percent-encoding",
  "portable-pty",
  "r2d2",
  "r2d2_sqlite",

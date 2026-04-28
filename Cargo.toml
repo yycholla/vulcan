@@ -139,6 +139,9 @@ lsp-types = "0.97"
 ignore = "0.4.25"
 # Glob matching for the in-process search_files fallback (YYC-260).
 globset = "0.4"
+# RFC 3986 percent-encoding for query strings (YYC-253). Replaces
+# the hand-rolled urlencoding() in web.rs.
+percent-encoding = "2"
 
 # Gateway daemon HTTP stack. Optional — only linked under `gateway`.
 axum = { version = "0.8.9", optional = true }
