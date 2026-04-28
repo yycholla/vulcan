@@ -100,6 +100,41 @@ pub enum Command {
         #[command(subcommand)]
         cmd: KnowledgeSubcommand,
     },
+    /// YYC-212: unified config CLI. List, get, and inspect every
+    /// known config field by dotted path.
+    Config {
+        #[command(subcommand)]
+        cmd: ConfigSubcommand,
+    },
+}
+
+/// YYC-212: subcommands under `vulcan config`. PR-1 implements
+/// the read-only paths; `set`/`unset`/`edit` land in follow-ups.
+#[derive(Subcommand, Debug)]
+pub enum ConfigSubcommand {
+    /// List every declared config field with its kind, default,
+    /// and target file.
+    List,
+    /// Print the resolved value for a single dotted key (e.g.
+    /// `tools.native_enforcement`). Falls back to the declared
+    /// default when the field is unset.
+    Get {
+        /// Dotted field path.
+        key: String,
+        /// Reveal secret values instead of redacting.
+        #[arg(long)]
+        reveal: bool,
+    },
+    /// Print the absolute paths of the config files Vulcan reads
+    /// from. Honors the `~/.vulcan/` split (config/keybinds/
+    /// providers).
+    Path,
+    /// Dump the merged in-memory config (defaults + files + env).
+    /// Secret fields print redacted unless `--reveal`.
+    Show {
+        #[arg(long)]
+        reveal: bool,
+    },
 }
 
 /// YYC-194: subcommands under `vulcan knowledge`.
