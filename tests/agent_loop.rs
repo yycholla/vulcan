@@ -114,6 +114,38 @@ async fn run_record_lifecycle_events_land_for_completed_turn() {
 }
 
 #[tokio::test]
+async fn run_record_captures_streaming_turn_with_tui_origin() {
+    // YYC-179 acceptance: the streaming path (TUI primary consumer)
+    // produces a run record with `RunOrigin::Tui`, lifecycle events,
+    // and a streaming=true ProviderRequest event so dashboards can
+    // distinguish it from buffered turns.
+    let (mut agent, mock) = agent_with_mock();
+    mock.enqueue_text("streamed reply.");
+    let (tx, _rx) = mpsc::channel(vulcan::provider::STREAM_CHANNEL_CAPACITY);
+    let cancel = CancellationToken::new();
+    let _ = agent
+        .run_prompt_stream_with_cancel("hi over stream", tx, cancel)
+        .await
+        .unwrap();
+
+    let store = agent.run_store();
+    let recent = store.recent(1).unwrap();
+    let record = &recent[0];
+    assert_eq!(record.status, vulcan::run_record::RunStatus::Completed);
+    assert!(matches!(record.origin, vulcan::run_record::RunOrigin::Tui));
+    let saw_streaming_request = record.events.iter().any(|e| {
+        matches!(
+            e,
+            vulcan::run_record::RunEvent::ProviderRequest {
+                streaming: true,
+                ..
+            }
+        )
+    });
+    assert!(saw_streaming_request, "expected streaming ProviderRequest");
+}
+
+#[tokio::test]
 async fn run_record_captures_tool_call_with_error_distinguishable_from_success() {
     // YYC-179 acceptance: tool errors must be distinguishable from
     // successful tool calls in the run record (is_error: true). This

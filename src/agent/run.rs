@@ -119,7 +119,11 @@ impl Agent {
     /// default. Returns the new `RunId` so the caller can attach
     /// further events.
     fn begin_run_record(&mut self, input: &str) {
-        let mut record = RunRecord::new(RunOrigin::Cli);
+        self.begin_run_record_with_origin(input, RunOrigin::Cli);
+    }
+
+    fn begin_run_record_with_origin(&mut self, input: &str, origin: RunOrigin) {
+        let mut record = RunRecord::new(origin);
         record.session_id = Some(self.session_id.clone());
         record.model = Some(self.provider_config.model.clone());
         let id = record.id;
@@ -384,6 +388,31 @@ impl Agent {
     /// this so the Ctrl+C handler can fire the token directly without
     /// blocking on the agent mutex held by the in-flight prompt task.
     pub async fn run_prompt_stream_with_cancel(
+        &mut self,
+        input: &str,
+        ui_tx: mpsc::Sender<StreamEvent>,
+        cancel: CancellationToken,
+    ) -> Result<String> {
+        // YYC-179: open a run record for the streaming turn too. The
+        // TUI is the primary streaming consumer, so the resulting
+        // origin is `Tui` rather than `Cli`.
+        self.begin_run_record_with_origin(input, RunOrigin::Tui);
+        let result = self.run_prompt_stream_body(input, ui_tx, cancel).await;
+        match &result {
+            Ok(text) if text == "Cancelled" => {
+                self.end_run_record(RunStatus::Cancelled, None);
+            }
+            Ok(_) => {
+                self.end_run_record(RunStatus::Completed, None);
+            }
+            Err(e) => {
+                self.end_run_record(RunStatus::Failed, Some(e.to_string()));
+            }
+        }
+        result
+    }
+
+    async fn run_prompt_stream_body(
         &mut self,
         input: &str,
         ui_tx: mpsc::Sender<StreamEvent>,
@@ -758,6 +787,14 @@ impl Agent {
             }
         });
 
+        // YYC-179: record the provider request before dispatch so a
+        // transport error still leaves a breadcrumb on the timeline.
+        self.record_run_event(RunEvent::ProviderRequest {
+            model: self.provider_config.model.clone(),
+            streaming: true,
+            message_count: outgoing.len(),
+        });
+
         if let Err(e) = self
             .provider
             .chat_stream(outgoing, tool_defs, inner_tx, cancel)
@@ -773,6 +810,10 @@ impl Agent {
                 .map(|pe| pe.to_string())
                 .unwrap_or_else(|| format!("{e}"));
             tracing::error!("agent iteration {iteration}: chat_stream failed: {user_message}");
+            self.record_run_event(RunEvent::ProviderError {
+                message: user_message.clone(),
+                retryable: false,
+            });
             let _ = ui_tx.send(StreamEvent::Error(user_message.clone())).await;
             let _ = ui_tx
                 .send(StreamEvent::Done(ChatResponse {
@@ -801,10 +842,34 @@ impl Agent {
         }
 
         match final_response {
-            Some(r) => Ok(r),
+            Some(r) => {
+                // YYC-179: emit ProviderResponse for the streaming
+                // path so dashboards can group buffered/streaming
+                // turns under the same event family.
+                if let Some(usage) = &r.usage {
+                    self.record_run_event(RunEvent::ProviderResponse {
+                        prompt_tokens: usage.prompt_tokens as u32,
+                        completion_tokens: usage.completion_tokens as u32,
+                        total_tokens: usage.total_tokens as u32,
+                        finish_reason: r.finish_reason.clone(),
+                    });
+                } else {
+                    self.record_run_event(RunEvent::ProviderResponse {
+                        prompt_tokens: 0,
+                        completion_tokens: 0,
+                        total_tokens: 0,
+                        finish_reason: r.finish_reason.clone(),
+                    });
+                }
+                Ok(r)
+            }
             None => {
                 let msg = "Stream ended without Done event";
                 tracing::error!("agent iteration {iteration}: {msg}");
+                self.record_run_event(RunEvent::ProviderError {
+                    message: msg.to_string(),
+                    retryable: false,
+                });
                 let _ = ui_tx.send(StreamEvent::Error(msg.into())).await;
                 Err(anyhow::anyhow!(msg))
             }
