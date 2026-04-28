@@ -6,6 +6,7 @@ pub mod cli_auth;
 pub mod cli_config;
 pub mod cli_impact;
 pub mod cli_knowledge;
+pub mod cli_playbook;
 pub mod cli_policy;
 pub mod cli_provider;
 pub mod cli_replay;
