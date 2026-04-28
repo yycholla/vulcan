@@ -15,12 +15,66 @@
 //! raw stdout to the LLM (no trimming) and surface stderr only when the
 //! command fails.
 
-use crate::tools::{Tool, ToolResult};
+use crate::tools::{Tool, ToolResult, parse_tool_params};
 use anyhow::Result;
 use async_trait::async_trait;
+use serde::Deserialize;
 use serde_json::{Value, json};
 use tokio::process::Command;
 use tokio_util::sync::CancellationToken;
+
+#[derive(Deserialize)]
+struct GitDiffParams {
+    #[serde(default)]
+    staged: bool,
+    #[serde(default)]
+    path: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct GitCommitParams {
+    message: String,
+    #[serde(default)]
+    all: bool,
+}
+
+fn default_git_remote() -> String {
+    "origin".to_string()
+}
+
+#[derive(Deserialize)]
+struct GitPushParams {
+    #[serde(default = "default_git_remote")]
+    remote: String,
+    #[serde(default)]
+    branch: Option<String>,
+    #[serde(default)]
+    set_upstream: bool,
+}
+
+fn default_git_branch_action() -> String {
+    "list".to_string()
+}
+
+#[derive(Deserialize)]
+struct GitBranchParams {
+    #[serde(default = "default_git_branch_action")]
+    action: String,
+    #[serde(default)]
+    name: Option<String>,
+}
+
+fn default_git_log_limit() -> i64 {
+    10
+}
+
+#[derive(Deserialize)]
+struct GitLogParams {
+    #[serde(default = "default_git_log_limit")]
+    limit: i64,
+    #[serde(default)]
+    branch: Option<String>,
+}
 
 /// Run `git <args...>` in the current working directory and return its
 /// output. Returns Err only for spawn failures; non-zero exit codes are
@@ -129,20 +183,19 @@ impl Tool for GitDiffTool {
         })
     }
     async fn call(&self, params: Value, cancel: CancellationToken) -> Result<ToolResult> {
-        let staged = params
-            .get("staged")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false);
-        let path = params.get("path").and_then(|v| v.as_str());
+        let p: GitDiffParams = match parse_tool_params(params) {
+            Ok(p) => p,
+            Err(e) => return Ok(e),
+        };
 
         let mut args: Vec<&str> = vec!["diff"];
-        if staged {
+        if p.staged {
             args.push("--cached");
         }
         args.push("--no-color");
-        if let Some(p) = path {
+        if let Some(path) = p.path.as_deref() {
             args.push("--");
-            args.push(p);
+            args.push(path);
         }
         run_git(&args, cancel).await
     }
@@ -175,18 +228,17 @@ impl Tool for GitCommitTool {
         })
     }
     async fn call(&self, params: Value, cancel: CancellationToken) -> Result<ToolResult> {
-        let message = params
-            .get("message")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| anyhow::anyhow!("message required"))?;
-        let all = params.get("all").and_then(|v| v.as_bool()).unwrap_or(false);
+        let p: GitCommitParams = match parse_tool_params(params) {
+            Ok(p) => p,
+            Err(e) => return Ok(e),
+        };
 
         let mut args: Vec<&str> = vec!["commit"];
-        if all {
+        if p.all {
             args.push("-a");
         }
         args.push("-m");
-        args.push(message);
+        args.push(&p.message);
         run_git(&args, cancel).await
     }
 }
@@ -218,22 +270,17 @@ impl Tool for GitPushTool {
         })
     }
     async fn call(&self, params: Value, cancel: CancellationToken) -> Result<ToolResult> {
-        let remote = params
-            .get("remote")
-            .and_then(|v| v.as_str())
-            .unwrap_or("origin");
-        let branch = params.get("branch").and_then(|v| v.as_str());
-        let set_upstream = params
-            .get("set_upstream")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false);
+        let p: GitPushParams = match parse_tool_params(params) {
+            Ok(p) => p,
+            Err(e) => return Ok(e),
+        };
 
         let mut args: Vec<&str> = vec!["push"];
-        if set_upstream {
+        if p.set_upstream {
             args.push("-u");
         }
-        args.push(remote);
-        if let Some(b) = branch {
+        args.push(&p.remote);
+        if let Some(b) = p.branch.as_deref() {
             args.push(b);
         }
         run_git(&args, cancel).await
@@ -270,13 +317,13 @@ impl Tool for GitBranchTool {
         })
     }
     async fn call(&self, params: Value, cancel: CancellationToken) -> Result<ToolResult> {
-        let action = params
-            .get("action")
-            .and_then(|v| v.as_str())
-            .unwrap_or("list");
-        let name = params.get("name").and_then(|v| v.as_str());
+        let p: GitBranchParams = match parse_tool_params(params) {
+            Ok(p) => p,
+            Err(e) => return Ok(e),
+        };
+        let name = p.name.as_deref();
 
-        match action {
+        match p.action.as_str() {
             "list" => run_git(&["branch", "--list", "-vv"], cancel).await,
             "create" => {
                 let n = name.ok_or_else(|| anyhow::anyhow!("name required for action='create'"))?;
@@ -324,12 +371,14 @@ impl Tool for GitLogTool {
         })
     }
     async fn call(&self, params: Value, cancel: CancellationToken) -> Result<ToolResult> {
-        let limit = params.get("limit").and_then(|v| v.as_i64()).unwrap_or(10);
-        let limit = limit.clamp(1, 200).to_string();
-        let branch = params.get("branch").and_then(|v| v.as_str());
+        let p: GitLogParams = match parse_tool_params(params) {
+            Ok(p) => p,
+            Err(e) => return Ok(e),
+        };
+        let limit = p.limit.clamp(1, 200).to_string();
 
         let mut args: Vec<&str> = vec!["log", "--oneline", "-n", limit.as_str()];
-        if let Some(b) = branch {
+        if let Some(b) = p.branch.as_deref() {
             args.push(b);
         }
         run_git(&args, cancel).await
@@ -344,6 +393,30 @@ mod tests {
     use tokio::sync::Mutex;
 
     static CWD_LOCK: Mutex<()> = Mutex::const_new(());
+
+    #[tokio::test]
+    async fn yyc263_git_commit_missing_message_surfaces_as_toolresult_err() {
+        let result = GitCommitTool
+            .call(json!({}), CancellationToken::new())
+            .await
+            .expect("call returns Ok(ToolResult)");
+        assert!(result.is_error);
+        assert!(
+            result.output.contains("tool params failed to validate"),
+            "expected serde-shaped error, got: {}",
+            result.output
+        );
+    }
+
+    #[tokio::test]
+    async fn yyc263_git_diff_bad_param_type_surfaces_as_toolresult_err() {
+        let result = GitDiffTool
+            .call(json!({ "staged": "yes" }), CancellationToken::new())
+            .await
+            .expect("call returns Ok(ToolResult)");
+        assert!(result.is_error);
+        assert!(result.output.contains("tool params failed to validate"));
+    }
 
     /// Run `args` in `cwd`. Wraps tokio's Command directly so the test
     /// doesn't need to hop through the public Tool trait.
