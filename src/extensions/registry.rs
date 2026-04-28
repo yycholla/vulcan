@@ -7,12 +7,46 @@
 //! top of this surface.
 
 use parking_lot::RwLock;
+use std::sync::Arc;
 
 use super::{ExtensionCapability, ExtensionMetadata, ExtensionStatus};
+use crate::hooks::{HookHandler, HookRegistry};
 
-#[derive(Debug, Default)]
+/// YYC-227 (YYC-165 PR-4): trait an in-process, code-backed
+/// extension implements. Implementors live alongside the
+/// [`ExtensionMetadata`] in the registry; only `Active`
+/// extensions get their hook handlers wired into the live
+/// `HookRegistry` at session start.
+pub trait CodeExtension: Send + Sync {
+    /// The static metadata describing this extension. Must
+    /// match the metadata under which the registry indexed the
+    /// extension.
+    fn metadata(&self) -> ExtensionMetadata;
+    /// Hook handlers this extension contributes. Called once,
+    /// at wire-time. Default implementation returns nothing —
+    /// extensions that only contribute prompt injections via a
+    /// `BeforePrompt` handler can override just this method.
+    fn hook_handlers(&self) -> Vec<Arc<dyn HookHandler>> {
+        Vec::new()
+    }
+}
+
+#[derive(Default)]
 pub struct ExtensionRegistry {
     inner: RwLock<Vec<ExtensionMetadata>>,
+    /// YYC-227: code-backed extensions, indexed by id. The
+    /// registry does not own metadata for these separately —
+    /// `metadata()` on the trait is the source of truth.
+    code_backed: RwLock<Vec<Arc<dyn CodeExtension>>>,
+}
+
+impl std::fmt::Debug for ExtensionRegistry {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ExtensionRegistry")
+            .field("metadata", &self.inner.read().clone())
+            .field("code_backed_count", &self.code_backed.read().len())
+            .finish()
+    }
 }
 
 impl ExtensionRegistry {
@@ -94,6 +128,50 @@ impl ExtensionRegistry {
 
     fn sort_in_place(items: &mut [ExtensionMetadata]) {
         items.sort_by(|a, b| a.priority.cmp(&b.priority).then_with(|| a.id.cmp(&b.id)));
+    }
+
+    /// YYC-227: register a code-backed extension. The registry
+    /// upserts its metadata under the extension's declared id +
+    /// stores the trait object so it can be activated later.
+    pub fn register_code_extension(&self, extension: Arc<dyn CodeExtension>) {
+        let metadata = extension.metadata();
+        self.upsert(metadata.clone());
+        let mut guard = self.code_backed.write();
+        if let Some(slot) = guard.iter_mut().find(|e| e.metadata().id == metadata.id) {
+            *slot = extension;
+        } else {
+            guard.push(extension);
+        }
+    }
+
+    /// YYC-227: register every `Active` code-backed extension's
+    /// hook handlers into the live [`HookRegistry`]. Returns the
+    /// number of handlers registered.
+    pub fn wire_into_hooks(&self, hooks: &mut HookRegistry) -> usize {
+        let mut total = 0usize;
+        let metadata_snapshot = self.inner.read().clone();
+        let code_snapshot = self.code_backed.read().clone();
+        for ext in code_snapshot {
+            let id = ext.metadata().id;
+            let active = metadata_snapshot
+                .iter()
+                .find(|m| m.id == id)
+                .map(|m| m.status == ExtensionStatus::Active)
+                .unwrap_or(false);
+            if !active {
+                continue;
+            }
+            for handler in ext.hook_handlers() {
+                hooks.register(handler);
+                total += 1;
+            }
+        }
+        total
+    }
+
+    /// YYC-227: count of code-backed extensions registered.
+    pub fn code_extension_count(&self) -> usize {
+        self.code_backed.read().len()
     }
 }
 
@@ -183,6 +261,113 @@ mod tests {
         let got = reg.get("alpha").unwrap();
         assert_eq!(got.status, ExtensionStatus::Active);
         assert_eq!(got.broken_reason, None);
+    }
+
+    // ── YYC-227 (YYC-165 PR-4): code-backed wiring ──────────────────
+
+    use anyhow::Result;
+    use async_trait::async_trait;
+    use tokio_util::sync::CancellationToken;
+
+    struct StubExtension {
+        meta: ExtensionMetadata,
+    }
+
+    impl StubExtension {
+        fn new(id: &str, status: ExtensionStatus) -> Self {
+            let mut m = ExtensionMetadata::new(
+                id,
+                id,
+                "0.1.0",
+                crate::extensions::ExtensionSource::Builtin,
+            );
+            m.status = status;
+            m.capabilities = vec![ExtensionCapability::HookHandler];
+            Self { meta: m }
+        }
+    }
+
+    impl crate::extensions::CodeExtension for StubExtension {
+        fn metadata(&self) -> ExtensionMetadata {
+            self.meta.clone()
+        }
+        fn hook_handlers(&self) -> Vec<Arc<dyn crate::hooks::HookHandler>> {
+            vec![Arc::new(NoopHook {
+                id: self.meta.id.clone(),
+            })]
+        }
+    }
+
+    struct NoopHook {
+        id: String,
+    }
+
+    #[async_trait]
+    impl crate::hooks::HookHandler for NoopHook {
+        fn name(&self) -> &str {
+            &self.id
+        }
+        async fn before_prompt(
+            &self,
+            _messages: &[crate::provider::Message],
+            _cancel: CancellationToken,
+        ) -> Result<crate::hooks::HookOutcome> {
+            Ok(crate::hooks::HookOutcome::Continue)
+        }
+    }
+
+    #[test]
+    fn wire_into_hooks_skips_inactive_extensions() {
+        let reg = ExtensionRegistry::new();
+        reg.register_code_extension(Arc::new(StubExtension::new(
+            "active-one",
+            ExtensionStatus::Active,
+        )));
+        reg.register_code_extension(Arc::new(StubExtension::new(
+            "inactive-one",
+            ExtensionStatus::Inactive,
+        )));
+        reg.register_code_extension(Arc::new(StubExtension::new(
+            "draft-one",
+            ExtensionStatus::Draft,
+        )));
+        reg.register_code_extension(Arc::new(StubExtension::new(
+            "broken-one",
+            ExtensionStatus::Broken,
+        )));
+
+        let mut hooks = crate::hooks::HookRegistry::new();
+        let registered = reg.wire_into_hooks(&mut hooks);
+        assert_eq!(registered, 1);
+        assert_eq!(hooks.handler_count(), 1);
+    }
+
+    #[test]
+    fn wire_into_hooks_respects_status_changes() {
+        let reg = ExtensionRegistry::new();
+        // Start inactive — wiring registers nothing.
+        reg.register_code_extension(Arc::new(StubExtension::new(
+            "toggle",
+            ExtensionStatus::Inactive,
+        )));
+        let mut hooks = crate::hooks::HookRegistry::new();
+        assert_eq!(reg.wire_into_hooks(&mut hooks), 0);
+        // Promote to active and re-wire.
+        assert!(reg.set_status("toggle", ExtensionStatus::Active));
+        let mut hooks = crate::hooks::HookRegistry::new();
+        assert_eq!(reg.wire_into_hooks(&mut hooks), 1);
+    }
+
+    #[test]
+    fn register_code_extension_replaces_metadata_on_id_collision() {
+        let reg = ExtensionRegistry::new();
+        reg.register_code_extension(Arc::new(StubExtension::new(
+            "dup",
+            ExtensionStatus::Inactive,
+        )));
+        reg.register_code_extension(Arc::new(StubExtension::new("dup", ExtensionStatus::Active)));
+        assert_eq!(reg.code_extension_count(), 1);
+        assert_eq!(reg.get("dup").unwrap().status, ExtensionStatus::Active);
     }
 
     #[test]

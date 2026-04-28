@@ -21,7 +21,7 @@ pub mod draft;
 pub mod registry;
 
 pub use draft::parse_skill_extension;
-pub use registry::ExtensionRegistry;
+pub use registry::{CodeExtension, ExtensionRegistry};
 
 use serde::{Deserialize, Serialize};
 
