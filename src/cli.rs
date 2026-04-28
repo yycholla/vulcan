@@ -87,6 +87,34 @@ pub enum Command {
         #[command(subcommand)]
         cmd: RunSubcommand,
     },
+    /// YYC-180: inspect typed artifacts (plans, diffs, reports,
+    /// subagent summaries) persisted alongside agent turns.
+    Artifact {
+        #[command(subcommand)]
+        cmd: ArtifactSubcommand,
+    },
+}
+
+/// YYC-180: subcommands under `vulcan artifact`.
+#[derive(Subcommand, Debug)]
+pub enum ArtifactSubcommand {
+    /// List recent artifacts (newest first).
+    List {
+        /// Maximum number of artifacts to display (default 20).
+        #[arg(long, default_value_t = 20)]
+        limit: usize,
+        /// Optional run id (UUID or 8-char prefix) to filter by.
+        #[arg(long)]
+        run: Option<String>,
+        /// Optional session id to filter by.
+        #[arg(long)]
+        session: Option<String>,
+    },
+    /// Print full content + metadata for a single artifact id.
+    Show {
+        /// Artifact id (UUID, full or 8-char prefix).
+        id: String,
+    },
 }
 
 /// YYC-179: subcommands under `vulcan run`.
