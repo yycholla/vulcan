@@ -114,18 +114,48 @@ fn extract_ddg_results(html: &str) -> Vec<DdgResult> {
     results
 }
 
+/// YYC-253: percent-encode a query-string value using the vetted
+/// `percent-encoding` crate. Matches the prior hand-rolled function's
+/// shape (`+` for space, percent-encode everything else outside the
+/// RFC 3986 unreserved set) so existing search backends parse the
+/// query correctly.
 fn urlencoding(s: &str) -> String {
-    let mut encoded = String::new();
-    for byte in s.bytes() {
-        match byte {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
-                encoded.push(byte as char);
-            }
-            b' ' => encoded.push('+'),
-            _ => encoded.push_str(&format!("%{:02X}", byte)),
-        }
-    }
-    encoded
+    use percent_encoding::{AsciiSet, CONTROLS, utf8_percent_encode};
+    // RFC 3986 reserved + non-unreserved chars. The unreserved set is
+    // `A-Z` / `a-z` / `0-9` / `-` / `_` / `.` / `~`.
+    const QUERY_SET: &AsciiSet = &CONTROLS
+        .add(b' ') // ' ' becomes %20 here, then we swap to '+' below.
+        .add(b'"')
+        .add(b'#')
+        .add(b'$')
+        .add(b'%')
+        .add(b'&')
+        .add(b'\'')
+        .add(b'(')
+        .add(b')')
+        .add(b'*')
+        .add(b'+')
+        .add(b',')
+        .add(b'/')
+        .add(b':')
+        .add(b';')
+        .add(b'<')
+        .add(b'=')
+        .add(b'>')
+        .add(b'?')
+        .add(b'@')
+        .add(b'[')
+        .add(b'\\')
+        .add(b']')
+        .add(b'^')
+        .add(b'`')
+        .add(b'{')
+        .add(b'|')
+        .add(b'}');
+    // Swap %20 → '+' for query-string convention.
+    utf8_percent_encode(s, QUERY_SET)
+        .to_string()
+        .replace("%20", "+")
 }
 
 pub struct WebFetch;
@@ -275,6 +305,38 @@ fn html_to_text(html: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn yyc253_urlencoding_passes_unreserved_through() {
+        // RFC 3986 unreserved set survives untouched.
+        assert_eq!(urlencoding("AaZz09-_.~"), "AaZz09-_.~".to_string());
+    }
+
+    #[test]
+    fn yyc253_urlencoding_swaps_space_to_plus() {
+        assert_eq!(urlencoding("hello world"), "hello+world");
+        assert_eq!(urlencoding("a b c"), "a+b+c");
+    }
+
+    #[test]
+    fn yyc253_urlencoding_percent_encodes_reserved() {
+        assert_eq!(urlencoding("a&b"), "a%26b");
+        assert_eq!(urlencoding("?q=x"), "%3Fq%3Dx");
+        assert_eq!(urlencoding("/path"), "%2Fpath");
+    }
+
+    #[test]
+    fn yyc253_urlencoding_handles_unicode() {
+        // Multi-byte UTF-8 must each percent-encode as separate bytes.
+        let out = urlencoding("héllo");
+        // 'é' = 0xC3 0xA9 in UTF-8.
+        assert_eq!(out, "h%C3%A9llo");
+    }
+
+    #[test]
+    fn yyc253_urlencoding_empty_string_passthrough() {
+        assert_eq!(urlencoding(""), "");
+    }
 
     #[test]
     fn truncate_chars_passes_through_when_under_cap() {
