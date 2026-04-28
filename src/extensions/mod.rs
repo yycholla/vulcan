@@ -17,8 +17,10 @@
 //! - Manifest `[config]` → `ConfigField` bridge for YYC-212 (PR-5).
 //! - Dynamic loading (out of scope for the entire YYC-165 epic).
 
+pub mod draft;
 pub mod registry;
 
+pub use draft::parse_skill_extension;
 pub use registry::ExtensionRegistry;
 
 use serde::{Deserialize, Serialize};
