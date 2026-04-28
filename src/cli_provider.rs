@@ -24,6 +24,21 @@ pub enum ProviderCommand {
     Add(AddArgs),
     /// Delete a named `[<name>]` block from providers.toml.
     Remove(RemoveArgs),
+    /// YYC-240 (YYC-238 PR-2): persist `active_profile = "<name>"`
+    /// in config.toml so both TUI and gateway boot against this
+    /// profile. `--clear` removes the override.
+    Use(UseArgs),
+}
+
+#[derive(Args, Debug)]
+pub struct UseArgs {
+    /// Profile name to activate. Must already exist in
+    /// providers.toml. Conflicts with `--clear`.
+    pub name: Option<String>,
+    /// Remove the persisted `active_profile` so the legacy
+    /// `[provider]` block becomes the active one again.
+    #[arg(long)]
+    pub clear: bool,
 }
 
 #[derive(Args, Debug)]
@@ -164,6 +179,7 @@ pub async fn run(cmd: ProviderCommand, dir: PathBuf) -> Result<()> {
         }
         ProviderCommand::Add(args) => add(args, &dir),
         ProviderCommand::Remove(args) => remove(args, &dir),
+        ProviderCommand::Use(args) => use_profile(args, &dir),
     }
 }
 
@@ -289,6 +305,59 @@ fn remove(args: RemoveArgs, dir: &Path) -> Result<()> {
     Ok(())
 }
 
+fn use_profile(args: UseArgs, dir: &Path) -> Result<()> {
+    let config_path = dir.join("config.toml");
+    let providers_path = dir.join("providers.toml");
+    if args.clear && args.name.is_some() {
+        bail!("--clear conflicts with positional name");
+    }
+    if !args.clear && args.name.is_none() {
+        bail!("supply a profile name or pass --clear");
+    }
+
+    let mut config_doc = read_or_init_doc(&config_path)?;
+
+    if args.clear {
+        let removed = config_doc.remove("active_profile").is_some();
+        write_doc(&config_path, &config_doc)?;
+        if removed {
+            println!(
+                "Cleared active_profile from {} — legacy [provider] is now active.",
+                config_path.display()
+            );
+        } else {
+            println!("No active_profile set; nothing to clear.");
+        }
+        return Ok(());
+    }
+
+    let name = args.name.expect("name required when --clear absent");
+    if name.eq_ignore_ascii_case("default") {
+        bail!(
+            "'default' refers to the legacy [provider] block — pass `--clear` instead to fall back to it."
+        );
+    }
+    // Validate the profile exists in providers.toml before writing.
+    let providers_doc = read_or_init_doc(&providers_path)?;
+    if providers_doc.get(&name).is_none() {
+        bail!(
+            "no provider profile named '{}' in {} — run `vulcan provider list` to see available profiles",
+            name,
+            providers_path.display()
+        );
+    }
+
+    config_doc["active_profile"] = value(name.clone());
+    write_doc(&config_path, &config_doc)?;
+    println!(
+        "Set active_profile = \"{}\" in {} — TUI + gateway will boot against [providers.{}]",
+        name,
+        config_path.display(),
+        name
+    );
+    Ok(())
+}
+
 fn read_or_init_doc(path: &Path) -> Result<DocumentMut> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)
@@ -327,6 +396,114 @@ mod tests {
         ] {
             assert!(keys.contains(&must), "preset {must} missing from catalog");
         }
+    }
+
+    // ── YYC-240 (YYC-238 PR-2): vulcan provider use/clear ────────
+
+    #[test]
+    fn use_profile_writes_active_profile_when_target_exists() {
+        let dir = tempdir().unwrap();
+        // Seed providers.toml with one named profile so `use`
+        // can find it.
+        add(
+            AddArgs {
+                name: "fast".into(),
+                preset: Some("openai".into()),
+                base_url: None,
+                model: None,
+                api_key: None,
+                max_context: None,
+                disable_catalog: false,
+                force: false,
+            },
+            dir.path(),
+        )
+        .unwrap();
+
+        use_profile(
+            UseArgs {
+                name: Some("fast".into()),
+                clear: false,
+            },
+            dir.path(),
+        )
+        .unwrap();
+
+        let raw = std::fs::read_to_string(dir.path().join("config.toml")).unwrap();
+        assert!(raw.contains("active_profile = \"fast\""));
+        // Round-trip via Config::load_from_dir picks it up.
+        let cfg = crate::config::Config::load_from_dir(dir.path()).unwrap();
+        assert_eq!(cfg.active_profile.as_deref(), Some("fast"));
+    }
+
+    #[test]
+    fn use_profile_rejects_unknown_target_before_writing() {
+        let dir = tempdir().unwrap();
+        let err = use_profile(
+            UseArgs {
+                name: Some("ghost".into()),
+                clear: false,
+            },
+            dir.path(),
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("no provider profile named 'ghost'")
+        );
+        // No config.toml written on failure.
+        assert!(!dir.path().join("config.toml").exists());
+    }
+
+    #[test]
+    fn use_profile_clear_removes_active_profile() {
+        let dir = tempdir().unwrap();
+        add(
+            AddArgs {
+                name: "fast".into(),
+                preset: Some("openai".into()),
+                base_url: None,
+                model: None,
+                api_key: None,
+                max_context: None,
+                disable_catalog: false,
+                force: false,
+            },
+            dir.path(),
+        )
+        .unwrap();
+        use_profile(
+            UseArgs {
+                name: Some("fast".into()),
+                clear: false,
+            },
+            dir.path(),
+        )
+        .unwrap();
+        use_profile(
+            UseArgs {
+                name: None,
+                clear: true,
+            },
+            dir.path(),
+        )
+        .unwrap();
+        let cfg = crate::config::Config::load_from_dir(dir.path()).unwrap();
+        assert!(cfg.active_profile.is_none());
+    }
+
+    #[test]
+    fn use_profile_rejects_conflicting_args() {
+        let dir = tempdir().unwrap();
+        let err = use_profile(
+            UseArgs {
+                name: Some("any".into()),
+                clear: true,
+            },
+            dir.path(),
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("conflicts"));
     }
 
     #[test]
