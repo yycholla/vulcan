@@ -2,6 +2,9 @@ use crate::tools::{Tool, ToolResult, web_ssrf};
 use anyhow::Result;
 use async_trait::async_trait;
 use serde_json::{Value, json};
+use std::collections::HashMap;
+use std::sync::OnceLock;
+use std::time::{Duration, Instant};
 use tokio_util::sync::CancellationToken;
 
 pub struct WebSearch;
@@ -30,9 +33,9 @@ impl Tool for WebSearch {
 
         // Use DuckDuckGo's lite version for simple scraping
         let url = format!("https://html.duckduckgo.com/html/?q={}", urlencoding(query));
-        let client = reqwest::Client::builder()
-            .user_agent("vulcan/0.1 (AI agent; personal use)")
-            .build()?;
+        let client = shared_client();
+        // YYC-256: rate-limit per host so the LLM can't hammer DDG.
+        wait_for_rate_limit("html.duckduckgo.com").await;
 
         let html = tokio::select! {
             biased;
@@ -114,6 +117,63 @@ fn extract_ddg_results(html: &str) -> Vec<DdgResult> {
     results
 }
 
+/// YYC-256: minimum spacing between consecutive web-tool requests
+/// to the same host. 200 ms ≈ 5 req/s — enough headroom for normal
+/// follow-up calls; tight enough that the LLM can't accidentally
+/// hammer a target.
+const MIN_HOST_INTERVAL: Duration = Duration::from_millis(200);
+
+/// YYC-256: shared `reqwest::Client` so the web tools reuse the
+/// connection pool across calls instead of opening a fresh TCP/TLS
+/// session every fetch. Lazy-initialized once per process.
+fn shared_client() -> &'static reqwest::Client {
+    static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
+    CLIENT.get_or_init(|| {
+        reqwest::Client::builder()
+            .user_agent("vulcan/0.1 (AI agent; personal use)")
+            .timeout(Duration::from_secs(30))
+            .build()
+            .unwrap_or_else(|_| reqwest::Client::new())
+    })
+}
+
+/// YYC-256: rough per-host rate limit. If the same host was hit less
+/// than `MIN_HOST_INTERVAL` ago, sleep until the window elapses.
+/// Implementation is a `Mutex<HashMap<host, last_call>>` — the lock
+/// is held only briefly to read/update the timestamp, never across
+/// the sleep itself.
+async fn wait_for_rate_limit(host: &str) {
+    static LAST_CALL: OnceLock<std::sync::Mutex<HashMap<String, Instant>>> = OnceLock::new();
+    let map = LAST_CALL.get_or_init(|| std::sync::Mutex::new(HashMap::new()));
+    let wait = {
+        let mut guard = map.lock().expect("rate-limit map poisoned");
+        let now = Instant::now();
+        let key = host.to_string();
+        match guard.get(&key) {
+            Some(prev) => {
+                let elapsed = now.duration_since(*prev);
+                if elapsed >= MIN_HOST_INTERVAL {
+                    guard.insert(key, now);
+                    Duration::ZERO
+                } else {
+                    let wait = MIN_HOST_INTERVAL - elapsed;
+                    // Optimistically book the next slot so concurrent
+                    // callers serialize without piling up.
+                    guard.insert(key, now + wait);
+                    wait
+                }
+            }
+            None => {
+                guard.insert(key, now);
+                Duration::ZERO
+            }
+        }
+    };
+    if !wait.is_zero() {
+        tokio::time::sleep(wait).await;
+    }
+}
+
 /// YYC-253: percent-encode a query-string value using the vetted
 /// `percent-encoding` crate. Matches the prior hand-rolled function's
 /// shape (`+` for space, percent-encode everything else outside the
@@ -191,10 +251,11 @@ impl Tool for WebFetch {
             Err(e) => return Ok(ToolResult::err(format!("URL refused: {e}"))),
         };
 
-        let client = reqwest::Client::builder()
-            .user_agent("vulcan/0.1 (AI agent; personal use)")
-            .timeout(std::time::Duration::from_secs(30))
-            .build()?;
+        // YYC-256: rate-limit per host before fetching.
+        if let Some(host) = validated.host_str() {
+            wait_for_rate_limit(host).await;
+        }
+        let client = shared_client();
 
         let (status, body) = tokio::select! {
             biased;
@@ -305,6 +366,53 @@ fn html_to_text(html: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn yyc256_shared_client_returns_same_pointer_each_call() {
+        let a = shared_client() as *const _;
+        let b = shared_client() as *const _;
+        assert_eq!(a, b, "shared_client should hand out the same instance");
+    }
+
+    #[tokio::test]
+    async fn yyc256_rate_limiter_first_call_does_not_sleep() {
+        let host = format!("yyc256-fresh-{}.example", std::process::id());
+        let start = Instant::now();
+        wait_for_rate_limit(&host).await;
+        let elapsed = start.elapsed();
+        assert!(
+            elapsed < Duration::from_millis(50),
+            "first call shouldn't sleep, took {elapsed:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn yyc256_rate_limiter_second_call_sleeps_at_least_window() {
+        // Use a unique host so other tests' state can't bleed in.
+        let host = format!("yyc256-second-{}.example", std::process::id());
+        wait_for_rate_limit(&host).await; // primes the map
+        let start = Instant::now();
+        wait_for_rate_limit(&host).await;
+        let elapsed = start.elapsed();
+        assert!(
+            elapsed >= Duration::from_millis(150),
+            "second call within window should sleep ~MIN_HOST_INTERVAL, got {elapsed:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn yyc256_rate_limiter_distinct_hosts_do_not_block_each_other() {
+        let host_a = format!("yyc256-distinct-a-{}.example", std::process::id());
+        let host_b = format!("yyc256-distinct-b-{}.example", std::process::id());
+        wait_for_rate_limit(&host_a).await;
+        let start = Instant::now();
+        wait_for_rate_limit(&host_b).await;
+        let elapsed = start.elapsed();
+        assert!(
+            elapsed < Duration::from_millis(50),
+            "different host shouldn't be throttled by another's window, took {elapsed:?}"
+        );
+    }
 
     #[test]
     fn yyc253_urlencoding_passes_unreserved_through() {
