@@ -114,6 +114,26 @@ pub fn discover_in(home: &Path) -> Result<Vec<KnowledgeStoreInfo>> {
     Ok(out)
 }
 
+/// YYC-194 PR-2: delete the on-disk store backing one
+/// [`KnowledgeStoreInfo`]. Returns the number of bytes freed.
+/// Caller is responsible for confirmation prompts.
+pub fn purge(info: &KnowledgeStoreInfo) -> Result<u64> {
+    let bytes = info.size_bytes;
+    if !info.path.exists() {
+        return Ok(0);
+    }
+    std::fs::remove_file(&info.path)?;
+    // For SQLite WAL mode databases there can also be `*-wal` and
+    // `*-shm` siblings. Best-effort cleanup so the next session
+    // doesn't reattach to a half-removed store.
+    let path_str = info.path.to_string_lossy().to_string();
+    for suffix in ["-wal", "-shm"] {
+        let sibling = std::path::PathBuf::from(format!("{path_str}{suffix}"));
+        let _ = std::fs::remove_file(sibling);
+    }
+    Ok(bytes)
+}
+
 fn probe_store(
     kind: KnowledgeIndex,
     path: PathBuf,
@@ -158,6 +178,32 @@ mod tests {
         assert_eq!(kinds, vec!["artifacts", "run_records", "sessions"]);
         let sizes: u64 = stores.iter().map(|s| s.size_bytes).sum();
         assert_eq!(sizes, 1 + 2 + 3);
+    }
+
+    #[test]
+    fn purge_removes_file_and_returns_bytes() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("artifacts.db");
+        std::fs::write(&path, b"hello world").unwrap();
+        let stores = discover_in(dir.path()).unwrap();
+        assert_eq!(stores.len(), 1);
+        let bytes = purge(&stores[0]).unwrap();
+        assert_eq!(bytes, 11);
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn purge_cleans_up_wal_and_shm_siblings() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("sessions.db");
+        std::fs::write(&path, b"db").unwrap();
+        std::fs::write(dir.path().join("sessions.db-wal"), b"wal").unwrap();
+        std::fs::write(dir.path().join("sessions.db-shm"), b"shm").unwrap();
+        let stores = discover_in(dir.path()).unwrap();
+        purge(&stores[0]).unwrap();
+        assert!(!dir.path().join("sessions.db").exists());
+        assert!(!dir.path().join("sessions.db-wal").exists());
+        assert!(!dir.path().join("sessions.db-shm").exists());
     }
 
     #[test]
