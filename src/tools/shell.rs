@@ -917,6 +917,21 @@ fn spawn_reader_thread(mut reader: Box<dyn Read + Send>, session: Arc<PtySession
     std::thread::spawn(move || {
         let mut chunk = [0_u8; 4096];
         loop {
+            // YYC-262: bail before each read if the session has been
+            // closed. Normally the child process dying causes `read`
+            // to return EOF and the loop exits naturally, but if
+            // `PtyRegistry::close` finds itself unable to kill the
+            // child (rare — already-exited zombie, EPERM, etc.) the
+            // reader would otherwise keep waiting forever holding
+            // the master FD. Checking the flag between reads is the
+            // cheapest defense against a wedged read.
+            if session.closed.load(Ordering::SeqCst) {
+                tracing::debug!(
+                    session = %session.session_id,
+                    "PTY reader exiting because session was marked closed"
+                );
+                break;
+            }
             match reader.read(&mut chunk) {
                 Ok(0) => break,
                 Ok(n) => {
@@ -1021,6 +1036,96 @@ mod tests {
     use std::time::Instant;
     use tokio::time::sleep;
     use tokio_util::sync::CancellationToken;
+
+    /// YYC-262: a reader whose underlying source has finite output —
+    /// the read function returns N bytes each call, then `Ok(0)` to
+    /// signal EOF. Used to drive `spawn_reader_thread` deterministically
+    /// inside a test without requiring a real PTY.
+    struct FiniteReader {
+        chunks: VecDeque<Vec<u8>>,
+    }
+
+    impl Read for FiniteReader {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            match self.chunks.pop_front() {
+                Some(chunk) => {
+                    let n = chunk.len().min(buf.len());
+                    buf[..n].copy_from_slice(&chunk[..n]);
+                    Ok(n)
+                }
+                None => Ok(0),
+            }
+        }
+    }
+
+    fn make_test_session(id: &str) -> Arc<PtySession> {
+        // Build a minimal PtySession suitable for the reader thread —
+        // we don't need a real master/writer/killer here because the
+        // reader thread only touches `session.closed` and `session.output`.
+        let pair = NativePtySystem::default()
+            .openpty(PtySize {
+                rows: 24,
+                cols: 80,
+                pixel_width: 0,
+                pixel_height: 0,
+            })
+            .expect("openpty");
+        Arc::new(PtySession {
+            session_id: id.to_string(),
+            name: None,
+            shell: "test".to_string(),
+            workdir: None,
+            pid: None,
+            master: Mutex::new(pair.master),
+            writer: Mutex::new(Box::new(std::io::sink())),
+            killer: Mutex::new(Box::new(NoopKiller)),
+            output: Mutex::new(OutputBuffer::new(SESSION_BUFFER_BYTES)),
+            exit_code: Mutex::new(None),
+            closed: AtomicBool::new(false),
+            last_used: Mutex::new(Instant::now()),
+        })
+    }
+
+    #[derive(Debug)]
+    struct NoopKiller;
+    impl portable_pty::ChildKiller for NoopKiller {
+        fn kill(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+        fn clone_killer(&self) -> Box<dyn portable_pty::ChildKiller + Send + Sync> {
+            Box::new(NoopKiller)
+        }
+    }
+
+    #[test]
+    fn yyc262_reader_exits_when_session_closed_flag_is_set() {
+        let session = make_test_session("test-cancel");
+        // The reader will see `closed=true` BEFORE the first read, so
+        // the FiniteReader's chunk never lands in the buffer.
+        session.closed.store(true, Ordering::SeqCst);
+        let reader = Box::new(FiniteReader {
+            chunks: VecDeque::from(vec![b"should not be read".to_vec()]),
+        });
+        spawn_reader_thread(reader, session.clone());
+        // Give the spawned thread a moment to observe the flag and exit.
+        std::thread::sleep(Duration::from_millis(50));
+        // No bytes should have made it into the output buffer.
+        let buf = session.output.lock().unwrap();
+        assert_eq!(buf.end_cursor(), 0);
+    }
+
+    #[test]
+    fn yyc262_reader_drains_then_exits_on_eof() {
+        let session = make_test_session("test-eof");
+        let reader = Box::new(FiniteReader {
+            chunks: VecDeque::from(vec![b"hello".to_vec(), b" world".to_vec()]),
+        });
+        spawn_reader_thread(reader, session.clone());
+        std::thread::sleep(Duration::from_millis(50));
+        let buf = session.output.lock().unwrap();
+        let read = buf.read_from(0, 1024);
+        assert_eq!(read.output, "hello world");
+    }
 
     #[test]
     fn yyc261_clamp_bash_timeout_rejects_negative() {
