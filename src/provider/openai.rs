@@ -121,7 +121,16 @@ impl OpenAIProvider {
             }
 
             if attempt > 0 {
-                let delay = backoff_delay(attempt);
+                // YYC-272: when the previous error was a 429 with an
+                // explicit `Retry-After` header, honor that delay
+                // (clamped against unreasonable values). Otherwise fall
+                // back to the exponential schedule.
+                let delay = match &last_err {
+                    Some(ProviderError::RateLimited {
+                        retry_after: Some(d),
+                    }) => clamp_retry_after(*d),
+                    _ => backoff_delay(attempt),
+                };
                 tracing::warn!(
                     "Retrying API request (attempt {}/{}) after {:?}",
                     attempt,
@@ -155,8 +164,22 @@ impl OpenAIProvider {
                     if status.is_success() {
                         return Ok(response);
                     }
+                    // YYC-272: capture the `Retry-After` header before the
+                    // response body is consumed so a 429 carries the
+                    // server's recommended delay through the retry loop.
+                    let retry_after = parse_retry_after_header(response.headers());
                     let body_text = response.text().await.unwrap_or_default();
-                    ProviderError::from_response(status, &body_text, &self.model)
+                    let mut err = ProviderError::from_response(status, &body_text, &self.model);
+                    if let (
+                        ProviderError::RateLimited {
+                            retry_after: ra @ None,
+                        },
+                        Some(d),
+                    ) = (&mut err, retry_after)
+                    {
+                        *ra = Some(d);
+                    }
+                    err
                 }
                 Err(e) => ProviderError::Network(e),
             };
@@ -841,6 +864,47 @@ impl LLMProvider for OpenAIProvider {
 /// Exponential backoff with jitter. attempt=1 → ~1s, 2 → ~2s, 3 → ~4s, 4 → ~8s, 5 → ~16s.
 /// Jitter is 0-25% of the base delay, derived from monotonic-ish system time
 /// to avoid synchronized retry storms across multiple in-flight requests.
+/// YYC-272: parse a `Retry-After` header. Supports both the
+/// delta-seconds form (`Retry-After: 5`) and the HTTP-date form
+/// (`Retry-After: Wed, 21 Oct 2026 07:28:00 GMT`). Returns `None`
+/// when the header is absent or unparseable.
+fn parse_retry_after_header(headers: &reqwest::header::HeaderMap) -> Option<Duration> {
+    let raw = headers
+        .get(reqwest::header::RETRY_AFTER)
+        .and_then(|v| v.to_str().ok())?
+        .trim();
+    if raw.is_empty() {
+        return None;
+    }
+    if let Ok(secs) = raw.parse::<u64>() {
+        return Some(Duration::from_secs(secs));
+    }
+    // HTTP-date form. `httpdate` would be cleaner but we don't depend on
+    // it; fall back to chrono since it's already in the dep tree.
+    if let Ok(when) = chrono::DateTime::parse_from_rfc2822(raw) {
+        let now = chrono::Utc::now();
+        let diff = when.signed_duration_since(now);
+        if let Ok(secs) = u64::try_from(diff.num_seconds()) {
+            return Some(Duration::from_secs(secs));
+        }
+    }
+    None
+}
+
+/// YYC-272: prevent a hostile or buggy server from pinning the agent
+/// for hours by returning a giant `Retry-After`. 5 minutes is the
+/// upper bound a per-turn flow can plausibly absorb.
+fn clamp_retry_after(d: Duration) -> Duration {
+    const MAX_RETRY_AFTER: Duration = Duration::from_secs(300);
+    if d > MAX_RETRY_AFTER {
+        MAX_RETRY_AFTER
+    } else if d.is_zero() {
+        Duration::from_secs(1)
+    } else {
+        d
+    }
+}
+
 fn backoff_delay(attempt: u32) -> Duration {
     let shift = attempt.saturating_sub(1).min(4);
     let base_ms: u64 = 1_000_u64 << shift;
@@ -1446,5 +1510,101 @@ data: [DONE]
         assert_eq!(mid, "");
         let tail = d.flush();
         assert!(tail.contains('\u{FFFD}'));
+    }
+
+    // YYC-272: Retry-After parsing covers delta-seconds + HTTP-date.
+    #[test]
+    fn parse_retry_after_delta_seconds() {
+        let mut h = reqwest::header::HeaderMap::new();
+        h.insert(
+            reqwest::header::RETRY_AFTER,
+            reqwest::header::HeaderValue::from_static("5"),
+        );
+        assert_eq!(parse_retry_after_header(&h), Some(Duration::from_secs(5)));
+    }
+
+    #[test]
+    fn parse_retry_after_zero_returns_zero() {
+        // 0 is valid — the clamp helper bumps it to 1s before sleeping.
+        let mut h = reqwest::header::HeaderMap::new();
+        h.insert(
+            reqwest::header::RETRY_AFTER,
+            reqwest::header::HeaderValue::from_static("0"),
+        );
+        assert_eq!(parse_retry_after_header(&h), Some(Duration::from_secs(0)));
+    }
+
+    #[test]
+    fn parse_retry_after_missing_header_returns_none() {
+        let h = reqwest::header::HeaderMap::new();
+        assert!(parse_retry_after_header(&h).is_none());
+    }
+
+    #[test]
+    fn parse_retry_after_unparseable_value_returns_none() {
+        let mut h = reqwest::header::HeaderMap::new();
+        h.insert(
+            reqwest::header::RETRY_AFTER,
+            reqwest::header::HeaderValue::from_static("nonsense"),
+        );
+        assert!(parse_retry_after_header(&h).is_none());
+    }
+
+    #[test]
+    fn parse_retry_after_http_date_in_future() {
+        let when = chrono::Utc::now() + chrono::Duration::seconds(7);
+        let raw = when.to_rfc2822();
+        let mut h = reqwest::header::HeaderMap::new();
+        h.insert(
+            reqwest::header::RETRY_AFTER,
+            reqwest::header::HeaderValue::from_str(&raw).unwrap(),
+        );
+        let d = parse_retry_after_header(&h).expect("parsed");
+        // Allow for tiny clock drift between insertion and parse.
+        assert!(
+            d >= Duration::from_secs(5) && d <= Duration::from_secs(8),
+            "got {d:?}"
+        );
+    }
+
+    #[test]
+    fn clamp_retry_after_zero_becomes_one_sec() {
+        assert_eq!(clamp_retry_after(Duration::ZERO), Duration::from_secs(1));
+    }
+
+    #[test]
+    fn clamp_retry_after_caps_at_five_minutes() {
+        let huge = Duration::from_secs(3600);
+        assert_eq!(clamp_retry_after(huge), Duration::from_secs(300));
+    }
+
+    #[test]
+    fn clamp_retry_after_passes_through_reasonable_value() {
+        let d = Duration::from_secs(42);
+        assert_eq!(clamp_retry_after(d), d);
+    }
+
+    // YYC-272: 4xx non-429 must not be retried.
+    #[test]
+    fn provider_error_4xx_non_429_is_not_retryable() {
+        for code in [400, 401, 403, 404, 422] {
+            let err = classify(code, r#"{"error":{"message":"x"}}"#);
+            assert!(
+                !err.is_retryable(),
+                "expected {code} ({err:?}) to be non-retryable"
+            );
+        }
+    }
+
+    // YYC-272: 429 + 5xx must be retryable.
+    #[test]
+    fn provider_error_429_and_5xx_are_retryable() {
+        for code in [429, 500, 502, 503, 504] {
+            let err = classify(code, r#"{"error":{"message":"x"}}"#);
+            assert!(
+                err.is_retryable(),
+                "expected {code} ({err:?}) to be retryable"
+            );
+        }
     }
 }
