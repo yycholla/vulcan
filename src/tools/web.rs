@@ -1,4 +1,4 @@
-use crate::tools::{Tool, ToolResult};
+use crate::tools::{Tool, ToolResult, web_ssrf};
 use anyhow::Result;
 use async_trait::async_trait;
 use serde_json::{Value, json};
@@ -152,6 +152,15 @@ impl Tool for WebFetch {
             .as_str()
             .ok_or_else(|| anyhow::anyhow!("url required"))?;
 
+        // YYC-246: SSRF guard. Refuses non-HTTP(S) schemes and any URL
+        // whose host (literal or DNS-resolved) sits in a private,
+        // loopback, link-local, multicast, or otherwise non-public
+        // address class. See `web_ssrf` for the full block list.
+        let validated = match web_ssrf::validate(url).await {
+            Ok(parsed) => parsed,
+            Err(e) => return Ok(ToolResult::err(format!("URL refused: {e}"))),
+        };
+
         let client = reqwest::Client::builder()
             .user_agent("vulcan/0.1 (AI agent; personal use)")
             .timeout(std::time::Duration::from_secs(30))
@@ -161,7 +170,7 @@ impl Tool for WebFetch {
             biased;
             _ = cancel.cancelled() => return Ok(ToolResult::err("Cancelled")),
             res = async {
-                let response = client.get(url).send().await?;
+                let response = client.get(validated.as_str()).send().await?;
                 let status = response.status();
                 if !status.is_success() {
                     return Err(anyhow::anyhow!("HTTP {status} fetching {url}"));
