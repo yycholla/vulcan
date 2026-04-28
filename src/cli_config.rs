@@ -17,6 +17,55 @@ pub async fn run(cmd: ConfigSubcommand) -> Result<()> {
         ConfigSubcommand::Show { reveal } => show(reveal),
         ConfigSubcommand::Set { key, value } => set(&key, &value),
         ConfigSubcommand::Unset { key } => unset(&key),
+        ConfigSubcommand::Edit { section } => edit(section.as_deref()),
+    }
+}
+
+/// YYC-217: resolve a section name to the file that owns it under
+/// the split layout (`keybinds.toml`, `providers.toml`,
+/// `config.toml`). Pure so tests don't touch the filesystem.
+fn resolve_section_path(home: &Path, section: Option<&str>) -> PathBuf {
+    match section {
+        Some("keybinds") => home.join("keybinds.toml"),
+        Some("providers") | Some("provider") => home.join("providers.toml"),
+        Some(_) | None => home.join("config.toml"),
+    }
+}
+
+/// YYC-217: open the right config file in the user's `$EDITOR`. If
+/// no editor is set, print the path so the user can open it
+/// themselves. Routes section name → file via the same split
+/// layout the registry uses (`config.toml` / `keybinds.toml` /
+/// `providers.toml`).
+fn edit(section: Option<&str>) -> Result<()> {
+    let path = resolve_section_path(&vulcan_home(), section);
+    // Make sure the file exists so the editor doesn't error on
+    // first open. An empty file is a fine starting point.
+    if !path.exists() {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::write(&path, "")?;
+    }
+    match std::env::var("EDITOR") {
+        Ok(editor) if !editor.trim().is_empty() => {
+            let status = std::process::Command::new(editor.trim())
+                .arg(&path)
+                .status()?;
+            if !status.success() {
+                bail!(
+                    "editor exited non-zero ({status}). Check {} manually.",
+                    path.display()
+                );
+            }
+            println!("Saved {}", path.display());
+            Ok(())
+        }
+        _ => {
+            println!("$EDITOR is not set; open this file manually:");
+            println!("  {}", path.display());
+            Ok(())
+        }
     }
 }
 
@@ -339,6 +388,42 @@ fn format_file(f: ConfigFile) -> &'static str {
         ConfigFile::Config => "config",
         ConfigFile::Keybinds => "keybinds",
         ConfigFile::Providers => "providers",
+    }
+}
+
+#[cfg(test)]
+mod yyc217_tests {
+    use super::*;
+
+    #[test]
+    fn resolve_section_path_routes_known_sections() {
+        let home = std::path::Path::new("/tmp/x");
+        assert_eq!(
+            resolve_section_path(home, Some("keybinds")),
+            home.join("keybinds.toml"),
+        );
+        assert_eq!(
+            resolve_section_path(home, Some("providers")),
+            home.join("providers.toml"),
+        );
+        assert_eq!(
+            resolve_section_path(home, Some("provider")),
+            home.join("providers.toml"),
+        );
+    }
+
+    #[test]
+    fn resolve_section_path_defaults_unknown_to_config_toml() {
+        let home = std::path::Path::new("/tmp/x");
+        assert_eq!(resolve_section_path(home, None), home.join("config.toml"),);
+        assert_eq!(
+            resolve_section_path(home, Some("scheduler")),
+            home.join("config.toml"),
+        );
+        assert_eq!(
+            resolve_section_path(home, Some("totally-unknown")),
+            home.join("config.toml"),
+        );
     }
 }
 

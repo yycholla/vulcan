@@ -405,6 +405,16 @@ pub enum ConfigSubcommand {
         /// Dotted field path.
         key: String,
     },
+    /// YYC-217: open the config file containing a given section in
+    /// `$EDITOR` for ad-hoc edits. Prints the path when no editor
+    /// is set so the user can open it themselves.
+    Edit {
+        /// Optional section name (e.g. `provider`, `gateway`,
+        /// `keybinds`). Routes to the right TOML file across the
+        /// split layout (`config.toml` / `keybinds.toml` /
+        /// `providers.toml`). Omit to edit `config.toml`.
+        section: Option<String>,
+    },
 }
 
 /// YYC-219: subcommands under `vulcan context-pack`.
