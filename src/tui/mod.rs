@@ -1,3 +1,30 @@
+//! TUI entry point.
+//!
+//! ## YYC-266 — module size investigation
+//!
+//! The audit (`codebase-analysis.md` A2) flagged `tui/mod.rs` as
+//! oversized at "101 KB"; the actual figure is ~1675 lines, and
+//! the file holds `run_tui` (the event loop) plus a single small
+//! helper. Heavy decomposition has already happened — the TUI
+//! is split across 15+ submodules:
+//!
+//! - State + diffing: `state/`, `chat_message`, `chat_render`.
+//! - Rendering: `rendering`, `widgets`, `views`, `markdown`,
+//!   `theme`, `miller_columns`, `model_picker`, `picker_state`.
+//! - Input: `events`, `keybinds`, `keymap`.
+//! - Init / orchestration: `init`, `orchestration`.
+//!
+//! What's left in `mod.rs` is the orchestrator — the event loop,
+//! the streaming-event pump, slash-command dispatch, and pause /
+//! resume wiring. Every line couples to multiple submodules; a
+//! further split would mean either passing huge tuples of state
+//! across module boundaries or pulling submodules back into a
+//! shared file. Neither is a clear win.
+//!
+//! Decision: leave the orchestrator in `mod.rs`. New code that
+//! adds a *new* coherent surface (e.g. a future plugin host)
+//! lives in its own submodule from day one.
+
 use std::sync::Arc;
 use std::time::Instant;
 
