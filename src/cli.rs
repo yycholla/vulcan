@@ -132,6 +132,16 @@ pub enum Command {
         #[command(subcommand)]
         cmd: ReplaySubcommand,
     },
+    /// YYC-218 / YYC-189: generate a change-impact report for a
+    /// file. Walks code references + tests + docs and emits
+    /// markdown.
+    Impact {
+        /// File path to analyze.
+        target: std::path::PathBuf,
+        /// Persist the rendered report as a YYC-180 artifact.
+        #[arg(long)]
+        save: bool,
+    },
 }
 
 /// YYC-184: subcommands under `vulcan replay`.
