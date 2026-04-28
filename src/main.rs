@@ -143,6 +143,10 @@ async fn main() -> anyhow::Result<()> {
             init_cli_logging();
             vulcan::cli_artifact::run(cmd).await?;
         }
+        Some(Command::Knowledge { cmd }) => {
+            init_cli_logging();
+            vulcan::cli_knowledge::run(cmd).await?;
+        }
     }
 
     Ok(())
