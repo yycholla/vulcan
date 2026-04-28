@@ -7,14 +7,27 @@
 //! auto-diagnostics hook for a "did my edit compile?" Rust path that
 //! doesn't depend on tooling state.
 
-use crate::tools::{Tool, ToolContext, ToolResult};
+use crate::tools::{Tool, ToolContext, ToolResult, parse_tool_params};
 use anyhow::Result;
 use async_trait::async_trait;
+use serde::Deserialize;
 use serde_json::{Value, json};
 use tokio::process::Command;
 use tokio_util::sync::CancellationToken;
 
 const MAX_DIAGS: usize = 50;
+
+fn default_cargo_all_targets() -> bool {
+    true
+}
+
+#[derive(Deserialize)]
+struct CargoCheckParams {
+    #[serde(default)]
+    package: Option<String>,
+    #[serde(default = "default_cargo_all_targets")]
+    all_targets: bool,
+}
 
 pub struct CargoCheckTool;
 
@@ -70,17 +83,18 @@ impl Tool for CargoCheckTool {
     }
 
     async fn call(&self, params: Value, cancel: CancellationToken) -> Result<ToolResult> {
-        let package = params.get("package").and_then(|v| v.as_str());
-        let all_targets = params
-            .get("all_targets")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(true);
+        let p: CargoCheckParams = match parse_tool_params(params) {
+            Ok(p) => p,
+            Err(e) => return Ok(e),
+        };
+        let package = p.package.as_deref();
+        let all_targets = p.all_targets;
 
         let mut cmd = Command::new("cargo");
         cmd.arg("check");
         cmd.arg("--message-format=json");
-        if let Some(p) = package {
-            cmd.arg("-p").arg(p);
+        if let Some(pkg) = package {
+            cmd.arg("-p").arg(pkg);
         } else {
             cmd.arg("--workspace");
         }
@@ -188,5 +202,24 @@ impl Tool for CargoCheckTool {
             },
         });
         Ok(ToolResult::ok(serde_json::to_string_pretty(&payload)?))
+    }
+}
+
+#[cfg(test)]
+mod yyc263_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn cargo_check_bad_param_type_surfaces_as_toolresult_err() {
+        let result = CargoCheckTool
+            .call(json!({ "all_targets": "yes" }), CancellationToken::new())
+            .await
+            .expect("call returns Ok(ToolResult)");
+        assert!(result.is_error);
+        assert!(
+            result.output.contains("tool params failed to validate"),
+            "expected serde-shaped error, got: {}",
+            result.output
+        );
     }
 }
