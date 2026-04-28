@@ -224,6 +224,7 @@ pub mod code_edit;
 pub mod code_graph;
 pub mod code_search;
 pub mod file;
+pub mod fs_sandbox;
 pub mod git;
 pub mod lsp;
 pub mod profile;

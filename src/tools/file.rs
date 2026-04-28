@@ -1,5 +1,5 @@
 use crate::pause::{AgentPause, AgentResume, DiffScrubHunk, PauseKind, PauseSender};
-use crate::tools::{Tool, ToolResult};
+use crate::tools::{Tool, ToolResult, fs_sandbox};
 use anyhow::Result;
 use async_trait::async_trait;
 use serde_json::{Value, json};
@@ -45,9 +45,16 @@ impl Tool for ReadFile {
         let offset = params["offset"].as_i64().unwrap_or(1);
         let limit = params["limit"].as_i64().unwrap_or(500);
 
+        // YYC-248: refuse reads of system credential / pseudo-fs paths
+        // before any I/O happens.
+        let path = match fs_sandbox::validate_read(path) {
+            Ok(p) => p,
+            Err(e) => return Ok(ToolResult::err(e.to_string())),
+        };
+
         // YYC-159: preflight the file size so multi-GB inputs are
         // refused before they hit `read_to_string` and OOM the host.
-        let metadata = tokio::fs::metadata(path).await?;
+        let metadata = tokio::fs::metadata(&path).await?;
         let size = metadata.len();
         if size > READ_FILE_MAX_BYTES {
             let mib = size as f64 / (1024.0 * 1024.0);
@@ -66,7 +73,7 @@ impl Tool for ReadFile {
         let limit = limit.max(0) as usize;
         let target_end = start.saturating_add(limit);
 
-        let file = File::open(path).await?;
+        let file = File::open(&path).await?;
         let reader = BufReader::new(file);
         let mut lines_iter = reader.lines();
         let mut collected: Vec<String> = Vec::with_capacity(limit.min(1024));
@@ -148,6 +155,12 @@ impl Tool for ListFiles {
             .get("max_entries")
             .and_then(|v| v.as_u64())
             .unwrap_or(500) as usize;
+
+        // YYC-248: refuse listing of credential / pseudo-fs roots.
+        let path = match fs_sandbox::validate_read(&path) {
+            Ok(p) => p.to_string_lossy().into_owned(),
+            Err(e) => return Ok(ToolResult::err(e.to_string())),
+        };
 
         let walker = ignore::WalkBuilder::new(&path)
             .standard_filters(true)
@@ -284,6 +297,12 @@ impl Tool for WriteFile {
             .ok_or_else(|| anyhow::anyhow!("path required"))?;
         let content = params["content"].as_str().unwrap_or("");
 
+        // YYC-248: refuse writes to system credential / pseudo-fs paths
+        // and to any user-credential or agent-state directory.
+        if let Err(e) = fs_sandbox::validate_write(path) {
+            return Ok(ToolResult::err(e.to_string()));
+        }
+
         // YYC-66: snapshot the existing content before overwriting so the
         // diff sink has a meaningful "before" — empty string for a fresh
         // file is correct (it didn't exist).
@@ -360,6 +379,14 @@ impl Tool for SearchFiles {
             .ok_or_else(|| anyhow::anyhow!("pattern required"))?;
         let path = params["path"].as_str().unwrap_or(".");
         let limit = params["limit"].as_i64().unwrap_or(20);
+
+        // YYC-248: refuse search roots inside credential / pseudo-fs
+        // directories — `rg pattern /etc/shadow` would dump shadow lines
+        // matching the pattern to the LLM.
+        let path = match fs_sandbox::validate_read(path) {
+            Ok(p) => p.to_string_lossy().into_owned(),
+            Err(e) => return Ok(ToolResult::err(e.to_string())),
+        };
 
         let mut cmd = tokio::process::Command::new("rg");
         cmd.arg("--line-number").arg("--color").arg("never");
@@ -445,6 +472,15 @@ impl Tool for PatchFile {
             .as_str()
             .ok_or_else(|| anyhow::anyhow!("old_string required"))?;
         let new = params["new_string"].as_str().unwrap_or("");
+
+        // YYC-248: edit_file reads then writes — refuse blocked paths
+        // for both directions.
+        if let Err(e) = fs_sandbox::validate_read(path) {
+            return Ok(ToolResult::err(e.to_string()));
+        }
+        if let Err(e) = fs_sandbox::validate_write(path) {
+            return Ok(ToolResult::err(e.to_string()));
+        }
 
         let content = tokio::fs::read_to_string(path).await?;
 
