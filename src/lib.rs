@@ -26,6 +26,7 @@ pub mod platform;
 pub mod playbook;
 pub mod prompt_builder;
 pub mod provider;
+pub mod release;
 pub mod review;
 pub mod run_record;
 pub mod skills;
