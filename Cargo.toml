@@ -190,7 +190,9 @@ unused_must_use = "warn"
 [lints.clippy]
 # Common but noisy in this crate. Allowed at the baseline; revisit
 # per-call-site as those code paths get refactored.
-too_many_arguments = "allow"
+# YYC-275: `too_many_arguments` removed from the workspace allow.
+# Existing offenders carry `#[allow(clippy::too_many_arguments)]` at
+# the function so new code lights up clippy by default.
 field_reassign_with_default = "allow"
 doc_overindented_list_items = "allow"
 # `&PathBuf` / `&String` parameters are technically slower than `&Path`

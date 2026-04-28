@@ -63,6 +63,9 @@ pub struct ChatRenderStore {
 }
 
 impl ChatRenderStore {
+    // YYC-275: TUI render hot path; a builder/options struct would
+    // add allocation per draw call. Allowed at this site only.
+    #[allow(clippy::too_many_arguments)]
     pub fn visible_lines(
         &mut self,
         messages: &[ChatMessage],

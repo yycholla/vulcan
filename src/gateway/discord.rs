@@ -28,6 +28,9 @@ impl DiscordPlatform {
         })
     }
 
+    // YYC-275: maps Serenity Message fields one-to-one; refactoring
+    // to a struct would just hide the same shape. Allowed here.
+    #[allow(clippy::too_many_arguments)]
     fn inbound_from_message_parts(
         channel_id: u64,
         user_id: u64,
