@@ -1,4 +1,5 @@
-use clap::Parser;
+use clap::{CommandFactory, Parser};
+use clap_complete::generate;
 use std::fs::File;
 use std::io::Write;
 use std::path::PathBuf;
@@ -126,6 +127,14 @@ async fn main() -> anyhow::Result<()> {
             let dir = vulcan::config::vulcan_home();
             vulcan::cli_auth::run(args, dir).await?;
         }
+        Some(Command::Completions { shell }) => {
+            // YYC-213: dump a shell-completion script to stdout so
+            // users can `vulcan completions bash > /path/to/file` (or
+            // pipe into their shell init). Stays out of the logging
+            // setup so the output is the script alone.
+            let mut cmd = Cli::command();
+            generate(shell, &mut cmd, "vulcan", &mut std::io::stdout());
+        }
     }
 
     Ok(())
@@ -194,6 +203,27 @@ fn init_tui_logging() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// YYC-213: the bash completion script must mention global flags
+    /// like `--profile` so we know the Cli struct's flag definitions
+    /// are flowing through the generator. If a future PR drops a
+    /// flag from the Cli, this test catches the silent regression
+    /// in completion output.
+    #[test]
+    fn bash_completion_script_includes_global_profile_flag() {
+        let mut cmd = vulcan::cli::Cli::command();
+        let mut buf: Vec<u8> = Vec::new();
+        generate(clap_complete::Shell::Bash, &mut cmd, "vulcan", &mut buf);
+        let script = String::from_utf8(buf).expect("bash completion is utf-8");
+        assert!(
+            script.contains("--profile"),
+            "bash completion script missing --profile flag"
+        );
+        assert!(
+            script.contains("vulcan"),
+            "bash completion script missing vulcan binary name"
+        );
+    }
 
     #[test]
     fn pick_tui_log_target_uses_sink_when_path_invalid() {
