@@ -2,6 +2,30 @@ use anyhow::{Result, anyhow};
 use rusqlite::params;
 
 use crate::memory::DbPool;
+
+/// YYC-271: alias for the pooled connection type so the
+/// `db_blocking` helper signature is readable.
+type PooledConn = r2d2::PooledConnection<r2d2_sqlite::SqliteConnectionManager>;
+
+/// YYC-271: run a synchronous closure on the blocking pool with a
+/// freshly checked-out connection. Gateway DB ops are synchronous
+/// (rusqlite + r2d2) — running them on the tokio worker thread
+/// blocks the async runtime under load. `spawn_blocking` parks the
+/// work on the blocking pool so async workers stay responsive.
+async fn db_blocking<F, T>(pool: DbPool, f: F) -> Result<T>
+where
+    F: FnOnce(PooledConn) -> Result<T> + Send + 'static,
+    T: Send + 'static,
+{
+    tokio::task::spawn_blocking(move || -> Result<T> {
+        let conn = pool
+            .get()
+            .map_err(|e| anyhow!("queue DB pool checkout: {e}"))?;
+        f(conn)
+    })
+    .await
+    .map_err(|e| anyhow!("DB blocking task panicked: {e}"))?
+}
 use crate::platform::{InboundMessage, OutboundAttachment, OutboundMessage};
 
 /// Default per-row attempt cap before mark_failed routes a row to the
@@ -70,105 +94,101 @@ impl InboundQueue {
     }
 
     pub async fn enqueue(&self, msg: InboundMessage) -> Result<i64> {
-        let conn = self
-            .conn
-            .get()
-            .map_err(|e| anyhow!("queue DB pool checkout: {e}"))?;
-        let now = chrono::Utc::now().timestamp();
-        conn.execute(
-            "INSERT INTO inbound_queue (platform, chat_id, user_id, text, received_at, state) \
-             VALUES (?1, ?2, ?3, ?4, ?5, 'pending')",
-            params![msg.platform, msg.chat_id, msg.user_id, msg.text, now],
-        )?;
-        Ok(conn.last_insert_rowid())
+        // YYC-271: park synchronous SQLite work on the blocking pool.
+        db_blocking(self.conn.clone(), move |conn| {
+            let now = chrono::Utc::now().timestamp();
+            conn.execute(
+                "INSERT INTO inbound_queue (platform, chat_id, user_id, text, received_at, state) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, 'pending')",
+                params![msg.platform, msg.chat_id, msg.user_id, msg.text, now],
+            )?;
+            Ok(conn.last_insert_rowid())
+        })
+        .await
     }
 
     pub async fn claim_next(&self) -> Result<Option<InboundRow>> {
-        let conn = self
-            .conn
-            .get()
-            .map_err(|e| anyhow!("queue DB pool checkout: {e}"))?;
-        let now = chrono::Utc::now().timestamp();
-        // RETURNING (SQLite >= 3.35) makes the claim a single atomic statement.
-        // YYC-137: stamp last_heartbeat_at on claim so recover_processing can
-        // tell live-but-slow rows from crash-orphaned ones.
-        let mut stmt = conn.prepare(
-            "UPDATE inbound_queue \
-             SET state='processing', attempts = attempts + 1, last_heartbeat_at = ?1 \
-             WHERE id = (SELECT id FROM inbound_queue WHERE state='pending' \
-                         ORDER BY received_at ASC LIMIT 1) \
-             RETURNING id, platform, chat_id, user_id, text, received_at, attempts",
-        )?;
-        let mut rows = stmt.query(params![now])?;
-        if let Some(row) = rows.next()? {
-            Ok(Some(InboundRow {
-                id: row.get(0)?,
-                platform: row.get(1)?,
-                chat_id: row.get(2)?,
-                user_id: row.get(3)?,
-                text: row.get(4)?,
-                received_at: row.get(5)?,
-                attempts: row.get(6)?,
-            }))
-        } else {
-            Ok(None)
-        }
+        // YYC-271: spawn_blocking — RETURNING is still atomic on SQLite.
+        db_blocking(self.conn.clone(), move |conn| {
+            let now = chrono::Utc::now().timestamp();
+            // YYC-137: stamp last_heartbeat_at on claim so recover_processing can
+            // tell live-but-slow rows from crash-orphaned ones.
+            let mut stmt = conn.prepare(
+                "UPDATE inbound_queue \
+                 SET state='processing', attempts = attempts + 1, last_heartbeat_at = ?1 \
+                 WHERE id = (SELECT id FROM inbound_queue WHERE state='pending' \
+                             ORDER BY received_at ASC LIMIT 1) \
+                 RETURNING id, platform, chat_id, user_id, text, received_at, attempts",
+            )?;
+            let mut rows = stmt.query(params![now])?;
+            if let Some(row) = rows.next()? {
+                Ok(Some(InboundRow {
+                    id: row.get(0)?,
+                    platform: row.get(1)?,
+                    chat_id: row.get(2)?,
+                    user_id: row.get(3)?,
+                    text: row.get(4)?,
+                    received_at: row.get(5)?,
+                    attempts: row.get(6)?,
+                }))
+            } else {
+                Ok(None)
+            }
+        })
+        .await
     }
 
     /// Refresh `last_heartbeat_at` for a row in-flight (YYC-137). Long
     /// runs that exceed the stale threshold can call this periodically
     /// to keep `recover_processing` from racing them on next startup.
     pub async fn heartbeat(&self, id: i64) -> Result<()> {
-        let conn = self
-            .conn
-            .get()
-            .map_err(|e| anyhow!("queue DB pool checkout: {e}"))?;
-        let now = chrono::Utc::now().timestamp();
-        conn.execute(
-            "UPDATE inbound_queue SET last_heartbeat_at = ?1 \
-             WHERE id = ?2 AND state = 'processing'",
-            params![now, id],
-        )?;
-        Ok(())
+        db_blocking(self.conn.clone(), move |conn| {
+            let now = chrono::Utc::now().timestamp();
+            conn.execute(
+                "UPDATE inbound_queue SET last_heartbeat_at = ?1 \
+                 WHERE id = ?2 AND state = 'processing'",
+                params![now, id],
+            )?;
+            Ok(())
+        })
+        .await
     }
 
     pub async fn mark_done(&self, id: i64) -> Result<()> {
-        let conn = self
-            .conn
-            .get()
-            .map_err(|e| anyhow!("queue DB pool checkout: {e}"))?;
-        conn.execute("DELETE FROM inbound_queue WHERE id = ?1", params![id])?;
-        Ok(())
+        db_blocking(self.conn.clone(), move |conn| {
+            conn.execute("DELETE FROM inbound_queue WHERE id = ?1", params![id])?;
+            Ok(())
+        })
+        .await
     }
 
     pub async fn complete_with_outbound(&self, id: i64, msg: OutboundMessage) -> Result<i64> {
-        let mut conn = self
-            .conn
-            .get()
-            .map_err(|e| anyhow!("queue DB pool checkout: {e}"))?;
-        let tx = conn.transaction()?;
-        let now = chrono::Utc::now().timestamp();
-        let attachments_json = serde_json::to_string(&msg.attachments)?;
-        tx.execute(
-            "INSERT INTO outbound_queue \
-             (platform, chat_id, text, attachments_json, enqueued_at, next_attempt_at, state, \
-              edit_target, reply_to, turn_id) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?5, 'pending', ?6, ?7, ?8)",
-            params![
-                msg.platform,
-                msg.chat_id,
-                msg.text,
-                attachments_json,
-                now,
-                msg.edit_target,
-                msg.reply_to,
-                msg.turn_id,
-            ],
-        )?;
-        let outbound_id = tx.last_insert_rowid();
-        tx.execute("DELETE FROM inbound_queue WHERE id = ?1", params![id])?;
-        tx.commit()?;
-        Ok(outbound_id)
+        db_blocking(self.conn.clone(), move |mut conn| {
+            let tx = conn.transaction()?;
+            let now = chrono::Utc::now().timestamp();
+            let attachments_json = serde_json::to_string(&msg.attachments)?;
+            tx.execute(
+                "INSERT INTO outbound_queue \
+                 (platform, chat_id, text, attachments_json, enqueued_at, next_attempt_at, state, \
+                  edit_target, reply_to, turn_id) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?5, 'pending', ?6, ?7, ?8)",
+                params![
+                    msg.platform,
+                    msg.chat_id,
+                    msg.text,
+                    attachments_json,
+                    now,
+                    msg.edit_target,
+                    msg.reply_to,
+                    msg.turn_id,
+                ],
+            )?;
+            let outbound_id = tx.last_insert_rowid();
+            tx.execute("DELETE FROM inbound_queue WHERE id = ?1", params![id])?;
+            tx.commit()?;
+            Ok(outbound_id)
+        })
+        .await
     }
 
     /// Record a processing failure. If the row's `attempts` count has
@@ -176,37 +196,38 @@ impl InboundQueue {
     /// (`state='dead'`) so it stops being claimed. Otherwise the row
     /// goes back to `state='pending'` for another try (YYC-137).
     pub async fn mark_failed(&self, id: i64, error: &str) -> Result<()> {
-        let conn = self
-            .conn
-            .get()
-            .map_err(|e| anyhow!("queue DB pool checkout: {e}"))?;
-        let attempts: i64 = conn.query_row(
-            "SELECT attempts FROM inbound_queue WHERE id = ?1",
-            params![id],
-            |row| row.get(0),
-        )?;
-        let next_state = if attempts as u32 >= self.max_attempts {
-            // YYC-146: DLQ transitions log at error so operators don't
-            // need to query state to notice exhausted rows.
-            tracing::error!(
-                target: "gateway::queue",
-                id, attempts, error, max_attempts = self.max_attempts,
-                "inbound DLQ transition: row exhausted retries, routing to dead-letter queue",
-            );
-            "dead"
-        } else {
-            tracing::warn!(
-                target: "gateway::queue",
-                id, attempts, error, max_attempts = self.max_attempts,
-                "inbound message marked failed; will retry",
-            );
-            "pending"
-        };
-        conn.execute(
-            "UPDATE inbound_queue SET state = ?1, last_error = ?2 WHERE id = ?3",
-            params![next_state, error, id],
-        )?;
-        Ok(())
+        let max_attempts = self.max_attempts;
+        let error = error.to_string();
+        db_blocking(self.conn.clone(), move |conn| {
+            let attempts: i64 = conn.query_row(
+                "SELECT attempts FROM inbound_queue WHERE id = ?1",
+                params![id],
+                |row| row.get(0),
+            )?;
+            let next_state = if attempts as u32 >= max_attempts {
+                // YYC-146: DLQ transitions log at error so operators don't
+                // need to query state to notice exhausted rows.
+                tracing::error!(
+                    target: "gateway::queue",
+                    id, attempts, error = %error, max_attempts,
+                    "inbound DLQ transition: row exhausted retries, routing to dead-letter queue",
+                );
+                "dead"
+            } else {
+                tracing::warn!(
+                    target: "gateway::queue",
+                    id, attempts, error = %error, max_attempts,
+                    "inbound message marked failed; will retry",
+                );
+                "pending"
+            };
+            conn.execute(
+                "UPDATE inbound_queue SET state = ?1, last_error = ?2 WHERE id = ?3",
+                params![next_state, error, id],
+            )?;
+            Ok(())
+        })
+        .await
     }
 
     /// Reset crash-orphaned `processing` rows back to `pending`.
@@ -217,62 +238,60 @@ impl InboundQueue {
     /// are assumed to belong to a live worker and are left alone, so
     /// a fast worker restart doesn't duplicate in-flight work.
     pub async fn recover_processing(&self) -> Result<usize> {
-        let conn = self
-            .conn
-            .get()
-            .map_err(|e| anyhow!("queue DB pool checkout: {e}"))?;
-        let now = chrono::Utc::now().timestamp();
-        let cutoff = now - self.heartbeat_stale_secs;
-        let n = conn.execute(
-            "UPDATE inbound_queue SET state='pending' \
-             WHERE state='processing' \
-               AND (last_heartbeat_at IS NULL OR last_heartbeat_at < ?1)",
-            params![cutoff],
-        )?;
-        Ok(n)
+        let stale_secs = self.heartbeat_stale_secs;
+        db_blocking(self.conn.clone(), move |conn| {
+            let now = chrono::Utc::now().timestamp();
+            let cutoff = now - stale_secs;
+            let n = conn.execute(
+                "UPDATE inbound_queue SET state='pending' \
+                 WHERE state='processing' \
+                   AND (last_heartbeat_at IS NULL OR last_heartbeat_at < ?1)",
+                params![cutoff],
+            )?;
+            Ok(n)
+        })
+        .await
     }
 
     /// Count of rows currently in the dead-letter queue (YYC-137).
     pub async fn count_dead(&self) -> Result<usize> {
-        let conn = self
-            .conn
-            .get()
-            .map_err(|e| anyhow!("queue DB pool checkout: {e}"))?;
-        let n: i64 = conn.query_row(
-            "SELECT count(*) FROM inbound_queue WHERE state='dead'",
-            [],
-            |row| row.get(0),
-        )?;
-        Ok(n.max(0) as usize)
+        db_blocking(self.conn.clone(), move |conn| {
+            let n: i64 = conn.query_row(
+                "SELECT count(*) FROM inbound_queue WHERE state='dead'",
+                [],
+                |row| row.get(0),
+            )?;
+            Ok(n.max(0) as usize)
+        })
+        .await
     }
 
     /// Snapshot the most recent `limit` dead-letter rows so an admin
     /// endpoint can surface them for replay (YYC-137).
     pub async fn list_dead(&self, limit: usize) -> Result<Vec<DeadInboundRow>> {
-        let conn = self
-            .conn
-            .get()
-            .map_err(|e| anyhow!("queue DB pool checkout: {e}"))?;
-        let mut stmt = conn.prepare(
-            "SELECT id, platform, chat_id, user_id, text, received_at, attempts, last_error \
-             FROM inbound_queue WHERE state='dead' \
-             ORDER BY received_at DESC LIMIT ?1",
-        )?;
-        let rows = stmt
-            .query_map(params![limit as i64], |row| {
-                Ok(DeadInboundRow {
-                    id: row.get(0)?,
-                    platform: row.get(1)?,
-                    chat_id: row.get(2)?,
-                    user_id: row.get(3)?,
-                    text: row.get(4)?,
-                    received_at: row.get(5)?,
-                    attempts: row.get(6)?,
-                    last_error: row.get(7)?,
-                })
-            })?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
-        Ok(rows)
+        db_blocking(self.conn.clone(), move |conn| {
+            let mut stmt = conn.prepare(
+                "SELECT id, platform, chat_id, user_id, text, received_at, attempts, last_error \
+                 FROM inbound_queue WHERE state='dead' \
+                 ORDER BY received_at DESC LIMIT ?1",
+            )?;
+            let rows = stmt
+                .query_map(params![limit as i64], |row| {
+                    Ok(DeadInboundRow {
+                        id: row.get(0)?,
+                        platform: row.get(1)?,
+                        chat_id: row.get(2)?,
+                        user_id: row.get(3)?,
+                        text: row.get(4)?,
+                        received_at: row.get(5)?,
+                        attempts: row.get(6)?,
+                        last_error: row.get(7)?,
+                    })
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            Ok(rows)
+        })
+        .await
     }
 
     /// Move a dead row back to `pending` so it gets re-claimed on the
@@ -280,16 +299,15 @@ impl InboundQueue {
     /// starts fresh; preserves `last_error` for diagnostics. Returns
     /// whether the row was found in `dead` state (YYC-137).
     pub async fn replay_dead(&self, id: i64) -> Result<bool> {
-        let conn = self
-            .conn
-            .get()
-            .map_err(|e| anyhow!("queue DB pool checkout: {e}"))?;
-        let n = conn.execute(
-            "UPDATE inbound_queue SET state='pending', attempts=0 \
-             WHERE id = ?1 AND state='dead'",
-            params![id],
-        )?;
-        Ok(n > 0)
+        db_blocking(self.conn.clone(), move |conn| {
+            let n = conn.execute(
+                "UPDATE inbound_queue SET state='pending', attempts=0 \
+                 WHERE id = ?1 AND state='dead'",
+                params![id],
+            )?;
+            Ok(n > 0)
+        })
+        .await
     }
 }
 
