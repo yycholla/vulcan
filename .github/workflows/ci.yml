@@ -53,35 +53,44 @@ jobs:
         continue-on-error: true
 
   test:
+    # Single job (was a 2-variant matrix) so the default-features and
+    # gateway-features builds share one warm `target/` cache. The
+    # gateway variant is a strict superset of the default feature set,
+    # so the second `cargo build` only rebuilds gateway-touched crates
+    # — incremental, not cold. Trades a parallel runner slot for cache
+    # reuse + one less Swatinem cache restore/save cycle.
     runs-on: ubuntu-latest
-    timeout-minutes: 20
-    strategy:
-      fail-fast: false
-      matrix:
-        features:
-          - ""
-          - "gateway"
+    # Bumped 20 → 25 to absorb the sequential second variant.
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - uses: taiki-e/install-action@nextest
-      - name: Build
-        run: cargo build --all-targets --features "${{ matrix.features }}"
+      # Compile-check both feature variants up front. Catches a
+      # default-features-only break independently of the gateway path.
+      - name: Build (default features)
+        run: cargo build --all-targets
+      - name: Build (gateway feature)
+        run: cargo build --all-targets --features gateway
       # Test target set excludes `--benches` deliberately. The divan
       # benches (`tui_render`, `agent_core`) are measurement loops, not
       # tests — under nextest they hit the 120s per-test timeout, retry
       # 3x, and break the test run. Benches get exercised by `cargo bench`
       # in `bench.yml`, not here.
-      - name: Test (nextest)
-        run: cargo nextest run --profile ci --lib --bins --tests --features "${{ matrix.features }}"
-      - name: Doc tests
-        run: cargo test --doc --features "${{ matrix.features }}"
+      - name: Test (default features)
+        run: cargo nextest run --profile ci --lib --bins --tests
+      - name: Test (gateway feature)
+        run: cargo nextest run --profile ci --lib --bins --tests --features gateway
+      - name: Doc tests (default features)
+        run: cargo test --doc
+      - name: Doc tests (gateway feature)
+        run: cargo test --doc --features gateway
       - name: Upload junit
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: junit-${{ matrix.features || 'default' }}
+          name: junit
           path: target/nextest/ci/junit.xml
           if-no-files-found: ignore
 
