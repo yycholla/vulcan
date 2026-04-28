@@ -138,6 +138,14 @@ pub enum Command {
     /// YYC-183: structured runtime diagnostics — config,
     /// storage, workspace, tool registry checks.
     Doctor,
+    /// YYC-221: render a release summary for a git revision range
+    /// (e.g. `main..HEAD`). Walks `git log`, groups commits by
+    /// `YYC-<id>` issue refs, surfaces risk-flagged subjects, and
+    /// prints markdown to stdout.
+    Release {
+        /// Git revision range. Anything `git log` accepts works.
+        range: String,
+    },
     /// YYC-185: dry-run effective tool policy for a workspace
     /// + capability profile combination, without executing
     /// anything.

@@ -208,6 +208,13 @@ async fn main() -> anyhow::Result<()> {
             vulcan::cli_review::run(cmd).await?;
         }
         Some(Command::Doctor) => unreachable!("handled before Config::load above"),
+        Some(Command::Release { range }) => {
+            init_cli_logging();
+            // YYC-221: ingest git log → build summary → render.
+            let commits = vulcan::release::ingest_git_log(&range)?;
+            let summary = vulcan::release::build_summary(&range, &commits);
+            print!("{}", vulcan::release::render_markdown(&summary));
+        }
         Some(Command::Policy { cmd }) => {
             init_cli_logging();
             vulcan::cli_policy::run(cmd).await?;
