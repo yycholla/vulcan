@@ -145,6 +145,10 @@ percent-encoding = "2"
 # CSS-selector HTML parsing for the DDG scraper (YYC-252). Replaces
 # the brittle hand-rolled `.split().nth()` chain.
 scraper = "0.26"
+# Render HTML as plain text for web_fetch output (YYC-254). Handles
+# entities, <pre>, CDATA, nested tags — all gaps in the prior
+# hand-rolled state machine.
+html2text = "0.17"
 
 # Gateway daemon HTTP stack. Optional — only linked under `gateway`.
 axum = { version = "0.8.9", optional = true }

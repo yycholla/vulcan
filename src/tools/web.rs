@@ -311,66 +311,53 @@ fn truncate_chars(text: &str, max: usize) -> (String, bool) {
     (text.chars().take(max).collect(), true)
 }
 
+/// YYC-254: render HTML body as plain text via the `html2text`
+/// crate. The previous hand-rolled char-by-char state machine
+/// missed CDATA, HTML entities (`&amp;`, `&#x20;`), `<pre>`
+/// whitespace, and nested-tag edge cases — `html2text` handles all
+/// four because it lowers HTML through `html5ever` and then renders
+/// the DOM as text.
+///
+/// The 1024-column width is wider than any reasonable terminal so
+/// the output isn't artificially line-wrapped — the agent's own
+/// truncate_chars cap downstream (FETCH_MAX_CHARS) handles length.
 fn html_to_text(html: &str) -> String {
-    // Simple HTML-to-text extraction — remove tags, normalize whitespace
-    let mut text = String::new();
-    let mut in_tag = false;
-    let mut in_script = false;
-    let mut in_style = false;
+    const RENDER_WIDTH: usize = 1024;
+    match html2text::from_read(html.as_bytes(), RENDER_WIDTH) {
+        Ok(rendered) => rendered.trim().to_string(),
+        Err(e) => {
+            tracing::warn!("html2text render failed: {e}");
+            // Fall back to a naive tag-strip so the tool still
+            // produces *something* usable on malformed pages.
+            naive_strip_tags(html)
+        }
+    }
+}
 
+/// Last-resort tag stripper for inputs `html2text` rejects.
+/// Walks each char and skips everything between `<` and `>`. Doesn't
+/// handle CDATA / entities / scripts — those cases get the worse
+/// output, but the tool keeps responding.
+fn naive_strip_tags(html: &str) -> String {
+    let mut out = String::with_capacity(html.len());
+    let mut in_tag = false;
     for ch in html.chars() {
-        if in_script {
-            if ch == '<' {
-                // Check for closing script tag
-                if html[html.len().saturating_sub(8)..]
-                    .to_lowercase()
-                    .contains("/script")
-                {
-                    in_script = false;
-                }
-            }
-            continue;
-        }
-        if in_style {
-            if ch == '<' {
-                in_style = false;
-            }
-            continue;
-        }
         match ch {
-            '<' => {
-                in_tag = true;
-                // Detect script/style blocks to skip
-                let lower = html[..].to_lowercase();
-                if lower.contains("<script") {
-                    in_script = true;
-                    in_tag = false;
-                    continue;
-                }
-                if lower.contains("<style") {
-                    in_style = true;
-                    in_tag = false;
-                    continue;
-                }
-            }
-            '>' if in_tag => {
-                in_tag = false;
-            }
+            '<' => in_tag = true,
+            '>' if in_tag => in_tag = false,
             _ if !in_tag => {
-                // Normalize whitespace
                 if ch.is_whitespace() {
-                    if !text.ends_with(' ') && !text.is_empty() {
-                        text.push(' ');
+                    if !out.ends_with(' ') && !out.is_empty() {
+                        out.push(' ');
                     }
                 } else {
-                    text.push(ch);
+                    out.push(ch);
                 }
             }
             _ => {}
         }
     }
-
-    text.trim().to_string()
+    out.trim().to_string()
 }
 
 #[cfg(test)]
@@ -448,14 +435,50 @@ mod tests {
     }
 
     #[test]
-    fn yyc257_html_to_text_strips_tags_and_normalizes_whitespace() {
-        let html = "<p>Hello,  <b>world</b>!</p>\n  <p>Second  line.</p>";
+    fn yyc257_html_to_text_strips_tags() {
+        // YYC-254: html2text now powers the renderer. Exact spacing
+        // and inline-tag rendering depend on the crate, so the test
+        // only asserts the structural properties: tag characters are
+        // gone and the visible words land in the output in order.
+        let html = "<p>Hello, <b>world</b>!</p><p>Second line.</p>";
         let text = html_to_text(html);
-        // Tag chars stripped; runs of whitespace collapsed.
-        assert!(text.contains("Hello, world!"));
+        assert!(text.contains("Hello"));
+        assert!(text.contains("world"));
         assert!(text.contains("Second line."));
         assert!(!text.contains('<'));
         assert!(!text.contains('>'));
+    }
+
+    #[test]
+    fn yyc254_html_to_text_decodes_entities() {
+        // The hand-rolled stripper passed `&amp;` through verbatim;
+        // html2text decodes named + numeric entities.
+        let html = "<p>R&amp;D &amp; tools (&#x40; &#64;)</p>";
+        let text = html_to_text(html);
+        assert!(text.contains("R&D"));
+        assert!(text.contains("tools"));
+        assert!(!text.contains("&amp;"));
+    }
+
+    #[test]
+    fn yyc254_html_to_text_skips_script_and_style_blocks() {
+        let html =
+            "<style>.x { color: red }</style><p>visible</p><script>alert('hi')</script>after";
+        let text = html_to_text(html);
+        assert!(text.contains("visible"));
+        assert!(text.contains("after"));
+        // Neither inline JS nor inline CSS should land in output.
+        assert!(!text.contains("alert"));
+        assert!(!text.contains("color: red"));
+    }
+
+    #[test]
+    fn yyc254_naive_strip_tags_falls_back_when_html2text_fails() {
+        // Best-effort fallback path. Pin its happy case directly.
+        let stripped = naive_strip_tags("<p>hello <b>world</b></p>");
+        assert!(stripped.contains("hello"));
+        assert!(stripped.contains("world"));
+        assert!(!stripped.contains('<'));
     }
 
     #[test]
