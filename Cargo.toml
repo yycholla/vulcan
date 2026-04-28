@@ -100,6 +100,9 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 anyhow = "1"
 thiserror = "2"
 
+# Zeroizing wrappers for in-memory secrets (YYC-249).
+secrecy = "0.10"
+
 # Date/time
 chrono = { version = "0.4", features = ["serde"] }
 

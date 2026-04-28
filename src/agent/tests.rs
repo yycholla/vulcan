@@ -927,3 +927,21 @@ fn is_local_base_url_returns_false_on_malformed_input() {
     assert!(!is_local_base_url("not a url"));
     assert!(!is_local_base_url("http://"));
 }
+
+// YYC-249: Agent.provider_api_key must be wrapped in SecretString so
+// the buffer is zeroed on drop and Debug doesn't leak the value.
+#[test]
+fn provider_api_key_is_secret_string() {
+    let _: fn(&Agent) -> &secrecy::SecretString = |a| &a.provider_api_key;
+}
+
+#[test]
+fn provider_api_key_debug_does_not_leak_value() {
+    use secrecy::SecretString;
+    let secret = SecretString::from("super-secret-key-do-not-leak".to_string());
+    let dbg = format!("{secret:?}");
+    assert!(
+        !dbg.contains("super-secret-key-do-not-leak"),
+        "SecretString Debug leaked the value: {dbg}"
+    );
+}
