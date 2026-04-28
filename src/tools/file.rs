@@ -441,7 +441,8 @@ impl Tool for SearchFiles {
             .as_str()
             .ok_or_else(|| anyhow::anyhow!("pattern required"))?;
         let path = params["path"].as_str().unwrap_or(".");
-        let limit = params["limit"].as_i64().unwrap_or(20);
+        let limit = params["limit"].as_i64().unwrap_or(20).max(1) as usize;
+        let glob = params["file_glob"].as_str().map(str::to_string);
 
         // YYC-248: refuse search roots inside credential / pseudo-fs
         // directories — `rg pattern /etc/shadow` would dump shadow lines
@@ -451,32 +452,128 @@ impl Tool for SearchFiles {
             Err(e) => return Ok(ToolResult::err(e.to_string())),
         };
 
-        let mut cmd = tokio::process::Command::new("rg");
-        cmd.arg("--line-number").arg("--color").arg("never");
-        cmd.arg("-m").arg(limit.to_string());
-        cmd.arg(pattern);
-        cmd.arg(path);
-
-        if let Some(glob) = params["file_glob"].as_str() {
-            cmd.arg("--glob").arg(glob);
+        // YYC-260: prefer `rg` for speed; fall back to an in-process
+        // walker when ripgrep isn't installed. The fallback is slower
+        // but means the tool isn't broken on hosts without rg.
+        if rg_available().await {
+            return search_with_rg(pattern, &path, limit, glob.as_deref()).await;
         }
-
-        let output = cmd.output().await?;
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let stderr = String::from_utf8_lossy(&output.stderr);
-
-        if !output.status.success() && !stderr.is_empty() {
-            return Err(anyhow::anyhow!("rg failed: {stderr}"));
-        }
-
-        let result = stdout.trim().to_string();
-        let output = if result.is_empty() {
-            "No matches found.".to_string()
-        } else {
-            result
-        };
-        Ok(ToolResult::ok(output))
+        tracing::warn!("ripgrep not available — falling back to in-process search");
+        search_in_process(pattern, &path, limit, glob.as_deref())
     }
+}
+
+/// YYC-260: probe for `rg` once per process. Result is cached so we
+/// don't fork a child every search call. `OnceLock<bool>` keeps the
+/// hot path lock-free after the first hit.
+async fn rg_available() -> bool {
+    use std::sync::OnceLock;
+    static AVAILABLE: OnceLock<bool> = OnceLock::new();
+    if let Some(present) = AVAILABLE.get() {
+        return *present;
+    }
+    let present = tokio::process::Command::new("rg")
+        .arg("--version")
+        .output()
+        .await
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+    let _ = AVAILABLE.set(present);
+    present
+}
+
+async fn search_with_rg(
+    pattern: &str,
+    path: &str,
+    limit: usize,
+    glob: Option<&str>,
+) -> Result<ToolResult> {
+    let mut cmd = tokio::process::Command::new("rg");
+    cmd.arg("--line-number").arg("--color").arg("never");
+    cmd.arg("-m").arg(limit.to_string());
+    cmd.arg(pattern);
+    cmd.arg(path);
+    if let Some(g) = glob {
+        cmd.arg("--glob").arg(g);
+    }
+    let output = cmd.output().await?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    if !output.status.success() && !stderr.is_empty() {
+        return Err(anyhow::anyhow!("rg failed: {stderr}"));
+    }
+    let result = stdout.trim().to_string();
+    Ok(ToolResult::ok(if result.is_empty() {
+        "No matches found.".to_string()
+    } else {
+        result
+    }))
+}
+
+/// YYC-260: in-process fallback when `rg` isn't installed. Uses the
+/// `ignore` crate's `WalkBuilder` (gitignore-aware, same defaults as
+/// rg) plus the `regex` crate. Output format mirrors rg
+/// (`path:line:matched-line`) so the agent sees the same shape
+/// regardless of which backend ran.
+fn search_in_process(
+    pattern: &str,
+    path: &str,
+    limit: usize,
+    glob: Option<&str>,
+) -> Result<ToolResult> {
+    let re = match regex::Regex::new(pattern) {
+        Ok(r) => r,
+        Err(e) => return Ok(ToolResult::err(format!("invalid regex `{pattern}`: {e}"))),
+    };
+    let glob_matcher = match glob {
+        Some(g) => match globset::Glob::new(g) {
+            Ok(gx) => Some(gx.compile_matcher()),
+            Err(e) => return Ok(ToolResult::err(format!("invalid glob `{g}`: {e}"))),
+        },
+        None => None,
+    };
+
+    let walker = ignore::WalkBuilder::new(path)
+        .standard_filters(true)
+        .build();
+    let mut hits: Vec<String> = Vec::with_capacity(limit);
+
+    for entry in walker {
+        if hits.len() >= limit {
+            break;
+        }
+        let entry = match entry {
+            Ok(e) => e,
+            Err(_) => continue,
+        };
+        if !entry.file_type().map(|t| t.is_file()).unwrap_or(false) {
+            continue;
+        }
+        let p = entry.path();
+        if let Some(m) = glob_matcher.as_ref()
+            && !m.is_match(p)
+        {
+            continue;
+        }
+        let content = match std::fs::read_to_string(p) {
+            Ok(s) => s,
+            Err(_) => continue, // binary or unreadable
+        };
+        for (i, line) in content.lines().enumerate() {
+            if hits.len() >= limit {
+                break;
+            }
+            if re.is_match(line) {
+                hits.push(format!("{}:{}:{}", p.display(), i + 1, line));
+            }
+        }
+    }
+
+    Ok(ToolResult::ok(if hits.is_empty() {
+        "No matches found.".to_string()
+    } else {
+        hits.join("\n")
+    }))
 }
 
 pub struct PatchFile {
@@ -741,6 +838,69 @@ mod tests {
     use serde_json::json;
     use tempfile::tempdir;
     use tokio_util::sync::CancellationToken;
+
+    #[tokio::test]
+    async fn search_in_process_finds_pattern_in_text_file() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("hit.rs");
+        std::fs::write(
+            &path,
+            "fn target_function() {\n    println!(\"hello\");\n}\nfn other() {}\n",
+        )
+        .unwrap();
+        let result =
+            search_in_process("target_function", dir.path().to_str().unwrap(), 10, None).unwrap();
+        assert!(!result.is_error);
+        assert!(result.output.contains("target_function"));
+        assert!(
+            result.output.contains(":1:"),
+            "expected line-number marker in {}",
+            result.output
+        );
+    }
+
+    #[tokio::test]
+    async fn search_in_process_respects_glob_filter() {
+        let dir = tempdir().unwrap();
+        std::fs::write(dir.path().join("a.rs"), "fn keep() {}\n").unwrap();
+        std::fs::write(dir.path().join("b.txt"), "fn keep() {}\n").unwrap();
+        let result =
+            search_in_process("keep", dir.path().to_str().unwrap(), 10, Some("*.rs")).unwrap();
+        assert!(result.output.contains("a.rs"));
+        assert!(!result.output.contains("b.txt"));
+    }
+
+    #[tokio::test]
+    async fn search_in_process_caps_at_limit() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("many.txt");
+        let mut content = String::new();
+        for i in 0..50 {
+            content.push_str(&format!("hit-{i} match here\n"));
+        }
+        std::fs::write(&path, content).unwrap();
+        let result = search_in_process("match", dir.path().to_str().unwrap(), 5, None).unwrap();
+        let line_count = result.output.lines().count();
+        assert_eq!(line_count, 5);
+    }
+
+    #[tokio::test]
+    async fn search_in_process_returns_no_matches_message_on_empty() {
+        let dir = tempdir().unwrap();
+        std::fs::write(dir.path().join("a.txt"), "nothing relevant here").unwrap();
+        let result =
+            search_in_process("definitelynothere", dir.path().to_str().unwrap(), 10, None).unwrap();
+        assert_eq!(result.output, "No matches found.");
+    }
+
+    #[tokio::test]
+    async fn search_in_process_surfaces_invalid_regex_as_error() {
+        let dir = tempdir().unwrap();
+        let result =
+            search_in_process("[unclosed", dir.path().to_str().unwrap(), 10, None).unwrap();
+        assert!(result.is_error);
+        assert!(result.output.contains("invalid regex"));
+    }
 
     #[tokio::test]
     async fn write_file_refuses_oversized_content() {

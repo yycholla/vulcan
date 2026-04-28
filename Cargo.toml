@@ -137,6 +137,8 @@ lsp-types = "0.97"
 # Workspace walker that respects .gitignore (YYC-50). Used by the
 # code-graph indexer so we don't index target/, node_modules/, etc.
 ignore = "0.4.25"
+# Glob matching for the in-process search_files fallback (YYC-260).
+globset = "0.4"
 
 # Gateway daemon HTTP stack. Optional — only linked under `gateway`.
 axum = { version = "0.8.9", optional = true }
