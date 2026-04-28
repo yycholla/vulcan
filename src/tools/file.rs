@@ -155,6 +155,28 @@ impl Tool for ReadFile {
 
 pub struct ListFiles;
 
+fn default_list_path() -> String {
+    ".".to_string()
+}
+fn default_list_depth() -> u64 {
+    2
+}
+fn default_list_max_entries() -> u64 {
+    500
+}
+
+#[derive(Deserialize)]
+struct ListFilesParams {
+    #[serde(default = "default_list_path")]
+    path: String,
+    #[serde(default = "default_list_depth")]
+    depth: u64,
+    #[serde(default)]
+    include_hidden: bool,
+    #[serde(default = "default_list_max_entries")]
+    max_entries: u64,
+}
+
 #[async_trait]
 impl Tool for ListFiles {
     fn name(&self) -> &str {
@@ -178,23 +200,16 @@ impl Tool for ListFiles {
         })
     }
     async fn call(&self, params: Value, _cancel: CancellationToken) -> Result<ToolResult> {
-        let path = params
-            .get("path")
-            .and_then(|v| v.as_str())
-            .unwrap_or(".")
-            .to_string();
-        let depth = params.get("depth").and_then(|v| v.as_u64()).unwrap_or(2) as usize;
-        let include_hidden = params
-            .get("include_hidden")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false);
-        let max_entries = params
-            .get("max_entries")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(500) as usize;
+        let p: ListFilesParams = match parse_tool_params(params) {
+            Ok(p) => p,
+            Err(e) => return Ok(e),
+        };
+        let depth = p.depth as usize;
+        let include_hidden = p.include_hidden;
+        let max_entries = p.max_entries as usize;
 
         // YYC-248: refuse listing of credential / pseudo-fs roots.
-        let path = match fs_sandbox::validate_read(&path) {
+        let path = match fs_sandbox::validate_read(&p.path) {
             Ok(p) => p.to_string_lossy().into_owned(),
             Err(e) => return Ok(ToolResult::err(e.to_string())),
         };
@@ -924,6 +939,35 @@ mod tests {
             "expected serde-shaped error, got: {}",
             result.output
         );
+    }
+
+    #[tokio::test]
+    async fn yyc279_list_files_bad_param_type_surfaces_as_toolresult_err() {
+        let result = ListFiles
+            .call(json!({ "depth": "two" }), CancellationToken::new())
+            .await
+            .expect("call returns Ok(ToolResult)");
+        assert!(result.is_error);
+        assert!(
+            result.output.contains("tool params failed to validate"),
+            "expected serde-shaped error, got: {}",
+            result.output
+        );
+    }
+
+    #[tokio::test]
+    async fn yyc279_list_files_uses_default_path_dot_when_omitted() {
+        let dir = tempdir().unwrap();
+        std::fs::write(dir.path().join("a.txt"), "hi").unwrap();
+        let result = ListFiles
+            .call(
+                json!({ "path": dir.path().to_str().unwrap() }),
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+        assert!(!result.is_error);
+        assert!(result.output.contains("a.txt"));
     }
 
     #[tokio::test]
