@@ -23,6 +23,7 @@ pub mod memory;
 pub mod orchestration;
 pub mod pause;
 pub mod platform;
+pub mod playbook;
 pub mod prompt_builder;
 pub mod provider;
 pub mod review;
