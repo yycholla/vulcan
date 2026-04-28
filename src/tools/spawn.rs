@@ -108,7 +108,7 @@ impl Tool for SpawnSubagentTool {
     }
 
     fn description(&self) -> &str {
-        "Delegate a focused task to a scoped child agent. The child runs an Agent loop with a restricted tool allowlist and a hard iteration cap, then returns a summary. Use for: reviewing a subsystem, summarizing a long file, comparing alternatives, bounded code search. Default tool set is read-only; pass `allowed_tools` to widen it."
+        "Delegate a focused task to a scoped child agent. The child runs an Agent loop with a restricted tool allowlist and a hard iteration cap, then returns a summary. Use for: reviewing a subsystem, summarizing a long file, comparing alternatives, bounded code search. Default tool set is read-only; pass `profile` for a named capability set, or `allowed_tools` to specify tool names directly."
     }
 
     fn schema(&self) -> Value {
@@ -118,6 +118,10 @@ impl Tool for SpawnSubagentTool {
                 "task": {
                     "type": "string",
                     "description": "The prompt the child agent will execute. Be specific — the child has no parent context."
+                },
+                "profile": {
+                    "type": "string",
+                    "description": "Named tool capability profile (YYC-181) — `readonly`, `coding`, `reviewer`, `gateway-safe`, or any user-defined `[tools.profiles.<name>]`. When set, supersedes `allowed_tools`."
                 },
                 "allowed_tools": {
                     "type": "array",
@@ -140,12 +144,32 @@ impl Tool for SpawnSubagentTool {
                 return Ok(ToolResult::err("task required + non-empty".to_string()));
             }
         };
-        let allowed: Vec<String> = match params.get("allowed_tools") {
-            Some(Value::Array(arr)) => arr
-                .iter()
-                .filter_map(|v| v.as_str().map(String::from))
-                .collect(),
-            _ => default_allowed_tools(),
+        // YYC-181: a named `profile` (built-in or user-defined in
+        // `[tools.profiles]`) supersedes `allowed_tools`. Unknown
+        // profile names surface as a tool error so the calling agent
+        // sees a typed signal it can self-correct from.
+        let profile_name = params
+            .get("profile")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        let allowed: Vec<String> = if let Some(name) = &profile_name {
+            match self.config.tools.resolve_profile(name) {
+                Some(p) => p.allowed.iter().map(|s| s.to_string()).collect(),
+                None => {
+                    return Ok(ToolResult::err(format!(
+                        "unknown tool capability profile `{name}`. \
+                         Built-in: readonly, coding, reviewer, gateway-safe."
+                    )));
+                }
+            }
+        } else {
+            match params.get("allowed_tools") {
+                Some(Value::Array(arr)) => arr
+                    .iter()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect(),
+                _ => default_allowed_tools(),
+            }
         };
         let max_iter_raw = params["max_iterations"]
             .as_u64()
@@ -179,9 +203,16 @@ impl Tool for SpawnSubagentTool {
             return Ok(ToolResult::ok(serde_json::to_string_pretty(&payload)?));
         }
 
+        // YYC-181: when a named profile was requested, build the
+        // child under it so the child's registry records the
+        // `active_profile` for run-record / doctor visibility (PR-4
+        // wires those). When the parent passed an explicit
+        // `allowed_tools` list instead, fall back to the legacy
+        // `restrict_tools` path so the child still narrows correctly.
         let child = Agent::builder(self.config.as_ref())
             .with_hooks(HookRegistry::new())
             .with_max_iterations(max_iter)
+            .with_tool_profile(profile_name.clone())
             .build()
             .await;
         let mut child = match child {
@@ -195,7 +226,9 @@ impl Tool for SpawnSubagentTool {
                 return Ok(ToolResult::err(format!("child agent build failed: {e}")));
             }
         };
-        child.restrict_tools(&allowed);
+        if profile_name.is_none() {
+            child.restrict_tools(&allowed);
+        }
         self.orchestration
             .update_status(child_id, crate::orchestration::ChildStatus::Running);
 
@@ -350,5 +383,26 @@ mod tests {
     #[test]
     fn iteration_cap_clamps_to_ceiling() {
         assert!(SUBAGENT_MAX_ITERATIONS_CAP >= SUBAGENT_DEFAULT_ITERATIONS);
+    }
+
+    // ── YYC-181: named profile narrowing for subagents ───────────────
+
+    #[tokio::test]
+    async fn unknown_profile_returns_structured_error() {
+        let cfg = Arc::new(Config::default());
+        let tool = SpawnSubagentTool::new(cfg);
+        let result = tool
+            .call(
+                json!({"task": "review", "profile": "imaginary"}),
+                CancellationToken::new(),
+            )
+            .await
+            .expect("call ok");
+        assert!(result.is_error);
+        assert!(
+            result.output.contains("unknown tool capability profile"),
+            "expected typed denial, got {:?}",
+            result.output
+        );
     }
 }
