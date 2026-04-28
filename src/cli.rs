@@ -142,6 +142,36 @@ pub enum Command {
         #[arg(long)]
         save: bool,
     },
+    /// YYC-220 / YYC-187: project playbook management.
+    Playbook {
+        #[command(subcommand)]
+        cmd: PlaybookSubcommand,
+    },
+}
+
+/// YYC-220: subcommands under `vulcan playbook`.
+#[derive(Subcommand, Debug)]
+pub enum PlaybookSubcommand {
+    /// List entries for the current workspace.
+    List {
+        /// Show only entries with a specific status (`proposed` /
+        /// `accepted`).
+        #[arg(long)]
+        status: Option<String>,
+    },
+    /// Print full body for a single entry id.
+    Show { id: String },
+    /// Mark a `Proposed` entry as `Accepted`.
+    Accept { id: String },
+    /// Delete an entry permanently.
+    Remove { id: String },
+    /// Import `AGENTS.md` / `CLAUDE.md` / `README.md` from the
+    /// workspace root as `Proposed` entries.
+    Import {
+        /// Workspace root (defaults to current directory).
+        #[arg(long)]
+        path: Option<std::path::PathBuf>,
+    },
 }
 
 /// YYC-184: subcommands under `vulcan replay`.
