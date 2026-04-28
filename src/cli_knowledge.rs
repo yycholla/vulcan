@@ -2,7 +2,7 @@
 //! stores with size + last-modified.
 
 use anyhow::{Result, anyhow};
-use std::io::{self, BufRead, Write};
+use std::io::{self, BufRead as _, Write};
 
 use crate::cli::KnowledgeSubcommand;
 use crate::knowledge::{self, KnowledgeStoreInfo};
