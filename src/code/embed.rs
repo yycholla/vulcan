@@ -12,11 +12,12 @@
 use crate::code::{Language, ParserCache};
 use crate::config::EmbeddingsConfig;
 use anyhow::{Context, Result, anyhow};
+use parking_lot::Mutex;
 use rusqlite::{Connection, params};
 use serde::Serialize;
 use serde_json::json;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use tree_sitter::{Query, QueryCursor, StreamingIterator};
 
 #[derive(Debug, Clone)]
@@ -199,7 +200,7 @@ impl EmbeddingIndex {
         }
         // Wipe + repopulate. Incremental updates land as a follow-up.
         {
-            let conn = self.conn.lock().unwrap();
+            let conn = self.conn.lock();
             conn.execute("DELETE FROM chunks", [])?;
         }
 
@@ -216,7 +217,7 @@ impl EmbeddingIndex {
                     batch.len()
                 ));
             }
-            let conn = self.conn.lock().unwrap();
+            let conn = self.conn.lock();
             for (chunk, vec) in batch.iter().zip(vectors.into_iter()) {
                 let blob = vec_to_bytes(&vec);
                 conn.execute(
@@ -251,7 +252,7 @@ impl EmbeddingIndex {
             .ok_or_else(|| anyhow!("empty embedding response for query"))?;
 
         let rows: Vec<(String, String, String, i64, i64, Vec<u8>)> = {
-            let conn = self.conn.lock().unwrap();
+            let conn = self.conn.lock();
             let mut stmt = conn
                 .prepare("SELECT file, kind, name, start_line, end_line, embedding FROM chunks")?;
             stmt.query_map([], |row| {
