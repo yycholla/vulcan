@@ -216,6 +216,12 @@ impl Tool for SpawnSubagentTool {
         // children. Done before the cancellation check below so
         // even the cancelled-by-parent path forgets the handle.
         self.orchestration.forget_cancel_handle(child_id);
+        // YYC-211: snapshot the child's cumulative token total
+        // for the orchestration record + tool payload. Read once
+        // because subsequent calls would observe the same fresh
+        // child agent's lifetime tally.
+        let tokens_consumed = child.tokens_consumed();
+        self.orchestration.update_tokens(child_id, tokens_consumed);
         let iterations = child.iterations();
         // If parent cancelled, mark Cancelled regardless of how the
         // child's run_prompt happened to surface — its Err shape on
@@ -229,6 +235,7 @@ impl Tool for SpawnSubagentTool {
                 "budget_used": {
                     "iterations": iterations,
                     "max_iterations": max_iter,
+                    "tokens": tokens_consumed,
                 },
             });
             return Ok(ToolResult::ok(serde_json::to_string_pretty(&payload)?));
@@ -249,6 +256,7 @@ impl Tool for SpawnSubagentTool {
                     "budget_used": {
                         "iterations": iterations,
                         "max_iterations": max_iter,
+                        "tokens": tokens_consumed,
                     },
                     "tools_granted": allowed.len(),
                 });
@@ -265,6 +273,7 @@ impl Tool for SpawnSubagentTool {
                     "budget_used": {
                         "iterations": iterations,
                         "max_iterations": max_iter,
+                        "tokens": tokens_consumed,
                     },
                 });
                 Ok(ToolResult::ok(serde_json::to_string_pretty(&payload)?))

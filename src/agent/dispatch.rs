@@ -346,7 +346,7 @@ pub(in crate::agent) fn summarize_tool_result(name: &str, output: &str) -> Optio
             .ok()
             .and_then(|v| v.get("count")?.as_u64())
             .map(|n| format!("{n} action{}", if n == 1 { "" } else { "s" })),
-        // YYC-210: spawn_subagent — child status + iterations.
+        // YYC-210 / YYC-211: spawn_subagent — status + iterations + tokens.
         "spawn_subagent" => serde_json::from_str::<serde_json::Value>(text)
             .ok()
             .and_then(|v| {
@@ -361,7 +361,16 @@ pub(in crate::agent) fn summarize_tool_result(name: &str, output: &str) -> Optio
                     .and_then(|b| b.get("max_iterations"))
                     .and_then(|i| i.as_u64())
                     .unwrap_or(0);
-                Some(format!("{status} · {used}/{max} iters"))
+                let tokens = v
+                    .get("budget_used")
+                    .and_then(|b| b.get("tokens"))
+                    .and_then(|t| t.as_u64())
+                    .unwrap_or(0);
+                if tokens > 0 {
+                    Some(format!("{status} · {used}/{max} iters · {tokens} tok"))
+                } else {
+                    Some(format!("{status} · {used}/{max} iters"))
+                }
             }),
         // Generic fallback so even an unknown tool gets *something*.
         _ => {

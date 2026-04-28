@@ -102,6 +102,11 @@ pub struct ChildAgentRecord {
     /// spawn-time budget so the TUI can show fraction-used
     /// without joining against the spawn config.
     pub max_iterations: u32,
+    /// YYC-211: cumulative `total_tokens` the child consumed
+    /// across every provider response in its run. Reported by
+    /// `mark_completed` / `mark_failed`; observability surfaces
+    /// it alongside iterations.
+    pub tokens_consumed: u64,
     /// Final summary text the child returned. `None` until the
     /// child reaches `Completed`.
     pub final_summary: Option<String>,
@@ -171,6 +176,7 @@ impl OrchestrationStore {
             current_phase: None,
             iterations_used: 0,
             max_iterations,
+            tokens_consumed: 0,
             final_summary: None,
             error: None,
         };
@@ -211,6 +217,17 @@ impl OrchestrationStore {
         self.with_mut(id, |r| {
             if !r.status.is_terminal() {
                 r.iterations_used = iterations;
+            }
+        });
+    }
+
+    /// YYC-211: stamp the cumulative token total for an in-flight
+    /// child. Pre-terminal only — once a record is terminal the
+    /// final value was captured by `mark_completed` / `mark_failed`.
+    pub fn update_tokens(&self, id: ChildAgentId, tokens: u64) {
+        self.with_mut(id, |r| {
+            if !r.status.is_terminal() {
+                r.tokens_consumed = tokens;
             }
         });
     }
@@ -443,6 +460,21 @@ mod tests {
         let snap = s.get(r.id).unwrap();
         assert_eq!(snap.status, ChildStatus::Cancelled);
         assert!(snap.ended_at.is_some());
+    }
+
+    // YYC-211: tokens_consumed defaults to 0 + update_tokens
+    // mutates pre-terminal records only.
+    #[test]
+    fn update_tokens_records_pre_terminal_only() {
+        let s = store();
+        let r = s.register(None, "task", 4);
+        assert_eq!(s.get(r.id).unwrap().tokens_consumed, 0);
+        s.update_tokens(r.id, 4242);
+        assert_eq!(s.get(r.id).unwrap().tokens_consumed, 4242);
+        s.mark_completed(r.id, "ok", 1);
+        // Post-terminal update is a no-op.
+        s.update_tokens(r.id, 9_999);
+        assert_eq!(s.get(r.id).unwrap().tokens_consumed, 4242);
     }
 
     // YYC-209: cancel(id) fires the registered token + flips the
