@@ -17,6 +17,7 @@
 //! - Manifest `[config]` → `ConfigField` bridge for YYC-212 (PR-5).
 //! - Dynamic loading (out of scope for the entire YYC-165 epic).
 
+pub mod audit;
 pub mod config_field;
 pub mod draft;
 pub mod install_state;
@@ -26,6 +27,7 @@ pub mod registry;
 pub mod store;
 pub mod verify;
 
+pub use audit::{ExtensionAuditEvent, ExtensionAuditLog, QuotaTracker};
 pub use config_field::{ExtensionConfigField, ExtensionFieldKind};
 pub use draft::parse_skill_extension;
 pub use install_state::{InstallState, InstallStateStore, SqliteInstallStateStore};
