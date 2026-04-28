@@ -127,6 +127,19 @@ pub enum Command {
         #[command(subcommand)]
         cmd: PolicySubcommand,
     },
+    /// YYC-184: inspect or replay saved agent runs.
+    Replay {
+        #[command(subcommand)]
+        cmd: ReplaySubcommand,
+    },
+}
+
+/// YYC-184: subcommands under `vulcan replay`.
+#[derive(Subcommand, Debug)]
+pub enum ReplaySubcommand {
+    /// Print the saved timeline for a run id (UUID or 8-char
+    /// prefix). Read-only — no re-execution.
+    Inspect { id: String },
 }
 
 /// YYC-185: subcommands under `vulcan policy`.
