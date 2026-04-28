@@ -1,6 +1,7 @@
 pub mod agent;
 pub mod artifact;
 pub mod cli;
+pub mod cli_artifact;
 pub mod cli_auth;
 pub mod cli_provider;
 pub mod cli_run;
