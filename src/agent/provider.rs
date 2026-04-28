@@ -106,6 +106,35 @@ impl Agent {
         Ok(selection)
     }
 
+    /// YYC-240 (YYC-238 PR-2): persist `active_profile` to
+    /// `~/.vulcan/config.toml` so subsequent runs (TUI + gateway)
+    /// boot against the same provider. Called after a successful
+    /// `switch_provider` when the operator wants the change to
+    /// outlive the current session — equivalent to running
+    /// `vulcan provider use <name>` from the shell. Pass `None` to
+    /// remove the override.
+    pub fn persist_active_profile_to_config(&self, active_profile: Option<&str>) -> Result<()> {
+        use toml_edit::{DocumentMut, value};
+        let path = crate::config::vulcan_home().join("config.toml");
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let raw = std::fs::read_to_string(&path).unwrap_or_default();
+        let mut doc: DocumentMut = raw.parse().map_err(|e| {
+            anyhow::anyhow!("parse {} for active_profile write: {e}", path.display())
+        })?;
+        match active_profile {
+            Some(name) => {
+                doc["active_profile"] = value(name);
+            }
+            None => {
+                doc.remove("active_profile");
+            }
+        }
+        std::fs::write(&path, doc.to_string())?;
+        Ok(())
+    }
+
     /// Reapply the persisted provider profile for the current session
     /// (YYC-95). Call this after `resume_session` / `continue_last_session`
     /// to swap the agent onto whichever profile the session was last using.
