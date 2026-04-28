@@ -15,6 +15,17 @@ use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 const DEFAULT_TIMEOUT_SECS: i64 = 60;
+/// YYC-261: ceiling on the bash tool timeout. Past this, the LLM
+/// would effectively be running the command without supervision —
+/// long enough for an oversight by the user to lose minutes of
+/// progress, short enough that legitimate one-shot scripts (test
+/// suites, builds) still fit. One hour matches common CI step caps.
+const MAX_TIMEOUT_SECS: i64 = 3600;
+/// YYC-261: floor for the bash tool timeout. `0` would race with
+/// command startup — the spawn might not have begun before the
+/// deadline fires. 1s gives the OS time to actually start the
+/// command before the kill arrives.
+const MIN_TIMEOUT_SECS: i64 = 1;
 const DEFAULT_ROWS: u16 = 24;
 const DEFAULT_COLS: u16 = 80;
 const DEFAULT_READ_BYTES: usize = 8 * 1024;
@@ -487,7 +498,15 @@ impl Tool for BashTool {
         let command = params["command"]
             .as_str()
             .ok_or_else(|| anyhow::anyhow!("command required"))?;
-        let timeout = params["timeout"].as_i64().unwrap_or(DEFAULT_TIMEOUT_SECS);
+        // YYC-261: clamp the LLM-supplied timeout into the safe range.
+        // Negative values would otherwise wrap to ~∞ when cast to u64
+        // for `Duration::from_secs`, bypassing the kill-deadline; out-
+        // of-range positives would tie up the host. The clamp is
+        // silent — `tracing::warn!` if a value lands outside the
+        // window so an operator can spot a misconfigured tool call
+        // without breaking the run.
+        let raw_timeout = params["timeout"].as_i64().unwrap_or(DEFAULT_TIMEOUT_SECS);
+        let timeout = clamp_bash_timeout(raw_timeout);
         let workdir = params["workdir"].as_str();
         let use_pty = params["use_pty"].as_bool().unwrap_or(false);
         let rows = params["rows"].as_u64().map(|v| v as u16);
@@ -926,6 +945,26 @@ fn spawn_wait_thread(
     });
 }
 
+/// YYC-261: clamp the LLM-supplied bash timeout into a safe range.
+/// Negative values are flagged and replaced with the default; values
+/// outside `[MIN_TIMEOUT_SECS, MAX_TIMEOUT_SECS]` are clamped at the
+/// boundary. Returns the timeout (in seconds) the call should use.
+fn clamp_bash_timeout(raw: i64) -> i64 {
+    if raw < 0 {
+        tracing::warn!("bash timeout {raw} < 0 is invalid; using default {DEFAULT_TIMEOUT_SECS}s");
+        return DEFAULT_TIMEOUT_SECS;
+    }
+    if raw < MIN_TIMEOUT_SECS {
+        tracing::warn!("bash timeout {raw} below floor {MIN_TIMEOUT_SECS}; clamping up");
+        return MIN_TIMEOUT_SECS;
+    }
+    if raw > MAX_TIMEOUT_SECS {
+        tracing::warn!("bash timeout {raw} above ceiling {MAX_TIMEOUT_SECS}; clamping down");
+        return MAX_TIMEOUT_SECS;
+    }
+    raw
+}
+
 fn pty_size(rows: Option<u16>, cols: Option<u16>) -> PtySize {
     PtySize {
         rows: rows.unwrap_or(DEFAULT_ROWS),
@@ -982,6 +1021,30 @@ mod tests {
     use std::time::Instant;
     use tokio::time::sleep;
     use tokio_util::sync::CancellationToken;
+
+    #[test]
+    fn yyc261_clamp_bash_timeout_rejects_negative() {
+        assert_eq!(clamp_bash_timeout(-1), DEFAULT_TIMEOUT_SECS);
+        assert_eq!(clamp_bash_timeout(-9999), DEFAULT_TIMEOUT_SECS);
+    }
+
+    #[test]
+    fn yyc261_clamp_bash_timeout_clamps_below_floor() {
+        assert_eq!(clamp_bash_timeout(0), MIN_TIMEOUT_SECS);
+    }
+
+    #[test]
+    fn yyc261_clamp_bash_timeout_clamps_above_ceiling() {
+        assert_eq!(clamp_bash_timeout(MAX_TIMEOUT_SECS + 1), MAX_TIMEOUT_SECS);
+        assert_eq!(clamp_bash_timeout(i64::MAX), MAX_TIMEOUT_SECS);
+    }
+
+    #[test]
+    fn yyc261_clamp_bash_timeout_passes_through_in_range() {
+        for v in [1, 30, 60, 600, MAX_TIMEOUT_SECS] {
+            assert_eq!(clamp_bash_timeout(v), v);
+        }
+    }
 
     #[test]
     fn output_buffer_reads_incrementally() {
