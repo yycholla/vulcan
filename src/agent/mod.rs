@@ -108,7 +108,12 @@ pub struct Agent {
     /// commands can switch models without reconstructing the long-lived
     /// Agent, hook registry, tools, memory, or session state.
     pub(in crate::agent) provider_config: ProviderConfig,
-    pub(in crate::agent) provider_api_key: String,
+    /// YYC-249: provider API key wrapped in `SecretString` so the
+    /// underlying buffer is zeroed on drop. Default `Debug` impl
+    /// redacts the value, so accidental log lines don't print it.
+    /// Call sites that need the raw `&str` use `.expose_secret()`
+    /// at the moment of use rather than caching a copy.
+    pub(in crate::agent) provider_api_key: secrecy::SecretString,
     /// Name of the active named provider profile from `[providers.<name>]`,
     /// or `None` when running on the unnamed legacy `[provider]` block.
     /// Set by `switch_provider`; surfaced via `active_profile()` so the
@@ -517,7 +522,7 @@ impl Agent {
             pricing,
             compaction_config: config.compaction.clone(),
             provider_config: active_provider.clone(),
-            provider_api_key: api_key,
+            provider_api_key: secrecy::SecretString::from(api_key),
             active_profile: config.active_profile.clone(),
             lsp_manager,
             last_saved_count: 0,
@@ -691,7 +696,7 @@ impl Agent {
             pricing: None,
             compaction_config: CompactionConfig::default(),
             provider_config: ProviderConfig::default(),
-            provider_api_key: "test-key".into(),
+            provider_api_key: secrecy::SecretString::from("test-key".to_string()),
             active_profile: None,
             lsp_manager: Arc::new(crate::code::lsp::LspManager::new(
                 std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")),

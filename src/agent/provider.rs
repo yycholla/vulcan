@@ -13,7 +13,11 @@ use super::{Agent, ModelSelection, is_local_base_url};
 
 impl Agent {
     pub async fn available_models(&self) -> Result<Vec<crate::provider::catalog::ModelInfo>> {
-        Self::fetch_catalog_for(&self.provider_config, &self.provider_api_key).await
+        Self::fetch_catalog_for(
+            &self.provider_config,
+            secrecy::ExposeSecret::expose_secret(&self.provider_api_key),
+        )
+        .await
     }
 
     pub async fn switch_model(&mut self, model_id: &str) -> Result<ModelSelection> {
@@ -23,10 +27,14 @@ impl Agent {
 
         let mut next_config = self.provider_config.clone();
         next_config.model = model_id.to_string();
-        let selection = Self::resolve_model_selection(&next_config, &self.provider_api_key).await?;
+        let selection = Self::resolve_model_selection(
+            &next_config,
+            secrecy::ExposeSecret::expose_secret(&self.provider_api_key),
+        )
+        .await?;
         let provider = DefaultProviderFactory.build(
             &next_config,
-            &self.provider_api_key,
+            secrecy::ExposeSecret::expose_secret(&self.provider_api_key),
             selection.max_context,
             selection.model.features.json_mode,
         )?;
@@ -91,7 +99,7 @@ impl Agent {
 
         self.provider = provider;
         self.provider_config = next_config;
-        self.provider_api_key = api_key;
+        self.provider_api_key = secrecy::SecretString::from(api_key);
         self.context =
             ContextManager::with_config(selection.max_context, config.compaction.clone());
         self.compaction_config = config.compaction.clone();
