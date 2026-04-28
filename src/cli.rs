@@ -120,6 +120,27 @@ pub enum Command {
     /// YYC-183: structured runtime diagnostics — config,
     /// storage, workspace, tool registry checks.
     Doctor,
+    /// YYC-185: dry-run effective tool policy for a workspace
+    /// + capability profile combination, without executing
+    /// anything.
+    Policy {
+        #[command(subcommand)]
+        cmd: PolicySubcommand,
+    },
+}
+
+/// YYC-185: subcommands under `vulcan policy`.
+#[derive(Subcommand, Debug)]
+pub enum PolicySubcommand {
+    /// Resolve effective policy for a workspace path. Defaults
+    /// to the current working directory.
+    Simulate {
+        path: Option<std::path::PathBuf>,
+        /// Optional profile override; defaults to whatever the
+        /// agent would resolve at session start.
+        #[arg(long)]
+        profile: Option<String>,
+    },
 }
 
 /// YYC-190: subcommands under `vulcan review`.

@@ -174,6 +174,10 @@ async fn main() -> anyhow::Result<()> {
             vulcan::cli_review::run(cmd).await?;
         }
         Some(Command::Doctor) => unreachable!("handled before Config::load above"),
+        Some(Command::Policy { cmd }) => {
+            init_cli_logging();
+            vulcan::cli_policy::run(cmd).await?;
+        }
     }
 
     Ok(())
