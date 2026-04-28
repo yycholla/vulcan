@@ -184,6 +184,13 @@ impl Agent {
             if let Some(usage) = &response.usage {
                 self.context
                     .record_usage(usage.prompt_tokens, usage.completion_tokens);
+                // YYC-211: accumulate across the whole run so
+                // spawn_subagent (and future budget enforcement)
+                // can see the real token cost, not just the last
+                // prompt's size.
+                self.tokens_consumed = self
+                    .tokens_consumed
+                    .saturating_add(usage.total_tokens as u64);
             }
 
             if let Some(tool_calls) = &response.tool_calls {
@@ -335,6 +342,10 @@ impl Agent {
             if let Some(usage) = &response.usage {
                 self.context
                     .record_usage(usage.prompt_tokens, usage.completion_tokens);
+                // YYC-211: cumulative tally across the run.
+                self.tokens_consumed = self
+                    .tokens_consumed
+                    .saturating_add(usage.total_tokens as u64);
                 last_usage = Some(usage.clone());
             }
 

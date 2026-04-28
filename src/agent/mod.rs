@@ -135,6 +135,13 @@ pub struct Agent {
     /// `SpawnSubagentTool` writes to this so the TUI can render
     /// a real subagent timeline (YYC-205).
     pub(in crate::agent) orchestration: Arc<crate::orchestration::OrchestrationStore>,
+    /// YYC-211: cumulative `total_tokens` across every provider
+    /// response in the agent's lifetime. Distinct from
+    /// `ContextManager::current_tokens`, which tracks the last
+    /// prompt's size for compaction decisions. This counter only
+    /// grows; readers diff snapshots if they want per-run usage
+    /// (e.g. spawn_subagent computes `after - before`).
+    pub(in crate::agent) tokens_consumed: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -396,6 +403,7 @@ impl Agent {
             max_iterations: max_iterations.unwrap_or(config.provider.max_iterations),
             auto_create_skills: config.auto_create_skills,
             orchestration: Arc::clone(&orchestration),
+            tokens_consumed: 0,
         })
     }
 
@@ -457,6 +465,13 @@ impl Agent {
         Arc::clone(&self.orchestration)
     }
 
+    /// YYC-211: cumulative `total_tokens` across every provider
+    /// response since this Agent was built. Monotonic — readers
+    /// diff snapshots for per-run usage.
+    pub fn tokens_consumed(&self) -> u64 {
+        self.tokens_consumed
+    }
+
     pub fn for_test(
         provider: Box<dyn LLMProvider>,
         tools: ToolRegistry,
@@ -491,6 +506,7 @@ impl Agent {
             ),
             auto_create_skills: false,
             orchestration: Arc::new(crate::orchestration::OrchestrationStore::new()),
+            tokens_consumed: 0,
         }
     }
 
