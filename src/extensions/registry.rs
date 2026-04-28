@@ -9,7 +9,7 @@
 use parking_lot::RwLock;
 use std::sync::Arc;
 
-use super::{ExtensionCapability, ExtensionMetadata, ExtensionStatus};
+use super::{ExtensionCapability, ExtensionConfigField, ExtensionMetadata, ExtensionStatus};
 use crate::hooks::{HookHandler, HookRegistry};
 
 /// YYC-227 (YYC-165 PR-4): trait an in-process, code-backed
@@ -27,6 +27,13 @@ pub trait CodeExtension: Send + Sync {
     /// extensions that only contribute prompt injections via a
     /// `BeforePrompt` handler can override just this method.
     fn hook_handlers(&self) -> Vec<Arc<dyn HookHandler>> {
+        Vec::new()
+    }
+
+    /// YYC-228: configuration fields this extension declares.
+    /// The YYC-212 `vulcan config` CLI surfaces them under the
+    /// extension's id. Default returns nothing.
+    fn config_fields(&self) -> Vec<ExtensionConfigField> {
         Vec::new()
     }
 }
@@ -172,6 +179,31 @@ impl ExtensionRegistry {
     /// YYC-227: count of code-backed extensions registered.
     pub fn code_extension_count(&self) -> usize {
         self.code_backed.read().len()
+    }
+
+    /// YYC-228: enumerate every config field contributed by an
+    /// `Active` extension. Returns `(extension_id, field)` pairs
+    /// so callers can prefix the id when displaying.
+    /// Inactive / Draft / Broken extensions contribute nothing.
+    pub fn active_config_fields(&self) -> Vec<(String, ExtensionConfigField)> {
+        let metadata_snapshot = self.inner.read().clone();
+        let code_snapshot = self.code_backed.read().clone();
+        let mut out = Vec::new();
+        for ext in code_snapshot {
+            let id = ext.metadata().id;
+            let active = metadata_snapshot
+                .iter()
+                .find(|m| m.id == id)
+                .map(|m| m.status == ExtensionStatus::Active)
+                .unwrap_or(false);
+            if !active {
+                continue;
+            }
+            for field in ext.config_fields() {
+                out.push((id.clone(), field));
+            }
+        }
+        out
     }
 }
 
@@ -368,6 +400,43 @@ mod tests {
         reg.register_code_extension(Arc::new(StubExtension::new("dup", ExtensionStatus::Active)));
         assert_eq!(reg.code_extension_count(), 1);
         assert_eq!(reg.get("dup").unwrap().status, ExtensionStatus::Active);
+    }
+
+    #[test]
+    fn active_config_fields_only_includes_active_contributors() {
+        struct ExtWithFields {
+            meta: ExtensionMetadata,
+        }
+        impl crate::extensions::CodeExtension for ExtWithFields {
+            fn metadata(&self) -> ExtensionMetadata {
+                self.meta.clone()
+            }
+            fn config_fields(&self) -> Vec<ExtensionConfigField> {
+                vec![ExtensionConfigField::bool_field("enabled", false, "toggle")]
+            }
+        }
+        let reg = ExtensionRegistry::new();
+        let mut active = ExtensionMetadata::new(
+            "active-fielded",
+            "active",
+            "0.1.0",
+            crate::extensions::ExtensionSource::Builtin,
+        );
+        active.status = ExtensionStatus::Active;
+        let mut inactive = ExtensionMetadata::new(
+            "inactive-fielded",
+            "inactive",
+            "0.1.0",
+            crate::extensions::ExtensionSource::Builtin,
+        );
+        inactive.status = ExtensionStatus::Inactive;
+        reg.register_code_extension(Arc::new(ExtWithFields { meta: active }));
+        reg.register_code_extension(Arc::new(ExtWithFields { meta: inactive }));
+
+        let fields = reg.active_config_fields();
+        assert_eq!(fields.len(), 1);
+        assert_eq!(fields[0].0, "active-fielded");
+        assert_eq!(fields[0].1.path, "enabled");
     }
 
     #[test]
