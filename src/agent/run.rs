@@ -91,10 +91,28 @@ pub(crate) fn sanitize_orphan_tool_messages(messages: &mut Vec<Message>) -> usiz
 }
 
 impl Agent {
+    /// YYC-208: run_prompt with caller-supplied cancellation. Used
+    /// by `SpawnSubagentTool` to plumb the parent's CancellationToken
+    /// into the child so cancelling the parent turn aborts the
+    /// child's loop. The token replaces the agent's `turn_cancel`
+    /// for the duration of this run.
+    pub async fn run_prompt_with_cancel(
+        &mut self,
+        input: &str,
+        cancel: CancellationToken,
+    ) -> Result<String> {
+        self.turn_cancel = cancel;
+        self.run_prompt_inner(input).await
+    }
+
     pub async fn run_prompt(&mut self, input: &str) -> Result<String> {
         // Fresh token for this turn — calling cancel_current_turn between
         // turns shouldn't affect the next one.
         self.turn_cancel = CancellationToken::new();
+        self.run_prompt_inner(input).await
+    }
+
+    async fn run_prompt_inner(&mut self, input: &str) -> Result<String> {
         let cancel = self.turn_cancel.clone();
 
         let system = self
