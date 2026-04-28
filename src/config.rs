@@ -735,6 +735,30 @@ pub struct ToolsConfig {
     /// hook re-prompts.
     #[serde(default)]
     pub dangerous_commands: DangerousCommandsConfig,
+    /// YYC-181: default tool capability profile applied at session
+    /// start. CLI `--profile <name>` overrides. Built-in names:
+    /// `readonly`, `coding`, `reviewer`, `gateway-safe`. User-defined
+    /// names from [`profiles`](Self::profiles) take precedence over
+    /// built-ins on collision.
+    #[serde(default)]
+    pub profile: Option<String>,
+    /// YYC-181: user-defined tool capability profiles. Keyed by
+    /// profile name; each value lists the allowed tool names.
+    #[serde(default)]
+    pub profiles: HashMap<String, ToolProfileConfig>,
+}
+
+/// YYC-181: user-defined tool capability profile (config-side).
+/// Resolves to a [`crate::tools::ToolProfile`] at runtime.
+#[derive(Debug, Deserialize, Clone, Default)]
+pub struct ToolProfileConfig {
+    /// Optional human-readable description shown in `doctor` output.
+    #[serde(default)]
+    pub description: String,
+    /// Tool names this profile allows. Tools the running registry
+    /// doesn't have (extensions, optional features, MCP) are silently
+    /// dropped on apply.
+    pub allowed: Vec<String>,
 }
 
 /// Approval-flow policy for SafetyHook (YYC-130 follow-up).
@@ -821,6 +845,31 @@ pub struct ApprovalConfig {
 impl ApprovalConfig {
     pub fn mode_for(&self, tool: &str) -> ApprovalMode {
         self.per_tool.get(tool).copied().unwrap_or(self.default)
+    }
+}
+
+impl ToolProfileConfig {
+    /// YYC-181: convert a config-side profile to the runtime
+    /// [`crate::tools::ToolProfile`] under `name`.
+    pub fn into_tool_profile(self, name: &str) -> crate::tools::ToolProfile {
+        crate::tools::ToolProfile {
+            name: name.to_string().into(),
+            description: self.description.into(),
+            allowed: self.allowed.into_iter().map(Into::into).collect(),
+        }
+    }
+}
+
+impl ToolsConfig {
+    /// YYC-181: resolve a profile name (CLI flag or `tools.profile`
+    /// in config) to a runtime profile. User-defined profiles in
+    /// `[tools.profiles]` shadow the built-in catalog so operators
+    /// can replace `coding` etc. with a tighter set.
+    pub fn resolve_profile(&self, name: &str) -> Option<crate::tools::ToolProfile> {
+        if let Some(custom) = self.profiles.get(name) {
+            return Some(custom.clone().into_tool_profile(name));
+        }
+        crate::tools::builtin_profile(name)
     }
 }
 
@@ -1244,6 +1293,55 @@ debug = "wire"
         .expect("config should parse");
 
         assert!(matches!(config.provider.debug, ProviderDebugMode::Wire));
+    }
+
+    // ── YYC-181: tool capability profile config + resolution ────────
+
+    #[test]
+    fn tools_profile_default_is_none() {
+        let cfg: Config = toml::from_str("").expect("empty parses");
+        assert!(cfg.tools.profile.is_none());
+        assert!(cfg.tools.profiles.is_empty());
+    }
+
+    #[test]
+    fn tools_profile_parses_default_name() {
+        let cfg: Config =
+            toml::from_str("[tools]\nprofile = \"readonly\"\n").expect("should parse");
+        assert_eq!(cfg.tools.profile.as_deref(), Some("readonly"));
+    }
+
+    #[test]
+    fn user_defined_profile_shadows_builtin() {
+        let cfg: Config = toml::from_str(
+            r#"
+[tools.profiles.readonly]
+description = "Override"
+allowed = ["read_file"]
+"#,
+        )
+        .expect("should parse");
+        let resolved = cfg.tools.resolve_profile("readonly").expect("resolves");
+        assert_eq!(resolved.allowed.len(), 1);
+        assert!(resolved.allows("read_file"));
+        assert!(!resolved.allows("git_status"));
+    }
+
+    #[test]
+    fn unknown_profile_resolves_to_none() {
+        let cfg: Config = toml::from_str("").expect("empty parses");
+        assert!(cfg.tools.resolve_profile("does-not-exist").is_none());
+    }
+
+    #[test]
+    fn builtin_profile_is_resolved_when_no_user_override() {
+        let cfg: Config = toml::from_str("").expect("empty parses");
+        let resolved = cfg
+            .tools
+            .resolve_profile("coding")
+            .expect("built-in resolves");
+        assert!(resolved.allows("write_file"));
+        assert!(resolved.allows("bash"));
     }
 
     #[test]

@@ -24,11 +24,14 @@ async fn main() -> anyhow::Result<()> {
             } else {
                 ResumeTarget::None
             };
-            run_tui(&config, resume).await?;
+            run_tui(&config, resume, cli.profile.clone()).await?;
         }
         Some(Command::Prompt { text }) => {
             init_cli_logging();
-            let mut agent = vulcan::agent::Agent::builder(&config).build().await?;
+            let mut agent = vulcan::agent::Agent::builder(&config)
+                .with_tool_profile(cli.profile.clone())
+                .build()
+                .await?;
             if cli.r#continue {
                 agent.continue_last_session()?;
             }
@@ -71,7 +74,7 @@ async fn main() -> anyhow::Result<()> {
         }
         Some(Command::Session { id }) => {
             init_tui_logging();
-            run_tui(&config, ResumeTarget::Specific(id)).await?;
+            run_tui(&config, ResumeTarget::Specific(id), cli.profile.clone()).await?;
         }
         Some(Command::Search { query, limit }) => {
             init_cli_logging();
