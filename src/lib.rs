@@ -22,6 +22,7 @@ pub mod pause;
 pub mod platform;
 pub mod prompt_builder;
 pub mod provider;
+pub mod review;
 pub mod run_record;
 pub mod skills;
 pub mod tools;
