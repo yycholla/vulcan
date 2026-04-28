@@ -7,6 +7,7 @@ use serde_json::Value;
 use tokio_util::sync::CancellationToken;
 
 use crate::hooks::ToolCallDecision;
+use crate::run_record::{PayloadFingerprint, RunEvent};
 use crate::tools::ToolResult;
 
 use super::Agent;
@@ -38,6 +39,10 @@ impl Agent {
             }
         };
 
+        // YYC-179: dispatch timing for the run-record duration field.
+        let started = std::time::Instant::now();
+        let args_fingerprint = PayloadFingerprint::of(raw_args.as_bytes());
+
         let (effective_args_str, blocked) = match self
             .hooks
             .before_tool_call(name, &parsed_args, cancel.clone())
@@ -45,13 +50,31 @@ impl Agent {
         {
             ToolCallDecision::Continue => (raw_args.to_string(), None),
             ToolCallDecision::Block(reason) => (raw_args.to_string(), Some(reason)),
-            ToolCallDecision::ReplaceArgs(new_args) => (
-                serde_json::to_string(&new_args).unwrap_or_else(|_| raw_args.to_string()),
-                None,
-            ),
+            ToolCallDecision::ReplaceArgs(new_args) => {
+                // YYC-179: emit a hook decision event so the timeline
+                // shows the args mutation distinctly from the tool call.
+                self.record_run_event(RunEvent::HookDecision {
+                    event: "before_tool_call".into(),
+                    handler: "*replace_args*".into(),
+                    outcome: "replace_args".into(),
+                    detail: Some(name.to_string()),
+                });
+                (
+                    serde_json::to_string(&new_args).unwrap_or_else(|_| raw_args.to_string()),
+                    None,
+                )
+            }
         };
 
-        let raw_result: ToolResult = if let Some(reason) = blocked {
+        let raw_result: ToolResult = if let Some(reason) = blocked.clone() {
+            // YYC-179: record the block before failing the tool
+            // call so dashboards can group denied dispatches.
+            self.record_run_event(RunEvent::HookDecision {
+                event: "before_tool_call".into(),
+                handler: "*block*".into(),
+                outcome: "block".into(),
+                detail: Some(reason.clone()),
+            });
             ToolResult::err(format!("Blocked: {reason}"))
         } else {
             match self
@@ -64,14 +87,49 @@ impl Agent {
             }
         };
 
-        match self
+        let final_result = match self
             .hooks
             .after_tool_call(name, &raw_result, cancel.clone())
             .await
         {
-            Some(replaced) => replaced,
+            Some(replaced) => {
+                self.record_run_event(RunEvent::HookDecision {
+                    event: "after_tool_call".into(),
+                    handler: "*replace_result*".into(),
+                    outcome: "replace_result".into(),
+                    detail: Some(name.to_string()),
+                });
+                replaced
+            }
             None => raw_result,
-        }
+        };
+
+        // YYC-179: emit one ToolCall event per dispatch with the
+        // duration, approval surface, and structured error flag.
+        let duration_ms = started.elapsed().as_millis().min(u64::MAX as u128) as u64;
+        let approval = if blocked.is_some() {
+            Some("blocked".to_string())
+        } else {
+            None
+        };
+        let error = if final_result.is_error {
+            Some(crate::run_record::PayloadFingerprint::of(
+                final_result.output.as_bytes(),
+            ))
+            .map(|fp| fp.as_str().to_string())
+        } else {
+            None
+        };
+        self.record_run_event(RunEvent::ToolCall {
+            name: name.to_string(),
+            args_fingerprint,
+            approval,
+            duration_ms,
+            is_error: final_result.is_error,
+            error,
+        });
+
+        final_result
     }
 }
 
