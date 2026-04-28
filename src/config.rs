@@ -196,6 +196,84 @@ pub struct Config {
     /// `untrusted` level.
     #[serde(default)]
     pub workspace_trust: crate::trust::WorkspaceTrustConfig,
+
+    /// YYC-165 PR-3: per-extension activation policy. Empty by
+    /// default — every registered extension activates per its
+    /// own status. Operators add ids to `disabled` (or set
+    /// `[extensions.<id>] enabled = false`) to force `Inactive`.
+    #[serde(default)]
+    pub extensions: ExtensionsConfig,
+}
+
+/// YYC-165 PR-3: top-level config gate for extensions.
+///
+/// Wire shape:
+///
+/// ```toml
+/// [extensions]
+/// disabled = ["legacy-foo"]      # quick block-list
+///
+/// [extensions.lint-helper]
+/// enabled = true                 # explicit per-id override
+/// ```
+///
+/// `apply_to_registry` returns the count of extensions whose
+/// status it flipped to `Inactive` so the caller can log the
+/// effect at startup.
+#[derive(Debug, Deserialize, Clone, Default)]
+pub struct ExtensionsConfig {
+    /// Hard block-list. Any extension whose id appears here is
+    /// forced to `Inactive` regardless of its own preference.
+    #[serde(default)]
+    pub disabled: Vec<String>,
+    /// Per-extension overrides. Settings beyond `enabled` are
+    /// preserved but not interpreted at this layer — PR-5 lands
+    /// `ConfigField` integration so per-extension settings flow
+    /// through `vulcan config`.
+    #[serde(default, flatten)]
+    pub per_extension: HashMap<String, ExtensionEntryConfig>,
+}
+
+#[derive(Debug, Deserialize, Clone, Default)]
+pub struct ExtensionEntryConfig {
+    /// `Some(true)` activates, `Some(false)` deactivates,
+    /// `None` defers to the registry's prior status.
+    #[serde(default)]
+    pub enabled: Option<bool>,
+}
+
+impl ExtensionsConfig {
+    /// Apply gating to a registry: any disabled id is forced to
+    /// `Inactive`; any explicitly-enabled id has its status
+    /// promoted from `Inactive` to `Active`. Returns the number
+    /// of extensions whose status flipped.
+    pub fn apply_to_registry(&self, registry: &crate::extensions::ExtensionRegistry) -> usize {
+        let mut flips = 0usize;
+        for id in &self.disabled {
+            if registry.set_status(id, crate::extensions::ExtensionStatus::Inactive) {
+                flips += 1;
+            }
+        }
+        for (id, entry) in &self.per_extension {
+            if self.disabled.contains(id) {
+                continue;
+            }
+            match entry.enabled {
+                Some(true) => {
+                    if registry.set_status(id, crate::extensions::ExtensionStatus::Active) {
+                        flips += 1;
+                    }
+                }
+                Some(false) => {
+                    if registry.set_status(id, crate::extensions::ExtensionStatus::Inactive) {
+                        flips += 1;
+                    }
+                }
+                None => {}
+            }
+        }
+        flips
+    }
 }
 
 /// YYC-17: top-level scheduler configuration. Each job entry
@@ -937,6 +1015,7 @@ impl Default for Config {
             recall: RecallConfig::default(),
             scheduler: SchedulerConfig::default(),
             workspace_trust: crate::trust::WorkspaceTrustConfig::default(),
+            extensions: ExtensionsConfig::default(),
         }
     }
 }
@@ -1288,6 +1367,121 @@ impl Config {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── YYC-226 (YYC-165 PR-3): [extensions] gating ────────────────
+
+    fn seed_registry(ids: &[&str]) -> crate::extensions::ExtensionRegistry {
+        let reg = crate::extensions::ExtensionRegistry::new();
+        for id in ids {
+            let mut m = crate::extensions::ExtensionMetadata::new(
+                *id,
+                *id,
+                "0.1.0",
+                crate::extensions::ExtensionSource::Builtin,
+            );
+            m.status = crate::extensions::ExtensionStatus::Active;
+            reg.upsert(m);
+        }
+        reg
+    }
+
+    #[test]
+    fn extensions_disabled_array_forces_inactive() {
+        let cfg: Config = toml::from_str(
+            r#"
+[extensions]
+disabled = ["legacy-foo"]
+"#,
+        )
+        .expect("parses");
+        let reg = seed_registry(&["legacy-foo", "lint-helper"]);
+        let flips = cfg.extensions.apply_to_registry(&reg);
+        assert_eq!(flips, 1);
+        assert_eq!(
+            reg.get("legacy-foo").unwrap().status,
+            crate::extensions::ExtensionStatus::Inactive
+        );
+        assert_eq!(
+            reg.get("lint-helper").unwrap().status,
+            crate::extensions::ExtensionStatus::Active
+        );
+    }
+
+    #[test]
+    fn per_extension_enabled_false_overrides_active_default() {
+        let cfg: Config = toml::from_str(
+            r#"
+[extensions.lint-helper]
+enabled = false
+"#,
+        )
+        .expect("parses");
+        let reg = seed_registry(&["lint-helper"]);
+        cfg.extensions.apply_to_registry(&reg);
+        assert_eq!(
+            reg.get("lint-helper").unwrap().status,
+            crate::extensions::ExtensionStatus::Inactive
+        );
+    }
+
+    #[test]
+    fn per_extension_enabled_true_promotes_inactive_to_active() {
+        let cfg: Config = toml::from_str(
+            r#"
+[extensions.preview-tool]
+enabled = true
+"#,
+        )
+        .expect("parses");
+        // Seed as inactive (the default) — the explicit enable
+        // should promote it.
+        let reg = crate::extensions::ExtensionRegistry::new();
+        reg.upsert(crate::extensions::ExtensionMetadata::new(
+            "preview-tool",
+            "preview-tool",
+            "0.1.0",
+            crate::extensions::ExtensionSource::Builtin,
+        ));
+        cfg.extensions.apply_to_registry(&reg);
+        assert_eq!(
+            reg.get("preview-tool").unwrap().status,
+            crate::extensions::ExtensionStatus::Active
+        );
+    }
+
+    #[test]
+    fn disabled_array_wins_over_per_extension_enable() {
+        let cfg: Config = toml::from_str(
+            r#"
+[extensions]
+disabled = ["dangerous"]
+
+[extensions.dangerous]
+enabled = true
+"#,
+        )
+        .expect("parses");
+        let reg = seed_registry(&["dangerous"]);
+        cfg.extensions.apply_to_registry(&reg);
+        // `disabled` is the security-side block-list — even an
+        // explicit `enabled = true` does not override it.
+        assert_eq!(
+            reg.get("dangerous").unwrap().status,
+            crate::extensions::ExtensionStatus::Inactive
+        );
+    }
+
+    #[test]
+    fn empty_extensions_table_is_a_noop() {
+        let cfg: Config = toml::from_str("").expect("parses");
+        let reg = seed_registry(&["a", "b"]);
+        let flips = cfg.extensions.apply_to_registry(&reg);
+        assert_eq!(flips, 0);
+        assert_eq!(
+            reg.get("a").unwrap().status,
+            crate::extensions::ExtensionStatus::Active
+        );
+    }
 
     #[test]
     fn provider_debug_mode_parses_from_toml() {
