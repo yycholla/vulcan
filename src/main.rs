@@ -4,6 +4,8 @@ use std::fs::File;
 use std::io::Write;
 use std::path::PathBuf;
 use tracing_subscriber::EnvFilter;
+#[cfg(feature = "gateway")]
+use vulcan::cli::GatewaySubcommand;
 use vulcan::cli::{Cli, Command};
 use vulcan::config::Config;
 use vulcan::provider::StreamEvent;
@@ -24,6 +26,25 @@ async fn main() -> anyhow::Result<()> {
         if matches!(report.overall(), vulcan::doctor::CheckStatus::Fail) {
             std::process::exit(1);
         }
+        return Ok(());
+    }
+    // `gateway init` is a config repair/bootstrap command, so it must be
+    // able to run before the strongly-typed config loader rejects a missing
+    // or partial `[gateway]` table. Use typed config only for the provider
+    // label when it is readable; the command itself edits via toml_edit.
+    #[cfg(feature = "gateway")]
+    if let Some(Command::Gateway {
+        cmd: Some(GatewaySubcommand::Init { force }),
+        ..
+    }) = cli.command
+    {
+        init_cli_logging();
+        let dir = vulcan::config::vulcan_home();
+        let config = Config::load().unwrap_or_else(|e| {
+            tracing::warn!("config load failed before gateway init; continuing with defaults: {e}");
+            Config::default()
+        });
+        vulcan::cli_gateway::init(&dir, &config, force)?;
         return Ok(());
     }
     let config = Config::load()?;
@@ -111,9 +132,14 @@ async fn main() -> anyhow::Result<()> {
             }
         }
         #[cfg(feature = "gateway")]
-        Some(Command::Gateway { bind }) => {
+        Some(Command::Gateway { cmd, bind }) => {
             init_cli_logging();
-            vulcan::gateway::run(&config, bind).await?;
+            match cmd.unwrap_or(GatewaySubcommand::Run { bind: None }) {
+                GatewaySubcommand::Run { bind: run_bind } => {
+                    vulcan::gateway::run(&config, run_bind.or(bind)).await?
+                }
+                GatewaySubcommand::Init { .. } => unreachable!("handled before Config::load"),
+            }
         }
         Some(Command::MigrateConfig { force }) => {
             init_cli_logging();

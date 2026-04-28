@@ -5,6 +5,8 @@ pub mod cli_artifact;
 pub mod cli_auth;
 pub mod cli_config;
 pub mod cli_extension;
+#[cfg(feature = "gateway")]
+pub mod cli_gateway;
 pub mod cli_impact;
 pub mod cli_knowledge;
 pub mod cli_model;
