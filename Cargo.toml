@@ -27,7 +27,6 @@ gateway = [
     "dep:tower",
     "dep:subtle",
     "dep:hmac",
-    "dep:sha2",
     "dep:serenity",
     "dep:r2d2",
     "dep:r2d2_sqlite",
@@ -143,7 +142,9 @@ subtle = { version = "2.6.1", optional = true }
 # Webhook HMAC verification (Task 16). hmac 0.13 + sha2 0.11 share `digest 0.11`,
 # picking matching majors avoids pulling a second copy of `digest`.
 hmac = { version = "0.13.0", optional = true }
-sha2 = { version = "0.11.0", optional = true }
+# YYC-179: sha2 is now a non-optional core dep so run-record payload
+# fingerprinting works in CLI/TUI builds (not just `gateway`).
+sha2 = "0.11.0"
 serenity = { version = "0.12", default-features = false, features = ["client", "gateway", "http", "model", "rustls_backend"], optional = true }
 # Telegram Bot API client + types. We use teloxide-core (HTTP + types
 # only) rather than full teloxide so the dispatcher framework's macro
