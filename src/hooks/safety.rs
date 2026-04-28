@@ -45,8 +45,58 @@ pub struct SafetyHook {
     /// `policy.quota_per_session`, the hook re-prompts as if the
     /// approval entry had expired. `0` quota disables the cap.
     usage: Mutex<HashMap<String, u32>>,
+    /// YYC-196: rolling per-PTY input buffer. Each `pty_write` is
+    /// appended; the *current line* (chars since the last newline)
+    /// is matched against the dangerous-command rules so a
+    /// command split across writes (`"rm "` then `"-rf /\n"`)
+    /// can't slip past single-call inspection. Bounded length; the
+    /// front is trimmed when the cap is reached. Cleared when
+    /// `pty_close` is dispatched for the session_id.
+    pty_buffers: Mutex<HashMap<String, PtyInputBuffer>>,
     pause_tx: Option<PauseSender>,
     policy: DangerousCommandsConfig,
+}
+
+/// YYC-196: cap on the per-PTY rolling buffer length. Long enough
+/// to absorb realistic multi-write commands but small enough that
+/// the matcher work stays bounded.
+const PTY_INPUT_BUFFER_CAP: usize = 4 * 1024;
+
+#[derive(Default)]
+struct PtyInputBuffer {
+    buf: String,
+}
+
+impl PtyInputBuffer {
+    fn append(&mut self, input: &str) {
+        self.buf.push_str(input);
+        if self.buf.len() > PTY_INPUT_BUFFER_CAP {
+            // Drop from the front to stay under the cap. Use a
+            // char boundary to avoid slicing through multibyte
+            // UTF-8.
+            let drop_to = self.buf.len() - PTY_INPUT_BUFFER_CAP;
+            let mut idx = drop_to;
+            while !self.buf.is_char_boundary(idx) && idx < self.buf.len() {
+                idx += 1;
+            }
+            self.buf.drain(..idx);
+        }
+    }
+
+    /// YYC-196: the candidate command line for matching. Returns
+    /// the substring after the last newline (the "current,
+    /// not-yet-submitted" line) if no newline was present in this
+    /// write, otherwise the whole accumulated buffer up to the
+    /// last newline. Both forms are matched by the caller; the
+    /// completed-line form catches "rm -rf / + \n" arriving
+    /// together, the in-flight form catches accumulation across
+    /// writes.
+    fn current_line(&self) -> &str {
+        match self.buf.rfind(['\n', '\r']) {
+            Some(idx) => &self.buf[idx + 1..],
+            None => self.buf.as_str(),
+        }
+    }
 }
 
 #[derive(Default)]
@@ -119,9 +169,38 @@ impl SafetyHook {
         Self {
             approved: Mutex::new(ApprovalCache::with_cap(APPROVAL_CACHE_CAP)),
             usage: Mutex::new(HashMap::new()),
+            pty_buffers: Mutex::new(HashMap::new()),
             pause_tx,
             policy,
         }
+    }
+
+    /// YYC-196: append a `pty_write` input chunk to the per-session
+    /// rolling buffer and return the matched "candidate command"
+    /// string (combined buffer state) for safety inspection.
+    fn record_pty_write(&self, session_id: &str, input: &str) -> String {
+        let mut map = self.pty_buffers.lock();
+        let entry = map.entry(session_id.to_string()).or_default();
+        entry.append(input);
+        let current = entry.current_line().to_string();
+        // Also include the trailing-newline-terminated form so a
+        // newline arriving in this same chunk gets matched as a
+        // submitted command.
+        let trimmed = entry.buf.trim_end_matches(['\r', '\n']);
+        // Pick whichever is non-empty + bigger, since
+        // match_dangerous handles either shape.
+        if !current.is_empty() && current.len() >= trimmed.len() {
+            current
+        } else {
+            trimmed.to_string()
+        }
+    }
+
+    /// YYC-196: drop the rolling buffer for a session — called when
+    /// `pty_close` is dispatched against the same id so the buffer
+    /// doesn't outlive the PTY itself.
+    fn clear_pty_buffer(&self, session_id: &str) {
+        self.pty_buffers.lock().remove(session_id);
     }
 
     /// Add a command to the per-session approval cache. Future invocations of
@@ -213,18 +292,36 @@ impl HookHandler for SafetyHook {
             },
             "pty_write" => match args.get("input").and_then(|v| v.as_str()) {
                 Some(input) => {
-                    // Treat each newline-terminated line as a candidate
-                    // command. Strip the trailing CR/LF for matching but
-                    // preserve them in the cache key (the canonical key
-                    // path normalizes whitespace).
-                    let trimmed = input.trim_end_matches(['\r', '\n']);
-                    if trimmed.is_empty() {
+                    // YYC-196: feed the rolling per-session buffer
+                    // so a command split across multiple pty_write
+                    // calls (`"rm "` + `"-rf /\n"`) gets caught.
+                    // Falls back to the single-write trimmed form
+                    // when no session_id is present.
+                    let session = args
+                        .get("session_id")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("");
+                    let candidate = if session.is_empty() {
+                        input.trim_end_matches(['\r', '\n']).to_string()
+                    } else {
+                        self.record_pty_write(session, input)
+                    };
+                    if candidate.is_empty() {
                         return Ok(HookOutcome::Continue);
                     }
-                    trimmed.to_string()
+                    candidate
                 }
                 None => return Ok(HookOutcome::Continue),
             },
+            "pty_close" => {
+                // YYC-196: discard rolling buffer when the PTY is
+                // explicitly closed so it doesn't leak across the
+                // session.
+                if let Some(session) = args.get("session_id").and_then(|v| v.as_str()) {
+                    self.clear_pty_buffer(session);
+                }
+                return Ok(HookOutcome::Continue);
+            }
             _ => return Ok(HookOutcome::Continue),
         };
         let command = command.as_str();
@@ -1278,6 +1375,101 @@ mod tests {
             .await
             .unwrap();
         assert!(matches!(outcome, HookOutcome::Continue));
+    }
+
+    // ── YYC-196: multi-write pty command assembly ──────────────────────
+
+    // YYC-196: dangerous command split across two pty_write calls
+    // is blocked on the second write (when the rolling buffer
+    // assembles "rm -rf /").
+    #[tokio::test]
+    async fn pty_write_split_dangerous_command_blocks_on_second_write() {
+        let hook = SafetyHook::new();
+        // First write: harmless prefix.
+        let first = serde_json::json!({"session_id": "pty-1", "input": "rm "});
+        let outcome = hook
+            .before_tool_call("pty_write", &first, CancellationToken::new())
+            .await
+            .unwrap();
+        assert!(matches!(outcome, HookOutcome::Continue));
+        // Second write: completes the dangerous command.
+        let second = serde_json::json!({"session_id": "pty-1", "input": "-rf /\n"});
+        let outcome = hook
+            .before_tool_call("pty_write", &second, CancellationToken::new())
+            .await
+            .unwrap();
+        assert!(matches!(outcome, HookOutcome::Block { .. }));
+    }
+
+    // YYC-196: an incremental safe command still passes.
+    #[tokio::test]
+    async fn pty_write_safe_split_command_passes() {
+        let hook = SafetyHook::new();
+        for chunk in &["echo ", "hello", " ", "world", "\n"] {
+            let args = serde_json::json!({"session_id": "pty-2", "input": chunk});
+            let outcome = hook
+                .before_tool_call("pty_write", &args, CancellationToken::new())
+                .await
+                .unwrap();
+            assert!(matches!(outcome, HookOutcome::Continue));
+        }
+    }
+
+    // YYC-196: pty_close clears the rolling buffer so a fresh
+    // session can't inherit the previous one's accumulated state.
+    #[tokio::test]
+    async fn pty_close_clears_rolling_buffer() {
+        let hook = SafetyHook::new();
+        // Seed with "rm " then close.
+        let args = serde_json::json!({"session_id": "pty-3", "input": "rm "});
+        let _ = hook
+            .before_tool_call("pty_write", &args, CancellationToken::new())
+            .await
+            .unwrap();
+        let close_args = serde_json::json!({"session_id": "pty-3"});
+        let _ = hook
+            .before_tool_call("pty_close", &close_args, CancellationToken::new())
+            .await
+            .unwrap();
+        // After close, "-rf /\n" alone shouldn't trigger because
+        // the prefix is gone. (This passes through, as `-rf /` on
+        // its own isn't dangerous without `rm`.)
+        let next = serde_json::json!({"session_id": "pty-3", "input": "-rf /\n"});
+        let outcome = hook
+            .before_tool_call("pty_write", &next, CancellationToken::new())
+            .await
+            .unwrap();
+        assert!(matches!(outcome, HookOutcome::Continue));
+    }
+
+    // YYC-196: rolling buffer cap. Push more than the cap; the
+    // oldest bytes drop so a probe added at the start can no
+    // longer combine with later writes.
+    #[tokio::test]
+    async fn pty_buffer_truncates_at_cap() {
+        let hook = SafetyHook::new();
+        // Seed with the dangerous head.
+        let head = serde_json::json!({"session_id": "pty-4", "input": "rm "});
+        let _ = hook
+            .before_tool_call("pty_write", &head, CancellationToken::new())
+            .await
+            .unwrap();
+        // Push more than cap of safe content.
+        let filler = "a".repeat(PTY_INPUT_BUFFER_CAP + 100);
+        let big = serde_json::json!({"session_id": "pty-4", "input": filler});
+        let _ = hook
+            .before_tool_call("pty_write", &big, CancellationToken::new())
+            .await
+            .unwrap();
+        // Buffer is bounded.
+        let map = hook.pty_buffers.lock();
+        let buf = map.get("pty-4").expect("buffer");
+        assert!(
+            buf.buf.len() <= PTY_INPUT_BUFFER_CAP,
+            "buffer len {} exceeds cap {}",
+            buf.buf.len(),
+            PTY_INPUT_BUFFER_CAP,
+        );
     }
 
     // ── YYC-130 follow-up: policy + per-session quota ───────────────────
