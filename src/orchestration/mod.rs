@@ -18,11 +18,12 @@
 //! session anyway. SQLite-backed history is a follow-up if/when
 //! cross-session inspection becomes a real ask.
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
 use parking_lot::Mutex;
+use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 /// Cap on the number of records kept in the store. Old records
@@ -120,6 +121,11 @@ struct StoreInner {
     records: VecDeque<ChildAgentRecord>,
     /// Bounded length; a push past `capacity` evicts the front.
     capacity: usize,
+    /// YYC-209: per-active-child cancellation tokens, keyed by id.
+    /// Inserted by `register_cancel_handle` on child spawn,
+    /// removed at terminal transition. `cancel(id)` looks up and
+    /// fires.
+    cancel_handles: HashMap<ChildAgentId, CancellationToken>,
 }
 
 impl OrchestrationStore {
@@ -134,6 +140,7 @@ impl OrchestrationStore {
             inner: Mutex::new(StoreInner {
                 records: VecDeque::with_capacity(capacity.min(1024)),
                 capacity: capacity.max(1),
+                cancel_handles: HashMap::new(),
             }),
         }
     }
@@ -271,6 +278,57 @@ impl OrchestrationStore {
         inner.records.iter().rev().take(n).cloned().collect()
     }
 
+    /// YYC-209: register the cancellation token for an in-flight
+    /// child. Looked up by `cancel(id)` to fire the matching
+    /// child's cancel signal. The spawn tool calls this on child
+    /// start and `forget_cancel_handle` on terminal transition so
+    /// the map doesn't accumulate dead tokens.
+    pub fn register_cancel_handle(&self, id: ChildAgentId, token: CancellationToken) {
+        let mut inner = self.inner.lock();
+        inner.cancel_handles.insert(id, token);
+    }
+
+    /// YYC-209: drop a cancel handle without firing it. Called at
+    /// terminal transition so the map stays bounded by the count
+    /// of in-flight children, not lifetime-of-process.
+    pub fn forget_cancel_handle(&self, id: ChildAgentId) {
+        let mut inner = self.inner.lock();
+        inner.cancel_handles.remove(&id);
+    }
+
+    /// YYC-209: cancel a specific child by id. Looks up the
+    /// registered token, fires it, removes it from the map, and
+    /// flips the record to `Cancelled`. Returns true when a token
+    /// was registered and fired; false when the id is unknown or
+    /// already terminal.
+    pub fn cancel(&self, id: ChildAgentId) -> bool {
+        let token = {
+            let mut inner = self.inner.lock();
+            inner.cancel_handles.remove(&id)
+        };
+        match token {
+            Some(t) => {
+                t.cancel();
+                self.mark_cancelled(id);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// YYC-209: snapshot every record whose `parent_id` equals
+    /// `parent`. Used by tree-of-thought rendering to walk the
+    /// child hierarchy. Returned in insertion order.
+    pub fn children_of(&self, parent: ChildAgentId) -> Vec<ChildAgentRecord> {
+        let inner = self.inner.lock();
+        inner
+            .records
+            .iter()
+            .filter(|r| r.parent_id == Some(parent))
+            .cloned()
+            .collect()
+    }
+
     pub fn len(&self) -> usize {
         self.inner.lock().records.len()
     }
@@ -385,6 +443,59 @@ mod tests {
         let snap = s.get(r.id).unwrap();
         assert_eq!(snap.status, ChildStatus::Cancelled);
         assert!(snap.ended_at.is_some());
+    }
+
+    // YYC-209: cancel(id) fires the registered token + flips the
+    // record to Cancelled.
+    #[test]
+    fn cancel_fires_registered_token_and_marks_record() {
+        let s = store();
+        let r = s.register(None, "task", 4);
+        let token = CancellationToken::new();
+        s.register_cancel_handle(r.id, token.clone());
+        assert!(s.cancel(r.id));
+        assert!(token.is_cancelled());
+        let snap = s.get(r.id).unwrap();
+        assert_eq!(snap.status, ChildStatus::Cancelled);
+    }
+
+    // YYC-209: cancel on an unknown id returns false without
+    // panicking.
+    #[test]
+    fn cancel_unknown_id_returns_false() {
+        let s = store();
+        let phantom = ChildAgentId::new();
+        assert!(!s.cancel(phantom));
+    }
+
+    // YYC-209: forget_cancel_handle removes without firing.
+    #[test]
+    fn forget_cancel_handle_does_not_fire() {
+        let s = store();
+        let r = s.register(None, "task", 4);
+        let token = CancellationToken::new();
+        s.register_cancel_handle(r.id, token.clone());
+        s.forget_cancel_handle(r.id);
+        // Subsequent cancel returns false (handle gone) and the
+        // token stays uncancelled.
+        assert!(!s.cancel(r.id));
+        assert!(!token.is_cancelled());
+    }
+
+    // YYC-209: children_of returns only direct children.
+    #[test]
+    fn children_of_returns_direct_descendants() {
+        let s = store();
+        let parent = s.register(None, "parent", 8);
+        let c1 = s.register(Some(parent.id), "c1", 4);
+        let c2 = s.register(Some(parent.id), "c2", 4);
+        let _grandchild = s.register(Some(c1.id), "gc", 2);
+        let _unrelated = s.register(None, "other", 4);
+        let kids = s.children_of(parent.id);
+        let ids: Vec<ChildAgentId> = kids.iter().map(|r| r.id).collect();
+        assert_eq!(ids.len(), 2);
+        assert!(ids.contains(&c1.id));
+        assert!(ids.contains(&c2.id));
     }
 
     #[test]
