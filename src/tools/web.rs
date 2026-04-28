@@ -1,11 +1,22 @@
-use crate::tools::{ReplaySafety, Tool, ToolResult, web_ssrf};
+use crate::tools::{ReplaySafety, Tool, ToolResult, parse_tool_params, web_ssrf};
 use anyhow::Result;
 use async_trait::async_trait;
+use serde::Deserialize;
 use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 use tokio_util::sync::CancellationToken;
+
+#[derive(Deserialize)]
+struct WebSearchParams {
+    query: String,
+}
+
+#[derive(Deserialize)]
+struct WebFetchParams {
+    url: String,
+}
 
 pub struct WebSearch;
 
@@ -32,9 +43,11 @@ impl Tool for WebSearch {
         })
     }
     async fn call(&self, params: Value, cancel: CancellationToken) -> Result<ToolResult> {
-        let query = params["query"]
-            .as_str()
-            .ok_or_else(|| anyhow::anyhow!("query required"))?;
+        let p: WebSearchParams = match parse_tool_params(params) {
+            Ok(p) => p,
+            Err(e) => return Ok(e),
+        };
+        let query = p.query.as_str();
 
         // Use DuckDuckGo's lite version for simple scraping
         let url = format!("https://html.duckduckgo.com/html/?q={}", urlencoding(query));
@@ -256,9 +269,11 @@ impl Tool for WebFetch {
         })
     }
     async fn call(&self, params: Value, cancel: CancellationToken) -> Result<ToolResult> {
-        let url = params["url"]
-            .as_str()
-            .ok_or_else(|| anyhow::anyhow!("url required"))?;
+        let p: WebFetchParams = match parse_tool_params(params) {
+            Ok(p) => p,
+            Err(e) => return Ok(e),
+        };
+        let url = p.url.as_str();
 
         // YYC-246: SSRF guard. Refuses non-HTTP(S) schemes and any URL
         // whose host (literal or DNS-resolved) sits in a private,
@@ -376,6 +391,34 @@ mod tests {
     fn yyc222_web_tools_are_classified_external() {
         assert_eq!(WebSearch.replay_safety(), ReplaySafety::External);
         assert_eq!(WebFetch.replay_safety(), ReplaySafety::External);
+    }
+
+    #[tokio::test]
+    async fn yyc263_web_search_missing_query_surfaces_as_toolresult_err() {
+        let result = WebSearch
+            .call(json!({}), CancellationToken::new())
+            .await
+            .expect("call returns Ok(ToolResult)");
+        assert!(result.is_error);
+        assert!(
+            result.output.contains("tool params failed to validate"),
+            "expected serde-shaped error, got: {}",
+            result.output
+        );
+    }
+
+    #[tokio::test]
+    async fn yyc263_web_fetch_missing_url_surfaces_as_toolresult_err() {
+        let result = WebFetch
+            .call(json!({}), CancellationToken::new())
+            .await
+            .expect("call returns Ok(ToolResult)");
+        assert!(result.is_error);
+        assert!(
+            result.output.contains("tool params failed to validate"),
+            "expected serde-shaped error, got: {}",
+            result.output
+        );
     }
 
     #[test]
