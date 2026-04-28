@@ -211,6 +211,51 @@ pub struct Config {
     /// legacy `[provider]` block (today's default).
     #[serde(default)]
     pub active_profile: Option<String>,
+
+    /// YYC-216: knowledge governance — exclusions that bar
+    /// sensitive paths from being indexed by the embeddings
+    /// store, code-graph, or any future retrieval layer.
+    #[serde(default)]
+    pub knowledge: KnowledgeConfig,
+}
+
+/// YYC-216: knowledge index governance. Today the only field is
+/// `exclusions`, a list of glob patterns that the indexer skips at
+/// reindex time so sensitive files (e.g. `.env`, `*.pem`,
+/// `secrets/`) never enter the embedding/code-graph DBs in the
+/// first place. Per-workspace overrides land alongside the trust
+/// profile in a follow-up.
+#[derive(Debug, Deserialize, Clone, Default)]
+pub struct KnowledgeConfig {
+    /// Glob patterns matched against the path *relative to the
+    /// workspace root*. Standard `globset` syntax — `*` matches a
+    /// single path segment, `**` matches multiple, `?` matches one
+    /// character. Lines starting with `#` aren't supported here
+    /// (this is a TOML array, not a `.gitignore` file).
+    #[serde(default)]
+    pub exclusions: Vec<String>,
+}
+
+impl KnowledgeConfig {
+    /// Compile the exclusion patterns into a `GlobSet` for matching
+    /// during indexing. Invalid patterns are logged and skipped so
+    /// one typo doesn't stop the whole indexer.
+    pub fn build_excluder(&self) -> globset::GlobSet {
+        let mut builder = globset::GlobSetBuilder::new();
+        for pat in &self.exclusions {
+            match globset::Glob::new(pat) {
+                Ok(g) => {
+                    builder.add(g);
+                }
+                Err(e) => {
+                    tracing::warn!("knowledge.exclusions: invalid glob `{pat}`: {e}");
+                }
+            }
+        }
+        builder
+            .build()
+            .unwrap_or_else(|_| globset::GlobSet::empty())
+    }
 }
 
 impl Config {
@@ -1045,6 +1090,7 @@ impl Default for Config {
             workspace_trust: crate::trust::WorkspaceTrustConfig::default(),
             extensions: ExtensionsConfig::default(),
             active_profile: None,
+            knowledge: KnowledgeConfig::default(),
         }
     }
 }
@@ -1134,6 +1180,7 @@ impl Config {
             "workspace_trust",
             "extensions",
             "active_profile",
+            "knowledge",
         ];
         let Ok(value) = toml::from_str::<toml::Value>(raw) else {
             return Vec::new();

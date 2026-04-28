@@ -51,6 +51,10 @@ pub struct EmbeddingIndex {
     fallback_base_url: String,
     fallback_api_key: Option<String>,
     client: reqwest::Client,
+    /// YYC-216: knowledge-governance exclusions compiled to a
+    /// glob-set so the indexer can skip sensitive paths at reindex
+    /// time. Empty `GlobSet` (default) excludes nothing.
+    excluder: globset::GlobSet,
 }
 
 impl EmbeddingIndex {
@@ -60,6 +64,28 @@ impl EmbeddingIndex {
         cfg: EmbeddingsConfig,
         fallback_base_url: String,
         fallback_api_key: Option<String>,
+    ) -> Result<Self> {
+        Self::open_with_excluder(
+            workspace_root,
+            parsers,
+            cfg,
+            fallback_base_url,
+            fallback_api_key,
+            globset::GlobSet::empty(),
+        )
+    }
+
+    /// YYC-216: open with an explicit knowledge-exclusion glob set.
+    /// Files whose workspace-relative path matches any glob are
+    /// skipped at reindex time. The plain `open` constructor is the
+    /// no-exclusion convenience for tests + legacy callers.
+    pub fn open_with_excluder(
+        workspace_root: PathBuf,
+        parsers: Arc<ParserCache>,
+        cfg: EmbeddingsConfig,
+        fallback_base_url: String,
+        fallback_api_key: Option<String>,
+        excluder: globset::GlobSet,
     ) -> Result<Self> {
         let db_path = db_path_for(&workspace_root)?;
         if let Some(parent) = db_path.parent() {
@@ -92,6 +118,7 @@ impl EmbeddingIndex {
             fallback_base_url,
             fallback_api_key,
             client: reqwest::Client::new(),
+            excluder,
         })
     }
 
@@ -182,15 +209,20 @@ impl EmbeddingIndex {
                 Some(l) => l,
                 None => continue,
             };
+            let rel_for_check = path.strip_prefix(&self.workspace_root).unwrap_or(path);
+            // YYC-216: skip files matching any knowledge-exclusion
+            // glob so sensitive paths never enter the embedding DB.
+            // Match against the workspace-relative path so patterns
+            // like `*.pem` and `secrets/**` work intuitively.
+            if self.excluder.is_match(rel_for_check) {
+                tracing::debug!("knowledge.exclusions: skipping {}", rel_for_check.display());
+                continue;
+            }
             let source = match std::fs::read_to_string(path) {
                 Ok(s) => s,
                 Err(_) => continue,
             };
-            let rel = path
-                .strip_prefix(&self.workspace_root)
-                .unwrap_or(path)
-                .to_string_lossy()
-                .into_owned();
+            let rel = rel_for_check.to_string_lossy().into_owned();
             let chunks = chunk_file(&self.parsers, lang, &rel, &source)?;
             files += 1;
             all_chunks.extend(chunks);
@@ -409,6 +441,48 @@ fn cosine(a: &[f32], b: &[f32]) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn build_excluder(patterns: &[&str]) -> globset::GlobSet {
+        let mut b = globset::GlobSetBuilder::new();
+        for p in patterns {
+            b.add(globset::Glob::new(p).expect("test glob compiles"));
+        }
+        b.build().expect("globset builds")
+    }
+
+    #[test]
+    fn yyc216_excluder_matches_typical_secret_patterns() {
+        let g = build_excluder(&["*.pem", "secrets/**", ".env"]);
+        assert!(g.is_match(".env"));
+        assert!(g.is_match("server.pem"));
+        assert!(g.is_match("secrets/aws.toml"));
+        assert!(g.is_match("secrets/nested/deep.txt"));
+        assert!(!g.is_match("src/main.rs"));
+        assert!(!g.is_match("README.md"));
+    }
+
+    #[test]
+    fn yyc216_empty_excluder_matches_nothing() {
+        let g = globset::GlobSet::empty();
+        assert!(!g.is_match(".env"));
+        assert!(!g.is_match("anything.rs"));
+    }
+
+    #[test]
+    fn yyc216_knowledge_config_compiles_valid_globs_and_skips_invalid() {
+        let cfg = crate::config::KnowledgeConfig {
+            exclusions: vec![
+                "*.pem".to_string(),
+                // Intentionally malformed glob — must not panic.
+                "[unbalanced".to_string(),
+                ".env".to_string(),
+            ],
+        };
+        let g = cfg.build_excluder();
+        assert!(g.is_match("server.pem"));
+        assert!(g.is_match(".env"));
+        assert!(!g.is_match("ok.rs"));
+    }
 
     #[test]
     fn vec_bytes_round_trip() {
