@@ -27,6 +27,15 @@ use tokio::sync::mpsc;
 /// a structured taxonomy so callers (retry logic, TUI banner) can branch on
 /// the kind of failure, and so the user sees an actionable next-step hint
 /// instead of raw provider JSON. See YYC-41.
+///
+/// YYC-270: this is the canonical example of where typed errors earn
+/// their keep — clear taxonomy, multiple consumers (retry classifier,
+/// TUI banner, run records), and distinct remediation per variant.
+/// The spike's outcome is documented in
+/// `~/wiki/queries/typed-errors-spike.md`: do *not* roll out a
+/// generic `ToolError` / `ConfigError` enum; define local typed
+/// errors (e.g. `FsSandboxError`, `SsrfError`) only where they
+/// unlock new behavior.
 #[derive(Debug, thiserror::Error)]
 pub enum ProviderError {
     /// 401 / 403 — API key is missing, invalid, revoked, or lacks permission.
