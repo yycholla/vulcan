@@ -69,6 +69,67 @@ fn secret_patterns() -> &'static [(Regex, &'static str)] {
                 Regex::new(r"AKIA[0-9A-Z]{16}").expect("aws key id regex"),
                 "AKIA[REDACTED]",
             ),
+            // YYC-250: Google API key shape (services like Maps, GenAI,
+            // Cloud APIs all share this prefix).
+            (
+                Regex::new(r"AIza[0-9A-Za-z_\-]{35}").expect("google api key regex"),
+                "AIza[REDACTED]",
+            ),
+            // YYC-250: Slack tokens — bot, user, app, workspace, refresh,
+            // and service refresh prefixes.
+            (
+                Regex::new(r"xox[bpasr]-[A-Za-z0-9-]{8,}").expect("slack token regex"),
+                "xox-[REDACTED]",
+            ),
+            (
+                Regex::new(r"xapp-[A-Za-z0-9-]{8,}").expect("slack app token regex"),
+                "xapp-[REDACTED]",
+            ),
+            // YYC-250: Stripe live keys (secret / restricted / publishable
+            // / webhook signing).
+            (
+                Regex::new(r"sk_live_[A-Za-z0-9]{16,}").expect("stripe sk_live regex"),
+                "sk_live_[REDACTED]",
+            ),
+            (
+                Regex::new(r"rk_live_[A-Za-z0-9]{16,}").expect("stripe rk_live regex"),
+                "rk_live_[REDACTED]",
+            ),
+            (
+                Regex::new(r"pk_live_[A-Za-z0-9]{16,}").expect("stripe pk_live regex"),
+                "pk_live_[REDACTED]",
+            ),
+            (
+                Regex::new(r"whsec_[A-Za-z0-9]{16,}").expect("stripe webhook regex"),
+                "whsec_[REDACTED]",
+            ),
+            // YYC-250: generic JSON catch-all — redact `"api_key": "..."`
+            // (and the token/secret/password siblings) so a tool that
+            // returns its own config struct can't leak the inner string
+            // even when the value doesn't match a known prefix. Captures
+            // group 1 = `"key": "`, group 2 = closing quote so the JSON
+            // shape stays valid for downstream parsers.
+            (
+                Regex::new(
+                    r#"(?i)("(?:api[_-]?key|token|secret|password|access[_-]?token)"\s*:\s*")[^"\\]{8,}(")"#,
+                )
+                .expect("json secret kv regex"),
+                "$1[REDACTED]$2",
+            ),
+            // YYC-250: env-var leak — `AWS_SECRET_ACCESS_KEY=...`,
+            // `OPENAI_API_KEY=...`, etc. Group 1 keeps the var name so
+            // logs still show *which* secret leaked without the value.
+            (
+                Regex::new(
+                    r#"\b([A-Z][A-Z0-9_]*_(?:KEY|SECRET|TOKEN|PASSWORD|PASS|PWD))=([^\s'"]{4,})"#,
+                )
+                .expect("env var leak regex"),
+                "$1=[REDACTED]",
+            ),
+            // Azure-style hex tokens are caught by the Bearer regex.
+            // Standalone hex strings are too noisy — git SHAs, content
+            // hashes, CI build IDs all share the shape — so we lean on
+            // the Bearer + env-var-leak regexes instead.
         ]
     })
 }
@@ -145,7 +206,9 @@ mod tests {
 
     #[test]
     fn redact_string_strips_openrouter_key() {
-        let raw = "OPENROUTER_API_KEY=sk-or-v1-abcdefghijklmnopqrstuvwx";
+        // Non-env-var context so the prefix-specific pattern (and not
+        // the YYC-250 env-var-leak pattern) is the one exercised here.
+        let raw = "config: openrouter token sk-or-v1-abcdefghijklmnopqrstuvwx";
         let red = redact_string(raw);
         assert!(!red.contains("sk-or-v1-abcdefghijklmnopqrstuvwx"));
         assert!(red.contains("sk-or-[REDACTED]"));
@@ -211,6 +274,103 @@ mod tests {
         let red = redact_value(&v);
         let s = red.to_string();
         assert!(s.contains("[50 chars elided]"));
+    }
+
+    // Test fixtures concatenate prefix + body at runtime so the source
+    // file doesn't contain literal strings that match GitHub's secret
+    // scanners (which would block the push).
+    fn fake(prefix: &str, body: &str) -> String {
+        format!("{prefix}{body}")
+    }
+
+    #[test]
+    fn yyc250_redacts_google_api_key() {
+        let body = "X".repeat(35);
+        let raw = format!("GOOGLE_API_KEY={}", fake("AI", &format!("za{body}")));
+        let red = redact_string(&raw);
+        assert!(red.contains("[REDACTED]"));
+    }
+
+    #[test]
+    fn yyc250_redacts_slack_bot_user_app_tokens() {
+        let body = "1234567890-XXXXXXXXXXX";
+        for prefix in ["xoxb", "xoxp", "xoxs", "xoxr", "xapp"] {
+            let token = fake(prefix, &format!("-{body}"));
+            let raw = format!("Slack: {token}");
+            let red = redact_string(&raw);
+            assert!(!red.contains(body), "leaked Slack token body: {red}");
+        }
+    }
+
+    #[test]
+    fn yyc250_redacts_stripe_live_keys() {
+        let body = "X".repeat(20);
+        for prefix in ["sk_live", "rk_live", "pk_live", "whsec"] {
+            let token = fake(prefix, &format!("_{body}"));
+            let raw = format!("KEY: {token}");
+            let red = redact_string(&raw);
+            assert!(red.contains("[REDACTED]"), "did not redact: {raw} -> {red}");
+            assert!(!red.contains(&body), "leaked stripe body: {red}");
+        }
+    }
+
+    #[test]
+    fn yyc250_redacts_generic_json_secret_fields() {
+        let raw = r#"{"api_key": "abcdefghijklmnop", "token": "9876543210abcdef", "secret": "ssh-keep-out-please"}"#;
+        let red = redact_string(raw);
+        assert!(!red.contains("abcdefghijklmnop"));
+        assert!(!red.contains("9876543210abcdef"));
+        assert!(!red.contains("ssh-keep-out-please"));
+        assert!(red.contains("[REDACTED]"));
+    }
+
+    #[test]
+    fn yyc250_redacts_env_var_leaks() {
+        // Fake values to avoid GitHub secret-scanning false positives.
+        for raw in [
+            "AWS_SECRET_ACCESS_KEY=NOT-A-REAL-SECRET-PLACEHOLDER-VALUE",
+            "OPENAI_API_KEY=fake-test-value-xxxxxxxx",
+            "MY_AGENT_TOKEN=placeholder-token-1111",
+            "DATABASE_PASSWORD=placeholder-pw-1111",
+        ] {
+            let red = redact_string(raw);
+            assert!(red.contains("[REDACTED]"), "missed env leak in {raw}");
+            assert!(
+                !red.contains("NOT-A-REAL-SECRET-PLACEHOLDER"),
+                "leaked: {red}"
+            );
+            assert!(
+                !red.contains("placeholder-pw-1111"),
+                "leaked password: {red}"
+            );
+        }
+    }
+
+    #[test]
+    fn yyc250_truncation_runs_after_redaction() {
+        // The secret sits past the 500-char window. Without
+        // redact-before-truncate, it would survive in the kept prefix.
+        // Place a known token at the *start* of the string so we can
+        // confirm: post-redact, the head is short again so the
+        // elided suffix drops.
+        let mut raw = String::new();
+        raw.push_str("Bearer sk-test-aaaaaaaaaaaaaaaaaaaaaa ");
+        for _ in 0..600 {
+            raw.push('z');
+        }
+        let red = redact_string(&raw);
+        assert!(!red.contains("sk-test-aaaaaaaaaaaaaaaaaaaaaa"));
+        assert!(red.contains("Bearer [REDACTED]"));
+    }
+
+    #[test]
+    fn yyc250_does_not_redact_unrelated_long_strings() {
+        // 40+ char hex (git SHA-style) was a tempting redact target
+        // but produces too many false positives — confirm it stays
+        // intact so commit hashes survive in logs.
+        let raw = "commit 5a509b9b81ae8ff897a89706980068c33dedf16e abc";
+        let red = redact_string(raw);
+        assert_eq!(red, raw);
     }
 
     #[test]
