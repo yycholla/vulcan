@@ -19,10 +19,12 @@
 
 pub mod config_field;
 pub mod draft;
+pub mod manifest;
 pub mod registry;
 
 pub use config_field::{ExtensionConfigField, ExtensionFieldKind};
 pub use draft::parse_skill_extension;
+pub use manifest::{EntryKind, ExtensionManifest, ManifestError};
 pub use registry::{CodeExtension, ExtensionRegistry};
 
 use serde::{Deserialize, Serialize};
