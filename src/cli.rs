@@ -147,6 +147,33 @@ pub enum Command {
         #[command(subcommand)]
         cmd: PlaybookSubcommand,
     },
+    /// YYC-167: extension lifecycle CLI. Settings live under
+    /// `vulcan config extensions` (YYC-212).
+    Extension {
+        #[command(subcommand)]
+        cmd: ExtensionSubcommand,
+    },
+}
+
+/// YYC-167 PR-1 subcommands. `new` / `validate` / `install`
+/// land in PR-2.
+#[derive(Subcommand, Debug)]
+pub enum ExtensionSubcommand {
+    /// List installed extensions with status + last load error.
+    List,
+    /// Show full metadata + install state for one extension.
+    Show { id: String },
+    /// Promote install state to `enabled = true`.
+    Enable { id: String },
+    /// Demote install state to `enabled = false`.
+    Disable { id: String },
+    /// Permanently delete the install directory + state row.
+    Uninstall {
+        id: String,
+        /// Skip the confirmation prompt.
+        #[arg(long)]
+        yes: bool,
+    },
 }
 
 /// YYC-220: subcommands under `vulcan playbook`.

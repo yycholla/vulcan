@@ -190,6 +190,10 @@ async fn main() -> anyhow::Result<()> {
             init_cli_logging();
             vulcan::cli_playbook::run(cmd).await?;
         }
+        Some(Command::Extension { cmd }) => {
+            init_cli_logging();
+            vulcan::cli_extension::run(cmd).await?;
+        }
     }
 
     Ok(())
