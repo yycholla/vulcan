@@ -500,7 +500,64 @@ fn match_dangerous(command: &str) -> Option<&'static str> {
         return Some("pipe-to-shell from network (curl|bash / wget|sh)");
     }
 
+    // YYC-247: redirecting any output to a raw block / partition / mapper
+    // device file is destructive (overwriting the disk). /dev/null,
+    // /dev/std{in,out,err}, /dev/tty stay allowed because they're the
+    // intended generic sinks.
+    if matches_device_redirect(command) {
+        return Some("redirect to a block-device file");
+    }
+
     None
+}
+
+/// YYC-247: shell-redirect to a raw device. Matches `>`, `>>`, `&>`,
+/// `&>>`, or `<>` followed by an optional space and a `/dev/<name>`
+/// path that isn't one of the safe generic sinks.
+fn matches_device_redirect(command: &str) -> bool {
+    const SAFE_DEV_PATHS: &[&str] = &[
+        "/dev/null",
+        "/dev/stdout",
+        "/dev/stderr",
+        "/dev/stdin",
+        "/dev/tty",
+        "/dev/zero", // OK as a *source*; redirecting *to* zero is impossible (read-only)
+        "/dev/random",
+        "/dev/urandom",
+    ];
+    let bytes = command.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        let b = bytes[i];
+        if b != b'>' && !(b == b'&' && bytes.get(i + 1) == Some(&b'>')) {
+            i += 1;
+            continue;
+        }
+        // Skip the redirect operator itself: `>`, `>>`, `&>`, `&>>`.
+        let mut j = i;
+        if bytes[j] == b'&' {
+            j += 1;
+        }
+        while j < bytes.len() && bytes[j] == b'>' {
+            j += 1;
+        }
+        // Skip whitespace.
+        while j < bytes.len() && (bytes[j] == b' ' || bytes[j] == b'\t') {
+            j += 1;
+        }
+        // Look for a /dev/ path token.
+        if command[j..].starts_with("/dev/") {
+            let tail: String = command[j..]
+                .chars()
+                .take_while(|c| !c.is_whitespace() && *c != ';' && *c != '|' && *c != '&')
+                .collect();
+            if !SAFE_DEV_PATHS.iter().any(|safe| &tail == safe) {
+                return true;
+            }
+        }
+        i = j.max(i + 1);
+    }
+    false
 }
 
 /// YYC-195: when the segment's head verb is destructive
@@ -560,6 +617,144 @@ fn match_dangerous_tokens(tokens: &[String]) -> Option<&'static str> {
         h if h == "mkfs" || h.starts_with("mkfs.") => {
             return Some("filesystem format command (mkfs)");
         }
+        // YYC-247: low-level disk / partition tools.
+        "fdisk" | "parted" | "gparted" | "wipefs" | "shred" | "format" | "blkdiscard" => {
+            return Some("low-level disk / partition tool");
+        }
+        // YYC-247: system halt and reboot.
+        "shutdown" | "reboot" | "halt" | "poweroff" | "telinit" => {
+            return Some("system halt or reboot");
+        }
+        // YYC-247: destructive systemd/init verbs. Read-only verbs like
+        // `status`, `is-active`, `show` stay allowed.
+        "systemctl" | "service" => {
+            let bad = tokens.iter().skip(1).any(|t| {
+                matches!(
+                    t.as_str(),
+                    "stop"
+                        | "kill"
+                        | "disable"
+                        | "mask"
+                        | "reboot"
+                        | "poweroff"
+                        | "halt"
+                        | "kexec"
+                        | "isolate"
+                        | "emergency"
+                        | "rescue"
+                        | "default"
+                        | "suspend"
+                        | "hibernate"
+                )
+            });
+            if bad {
+                return Some("destructive systemctl/service action");
+            }
+        }
+        // YYC-247: mass-kill commands.
+        "killall" | "pkill" => return Some("mass-kill command (killall/pkill)"),
+        // YYC-247: scheduled-task wipe.
+        "crontab" => {
+            if tokens.iter().any(|t| t == "-r" || t == "--remove") {
+                return Some("crontab -r removes the user cron table");
+            }
+        }
+        // YYC-247: package removal (Debian-family).
+        "apt" | "apt-get" | "aptitude" => {
+            let bad = tokens
+                .iter()
+                .skip(1)
+                .any(|t| matches!(t.as_str(), "remove" | "purge" | "autoremove" | "autopurge"));
+            if bad {
+                return Some("package removal (apt/apt-get)");
+            }
+        }
+        // YYC-247: package removal (RPM-family).
+        "dnf" | "yum" | "microdnf" => {
+            if tokens
+                .iter()
+                .skip(1)
+                .any(|t| matches!(t.as_str(), "remove" | "erase" | "autoremove"))
+            {
+                return Some("package removal (dnf/yum)");
+            }
+        }
+        // YYC-247: package removal (Arch).
+        "pacman" => {
+            let bad = tokens.iter().skip(1).any(|t| {
+                t == "-R"
+                    || t == "--remove"
+                    || (t.starts_with('-') && !t.starts_with("--") && t.contains('R'))
+            });
+            if bad {
+                return Some("package removal (pacman -R)");
+            }
+        }
+        // YYC-247: language ecosystem uninstall.
+        "pip" | "pip3" | "pipx" | "uv" => {
+            if tokens.iter().skip(1).any(|t| t == "uninstall") {
+                return Some("language-package uninstall (pip/pipx/uv)");
+            }
+        }
+        "npm" | "pnpm" | "yarn" => {
+            if tokens
+                .iter()
+                .skip(1)
+                .any(|t| matches!(t.as_str(), "uninstall" | "remove" | "rm"))
+            {
+                return Some("language-package uninstall (npm/pnpm/yarn)");
+            }
+        }
+        "cargo" => {
+            if tokens.iter().skip(1).any(|t| t == "uninstall") {
+                return Some("cargo uninstall");
+            }
+        }
+        "gem" => {
+            if tokens.iter().skip(1).any(|t| t == "uninstall") {
+                return Some("gem uninstall");
+            }
+        }
+        "brew" => {
+            if tokens
+                .iter()
+                .skip(1)
+                .any(|t| matches!(t.as_str(), "uninstall" | "remove" | "rm"))
+            {
+                return Some("brew uninstall");
+            }
+        }
+        // YYC-247: container/cluster destructive verbs.
+        "docker" => {
+            if tokens
+                .windows(2)
+                .any(|w| w[0] == "system" && w[1] == "prune")
+            {
+                return Some("docker system prune");
+            }
+            if tokens.iter().skip(1).any(|t| t == "rm" || t == "rmi") {
+                return Some("docker rm/rmi");
+            }
+        }
+        "podman" => {
+            if tokens.iter().skip(1).any(|t| t == "rm" || t == "rmi") {
+                return Some("podman rm/rmi");
+            }
+        }
+        "kubectl" => {
+            if tokens.iter().skip(1).any(|t| t == "delete") {
+                return Some("kubectl delete");
+            }
+        }
+        "helm" => {
+            if tokens
+                .iter()
+                .skip(1)
+                .any(|t| matches!(t.as_str(), "uninstall" | "delete"))
+            {
+                return Some("helm uninstall");
+            }
+        }
         "chmod" => {
             let recursive = has_short_or_long(tokens, &['R'], &["--recursive"]);
             let permissive = tokens.iter().any(|t| t == "777");
@@ -587,9 +782,66 @@ fn match_dangerous_tokens(tokens: &[String]) -> Option<&'static str> {
                 }
             }
         }
+        // YYC-247: re-scan inner command of `eval` / `exec`.
+        "eval" => {
+            if tokens.len() > 1 {
+                // `eval` with multiple args concatenates them with
+                // spaces and feeds the result to the shell. Re-tokenize
+                // the whole thing so the inner verb is reachable.
+                let joined = tokens[1..].join(" ");
+                return scan_inner_command(&joined);
+            }
+        }
+        "exec" => {
+            // `exec <cmd> <args>` replaces the shell with the inner
+            // command. Re-classify with the inner head.
+            if tokens.len() > 1 {
+                let inner: Vec<String> = tokens[1..].to_vec();
+                let stripped = strip_command_prefixes(inner);
+                if let Some(r) = match_dangerous_tokens(&stripped) {
+                    return Some(r);
+                }
+                if let Some(r) = match_substitution_in_segment(&stripped) {
+                    return Some(r);
+                }
+            }
+        }
+        // YYC-247: re-scan the script body of `bash -c '...'` /
+        // `sh -c '...'`. Without this, the matcher sees only `bash` as
+        // the head verb and lets `bash -c 'rm -rf /'` through.
+        "bash" | "sh" | "zsh" | "ksh" | "dash" | "fish" => {
+            for (i, t) in tokens.iter().enumerate().skip(1) {
+                if t == "-c"
+                    && let Some(script) = tokens.get(i + 1)
+                    && let Some(r) = scan_inner_command(script)
+                {
+                    return Some(r);
+                }
+            }
+        }
         _ => {}
     }
 
+    None
+}
+
+/// YYC-247: re-tokenize a command string (e.g. the script passed to
+/// `bash -c` or the joined arg list of `eval`) and run it through the
+/// same segment + dangerous-token checks the top-level matcher uses.
+fn scan_inner_command(command: &str) -> Option<&'static str> {
+    let inner_tokens = shell_tokenize(command);
+    if inner_tokens.is_empty() {
+        return None;
+    }
+    for segment in command_segments(&inner_tokens) {
+        let stripped = strip_command_prefixes(segment);
+        if let Some(r) = match_dangerous_tokens(&stripped) {
+            return Some(r);
+        }
+        if let Some(r) = match_substitution_in_segment(&stripped) {
+            return Some(r);
+        }
+    }
     None
 }
 
@@ -877,6 +1129,167 @@ fn generic_substring_rules(command: &str) -> Option<&'static str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // YYC-247: each new dangerous-token family blocks at the matcher
+    // layer. Helper centralizes the call so a positive case is easy to
+    // read.
+    fn assert_blocked(cmd: &str) {
+        assert!(
+            match_dangerous(cmd).is_some(),
+            "expected `{cmd}` to be blocked"
+        );
+    }
+
+    fn assert_allowed(cmd: &str) {
+        assert!(
+            match_dangerous(cmd).is_none(),
+            "expected `{cmd}` to pass, got block: {:?}",
+            match_dangerous(cmd)
+        );
+    }
+
+    #[test]
+    fn yyc247_blocks_disk_partition_tools() {
+        assert_blocked("fdisk /dev/sda");
+        assert_blocked("parted /dev/nvme0n1 mklabel gpt");
+        assert_blocked("wipefs -a /dev/sdb");
+        assert_blocked("shred -n 3 /dev/sda");
+        assert_blocked("blkdiscard /dev/sda");
+    }
+
+    #[test]
+    fn yyc247_blocks_system_halt_commands() {
+        assert_blocked("shutdown -h now");
+        assert_blocked("reboot");
+        assert_blocked("halt");
+        assert_blocked("poweroff");
+    }
+
+    #[test]
+    fn yyc247_blocks_destructive_systemctl_actions() {
+        assert_blocked("systemctl stop nginx");
+        assert_blocked("systemctl disable docker");
+        assert_blocked("systemctl mask sshd");
+        assert_blocked("sudo systemctl reboot");
+        assert_blocked("service nginx stop");
+    }
+
+    #[test]
+    fn yyc247_allows_read_only_systemctl_actions() {
+        assert_allowed("systemctl status nginx");
+        assert_allowed("systemctl is-active docker");
+        assert_allowed("systemctl show sshd");
+    }
+
+    #[test]
+    fn yyc247_blocks_mass_kill_commands() {
+        assert_blocked("killall node");
+        assert_blocked("pkill -f python");
+    }
+
+    #[test]
+    fn yyc247_blocks_crontab_remove() {
+        assert_blocked("crontab -r");
+        assert_blocked("crontab --remove");
+    }
+
+    #[test]
+    fn yyc247_allows_other_crontab_actions() {
+        assert_allowed("crontab -l");
+        assert_allowed("crontab -e");
+    }
+
+    #[test]
+    fn yyc247_blocks_package_removals() {
+        assert_blocked("apt remove vim");
+        assert_blocked("apt-get purge curl");
+        assert_blocked("apt autoremove");
+        assert_blocked("dnf remove httpd");
+        assert_blocked("yum erase nginx");
+        assert_blocked("pacman -R foo");
+        assert_blocked("pacman -Rns foo");
+        assert_blocked("pip uninstall requests");
+        assert_blocked("pip3 uninstall requests");
+        assert_blocked("pipx uninstall something");
+        assert_blocked("npm uninstall lodash");
+        assert_blocked("yarn remove lodash");
+        assert_blocked("pnpm remove lodash");
+        assert_blocked("cargo uninstall ripgrep");
+        assert_blocked("brew uninstall git");
+        assert_blocked("gem uninstall rails");
+    }
+
+    #[test]
+    fn yyc247_allows_package_installs() {
+        assert_allowed("apt install vim");
+        assert_allowed("dnf install httpd");
+        assert_allowed("pip install requests");
+        assert_allowed("npm install lodash");
+        assert_allowed("cargo install ripgrep");
+    }
+
+    #[test]
+    fn yyc247_blocks_container_destructive_actions() {
+        assert_blocked("docker rm container_name");
+        assert_blocked("docker rmi some/image");
+        assert_blocked("docker system prune");
+        assert_blocked("podman rm pod1");
+        assert_blocked("kubectl delete pod foo");
+        assert_blocked("helm uninstall mychart");
+        assert_blocked("helm delete mychart");
+    }
+
+    #[test]
+    fn yyc247_allows_container_read_actions() {
+        assert_allowed("docker ps");
+        assert_allowed("kubectl get pods");
+        assert_allowed("helm list");
+    }
+
+    #[test]
+    fn yyc247_blocks_inner_command_under_bash_dash_c() {
+        assert_blocked("bash -c 'rm -rf /'");
+        assert_blocked("sh -c \"rm -rf $HOME\"");
+        assert_blocked("zsh -c 'apt remove vim'");
+    }
+
+    #[test]
+    fn yyc247_blocks_inner_command_under_eval_and_exec() {
+        assert_blocked("eval rm -rf /");
+        assert_blocked("eval 'apt remove curl'");
+        assert_blocked("exec systemctl stop nginx");
+    }
+
+    #[test]
+    fn yyc247_blocks_redirect_to_block_device() {
+        assert_blocked("cat /dev/zero > /dev/sda");
+        assert_blocked("dd if=/dev/random of=/dev/nvme0n1");
+        // ↑ `dd` itself is already blocked; this also exercises the
+        // device-redirect rule via a different path:
+        assert_blocked("echo bad > /dev/nvme0n1");
+        assert_blocked("yes > /dev/sdb");
+        assert_blocked("printf x >> /dev/disk0");
+    }
+
+    #[test]
+    fn yyc247_allows_redirect_to_safe_device_sinks() {
+        assert_allowed("echo hi > /dev/null");
+        assert_allowed("cmd 2> /dev/stderr");
+        assert_allowed("cat msg > /dev/tty");
+    }
+
+    #[test]
+    fn yyc247_no_false_positive_on_kill_one_pid() {
+        // Plain `kill <pid>` is a normal supervisory action; only
+        // mass-kill flavors are blocked.
+        assert_allowed("kill 12345");
+        assert_allowed("kill -9 12345");
+    }
+
+    #[test]
+    fn yyc247_no_false_positive_on_git_rm() {
+        assert_allowed("git rm path/to/file");
+    }
 
     // YYC-151: the FIFO approval cache must drop the oldest entry
     // once the cap is hit so a long-running session doesn't grow
