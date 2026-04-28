@@ -12,13 +12,54 @@ use crate::code::lsp::{
     find_references, goto_definition, hover, implementation, prepare_call_hierarchy,
     type_definition, workspace_symbol,
 };
-use crate::tools::{Tool, ToolResult};
+use crate::tools::{Tool, ToolResult, parse_tool_params};
 use anyhow::Result;
 use async_trait::async_trait;
+use serde::Deserialize;
 use serde_json::{Value, json};
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
+
+#[derive(Deserialize)]
+struct LspPositionParams {
+    path: String,
+    line: u64,
+    #[serde(default)]
+    character: u64,
+}
+
+#[derive(Deserialize)]
+struct CodeActionParams {
+    path: String,
+    start_line: u64,
+    #[serde(default)]
+    end_line: Option<u64>,
+    #[serde(default)]
+    start_character: u64,
+    #[serde(default)]
+    end_character: u64,
+}
+
+#[derive(Deserialize)]
+struct CallHierarchyParams {
+    path: String,
+    line: u64,
+    #[serde(default)]
+    character: u64,
+    direction: String,
+}
+
+#[derive(Deserialize)]
+struct WorkspaceSymbolParams {
+    query: String,
+    language: String,
+}
+
+#[derive(Deserialize)]
+struct DiagnosticsParams {
+    path: String,
+}
 
 /// Resolve `path` to the language for which we'd talk to an LSP. Used
 /// by every tool below to fail fast on unsupported file types.
@@ -59,13 +100,13 @@ impl Tool for GotoDefinitionTool {
         })
     }
     async fn call(&self, params: Value, _cancel: CancellationToken) -> Result<ToolResult> {
-        let path = params["path"]
-            .as_str()
-            .ok_or_else(|| anyhow::anyhow!("path required"))?;
-        let line = params["line"]
-            .as_u64()
-            .ok_or_else(|| anyhow::anyhow!("line required"))?;
-        let character = params["character"].as_u64().unwrap_or(0);
+        let p: LspPositionParams = match parse_tool_params(params) {
+            Ok(p) => p,
+            Err(e) => return Ok(e),
+        };
+        let path = p.path.as_str();
+        let line = p.line;
+        let character = p.character;
         let lang = match lang_for(path) {
             Ok(l) => l,
             Err(e) => return Ok(ToolResult::err(e.to_string())),
@@ -123,13 +164,13 @@ impl Tool for FindReferencesTool {
         })
     }
     async fn call(&self, params: Value, _cancel: CancellationToken) -> Result<ToolResult> {
-        let path = params["path"]
-            .as_str()
-            .ok_or_else(|| anyhow::anyhow!("path required"))?;
-        let line = params["line"]
-            .as_u64()
-            .ok_or_else(|| anyhow::anyhow!("line required"))?;
-        let character = params["character"].as_u64().unwrap_or(0);
+        let p: LspPositionParams = match parse_tool_params(params) {
+            Ok(p) => p,
+            Err(e) => return Ok(e),
+        };
+        let path = p.path.as_str();
+        let line = p.line;
+        let character = p.character;
         let lang = match lang_for(path) {
             Ok(l) => l,
             Err(e) => return Ok(ToolResult::err(e.to_string())),
@@ -185,13 +226,13 @@ impl Tool for HoverTool {
         })
     }
     async fn call(&self, params: Value, _cancel: CancellationToken) -> Result<ToolResult> {
-        let path = params["path"]
-            .as_str()
-            .ok_or_else(|| anyhow::anyhow!("path required"))?;
-        let line = params["line"]
-            .as_u64()
-            .ok_or_else(|| anyhow::anyhow!("line required"))?;
-        let character = params["character"].as_u64().unwrap_or(0);
+        let p: LspPositionParams = match parse_tool_params(params) {
+            Ok(p) => p,
+            Err(e) => return Ok(e),
+        };
+        let path = p.path.as_str();
+        let line = p.line;
+        let character = p.character;
         let lang = match lang_for(path) {
             Ok(l) => l,
             Err(e) => return Ok(ToolResult::err(e.to_string())),
@@ -247,13 +288,13 @@ impl Tool for TypeDefinitionTool {
         })
     }
     async fn call(&self, params: Value, _cancel: CancellationToken) -> Result<ToolResult> {
-        let path = params["path"]
-            .as_str()
-            .ok_or_else(|| anyhow::anyhow!("path required"))?;
-        let line = params["line"]
-            .as_u64()
-            .ok_or_else(|| anyhow::anyhow!("line required"))?;
-        let character = params["character"].as_u64().unwrap_or(0);
+        let p: LspPositionParams = match parse_tool_params(params) {
+            Ok(p) => p,
+            Err(e) => return Ok(e),
+        };
+        let path = p.path.as_str();
+        let line = p.line;
+        let character = p.character;
         let lang = match lang_for(path) {
             Ok(l) => l,
             Err(e) => return Ok(ToolResult::err(e.to_string())),
@@ -309,13 +350,13 @@ impl Tool for ImplementationTool {
         })
     }
     async fn call(&self, params: Value, _cancel: CancellationToken) -> Result<ToolResult> {
-        let path = params["path"]
-            .as_str()
-            .ok_or_else(|| anyhow::anyhow!("path required"))?;
-        let line = params["line"]
-            .as_u64()
-            .ok_or_else(|| anyhow::anyhow!("line required"))?;
-        let character = params["character"].as_u64().unwrap_or(0);
+        let p: LspPositionParams = match parse_tool_params(params) {
+            Ok(p) => p,
+            Err(e) => return Ok(e),
+        };
+        let path = p.path.as_str();
+        let line = p.line;
+        let character = p.character;
         let lang = match lang_for(path) {
             Ok(l) => l,
             Err(e) => return Ok(ToolResult::err(e.to_string())),
@@ -386,15 +427,15 @@ impl Tool for CodeActionTool {
     }
     async fn call(&self, params: Value, _cancel: CancellationToken) -> Result<ToolResult> {
         use lsp_types::Position as LspPosition;
-        let path = params["path"]
-            .as_str()
-            .ok_or_else(|| anyhow::anyhow!("path required"))?;
-        let start_line = params["start_line"]
-            .as_u64()
-            .ok_or_else(|| anyhow::anyhow!("start_line required"))?;
-        let end_line = params["end_line"].as_u64().unwrap_or(start_line);
-        let start_char = params["start_character"].as_u64().unwrap_or(0) as u32;
-        let end_char = params["end_character"].as_u64().unwrap_or(0) as u32;
+        let p: CodeActionParams = match parse_tool_params(params) {
+            Ok(p) => p,
+            Err(e) => return Ok(e),
+        };
+        let path = p.path.as_str();
+        let start_line = p.start_line;
+        let end_line = p.end_line.unwrap_or(start_line);
+        let start_char = p.start_character as u32;
+        let end_char = p.end_character as u32;
         let lang = match lang_for(path) {
             Ok(l) => l,
             Err(e) => return Ok(ToolResult::err(e.to_string())),
@@ -491,16 +532,14 @@ impl Tool for CallHierarchyTool {
         })
     }
     async fn call(&self, params: Value, _cancel: CancellationToken) -> Result<ToolResult> {
-        let path = params["path"]
-            .as_str()
-            .ok_or_else(|| anyhow::anyhow!("path required"))?;
-        let line = params["line"]
-            .as_u64()
-            .ok_or_else(|| anyhow::anyhow!("line required"))?;
-        let character = params["character"].as_u64().unwrap_or(0);
-        let direction = params["direction"]
-            .as_str()
-            .ok_or_else(|| anyhow::anyhow!("direction required"))?;
+        let p: CallHierarchyParams = match parse_tool_params(params) {
+            Ok(p) => p,
+            Err(e) => return Ok(e),
+        };
+        let path = p.path.as_str();
+        let line = p.line;
+        let character = p.character;
+        let direction = p.direction.as_str();
         if direction != "incoming" && direction != "outgoing" {
             return Ok(ToolResult::err(format!(
                 "direction must be \"incoming\" or \"outgoing\"; got `{direction}`",
@@ -617,12 +656,12 @@ impl Tool for WorkspaceSymbolTool {
         })
     }
     async fn call(&self, params: Value, _cancel: CancellationToken) -> Result<ToolResult> {
-        let query = params["query"]
-            .as_str()
-            .ok_or_else(|| anyhow::anyhow!("query required"))?;
-        let lang_name = params["language"]
-            .as_str()
-            .ok_or_else(|| anyhow::anyhow!("language required"))?;
+        let p: WorkspaceSymbolParams = match parse_tool_params(params) {
+            Ok(p) => p,
+            Err(e) => return Ok(e),
+        };
+        let query = p.query.as_str();
+        let lang_name = p.language.as_str();
         let lang = match Language::from_name(lang_name) {
             Some(l) => l,
             None => {
@@ -681,26 +720,28 @@ mod workspace_symbol_tests {
         WorkspaceSymbolTool::new(Arc::new(LspManager::new(PathBuf::from("."))))
     }
 
-    // YYC-201: missing query is rejected up front.
+    // YYC-201: missing query surfaces as ToolResult::err (YYC-263 typed params).
     #[tokio::test]
     async fn workspace_symbol_requires_query() {
         let t = tool();
-        let err = t
+        let result = t
             .call(json!({"language": "rust"}), CancellationToken::new())
             .await
-            .expect_err("missing query must error");
-        assert!(format!("{err:#}").contains("query required"));
+            .expect("call ok");
+        assert!(result.is_error);
+        assert!(result.output.contains("tool params failed to validate"));
     }
 
-    // YYC-201: missing language is rejected up front.
+    // YYC-201: missing language surfaces as ToolResult::err (YYC-263 typed params).
     #[tokio::test]
     async fn workspace_symbol_requires_language() {
         let t = tool();
-        let err = t
+        let result = t
             .call(json!({"query": "foo"}), CancellationToken::new())
             .await
-            .expect_err("missing language must error");
-        assert!(format!("{err:#}").contains("language required"));
+            .expect("call ok");
+        assert!(result.is_error);
+        assert!(result.output.contains("tool params failed to validate"));
     }
 
     // YYC-201: unknown language → structured ToolResult error,
@@ -750,9 +791,11 @@ impl Tool for DiagnosticsTool {
         })
     }
     async fn call(&self, params: Value, _cancel: CancellationToken) -> Result<ToolResult> {
-        let path = params["path"]
-            .as_str()
-            .ok_or_else(|| anyhow::anyhow!("path required"))?;
+        let p: DiagnosticsParams = match parse_tool_params(params) {
+            Ok(p) => p,
+            Err(e) => return Ok(e),
+        };
+        let path = p.path.as_str();
         let lang = match lang_for(path) {
             Ok(l) => l,
             Err(e) => return Ok(ToolResult::err(e.to_string())),
