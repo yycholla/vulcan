@@ -19,12 +19,14 @@
 
 pub mod config_field;
 pub mod draft;
+pub mod install_state;
 pub mod manifest;
 pub mod registry;
 pub mod store;
 
 pub use config_field::{ExtensionConfigField, ExtensionFieldKind};
 pub use draft::parse_skill_extension;
+pub use install_state::{InstallState, InstallStateStore, SqliteInstallStateStore};
 pub use manifest::{EntryKind, ExtensionManifest, ManifestError};
 pub use registry::{CodeExtension, ExtensionRegistry};
 pub use store::{DiscoveredExtension, discover};
