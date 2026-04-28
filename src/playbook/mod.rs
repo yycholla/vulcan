@@ -127,6 +127,56 @@ pub trait PlaybookStore: Send + Sync {
     fn remove_entry(&self, workspace: &str, entry_id: Uuid) -> Result<bool>;
 }
 
+/// YYC-223: render the *accepted* entries for a workspace as a
+/// system-prompt-ready markdown block. Proposed entries are
+/// filtered out — gating is the security contract: an unreviewed
+/// agent suggestion must never silently flow back into a prompt.
+/// Returns `None` when no accepted entries exist so callers can
+/// skip injection without rendering an empty header.
+pub fn render_accepted_entries(
+    store: &dyn PlaybookStore,
+    workspace: &str,
+) -> Result<Option<String>> {
+    let entries = store.list_entries(workspace)?;
+    let accepted: Vec<PlaybookEntry> = entries
+        .into_iter()
+        .filter(|e| e.status == EntryStatus::Accepted)
+        .collect();
+    if accepted.is_empty() {
+        return Ok(None);
+    }
+    let mut out = String::from("## Project playbook\n\n");
+    out.push_str(
+        "Workspace-specific notes the user has reviewed and accepted. \
+         Proposed (unreviewed) entries are deliberately excluded.\n\n",
+    );
+    // Group by section so related entries surface together.
+    let sections = [
+        PlaybookSection::Setup,
+        PlaybookSection::Build,
+        PlaybookSection::Workflow,
+        PlaybookSection::Architecture,
+        PlaybookSection::Verification,
+        PlaybookSection::Pitfalls,
+        PlaybookSection::Docs,
+        PlaybookSection::Release,
+        PlaybookSection::AgentBehavior,
+    ];
+    for section in sections {
+        let in_section: Vec<&PlaybookEntry> =
+            accepted.iter().filter(|e| e.section == section).collect();
+        if in_section.is_empty() {
+            continue;
+        }
+        out.push_str(&format!("### {}\n\n", section.as_str()));
+        for entry in in_section {
+            out.push_str(&format!("- {}\n", entry.body.trim()));
+        }
+        out.push('\n');
+    }
+    Ok(Some(out))
+}
+
 #[derive(Debug, Default)]
 pub struct InMemoryPlaybookStore {
     inner: Mutex<Vec<(String, PlaybookEntry)>>,
@@ -321,6 +371,89 @@ impl PlaybookStore for SqlitePlaybookStore {
             params![workspace, entry_id.to_string()],
         )?;
         Ok(n > 0)
+    }
+}
+
+#[cfg(test)]
+mod yyc223_render_tests {
+    use super::*;
+
+    #[test]
+    fn render_accepted_entries_excludes_proposed_entries() {
+        // Gating contract: a Proposed entry must never appear in
+        // the rendered prompt block. The user's `accept` action is
+        // the security boundary.
+        let store = InMemoryPlaybookStore::new();
+        let mut accepted = PlaybookEntry::proposed(
+            PlaybookSection::Workflow,
+            "run `oo cargo test` before each commit",
+            "agent-suggestion",
+        );
+        accepted.accept();
+        let proposed = PlaybookEntry::proposed(
+            PlaybookSection::Pitfalls,
+            "DELETE FROM secrets WHERE 1=1 — do not actually run",
+            "agent-suggestion",
+        );
+        store.upsert_entry("ws", &accepted).unwrap();
+        store.upsert_entry("ws", &proposed).unwrap();
+
+        let rendered = render_accepted_entries(&store, "ws")
+            .unwrap()
+            .expect("at least one accepted entry");
+        assert!(rendered.contains("oo cargo test"));
+        assert!(
+            !rendered.contains("DELETE FROM secrets"),
+            "proposed entries must NOT leak into the prompt"
+        );
+    }
+
+    #[test]
+    fn render_accepted_entries_returns_none_when_empty() {
+        let store = InMemoryPlaybookStore::new();
+        let proposed = PlaybookEntry::proposed(
+            PlaybookSection::Pitfalls,
+            "still-unreviewed",
+            "agent-suggestion",
+        );
+        store.upsert_entry("ws", &proposed).unwrap();
+        // Only proposed entries → no rendered output.
+        assert!(render_accepted_entries(&store, "ws").unwrap().is_none());
+    }
+
+    #[test]
+    fn render_accepted_entries_groups_by_section() {
+        let store = InMemoryPlaybookStore::new();
+        for (section, body) in [
+            (PlaybookSection::Setup, "install deps"),
+            (PlaybookSection::Build, "cargo build"),
+            (PlaybookSection::Workflow, "rebase before merge"),
+        ] {
+            let mut e = PlaybookEntry::proposed(section, body, "manual");
+            e.accept();
+            store.upsert_entry("ws", &e).unwrap();
+        }
+        let rendered = render_accepted_entries(&store, "ws").unwrap().unwrap();
+        // Each section header present and in the canonical order.
+        let setup_at = rendered.find("### setup").expect("has setup");
+        let build_at = rendered.find("### build").expect("has build");
+        let wf_at = rendered.find("### workflow").expect("has workflow");
+        assert!(setup_at < build_at);
+        assert!(build_at < wf_at);
+    }
+
+    #[test]
+    fn render_accepted_entries_filters_to_specified_workspace() {
+        let store = InMemoryPlaybookStore::new();
+        let mut a = PlaybookEntry::proposed(PlaybookSection::Setup, "ws-a entry", "manual");
+        a.accept();
+        let mut b = PlaybookEntry::proposed(PlaybookSection::Setup, "ws-b entry", "manual");
+        b.accept();
+        store.upsert_entry("ws-a", &a).unwrap();
+        store.upsert_entry("ws-b", &b).unwrap();
+        let rendered = render_accepted_entries(&store, "ws-a").unwrap().unwrap();
+        assert!(rendered.contains("ws-a entry"));
+        assert!(!rendered.contains("ws-b entry"));
     }
 }
 
