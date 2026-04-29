@@ -17,7 +17,12 @@ autobenches = false
 default-run = "vulcan"
 
 [features]
-default = []
+default = ["daemon"]
+# Long-lived `vulcan daemon` process + Unix-socket frontend (YYC-266
+# Slice 0). Default-on so the standard CLI/TUI binary ships with the
+# daemon entry point wired in; gated as a feature so embedders / minimal
+# builds can opt out.
+daemon = ["dep:notify", "dep:nix"]
 # Enabled only when running the soak binary. Pulls in dhat-rs (heap
 # profiler that swaps the global allocator) and hdrhistogram (latency
 # percentiles) — both optional so production builds skip them entirely.
@@ -192,6 +197,15 @@ dhat = { version = "0.3", optional = true }
 # `cargo bench` can use it without enabling the feature.)
 hdrhistogram = { version = "7", optional = true }
 
+# File watcher for daemon config auto-reload (YYC-266 Slice 0).
+# Cross-platform inotify/fseventsd/ReadDirectoryChangesW.
+notify = { version = "8.2.0", optional = true }
+
+# Unix-only primitives the daemon needs: kill(pid, None) for stale-PID
+# detection, signal handling. fs feature pulls in flock() if we end up
+# needing it for advisory locking beyond what redb already does.
+nix = { version = "0.31.2", optional = true, features = ["fs", "process", "signal"] }
+
 # Workspace lint baseline (YYC-121). Conservative defaults that bias
 # toward forward-leaning warnings without forcing a sprawling cleanup
 # of pre-existing patterns (TUI rendering helpers with many args, test
@@ -240,6 +254,9 @@ tokio = { version = "1", features = ["full", "test-util"] }
 # Snapshot testing for prompt builder + TUI render output (YYC follow-up).
 # Pinned to crates.io latest stable; default features sufficient.
 insta = "1.47.2"
+# E2E binary test harness for daemon subcommand (YYC-266).
+assert_cmd = "2.2.1"
+predicates = "3.1.4"
 
 [[bench]]
 name = "tui_render"
