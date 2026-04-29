@@ -29,6 +29,7 @@ use rusqlite::{Connection, OptionalExtension, params};
 use crate::provider::Message;
 
 mod codec;
+pub mod cortex;
 mod schema;
 
 #[cfg(test)]

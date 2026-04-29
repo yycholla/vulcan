@@ -49,6 +49,15 @@ async fn main() -> anyhow::Result<()> {
     }
     let config = Config::load()?;
 
+    // YYC-264: when `--seed-cortex` is passed and cortex is enabled, seed
+    // the knowledge graph from recent SQLite sessions before the session
+    // starts. Non-fatal — failures are logged and we continue.
+    if cli.seed_cortex && config.cortex.enabled {
+        if let Err(e) = vulcan::cli_cortex::seed_from_sessions(3).await {
+            tracing::warn!("cortex seed failed: {e}");
+        }
+    }
+
     match cli.command {
         None | Some(Command::Chat) => {
             init_tui_logging();
@@ -234,6 +243,10 @@ async fn main() -> anyhow::Result<()> {
         Some(Command::Extension { cmd }) => {
             init_cli_logging();
             vulcan::cli_extension::run(cmd).await?;
+        }
+        Some(Command::Cortex { cmd }) => {
+            init_cli_logging();
+            vulcan::cli_cortex::run(cmd).await?;
         }
     }
 

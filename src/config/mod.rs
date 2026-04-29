@@ -184,6 +184,14 @@ pub struct Config {
     #[serde(default)]
     pub recall: RecallConfig,
 
+    /// YYC-264: self-organizing graph memory via cortex-memory-core.
+    /// When enabled, Vulcan stores facts, decisions, and patterns in a
+    /// temporal knowledge graph with HNSW vector search, auto-linking,
+    /// and briefing synthesis. Off by default — opt in with `enabled = true`.
+    /// The database lives at `~/.vulcan/cortex.redb`.
+    #[serde(default)]
+    pub cortex: CortexConfig,
+
     /// YYC-17: scheduled jobs the gateway scheduler enqueues into
     /// the inbound queue at their cron firing times. Empty in the
     /// default config; jobs are parsed but their semantics are
@@ -494,6 +502,69 @@ fn default_recall_min_score() -> f64 {
 }
 fn default_recall_max_chars() -> usize {
     400
+}
+
+/// YYC-264: configuration for embedded cortex-memory-core graph memory.
+#[derive(Debug, Deserialize, Clone)]
+pub struct CortexConfig {
+    /// Master switch. Off by default — flip to `true` to enable.
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// Path to the cortex.redb database. Defaults to `~/.vulcan/cortex.redb`.
+    #[serde(default)]
+    pub db_path: Option<PathBuf>,
+
+    /// Embedding model identifier passed to fastembed. Default:
+    /// `BAAI/bge-small-en-v1.5` (~30 MB download on first use).
+    /// Alternatives: `BAAI/bge-base-en-v1.5`, `BAAI/bge-large-en-v1.5`.
+    #[serde(default = "default_cortex_embedding_model")]
+    pub embedding_model: String,
+
+    /// Max results returned from a semantic search. Higher values give
+    /// broader context at higher token cost.
+    #[serde(default = "default_cortex_max_search")]
+    pub max_search_results: usize,
+
+    /// Minimum node importance (0.0-1.0) for auto-storage. Nodes below
+    /// this threshold are not automatically persisted. Manual stores
+    /// always pass through.
+    #[serde(default = "default_cortex_min_importance")]
+    pub min_importance: f32,
+}
+
+impl Default for CortexConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            db_path: None,
+            embedding_model: default_cortex_embedding_model(),
+            max_search_results: default_cortex_max_search(),
+            min_importance: default_cortex_min_importance(),
+        }
+    }
+}
+
+impl CortexConfig {
+    /// Returns a config with `enabled: true` and default values.
+    /// Used by CLI commands (`vulcan cortex ...`) that always need the
+    /// store, regardless of the agent's runtime setting.
+    pub fn default_enabled() -> Self {
+        Self {
+            enabled: true,
+            ..Self::default()
+        }
+    }
+}
+
+fn default_cortex_embedding_model() -> String {
+    "BAAI/bge-small-en-v1.5".into()
+}
+fn default_cortex_max_search() -> usize {
+    5
+}
+fn default_cortex_min_importance() -> f32 {
+    0.3
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -1086,6 +1157,7 @@ impl Default for Config {
             gateway: None,
             keybinds: KeybindsConfig::default(),
             recall: RecallConfig::default(),
+            cortex: CortexConfig::default(),
             scheduler: SchedulerConfig::default(),
             workspace_trust: crate::trust::WorkspaceTrustConfig::default(),
             extensions: ExtensionsConfig::default(),

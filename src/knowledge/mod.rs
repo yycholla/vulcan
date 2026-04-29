@@ -37,6 +37,8 @@ pub enum KnowledgeIndex {
     RunRecords,
     /// Typed artifacts (YYC-180).
     Artifacts,
+    /// Cortex graph memory (YYC-264).
+    Cortex,
 }
 
 impl KnowledgeIndex {
@@ -47,6 +49,7 @@ impl KnowledgeIndex {
             KnowledgeIndex::Sessions => "sessions",
             KnowledgeIndex::RunRecords => "run_records",
             KnowledgeIndex::Artifacts => "artifacts",
+            KnowledgeIndex::Cortex => "cortex",
         }
     }
 }
@@ -83,6 +86,7 @@ pub fn discover_in(home: &Path) -> Result<Vec<KnowledgeStoreInfo>> {
         (KnowledgeIndex::Sessions, "sessions.db"),
         (KnowledgeIndex::RunRecords, "run_records.db"),
         (KnowledgeIndex::Artifacts, "artifacts.db"),
+        (KnowledgeIndex::Cortex, "cortex.redb"),
     ] {
         let path = home.join(fname);
         if path.exists() {
