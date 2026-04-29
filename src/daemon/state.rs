@@ -5,7 +5,7 @@ use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
-use tokio::sync::{Notify, watch};
+use tokio::sync::{Mutex, Notify, watch};
 
 use crate::daemon::session::SessionMap;
 use crate::memory::cortex::CortexStore;
@@ -19,6 +19,9 @@ pub struct DaemonState {
     sessions: Arc<SessionMap>,
     reloads_applied: AtomicU64,
     cortex: Option<Arc<CortexStore>>,
+    /// Slice 2: warm Agent held for the daemon's lifetime. CLI/TUI
+    /// prompt commands use this instead of building their own.
+    agent: Option<Arc<Mutex<crate::agent::Agent>>>,
 }
 
 impl DaemonState {
@@ -32,6 +35,7 @@ impl DaemonState {
             sessions: Arc::new(SessionMap::with_main()),
             reloads_applied: AtomicU64::new(0),
             cortex: None,
+            agent: None,
         }
     }
 
@@ -40,6 +44,17 @@ impl DaemonState {
     pub fn with_cortex(mut self, store: Arc<CortexStore>) -> Self {
         self.cortex = Some(store);
         self
+    }
+
+    /// Slice 2: initialize with a warm Agent.
+    pub fn with_agent(mut self, agent: crate::agent::Agent) -> Self {
+        self.agent = Some(Arc::new(Mutex::new(agent)));
+        self
+    }
+
+    /// Borrow the agent, if enabled.
+    pub fn agent(&self) -> Option<&Arc<Mutex<crate::agent::Agent>>> {
+        self.agent.as_ref()
     }
 
     /// Borrow the cortex store, if enabled.
