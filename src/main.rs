@@ -246,7 +246,11 @@ async fn main() -> anyhow::Result<()> {
         }
         Some(Command::Cortex { cmd }) => {
             init_cli_logging();
-            vulcan::cli_cortex::run(cmd).await?;
+            if cli.no_daemon {
+                vulcan::cli_cortex::run(cmd).await?;
+            } else {
+                vulcan::cli_cortex::run_with_client(cmd).await?;
+            }
         }
         #[cfg(feature = "daemon")]
         Some(Command::Daemon { action }) => {

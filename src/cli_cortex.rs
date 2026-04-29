@@ -57,10 +57,137 @@ pub async fn run(cmd: CortexSubcommand) -> Result<()> {
     Ok(())
 }
 
+// ── Daemon-routed client (Slice 1) ──
+
+// Embed the run_with_client implementation directly
+/// YYC-266 Slice 1: daemon-client routing for cortex CLI commands.
+/// Tries to connect to the daemon and issue RPC calls; falls back to
+/// direct (in-process) execution for Phase 3 commands or if the client
+/// is unavailable.
+#[cfg(feature = "daemon")]
+pub async fn run_with_client(cmd: CortexSubcommand) -> Result<()> {
+    // Phase 3 commands are not yet implemented as daemon RPCs — always
+    // run them directly (they open their own transient CortexStore).
+    match &cmd {
+        CortexSubcommand::Prompt { .. }
+        | CortexSubcommand::Agent { .. }
+        | CortexSubcommand::Observe { .. } => {
+            return run(cmd).await;
+        }
+        _ => {}
+    }
+
+    let mut client = match crate::client::Client::connect_or_autostart().await {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::warn!("daemon unavailable ({e}), falling back to direct mode");
+            return run(cmd).await;
+        }
+    };
+
+    match cmd {
+        CortexSubcommand::Store { text, importance } => {
+            let params = serde_json::json!({
+                "text": text,
+                "importance": importance,
+            });
+            let result = client.call("cortex.store", params).await?;
+            println!("Stored node: {}", result["node_id"].as_str().unwrap_or("?"));
+        }
+        CortexSubcommand::Search { query, limit } => {
+            let params = serde_json::json!({
+                "query": query,
+                "limit": limit,
+            });
+            let result = client.call("cortex.search", params).await?;
+            print_search_results(&result["results"]);
+        }
+        CortexSubcommand::Stats => {
+            let result = client.call("cortex.stats", serde_json::json!({})).await?;
+            println!("Cortex graph statistics:");
+            println!("  Nodes: {}", result["nodes"].as_u64().unwrap_or(0));
+            println!("  Edges: {}", result["edges"].as_u64().unwrap_or(0));
+            let db_size = result["db_size"].as_u64().unwrap_or(0);
+            if db_size > 0 {
+                println!("  DB size: {} bytes", db_size);
+            }
+        }
+        CortexSubcommand::Seed { sessions } => {
+            let params = serde_json::json!({ "sessions": sessions });
+            let result = client.call("cortex.seed", params).await?;
+            println!("Seeded {} facts.", result["stored"].as_u64().unwrap_or(0));
+        }
+        CortexSubcommand::Recall { limit } => {
+            let params = serde_json::json!({ "limit": limit });
+            let result = client.call("cortex.recall", params).await?;
+            print_recall_results(&result["nodes"], limit);
+        }
+        _ => unreachable!(),
+    }
+    Ok(())
+}
+
+#[cfg(feature = "daemon")]
+fn print_search_results(results: &serde_json::Value) {
+    let Some(arr) = results.as_array() else {
+        println!("No results.");
+        return;
+    };
+    if arr.is_empty() {
+        println!("No matches.");
+        return;
+    }
+    for hit in arr {
+        let score = hit["score"].as_f64().unwrap_or(0.0);
+        let title = hit["title"].as_str().unwrap_or("?");
+        let kind = hit["kind"].as_str().unwrap_or("?");
+        let id = hit["node_id"].as_str().unwrap_or("?");
+        println!("  [{:0.3}] [{kind}] {title} ({id})", score);
+        if let Some(body) = hit["body"].as_str() {
+            let preview: String = body.chars().take(120).collect();
+            println!("        {}", preview.replace('\n', " "));
+        }
+    }
+}
+
+#[cfg(feature = "daemon")]
+fn print_recall_results(nodes: &serde_json::Value, limit: usize) {
+    let Some(arr) = nodes.as_array() else {
+        println!("No facts in the graph yet.");
+        return;
+    };
+    if arr.is_empty() {
+        println!("No facts in the graph yet.");
+        return;
+    }
+    println!("Recent memory (cortex graph):\n");
+    for node in arr.iter().take(limit) {
+        let kind = node["kind"].as_str().unwrap_or("?");
+        let title = node["title"].as_str().unwrap_or("?");
+        let created = node["created_at"].as_str().unwrap_or("?");
+        println!("  [{kind}] {title}");
+        println!("         {created}");
+        if let Some(body) = node["body"].as_str() {
+            if !body.is_empty() {
+                let preview: String = body.chars().take(160).collect();
+                println!("         {}", preview.replace('\n', " "));
+            }
+        }
+        println!();
+    }
+    println!("Showing {} of {} node(s).", limit.min(arr.len()), arr.len());
+}
+
 /// Seed the cortex knowledge graph from recent SQLite sessions.
 /// Public so main.rs can call it when `--seed-cortex` is set.
 pub async fn seed_from_sessions(sessions: usize) -> Result<usize> {
     let store = open_cortex()?;
+    seed_from_sessions_to(sessions, &store).await
+}
+
+/// Daemon-friendly seed that operates on an existing `CortexStore` reference
+/// instead of opening its own. Used by the daemon's `cortex.seed` handler.
+pub async fn seed_from_sessions_to(sessions: usize, store: &CortexStore) -> Result<usize> {
     let session_store = SessionStore::try_new()?;
 
     let limit = sessions.max(1).min(20);

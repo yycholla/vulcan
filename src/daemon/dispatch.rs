@@ -4,7 +4,7 @@
 
 use std::sync::Arc;
 
-use crate::daemon::handlers::daemon_ops;
+use crate::daemon::handlers::{cortex, daemon_ops};
 use crate::daemon::protocol::{ProtocolError, Request, Response};
 use crate::daemon::state::DaemonState;
 
@@ -30,6 +30,75 @@ impl Dispatcher {
             }
             "daemon.reload" => daemon_ops::reload(&self.state, req.id).await,
             "daemon.status" => daemon_ops::status(&self.state, req.id).await,
+            // ── Cortex ──
+            "cortex.store" => {
+                let text = req
+                    .params
+                    .get("text")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                let importance = req
+                    .params
+                    .get("importance")
+                    .and_then(|v| v.as_f64())
+                    .map(|f| f as f32);
+                cortex::store(&self.state, req.id, text, importance).await
+            }
+            "cortex.search" => {
+                let query = req
+                    .params
+                    .get("query")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                let limit = req
+                    .params
+                    .get("limit")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(10) as usize;
+                cortex::search(&self.state, req.id, query, limit).await
+            }
+            "cortex.stats" => cortex::stats(&self.state, req.id).await,
+            "cortex.recall" => {
+                let limit = req
+                    .params
+                    .get("limit")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(20) as usize;
+                cortex::recall(&self.state, req.id, limit).await
+            }
+            "cortex.seed" => {
+                let sessions = req
+                    .params
+                    .get("sessions")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(3) as usize;
+                cortex::seed(&self.state, req.id, sessions).await
+            }
+            "cortex.edges_from" => {
+                let node_id = req
+                    .params
+                    .get("node_id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                cortex::edges_from(&self.state, req.id, node_id).await
+            }
+            "cortex.edges_to" => {
+                let node_id = req
+                    .params
+                    .get("node_id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                cortex::edges_to(&self.state, req.id, node_id).await
+            }
+            "cortex.delete_edge" => {
+                let edge_id = req
+                    .params
+                    .get("edge_id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                cortex::delete_edge(&self.state, req.id, edge_id).await
+            }
+            "cortex.run_decay" => cortex::run_decay(&self.state, req.id).await,
             other => Response::error(
                 req.id,
                 ProtocolError {
@@ -135,5 +204,24 @@ mod tests {
             result["sessions"].is_array(),
             "sessions should be array (Slice 0: empty)"
         );
+    }
+
+    #[tokio::test]
+    async fn cortex_store_without_cortex_returns_disabled_error() {
+        let dispatcher = Dispatcher::new(Arc::new(crate::daemon::state::DaemonState::new()));
+        let mut r = req("cortex.store");
+        r.params = serde_json::json!({ "text": "hello", "importance": 0.5 });
+        let resp = dispatcher.dispatch(r).await;
+        assert!(resp.result.is_none());
+        let err = resp.error.expect("error returned");
+        assert_eq!(err.code, "CORTEX_DISABLED");
+    }
+
+    #[tokio::test]
+    async fn cortex_stats_without_cortex_returns_disabled_error() {
+        let dispatcher = Dispatcher::new(Arc::new(crate::daemon::state::DaemonState::new()));
+        let resp = dispatcher.dispatch(req("cortex.stats")).await;
+        let err = resp.error.expect("error returned");
+        assert_eq!(err.code, "CORTEX_DISABLED");
     }
 }

@@ -33,6 +33,12 @@ pub struct Cli {
     /// Defaults to importing the 3 most recent sessions.
     #[arg(long, global = true)]
     pub seed_cortex: bool,
+
+    /// YYC-266 Slice 1: bypass the daemon and use in-process execution.
+    /// Forces direct mode for all subcommands that would normally route
+    /// through the daemon (cortex, search, etc.).
+    #[arg(long, global = true)]
+    pub no_daemon: bool,
 }
 
 #[derive(Subcommand, Debug)]

@@ -46,7 +46,24 @@ async fn start(detach: bool) -> anyhow::Result<()> {
 
     let _pidfile = PidFile::acquire_or_replace_stale(&pid_path)
         .with_context(|| format!("acquiring pid file {}", pid_path.display()))?;
-    let state = Arc::new(DaemonState::new());
+
+    // YYC-266 Slice 1: boot the CortexStore once so all CLI/TUI clients
+    // share it without fighting over the redb exclusive lock.
+    let config = crate::config::Config::load()?;
+    let mut state = DaemonState::new();
+    if config.cortex.enabled {
+        match crate::memory::cortex::CortexStore::try_open(&config.cortex) {
+            Ok(store) => {
+                tracing::info!("daemon: cortex store loaded");
+                state = state.with_cortex(store);
+            }
+            Err(e) => {
+                tracing::warn!("daemon: cortex store failed to open: {e}");
+            }
+        }
+    }
+
+    let state = Arc::new(state);
     let server = Server::bind(&sock_path, state.clone())
         .await
         .with_context(|| format!("binding socket {}", sock_path.display()))?;

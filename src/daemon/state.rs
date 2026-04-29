@@ -1,5 +1,5 @@
-//! Long-lived daemon process state. Holds the shutdown / reload signals
-//! and (once Slice 1+ adds them) the SessionMap and SharedResources.
+//! Long-lived daemon process state. Holds the shutdown / reload signals,
+//! the SessionMap, and the shared CortexStore (Slice 1).
 
 use std::path::Path;
 use std::sync::Arc;
@@ -8,6 +8,7 @@ use std::time::Instant;
 use tokio::sync::{Notify, watch};
 
 use crate::daemon::session::SessionMap;
+use crate::memory::cortex::CortexStore;
 
 /// Per-process daemon state, shared across all connections.
 pub struct DaemonState {
@@ -17,6 +18,7 @@ pub struct DaemonState {
     reload: Arc<Notify>,
     sessions: Arc<SessionMap>,
     reloads_applied: AtomicU64,
+    cortex: Option<Arc<CortexStore>>,
 }
 
 impl DaemonState {
@@ -29,7 +31,20 @@ impl DaemonState {
             reload: Arc::new(Notify::new()),
             sessions: Arc::new(SessionMap::with_main()),
             reloads_applied: AtomicU64::new(0),
+            cortex: None,
         }
+    }
+
+    /// Initialize with an opened CortexStore. Called by the daemon startup
+    /// path after loading config.
+    pub fn with_cortex(mut self, store: Arc<CortexStore>) -> Self {
+        self.cortex = Some(store);
+        self
+    }
+
+    /// Borrow the cortex store, if enabled.
+    pub fn cortex(&self) -> Option<&Arc<CortexStore>> {
+        self.cortex.as_ref()
     }
 
     /// Count of successful config reloads applied since startup.
