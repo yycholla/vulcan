@@ -1,7 +1,9 @@
 //! Long-lived daemon process state. Holds the shutdown / reload signals
 //! and (once Slice 1+ adds them) the SessionMap and SharedResources.
 
+use std::path::Path;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 use tokio::sync::{Notify, watch};
 
@@ -14,6 +16,7 @@ pub struct DaemonState {
     shutdown_rx: watch::Receiver<bool>,
     reload: Arc<Notify>,
     sessions: Arc<SessionMap>,
+    reloads_applied: AtomicU64,
 }
 
 impl DaemonState {
@@ -25,6 +28,37 @@ impl DaemonState {
             shutdown_rx,
             reload: Arc::new(Notify::new()),
             sessions: Arc::new(SessionMap::with_main()),
+            reloads_applied: AtomicU64::new(0),
+        }
+    }
+
+    /// Count of successful config reloads applied since startup.
+    /// Slice 0: bumped by [`Self::apply_config_stub`] when the file
+    /// parses cleanly. Slice 2 will gain a separate failure counter.
+    pub fn reloads_applied(&self) -> u64 {
+        self.reloads_applied.load(Ordering::SeqCst)
+    }
+
+    /// Slice 0 stub for config reload. Reads the file at `path`,
+    /// validates it parses as TOML, and bumps the reload counter on
+    /// success. Slice 2 will replace this with the actual Provider
+    /// rebuild + Agent swap.
+    ///
+    /// Decoupled from [`crate::config::Config`] on purpose: Slice 2
+    /// will rewire the loader, so coupling here would create needless
+    /// churn. The Slice 0 contract is just "file is well-formed TOML".
+    pub async fn apply_config_stub(&self, path: &Path) {
+        match std::fs::read_to_string(path)
+            .map_err(|e| e.to_string())
+            .and_then(|s| toml::from_str::<toml::Value>(&s).map_err(|e| e.to_string()))
+        {
+            Ok(_) => {
+                self.reloads_applied.fetch_add(1, Ordering::SeqCst);
+                tracing::info!(?path, "config_watch: reload applied (stub)");
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, ?path, "config_watch: reload failed; keeping current config");
+            }
         }
     }
 

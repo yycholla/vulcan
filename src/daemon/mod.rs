@@ -7,6 +7,7 @@
 //! [`tokio::io::AsyncWrite`], and the daemon skeleton.
 
 pub mod cli;
+pub mod config_watch;
 pub mod dispatch;
 pub mod handlers;
 pub mod lifecycle;
