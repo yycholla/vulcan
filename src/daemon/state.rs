@@ -5,7 +5,7 @@ use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
-use tokio::sync::{Mutex, Notify, watch};
+use tokio::sync::{Notify, watch};
 
 use crate::daemon::session::SessionMap;
 use crate::memory::cortex::CortexStore;
@@ -19,9 +19,6 @@ pub struct DaemonState {
     sessions: Arc<SessionMap>,
     reloads_applied: AtomicU64,
     cortex: Option<Arc<CortexStore>>,
-    /// Slice 2: warm Agent held for the daemon's lifetime. CLI/TUI
-    /// prompt commands use this instead of building their own.
-    agent: Option<Arc<Mutex<crate::agent::Agent>>>,
 }
 
 impl DaemonState {
@@ -35,8 +32,17 @@ impl DaemonState {
             sessions: Arc::new(SessionMap::with_main()),
             reloads_applied: AtomicU64::new(0),
             cortex: None,
-            agent: None,
         }
+    }
+
+    /// Test-only constructor. Returns a `DaemonState` with the default
+    /// `"main"` session pre-created and no Agent/Cortex installed —
+    /// matching the post-boot, pre-warm-build state. Tests that need a
+    /// minimal but realistic daemon state should use this to keep
+    /// session-handler / dispatch tests independent from the boot path.
+    #[doc(hidden)]
+    pub fn for_tests_minimal() -> Self {
+        Self::new()
     }
 
     /// Initialize with an opened CortexStore. Called by the daemon startup
@@ -46,25 +52,12 @@ impl DaemonState {
         self
     }
 
-    /// Slice 2: initialize with a warm Agent.
-    pub fn with_agent(mut self, agent: crate::agent::Agent) -> Self {
-        self.agent = Some(Arc::new(Mutex::new(agent)));
-        self
-    }
-
-    /// Borrow the agent, if enabled.
-    pub fn agent(&self) -> Option<&Arc<Mutex<crate::agent::Agent>>> {
-        self.agent.as_ref()
-    }
-
     /// Borrow the cortex store, if enabled.
     pub fn cortex(&self) -> Option<&Arc<CortexStore>> {
         self.cortex.as_ref()
     }
 
     /// Count of successful config reloads applied since startup.
-    /// Slice 0: bumped by [`Self::apply_config_stub`] when the file
-    /// parses cleanly. Slice 2 will gain a separate failure counter.
     pub fn reloads_applied(&self) -> u64 {
         self.reloads_applied.load(Ordering::SeqCst)
     }
@@ -73,10 +66,6 @@ impl DaemonState {
     /// validates it parses as TOML, and bumps the reload counter on
     /// success. Slice 2 will replace this with the actual Provider
     /// rebuild + Agent swap.
-    ///
-    /// Decoupled from [`crate::config::Config`] on purpose: Slice 2
-    /// will rewire the loader, so coupling here would create needless
-    /// churn. The Slice 0 contract is just "file is well-formed TOML".
     pub async fn apply_config_stub(&self, path: &Path) {
         match std::fs::read_to_string(path)
             .map_err(|e| e.to_string())

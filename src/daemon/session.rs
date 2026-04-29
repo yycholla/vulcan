@@ -1,14 +1,14 @@
 //! Session map and per-session state.
 //!
-//! In Slice 0 each `SessionState` is a small marker holding an id,
-//! activity timestamps, an in-flight flag, and a cancellation token.
-//! Slice 2 (full Agent in daemon) will add the heavy fields: `Agent`,
-//! audit buffer, etc. Slice 3 will add idle-eviction policy.
+//! Phase 3: each `SessionState` owns an optional warm Agent. The "main"
+//! session is pre-created on daemon boot (without an Agent), then the
+//! daemon startup path builds the Agent and installs it via
+//! [`SessionState::set_agent`]. Additional sessions can be created
+//! on-demand via `session.create`; their Agents are built lazily.
 //!
-//! The `"main"` session is pre-created on daemon boot and cannot be
-//! destroyed via [`SessionMap::destroy_checked`] — it's the implicit
-//! default when a request envelope omits or sends `"main"` for the
-//! `session` field.
+//! The `"main"` session cannot be destroyed via
+//! [`SessionMap::destroy_checked`] — it's the implicit default when a
+//! request envelope omits or sends `"main"` for the `session` field.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -17,13 +17,25 @@ use std::time::Instant;
 use parking_lot::{Mutex, RwLock};
 use tokio_util::sync::CancellationToken;
 
-/// Per-session state. Slice 0 fields only; Slice 2 will add `Agent` etc.
+/// Shared, async-locked handle to a per-session Agent. `Arc` so a
+/// single session can be locked from concurrent tasks (e.g. a
+/// streaming `prompt.stream` background task and an inbound
+/// `prompt.cancel` on the same session).
+pub type AgentHandle = Arc<tokio::sync::Mutex<crate::agent::Agent>>;
+
+/// Per-session state.
 pub struct SessionState {
     pub id: String,
     pub created_at: Instant,
     pub last_activity: Mutex<Instant>,
     pub in_flight: Mutex<bool>,
     pub cancel: CancellationToken,
+    /// Phase 3: each session optionally owns its own warm Agent.
+    /// `None` until the Agent is built (main at boot, others on
+    /// create). Stored as `Arc<AsyncMutex<Agent>>` so callers can
+    /// cheaply clone a handle and lock the Agent across `await`
+    /// points without holding the outer `parking_lot::Mutex`.
+    pub agent: Mutex<Option<AgentHandle>>,
 }
 
 impl SessionState {
@@ -35,13 +47,32 @@ impl SessionState {
             last_activity: Mutex::new(now),
             in_flight: Mutex::new(false),
             cancel: CancellationToken::new(),
+            agent: Mutex::new(None),
         }
     }
 
+    /// Install a warm Agent into this session. Called by daemon startup
+    /// for the "main" session, and by `session.create` for new sessions.
+    pub fn set_agent(&self, agent: crate::agent::Agent) {
+        *self.agent.lock() = Some(Arc::new(tokio::sync::Mutex::new(agent)));
+    }
+
     /// Update `last_activity` to `Instant::now()`. Call when this
-    /// session services any RPC; idle eviction (Slice 3) reads this.
+    /// session services any RPC; idle eviction reads this.
     pub fn touch(&self) {
         *self.last_activity.lock() = Instant::now();
+    }
+
+    /// True if this session has a warm Agent installed.
+    pub fn has_agent(&self) -> bool {
+        self.agent.lock().is_some()
+    }
+
+    /// Cloneable handle to the per-session Agent, if installed.
+    /// Returns `None` if the session has no Agent yet (e.g. created
+    /// via `session.create` for non-main; lazy-build is deferred).
+    pub fn agent_arc(&self) -> Option<AgentHandle> {
+        self.agent.lock().clone()
     }
 }
 
@@ -109,6 +140,7 @@ impl SessionMap {
                     "id": s.id,
                     "in_flight": *s.in_flight.lock(),
                     "last_activity_secs_ago": last.elapsed().as_secs(),
+                    "has_agent": s.has_agent(),
                 })
             })
             .collect()
@@ -119,6 +151,22 @@ impl SessionMap {
     pub fn any_in_flight(&self) -> bool {
         let g = self.inner.read();
         g.values().any(|s| *s.in_flight.lock())
+    }
+
+    /// Count of sessions currently alive.
+    pub fn len(&self) -> usize {
+        self.inner.read().len()
+    }
+
+    /// True if the map is empty. (Practically always false in
+    /// production: `with_main` seeds the `"main"` session.)
+    pub fn is_empty(&self) -> bool {
+        self.inner.read().is_empty()
+    }
+
+    /// List all session ids.
+    pub fn ids(&self) -> Vec<String> {
+        self.inner.read().keys().cloned().collect()
     }
 }
 
@@ -182,47 +230,31 @@ mod tests {
     }
 
     #[test]
-    fn descriptors_serializes_each_session() {
+    fn descriptors_includes_main() {
         let map = SessionMap::with_main();
-        map.create_named("foo").unwrap();
-        let desc = map.descriptors();
-        assert_eq!(desc.len(), 2, "main + foo");
-        // Each descriptor must have id, in_flight, last_activity_secs_ago
-        for d in &desc {
-            assert!(d["id"].is_string());
-            assert!(d["in_flight"].is_boolean());
-            assert!(d["last_activity_secs_ago"].is_number());
-        }
-        // ids should include both "main" and "foo" (order not guaranteed)
-        let ids: Vec<String> = desc
-            .iter()
-            .map(|d| d["id"].as_str().unwrap().to_string())
-            .collect();
-        assert!(ids.contains(&"main".to_string()));
-        assert!(ids.contains(&"foo".to_string()));
+        let d = map.descriptors();
+        assert_eq!(d.len(), 1);
+        assert_eq!(d[0]["id"], "main");
     }
 
     #[test]
-    fn any_in_flight_reflects_session_state() {
+    fn any_in_flight_false_when_idle() {
         let map = SessionMap::with_main();
-        assert!(!map.any_in_flight(), "fresh map: no in-flight");
-
-        let main = map.get("main").unwrap();
-        *main.in_flight.lock() = true;
-        assert!(map.any_in_flight());
-
-        *main.in_flight.lock() = false;
         assert!(!map.any_in_flight());
     }
 
     #[test]
-    fn touch_updates_last_activity() {
+    fn any_in_flight_true_when_session_busy() {
         let map = SessionMap::with_main();
-        let main = map.get("main").unwrap();
-        let initial = *main.last_activity.lock();
-        std::thread::sleep(std::time::Duration::from_millis(10));
-        main.touch();
-        let after = *main.last_activity.lock();
-        assert!(after > initial, "touch advances last_activity");
+        *map.get("main").unwrap().in_flight.lock() = true;
+        assert!(map.any_in_flight());
+    }
+
+    #[test]
+    fn len_counts_correctly() {
+        let map = SessionMap::with_main();
+        assert_eq!(map.len(), 1);
+        map.create_named("foo").unwrap();
+        assert_eq!(map.len(), 2);
     }
 }

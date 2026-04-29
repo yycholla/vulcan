@@ -49,39 +49,51 @@ impl Dispatcher {
             }
 
             // -- Agent --
-            "agent.status" => DispatchResult::Response(agent::status(&self.state, req.id).await),
+            "agent.status" => {
+                let session = req.session.clone();
+                DispatchResult::Response(agent::status(&self.state, req.id, session).await)
+            }
             "agent.switch_model" => {
+                let session = req.session.clone();
                 let model = req
                     .params
                     .get("model")
                     .and_then(|v| v.as_str())
                     .unwrap_or("");
-                DispatchResult::Response(agent::switch_model(&self.state, req.id, model).await)
+                DispatchResult::Response(
+                    agent::switch_model(&self.state, req.id, session, model).await,
+                )
             }
             "agent.list_models" => {
-                DispatchResult::Response(agent::list_models(&self.state, req.id).await)
+                let session = req.session.clone();
+                DispatchResult::Response(agent::list_models(&self.state, req.id, session).await)
             }
 
             // -- Prompt --
             "prompt.run" => {
+                let session = req.session.clone();
                 let input = req
                     .params
                     .get("text")
                     .and_then(|v| v.as_str())
                     .unwrap_or("");
-                DispatchResult::Response(prompt::run(&self.state, req.id, input).await)
+                DispatchResult::Response(prompt::run(&self.state, req.id, session, input).await)
             }
             "prompt.stream" => {
+                let session = req.session.clone();
                 let input = req
                     .params
                     .get("text")
                     .and_then(|v| v.as_str())
                     .unwrap_or("")
                     .to_string();
-                let (frames, done) = prompt::stream(&self.state, req.id, input);
+                let (frames, done) = prompt::stream(&self.state, req.id, session, input);
                 DispatchResult::Stream { frames, done }
             }
-            "prompt.cancel" => DispatchResult::Response(prompt::cancel(&self.state, req.id).await),
+            "prompt.cancel" => {
+                let session = req.session.clone();
+                DispatchResult::Response(prompt::cancel(&self.state, req.id, session).await)
+            }
 
             // -- Cortex --
             "cortex.store" => {
@@ -157,6 +169,30 @@ impl Dispatcher {
 
             // -- Session --
             "session.list" => DispatchResult::Response(session::list(&self.state, req.id).await),
+            "session.create" => {
+                let id = req
+                    .params
+                    .get("id")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string());
+                let resume_from = req
+                    .params
+                    .get("resume_from")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string());
+                DispatchResult::Response(
+                    session::create(&self.state, req.id, id, resume_from).await,
+                )
+            }
+            "session.destroy" => {
+                let sid = req
+                    .params
+                    .get("session_id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                DispatchResult::Response(session::destroy(&self.state, req.id, sid).await)
+            }
             "session.search" => {
                 let query = req
                     .params

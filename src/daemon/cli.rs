@@ -63,12 +63,14 @@ async fn start(detach: bool) -> anyhow::Result<()> {
         }
     }
 
-    // YYC-266 Slice 2: boot the warm Agent so CLI prompt/search commands
-    // don't pay cold-start cost.
+    // YYC-266 Slice 2/3: boot the warm Agent and install it into the
+    // "main" session. Additional sessions are created on-demand.
     match crate::agent::Agent::builder(&config).build().await {
         Ok(agent) => {
             tracing::info!("daemon: agent loaded (model={})", agent.active_model());
-            state = state.with_agent(agent);
+            if let Some(main) = state.sessions().get("main") {
+                main.set_agent(agent);
+            }
         }
         Err(e) => {
             tracing::warn!("daemon: agent failed to build: {e}");
