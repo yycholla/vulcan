@@ -1,7 +1,11 @@
 //! YYC-212 PR-1: `vulcan config list/get/path/show` — read-only
 //! discovery + inspection on top of the [`config_registry`].
+//! YYC-286: interactive picker + field-aware set when no value given.
 
-use anyhow::{Result, anyhow, bail};
+use anyhow::{Context, Result, anyhow, bail};
+use dialoguer::{Confirm, FuzzySelect, Input, Password};
+use owo_colors::OwoColorize;
+use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 use toml_edit::{DocumentMut, Item, value};
 
@@ -9,15 +13,20 @@ use crate::cli::ConfigSubcommand;
 use crate::config::{atomic_write, vulcan_home};
 use crate::config_registry::{ConfigField, ConfigFile, FieldKind, all, lookup};
 
-pub async fn run(cmd: ConfigSubcommand) -> Result<()> {
+pub async fn run(cmd: Option<ConfigSubcommand>) -> Result<()> {
     match cmd {
-        ConfigSubcommand::List => list(),
-        ConfigSubcommand::Get { key, reveal } => get(&key, reveal),
-        ConfigSubcommand::Path => paths(),
-        ConfigSubcommand::Show { reveal } => show(reveal),
-        ConfigSubcommand::Set { key, value } => set(&key, &value),
-        ConfigSubcommand::Unset { key } => unset(&key),
-        ConfigSubcommand::Edit { section } => edit(section.as_deref()),
+        None => interactive_picker(),
+        Some(ConfigSubcommand::List) => list(),
+        Some(ConfigSubcommand::Get { key, reveal }) => get(&key, reveal),
+        Some(ConfigSubcommand::Path) => paths(),
+        Some(ConfigSubcommand::Show { reveal }) => show(reveal),
+        Some(ConfigSubcommand::Set {
+            key,
+            value: Some(raw),
+        }) => set(&key, &raw),
+        Some(ConfigSubcommand::Set { key, value: None }) => interactive_set(&key),
+        Some(ConfigSubcommand::Unset { key }) => unset(&key),
+        Some(ConfigSubcommand::Edit { section }) => edit(section.as_deref()),
     }
 }
 
@@ -39,8 +48,6 @@ fn resolve_section_path(home: &Path, section: Option<&str>) -> PathBuf {
 /// `providers.toml`).
 fn edit(section: Option<&str>) -> Result<()> {
     let path = resolve_section_path(&vulcan_home(), section);
-    // Make sure the file exists so the editor doesn't error on
-    // first open. An empty file is a fine starting point.
     if !path.exists() {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
@@ -69,6 +76,399 @@ fn edit(section: Option<&str>) -> Result<()> {
     }
 }
 
+/// Group fields by their top-level category (first path segment).
+fn group_fields(fields: &[ConfigField]) -> Vec<(&str, Vec<&ConfigField>)> {
+    let mut map: std::collections::BTreeMap<&str, Vec<&ConfigField>> =
+        std::collections::BTreeMap::new();
+    for f in fields {
+        let cat = f.path.split('.').next().unwrap_or(f.path);
+        map.entry(cat).or_default().push(f);
+    }
+    map.into_iter().collect()
+}
+
+/// No subcommand given → pick a category, then a field within it.
+fn interactive_picker() -> Result<()> {
+    if !std::io::stdin().is_terminal() {
+        bail!(
+            "vulcan config (interactive) requires a terminal. Use `vulcan config list` to browse fields, or `vulcan config set <key> <value>` for scripting."
+        );
+    }
+
+    let theme = dialoguer_theme();
+    let groups = group_fields(&all());
+
+    // ---- Level 1: pick a category ---------------------------------
+    let cat_items: Vec<String> = groups
+        .iter()
+        .map(|(cat, fields)| {
+            format!(
+                "{} {}",
+                cat.bold(),
+                format!("({} fields)", fields.len()).dimmed()
+            )
+        })
+        .collect();
+
+    println!();
+    let cat_pick = FuzzySelect::with_theme(&theme)
+        .with_prompt("Pick a config category (Esc to cancel)")
+        .items(&cat_items)
+        .default(0)
+        .interact()
+        .context("cancelled")?;
+
+    let (cat_name, cat_fields) = &groups[cat_pick];
+
+    // ---- Level 2: pick a field within the category ----------------
+    let field_labels: Vec<String> = cat_fields
+        .iter()
+        .map(|f| {
+            let short = strip_prefix(f.path, cat_name);
+            let current = match lookup_in_file(f, f.path) {
+                Ok(Some(v)) => format_value(&v, f, false),
+                _ => "(default)".to_string(),
+            };
+            format!("{:<48} {}", short, current)
+        })
+        .collect();
+
+    println!();
+    let field_pick = FuzzySelect::with_theme(&theme)
+        .with_prompt(format!(
+            "[{}] Pick a field to set (Esc to cancel)",
+            cat_name
+        ))
+        .items(&field_labels)
+        .default(0)
+        .interact()
+        .context("cancelled")?;
+
+    let field = cat_fields[field_pick];
+    let current_val = match lookup_in_file(field, field.path) {
+        Ok(Some(v)) => format_value(&v, field, false),
+        _ => format!("(default: {})", field.default),
+    };
+    println!();
+    println!("  {}  ({})", field.path.bold(), field.help);
+    println!(
+        "  current: {}  |  kind: {}  |  file: {}",
+        current_val,
+        fmt_kind_short(&field.kind),
+        format_file(field.file),
+    );
+    println!();
+
+    let value = prompt_field_value(field, &theme)?;
+    confirm_and_write(field, value)?;
+    Ok(())
+}
+
+/// Remove a leading `prefix.` from `dotted`, returning the remainder.
+fn strip_prefix<'a>(dotted: &'a str, prefix: &str) -> &'a str {
+    if let Some(rest) = dotted.strip_prefix(prefix) {
+        rest.strip_prefix('.').unwrap_or(rest)
+    } else {
+        dotted
+    }
+}
+
+/// `vulcan config set <key>` without a value → field-aware prompt.
+fn interactive_set(key: &str) -> Result<()> {
+    let field = lookup(key).ok_or_else(|| {
+        anyhow!("unknown config field `{key}`. `vulcan config list` for the catalog.")
+    })?;
+
+    if !std::io::stdin().is_terminal() {
+        bail!(
+            "interactive set requires a terminal. Provide the value as an argument: `vulcan config set {key} <value>`."
+        );
+    }
+
+    let theme = dialoguer_theme();
+    println!();
+    println!("  {} ({})", field.path, field.help);
+    println!(
+        "  default: {}  |  kind: {}",
+        field.default,
+        fmt_kind_short(&field.kind)
+    );
+    println!();
+
+    let value = prompt_field_value(field, &theme)?;
+    confirm_and_write(field, value)?;
+    Ok(())
+}
+
+/// Prompt for a value adapted to the field kind.
+fn prompt_field_value(
+    field: &ConfigField,
+    theme: &dyn dialoguer::theme::Theme,
+) -> Result<toml_edit::Value> {
+    match &field.kind {
+        FieldKind::Bool => {
+            let confirmed = Confirm::with_theme(theme)
+                .with_prompt(format!("Set {} to true?", field.path))
+                .default(false)
+                .interact()?;
+            Ok(toml_edit::Value::from(confirmed))
+        }
+        FieldKind::Enum { variants } => {
+            let pick = FuzzySelect::with_theme(theme)
+                .with_prompt(format!("Pick value for {}", field.path))
+                .items(*variants)
+                .default(0)
+                .interact()?;
+            Ok(toml_edit::Value::from(variants[pick]))
+        }
+        FieldKind::Int { min, max } => {
+            let default_val = field.default.parse::<i64>().unwrap_or(0);
+            let range_hint = match (min, max) {
+                (Some(lo), Some(hi)) => format!("{lo}..{hi}"),
+                (Some(lo), None) => format!("≥ {lo}"),
+                (None, Some(hi)) => format!("≤ {hi}"),
+                (None, None) => "any integer".into(),
+            };
+            let input: String = Input::with_theme(theme)
+                .with_prompt(format!("Integer for {} ({})", field.path, range_hint))
+                .default(default_val.to_string())
+                .validate_with(|s: &String| -> Result<(), String> {
+                    let n: i64 = s.parse().map_err(|_| format!("not an integer: {s}"))?;
+                    if let Some(lo) = min {
+                        if n < *lo {
+                            return Err(format!("below minimum {lo}"));
+                        }
+                    }
+                    if let Some(hi) = max {
+                        if n > *hi {
+                            return Err(format!("above maximum {hi}"));
+                        }
+                    }
+                    Ok(())
+                })
+                .interact_text()?;
+            let n: i64 = input.parse().unwrap();
+            Ok(toml_edit::Value::from(n))
+        }
+        FieldKind::Float { min, max } => {
+            let default_val = field.default.parse::<f64>().unwrap_or(0.0);
+            let range_hint = match (min, max) {
+                (Some(lo), Some(hi)) => format!("{lo}..{hi}"),
+                (Some(lo), None) => format!("≥ {lo}"),
+                (None, Some(hi)) => format!("≤ {hi}"),
+                (None, None) => "any float".into(),
+            };
+            let input: String = Input::with_theme(theme)
+                .with_prompt(format!("Float for {} ({})", field.path, range_hint))
+                .default(default_val.to_string())
+                .validate_with(|s: &String| -> Result<(), String> {
+                    let n: f64 = s.parse().map_err(|_| format!("not a number: {s}"))?;
+                    if let Some(lo) = min {
+                        if n < *lo {
+                            return Err(format!("below minimum {lo}"));
+                        }
+                    }
+                    if let Some(hi) = max {
+                        if n > *hi {
+                            return Err(format!("above maximum {hi}"));
+                        }
+                    }
+                    Ok(())
+                })
+                .interact_text()?;
+            let n: f64 = input.parse().unwrap();
+            Ok(toml_edit::Value::from(n))
+        }
+        FieldKind::String { secret: true } => {
+            let key: String = Password::with_theme(theme)
+                .with_prompt(format!("Secret value for {} (hidden)", field.path))
+                .allow_empty_password(true)
+                .interact()?;
+            Ok(toml_edit::Value::from(key))
+        }
+        FieldKind::String { secret: false } | FieldKind::Path => {
+            let s: String = Input::with_theme(theme)
+                .with_prompt(format!("Value for {}", field.path))
+                .default(field.default.to_string())
+                .interact_text()?;
+            Ok(toml_edit::Value::from(s))
+        }
+        FieldKind::Model => pick_provider_model(field, theme),
+        FieldKind::EmbeddingModel => pick_embedding_model(field, theme),
+    }
+}
+
+/// Curated list of embedding models that `cortex-memory-core`'s
+/// `create_embedding_service` dispatch actually recognises. Each
+/// entry maps to a `fastembed::EmbeddingModel` variant inside cortex.
+/// Models NOT in this list silently fall back to bge-small (a bug in
+/// cortex-memory-core 0.3.1).
+///
+/// **Important**: switching to a model with a different dimension
+/// on an existing `cortex.redb` corrupts the HNSW index. The user
+/// must delete `~/.vulcan/cortex.redb` and re-seed.
+const KNOWN_EMBEDDING_MODELS: &[(&str, &str)] = &[
+    (
+        "BAAI/bge-small-en-v1.5",
+        "384-dim  ~130 MB  (default, fast)",
+    ),
+    ("BAAI/bge-base-en-v1.5", "768-dim  ~430 MB  (balanced)"),
+    (
+        "BAAI/bge-large-en-v1.5",
+        "1024-dim ~1.3 GB  (highest quality)",
+    ),
+];
+
+/// Suffix appended to the picker prompt when the user already has
+/// a cortex.redb, warning them about re-creation.
+const MODEL_SWITCH_WARNING: &str = "⚠ Switching to a different-dimension model requires deleting \
+     ~/.vulcan/cortex.redb and re-seeding (vulcan --seed-cortex).";
+
+/// Interactive fuzzy-select picker for embedding models.
+fn pick_embedding_model(
+    field: &ConfigField,
+    theme: &dyn dialoguer::theme::Theme,
+) -> Result<toml_edit::Value> {
+    let labels: Vec<String> = KNOWN_EMBEDDING_MODELS
+        .iter()
+        .map(|(id, hint)| format!("{:<25} {}", id, hint.dimmed()))
+        .collect();
+
+    println!();
+    if std::path::Path::new(&format!("{}/cortex.redb", vulcan_home().display())).exists() {
+        println!("{}\n", MODEL_SWITCH_WARNING.yellow());
+    }
+    let pick = FuzzySelect::with_theme(theme)
+        .with_prompt(format!("Pick an embedding model for {}", field.path))
+        .items(&labels)
+        .default(0)
+        .interact()
+        .context("picker cancelled")?;
+
+    Ok(toml_edit::Value::from(KNOWN_EMBEDDING_MODELS[pick].0))
+}
+
+/// Interactive fuzzy-select picker for LLM provider models.
+///
+/// Fetches the catalog from the active provider's `/models` endpoint
+/// (using the same cache as `vulcan model list`). Falls back to a
+/// plain text input when the catalog is unavailable (offline, bad
+/// key, etc.) so `config set` never dead-ends.
+fn pick_provider_model(
+    field: &ConfigField,
+    theme: &dyn dialoguer::theme::Theme,
+) -> Result<toml_edit::Value> {
+    // Try to fetch the provider catalog. We need a tokio runtime
+    // since `fetch_catalog` is async but we're in a sync context.
+    let models = match tokio::runtime::Handle::try_current() {
+        Ok(handle) => handle.block_on(fetch_models_from_active_provider()),
+        Err(_) => fetch_models_from_active_provider_blocking(),
+    };
+
+    match models {
+        Ok(ref list) if !list.is_empty() => {
+            let labels: Vec<String> = list
+                .iter()
+                .map(|m| {
+                    let ctx = if m.context_length > 0 {
+                        format!(" {}", m.context_length.to_string().dimmed())
+                    } else {
+                        String::new()
+                    };
+                    format!("{}{}", m.id, ctx)
+                })
+                .collect();
+
+            println!();
+            let pick = FuzzySelect::with_theme(theme)
+                .with_prompt(format!("Pick a model for {}", field.path))
+                .items(&labels)
+                .default(0)
+                .interact()
+                .context("picker cancelled")?;
+
+            Ok(toml_edit::Value::from(list[pick].id.clone()))
+        }
+        _ => {
+            // Catalog unavailable — fall back to free text.
+            tracing::warn!("provider catalog unavailable; falling back to text input");
+            let s: String = Input::with_theme(theme)
+                .with_prompt(format!("Model id for {} (catalog unavailable)", field.path))
+                .default(field.default.to_string())
+                .interact_text()?;
+            Ok(toml_edit::Value::from(s))
+        }
+    }
+}
+
+/// Fetch the model catalog from the active provider (async path —
+/// called when a tokio runtime is available).
+async fn fetch_models_from_active_provider() -> Result<Vec<crate::provider::catalog::ModelInfo>> {
+    let dir = vulcan_home();
+    let config = crate::config::Config::load_from_dir(&dir).unwrap_or_default();
+    let provider = config.active_provider_config();
+    let api_key = config.api_key().unwrap_or_default();
+    crate::cli_model::fetch_catalog(provider, &api_key).await
+}
+
+/// Blocking fallback: spin up a temporary tokio runtime to fetch
+/// the catalog. Used when `cli_config` is called outside an
+/// existing async context (e.g. `vulcan config set` from main).
+fn fetch_models_from_active_provider_blocking() -> Result<Vec<crate::provider::catalog::ModelInfo>>
+{
+    let rt = tokio::runtime::Runtime::new()?;
+    rt.block_on(fetch_models_from_active_provider())
+}
+
+/// Show a confirmation summary, then write.
+fn confirm_and_write(field: &ConfigField, val: toml_edit::Value) -> Result<()> {
+    let theme = dialoguer_theme();
+    let display = val.to_string();
+    let confirmed = Confirm::with_theme(&theme)
+        .with_prompt(format!("Write {} = {} to config?", field.path, display))
+        .default(true)
+        .interact()?;
+    if !confirmed {
+        println!("Aborted — nothing written.");
+        return Ok(());
+    }
+    let path = file_path_for(field.file);
+    let mut doc = read_document(&path)?;
+    apply_set(&mut doc, field.path, val)?;
+    write_document(&path, &doc)?;
+    println!("✓ set {} in {}", field.path, path.display());
+    Ok(())
+}
+
+fn dialoguer_theme() -> dialoguer::theme::ColorfulTheme {
+    dialoguer::theme::ColorfulTheme::default()
+}
+
+/// Short kind label for picker items.
+fn fmt_kind_short(k: &FieldKind) -> String {
+    match k {
+        FieldKind::Bool => "bool".into(),
+        FieldKind::Int { min, max } => match (min, max) {
+            (Some(lo), Some(hi)) => format!("int [{lo}..{hi}]"),
+            (Some(lo), None) => format!("int [≥{lo}]"),
+            (None, Some(hi)) => format!("int [≤{hi}]"),
+            (None, None) => "int".into(),
+        },
+        FieldKind::Float { min, max } => match (min, max) {
+            (Some(lo), Some(hi)) => format!("float [{lo}..{hi}]"),
+            (Some(lo), None) => format!("float [≥{lo}]"),
+            (None, Some(hi)) => format!("float [≤{hi}]"),
+            (None, None) => "float".into(),
+        },
+        FieldKind::Enum { variants } => format!("enum[{}]", variants.join("|")),
+        FieldKind::String { secret: true } => "🔒 secret".into(),
+        FieldKind::String { secret: false } => "string".into(),
+        FieldKind::Path => "path".into(),
+        FieldKind::Model => "model".into(),
+        FieldKind::EmbeddingModel => "embedding".into(),
+    }
+}
+
 fn set(key: &str, raw: &str) -> Result<()> {
     let field = lookup(key).ok_or_else(|| {
         anyhow!("unknown config field `{key}`. `vulcan config list` for the catalog.")
@@ -78,7 +478,7 @@ fn set(key: &str, raw: &str) -> Result<()> {
     let mut doc = read_document(&path)?;
     apply_set(&mut doc, key, parsed)?;
     write_document(&path, &doc)?;
-    println!("set {key} in {}", path.display());
+    println!("{} set {} in {}", "✓".green(), key, path.display());
     Ok(())
 }
 
@@ -155,7 +555,10 @@ fn parse_value(field: &ConfigField, raw: &str) -> Result<toml_edit::Value> {
                 )
             }
         }
-        FieldKind::String { .. } | FieldKind::Path => Ok(raw.into()),
+        FieldKind::String { .. }
+        | FieldKind::Path
+        | FieldKind::Model
+        | FieldKind::EmbeddingModel => Ok(raw.into()),
     }
 }
 
@@ -253,19 +656,52 @@ fn ensure_table<'a>(parent: &'a mut dyn TableLike, key: &str) -> Result<&'a mut 
 }
 
 fn list() -> Result<()> {
+    // Colored header row
     println!(
-        "{:<48} {:<14} {:<20} {:<14} help",
-        "key", "kind", "default", "file"
+        "{} {} {} {} {} {}",
+        "key".bold().white().on_blue(),
+        "kind".bold().white().on_blue(),
+        "current".bold().white().on_blue(),
+        "default".bold().white().on_blue(),
+        "file".bold().white().on_blue(),
+        "help".bold().white().on_blue(),
     );
     for f in all() {
-        let kind_str = format_kind(&f.kind);
-        let file_str = format_file(f.file);
+        let kind_str = colored_kind(&f.kind);
+        let default_str = f.default.dimmed().to_string();
+        let file_label = format_file(f.file);
+        let file_str = file_label.green().to_string();
+
+        // Look up the actual current value from config files
+        let current_str = match lookup_in_file(f, f.path) {
+            Ok(Some(v)) => format_value(&v, f, false).green().to_string(),
+            _ => {
+                // Not explicitly set — show "(default)" in yellow
+                "(default)".yellow().to_string()
+            }
+        };
+
         println!(
-            "{:<48} {:<14} {:<20} {:<14} {}",
-            f.path, kind_str, f.default, file_str, f.help
+            "{:<48} {:<14} {:<20} {:<20} {:<14} {}",
+            f.path, kind_str, current_str, default_str, file_str, f.help
         );
     }
     Ok(())
+}
+
+/// Colored kind badge for `list`.
+fn colored_kind(k: &FieldKind) -> String {
+    match k {
+        FieldKind::Bool => "bool".cyan().to_string(),
+        FieldKind::Int { .. } => format_kind(k).blue().to_string(),
+        FieldKind::Float { .. } => format_kind(k).blue().to_string(),
+        FieldKind::Enum { .. } => format_kind(k).yellow().to_string(),
+        FieldKind::String { secret: true } => "🔒 secret".red().to_string(),
+        FieldKind::String { secret: false } => "string".green().to_string(),
+        FieldKind::Path => "path".magenta().to_string(),
+        FieldKind::Model => "model".cyan().to_string(),
+        FieldKind::EmbeddingModel => "embedding".cyan().to_string(),
+    }
 }
 
 fn get(key: &str, reveal: bool) -> Result<()> {
@@ -273,12 +709,27 @@ fn get(key: &str, reveal: bool) -> Result<()> {
         anyhow!("unknown config field `{key}`. `vulcan config list` for the catalog.")
     })?;
     let raw = lookup_in_file(field, key)?;
-    let display = match raw {
-        None => "(unset; default applies)".to_string(),
-        Some(v) => format_value(&v, field, reveal),
-    };
-    println!("{display}");
+    match raw {
+        None => {
+            // Unset — show dim "(default: <val> applies)"
+            println!("{} {}", "(default)".dimmed(), field.default.yellow());
+        }
+        Some(v) if is_secret_not_revealed(field, reveal) => {
+            // Secret redacted
+            println!("{}", "***redacted*** (pass --reveal to show)".red());
+        }
+        Some(v) => {
+            let display = format_value(&v, field, reveal);
+            // Explicitly set — show in green with a checkmark
+            println!("✓ {}", display.green());
+        }
+    }
     Ok(())
+}
+
+/// True when the value should be redacted.
+fn is_secret_not_revealed(field: &ConfigField, reveal: bool) -> bool {
+    matches!(&field.kind, FieldKind::String { secret: true } if !reveal)
 }
 
 fn paths() -> Result<()> {
@@ -299,11 +750,18 @@ fn paths() -> Result<()> {
 fn show(reveal: bool) -> Result<()> {
     for f in all() {
         let raw = lookup_in_file(f, f.path)?;
-        let display = match raw {
-            None => "(default)".to_string(),
-            Some(v) => format_value(&v, f, reveal),
-        };
-        println!("{} = {}", f.path, display);
+        match raw {
+            None => {
+                println!("{} {} {}", f.path, "=".dimmed(), f.default.yellow());
+            }
+            Some(v) if is_secret_not_revealed(f, reveal) => {
+                println!("{} = {}", f.path, "***redacted***".red());
+            }
+            Some(v) => {
+                let display = format_value(&v, f, reveal);
+                println!("✓ {} = {}", f.path, display.green());
+            }
+        }
     }
     Ok(())
 }
@@ -380,6 +838,8 @@ fn format_kind(k: &FieldKind) -> String {
             }
         }
         FieldKind::Path => "path".into(),
+        FieldKind::Model => "model".into(),
+        FieldKind::EmbeddingModel => "embedding".into(),
     }
 }
 

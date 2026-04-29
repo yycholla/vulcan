@@ -7,6 +7,20 @@
 //! All public methods are `&self` — `Cortex` and its storage use interior
 //! mutability internally, so callers can pass `Arc<CortexStore>` through
 //! hooks without locking.
+//!
+//! ## Why no persistent second `RedbStorage` handle?
+//!
+//! `Cortex::open()` opens `cortex.redb` once and holds an exclusive file lock.
+//! Opening `RedbStorage::open()` a second time on the same file fails with
+//! "Database already open. Cannot acquire lock." because redb uses a
+//! single-writer lock model.
+//!
+//! Instead, edge-management and decay operations that need the raw storage
+//! API open a **transient** `RedbStorage` handle on demand (the CLI commands
+//! that call these methods are short-lived — they open, do work, and exit,
+//! so the lock is held only briefly). The long-lived `CortexStore` held by
+//! the agent and hooks never holds a second handle, so the lock is free
+//! when the TUI exits.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -23,8 +37,6 @@ use crate::config::{CortexConfig, vulcan_home};
 /// Wrapper around the embedded Cortex graph memory engine.
 pub struct CortexStore {
     pub inner: Cortex,
-    /// Shared redb handle so lower-level engines can operate on the same db.
-    storage: Arc<RedbStorage>,
     config: CortexConfig,
 }
 
@@ -47,10 +59,6 @@ impl CortexStore {
         let inner = Cortex::open(&db_path, lib_config)
             .with_context(|| format!("open cortex db at {}", db_path.display()))?;
 
-        let storage = Arc::new(
-            RedbStorage::open(&db_path).context("re-open redb for shared storage handle")?,
-        );
-
         tracing::info!(
             "cortex memory ready at {} (model: {})",
             db_path.display(),
@@ -59,7 +67,6 @@ impl CortexStore {
 
         Ok(Arc::new(Self {
             inner,
-            storage,
             config: config.clone(),
         }))
     }
@@ -121,28 +128,47 @@ impl CortexStore {
         self.inner.create_edge(edge).context("cortex create edge")
     }
 
+    // ── Edge management (requires transient storage handle) ──
+    //
+    // These methods open a short-lived `RedbStorage` handle because
+    // `Cortex` does not expose the raw storage API. They are intended
+    // for CLI subcommands that run and exit — NOT for the agent loop.
+    // The transient handle is opened, the operation runs, and the
+    // handle is dropped immediately, releasing the file lock.
+
     /// List all edges originating from `node_id`.
+    ///
+    /// Opens a transient storage handle. Only call from short-lived
+    /// CLI commands, not from agent hooks.
     pub fn edges_from(&self, node_id: NodeId) -> Result<Vec<cortex_core::Edge>> {
-        self.storage
-            .edges_from(node_id)
-            .context("cortex edges_from")
+        let storage = open_transient_storage(&self.config)?;
+        storage.edges_from(node_id).context("cortex edges_from")
     }
 
     /// List all edges terminating at `node_id`.
+    ///
+    /// Opens a transient storage handle. Only call from short-lived
+    /// CLI commands, not from agent hooks.
     pub fn edges_to(&self, node_id: NodeId) -> Result<Vec<cortex_core::Edge>> {
-        self.storage.edges_to(node_id).context("cortex edges_to")
+        let storage = open_transient_storage(&self.config)?;
+        storage.edges_to(node_id).context("cortex edges_to")
     }
 
     /// Delete an edge by its ID.
+    ///
+    /// Opens a transient storage handle. Only call from short-lived
+    /// CLI commands, not from agent hooks.
     pub fn delete_edge(&self, edge_id: cortex_core::EdgeId) -> Result<()> {
-        self.storage
-            .delete_edge(edge_id)
-            .context("cortex delete_edge")
+        let storage = open_transient_storage(&self.config)?;
+        storage.delete_edge(edge_id).context("cortex delete_edge")
     }
 
     /// Atomically update the weight of an edge between two nodes.
     /// Takes a relation filter and a weight-update closure.
     /// Returns `(old_weight, new_weight)`.
+    ///
+    /// Opens a transient storage handle. Only call from short-lived
+    /// CLI commands, not from agent hooks.
     pub fn update_edge_weight_atomic(
         &self,
         from: NodeId,
@@ -150,7 +176,8 @@ impl CortexStore {
         relation: &cortex_core::Relation,
         f: impl FnOnce(f32) -> f32,
     ) -> Result<(f32, f32)> {
-        self.storage
+        let storage = open_transient_storage(&self.config)?;
+        storage
             .update_edge_weight_atomic(from, to, relation, f)
             .context("cortex update edge weight")
     }
@@ -171,9 +198,13 @@ impl CortexStore {
 
     /// Run edge-decay. Call periodically to age out stale connections.
     /// Returns `(pruned_count, deleted_count)`.
+    ///
+    /// Opens a transient storage handle. Only call from short-lived
+    /// CLI commands, not from agent hooks.
     pub fn run_decay(&self) -> Result<(u64, u64)> {
+        let storage = Arc::new(open_transient_storage(&self.config)?);
         let engine = DecayEngine::new(
-            self.storage.clone(),
+            storage,
             DecayConfig {
                 daily_decay_rate: 0.01,
                 prune_threshold: 0.1,
@@ -191,24 +222,43 @@ impl CortexStore {
     /// Simple graph statistics.
     pub fn stats(&self) -> Result<CortexStats> {
         let nodes = self.inner.list_nodes(NodeFilter::new())?.len();
-        let edges = self
-            .storage
-            .list_nodes(NodeFilter::new())?
-            .iter()
-            .map(|n| {
-                self.storage
-                    .edges_from(n.id)
-                    .map(|e: Vec<_>| e.len())
-                    .unwrap_or(0)
-            })
-            .sum::<usize>();
-        Ok(CortexStats { nodes, edges })
+        // Count edges by traversing each node's neighbourhood.
+        // This avoids opening a second RedbStorage handle (which
+        // would fail with a lock conflict). We use `traverse` at
+        // depth 1 to get each node's local edges, but dedup since
+        // edges appear from both sides.
+        let mut edge_count: usize = 0;
+        let all_nodes = self.inner.list_nodes(NodeFilter::new())?;
+        for node in &all_nodes {
+            if let Ok(sg) = self.inner.traverse(node.id, 1) {
+                // Each edge is counted from both endpoints; divide by 2.
+                edge_count += sg.edges.len();
+            }
+        }
+        // Each edge appears in two traversals (from + to), so halve.
+        edge_count /= 2;
+        Ok(CortexStats {
+            nodes,
+            edges: edge_count,
+        })
     }
 
     /// Access the shared config.
     pub fn config(&self) -> &CortexConfig {
         &self.config
     }
+}
+
+/// Open a short-lived `RedbStorage` handle for edge management
+/// and decay operations.
+///
+/// **CAUTION:** This acquires an exclusive file lock on `cortex.redb`.
+/// It MUST only be called from short-lived CLI subcommands that exit
+/// after the operation completes. Calling this from the agent loop
+/// or TUI (which already holds the lock via `Cortex::open`) will fail.
+fn open_transient_storage(config: &CortexConfig) -> Result<RedbStorage> {
+    let db_path = resolve_db_path(config)?;
+    RedbStorage::open(&db_path).context("open transient cortex storage")
 }
 
 #[derive(Debug, Clone)]
