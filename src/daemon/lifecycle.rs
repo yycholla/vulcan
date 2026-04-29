@@ -87,11 +87,33 @@ fn is_alive(pid: i32) -> bool {
 /// (something accepting connections). Stale files are removed; live
 /// sockets cause `AddrInUse` rather than silent takeover.
 pub struct SocketBinder {
-    pub listener: UnixListener,
+    listener: UnixListener,
     path: PathBuf,
 }
 
 impl SocketBinder {
+    /// Bind a listening socket at `path`, with stale-vs-live discrimination
+    /// and 0600 perms.
+    ///
+    /// If something exists at `path`: probe with `UnixStream::connect`. A
+    /// successful connect means a live daemon is listening — return
+    /// [`std::io::ErrorKind::AddrInUse`]. A failed connect means the file
+    /// is stale (orphaned by a SIGKILL'd daemon, or never a socket at all)
+    /// and is removed before bind.
+    ///
+    /// File perms are set to 0600 after bind. There is a brief window
+    /// between bind and chmod where the socket has the umask-default mode;
+    /// the locked Slice 0 threat model is same-user (ssh-agent precedent),
+    /// so this is acceptable.
+    ///
+    /// # Race window
+    ///
+    /// Between the connect-fail and the `remove_file`, a peer daemon could
+    /// race in and successfully bind. Our subsequent `remove_file` would
+    /// orphan its filesystem entry (the listener keeps working in-kernel,
+    /// but new clients can't reach it). First-writer-wins is the Slice 0
+    /// policy; the loser will detect the situation on next reconnect.
+    /// Promote to atomic `bind`+`rename` if this becomes a real problem.
     pub async fn bind(path: &Path) -> std::io::Result<Self> {
         // If something exists at the path, decide stale vs live.
         if path.exists() {
@@ -116,6 +138,11 @@ impl SocketBinder {
             listener,
             path: path.to_path_buf(),
         })
+    }
+
+    /// Borrow the inner listener for `accept(&self)` calls.
+    pub fn listener(&self) -> &UnixListener {
+        &self.listener
     }
 }
 

@@ -1,4 +1,5 @@
 use super::lifecycle::*;
+use std::os::unix::fs::PermissionsExt;
 use tempfile::tempdir;
 
 #[test]
@@ -79,15 +80,12 @@ fn pid_file_acquire_or_replace_stale_rejects_malformed_pid() {
 
 #[test]
 fn pid_file_perms_are_0600() {
-    use std::os::unix::fs::PermissionsExt;
     let dir = tempdir().unwrap();
     let path = dir.path().join("daemon.pid");
     let _f = PidFile::acquire(&path).unwrap();
     let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
     assert_eq!(mode, 0o600, "pid file must be 0600 (owner-only)");
 }
-
-use std::os::unix::fs::PermissionsExt;
 
 #[tokio::test]
 async fn socket_binder_creates_0600_file() {
