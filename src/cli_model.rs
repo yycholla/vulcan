@@ -1,20 +1,83 @@
 //! YYC-241: `vulcan model list/show/use` for the active provider.
+//! YYC-288: interactive picker from catalog + styled output.
 
 use anyhow::{Context, Result, anyhow, bail};
+use owo_colors::OwoColorize;
+use std::io::IsTerminal;
 use std::time::Duration;
 use toml_edit::{DocumentMut, value};
 
 use crate::cli::ModelSubcommand;
 use crate::config::{Config, ProviderConfig, vulcan_home};
 
-pub async fn run(cmd: ModelSubcommand) -> Result<()> {
+pub async fn run(cmd: Option<ModelSubcommand>) -> Result<()> {
     let dir = vulcan_home();
     let config = Config::load_from_dir(&dir).unwrap_or_default();
     match cmd {
-        ModelSubcommand::List => list(&config).await,
-        ModelSubcommand::Show => show(&config),
-        ModelSubcommand::Use { id, force } => use_model(&dir, &config, &id, force).await,
+        None => interactive_pick(&config).await,
+        Some(ModelSubcommand::List) => list(&config).await,
+        Some(ModelSubcommand::Show) => show(&config),
+        Some(ModelSubcommand::Use {
+            id: Some(id),
+            force,
+        }) => use_model(&dir, &config, &id, force).await,
+        Some(ModelSubcommand::Use { id: None, force }) => {
+            // Interactive pick then use
+            let id = interactive_pick_id(&config).await?;
+            use_model(&dir, &config, &id, force).await
+        }
     }
+}
+
+/// No subcommand → fuzzy picker of models from catalog.
+/// Selecting one prompts to use it.
+async fn interactive_pick(config: &Config) -> Result<()> {
+    if !std::io::stdin().is_terminal() {
+        bail!(
+            "vulcan model (interactive) requires a terminal. Use `vulcan model list` to browse, or `vulcan model use <id>` to set."
+        );
+    }
+
+    let id = interactive_pick_id(config).await?;
+    let dir = vulcan_home();
+    let force = false;
+    use_model(&dir, config, &id, force).await
+}
+
+/// Fuzzy pick a model from the catalog. Returns the chosen model id.
+async fn interactive_pick_id(config: &Config) -> Result<String> {
+    let provider = config.active_provider_config();
+    let api_key = config.api_key().unwrap_or_else(String::new);
+    let models = fetch_catalog(provider, &api_key)
+        .await
+        .with_context(|| format!("failed to fetch /models from {}", provider.base_url))?;
+
+    if models.is_empty() {
+        bail!("No models available in the catalog.");
+    }
+
+    let theme = dialoguer::theme::ColorfulTheme::default();
+    let labels: Vec<String> = models
+        .iter()
+        .map(|m| {
+            let ctx = if m.context_length > 0 {
+                format!(" {}", m.context_length.to_string().dimmed())
+            } else {
+                String::new()
+            };
+            format!("{}{}", m.id, ctx)
+        })
+        .collect();
+
+    println!();
+    let pick = dialoguer::FuzzySelect::with_theme(&theme)
+        .with_prompt("Pick a model")
+        .items(&labels)
+        .default(0)
+        .interact()
+        .context("picker cancelled")?;
+
+    Ok(models[pick].id.clone())
 }
 
 fn show(config: &Config) -> Result<()> {
@@ -23,9 +86,10 @@ fn show(config: &Config) -> Result<()> {
         .active_profile
         .as_deref()
         .unwrap_or("[provider] (legacy)");
-    println!("Active provider: {label}");
-    println!("  base_url: {}", provider.base_url);
-    println!("  model:    {}", provider.model);
+    println!("{}", "Active provider:".bold());
+    println!("  {} {label}", "profile:".dimmed());
+    println!("  {}  {}", "base_url:".dimmed(), provider.base_url);
+    println!("  {}      {}", "model:".dimmed(), provider.model.green());
     Ok(())
 }
 
@@ -42,14 +106,20 @@ async fn list(config: &Config) -> Result<()> {
         println!("(catalog empty)");
         return Ok(());
     }
-    println!("{:<40} {:<10} {}", "id", "context", "display");
+    // Styled header
+    println!(
+        "{} {} {}",
+        "id".bold().white().on_blue(),
+        "context".bold().white().on_blue(),
+        "display".bold().white().on_blue(),
+    );
     for m in models {
         let ctx = if m.context_length > 0 {
-            m.context_length.to_string()
+            m.context_length.to_string().cyan().to_string()
         } else {
-            "-".to_string()
+            "-".dimmed().to_string()
         };
-        println!("{:<40} {:<10} {}", m.id, ctx, m.display_name);
+        println!("{:<40} {:<10} {}", m.id, ctx, m.display_name.dimmed());
     }
     Ok(())
 }
@@ -80,7 +150,7 @@ async fn use_model(dir: &std::path::Path, config: &Config, id: &str, force: bool
     let target = active_profile
         .map(|n| format!("[providers.{n}]"))
         .unwrap_or_else(|| "[provider]".to_string());
-    println!("Set model = \"{id}\" on {target}");
+    println!("{} set model = \"{id}\" on {target}", "✓".green());
     Ok(())
 }
 
@@ -124,7 +194,7 @@ fn write_legacy_provider_model(dir: &std::path::Path, id: &str) -> Result<()> {
     Ok(())
 }
 
-async fn fetch_catalog(
+pub async fn fetch_catalog(
     provider: &ProviderConfig,
     api_key: &str,
 ) -> Result<Vec<crate::provider::catalog::ModelInfo>> {

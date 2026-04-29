@@ -96,6 +96,9 @@ clap_complete = "4.6"
 dialoguer = { version = "0.12", features = ["fuzzy-select", "password"] }
 ratatui = "0.30"
 crossterm = "0.29"
+# YYC-287: lightweight ANSI terminal colors for styled CLI output
+# (config list/show/get, doctor, trust, etc.). Zero transitive deps.
+owo-colors = "4"
 
 # Logging
 tracing = "0.1"

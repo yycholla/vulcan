@@ -77,14 +77,16 @@ pub enum Command {
         force: bool,
     },
     /// Manage named provider profiles in ~/.vulcan/providers.toml (YYC-98).
+    /// No subcommand opens an interactive menu (YYC-289).
     Provider {
         #[command(subcommand)]
-        cmd: ProviderCommand,
+        cmd: Option<ProviderCommand>,
     },
     /// YYC-241: list + select models on the active provider.
+    /// No subcommand opens an interactive picker (YYC-288).
     Model {
         #[command(subcommand)]
-        cmd: ModelSubcommand,
+        cmd: Option<ModelSubcommand>,
     },
     /// Guided interactive provider setup (YYC-100). Picker + prompts for
     /// name, API key, and default model; writes to providers.toml.
@@ -125,10 +127,11 @@ pub enum Command {
         cmd: ContextPackSubcommand,
     },
     /// YYC-212: unified config CLI. List, get, and inspect every
-    /// known config field by dotted path.
+    /// known config field by dotted path. No subcommand opens an
+    /// interactive picker (YYC-286).
     Config {
         #[command(subcommand)]
-        cmd: ConfigSubcommand,
+        cmd: Option<ConfigSubcommand>,
     },
     /// YYC-182: inspect workspace trust resolution.
     Trust {
@@ -264,9 +267,10 @@ pub enum ModelSubcommand {
     List,
     /// Show the currently-active provider + model.
     Show,
-    /// Persist a new `model = "<id>"` on the active provider.
+    /// Persist a new model. Omit the model id to pick interactively (YYC-288).
     Use {
-        id: String,
+        /// Model id to switch to. Omit to pick from catalog.
+        id: Option<String>,
         /// Skip catalog membership validation (useful for
         /// self-hosted endpoints with no `/models` endpoint).
         #[arg(long)]
@@ -588,13 +592,14 @@ pub enum ConfigSubcommand {
     },
     /// Validate a value against the field's declared kind, then
     /// write it to the right TOML file with comments preserved.
+    /// Omit the value to set interactively (YYC-286).
     Set {
         /// Dotted field path.
         key: String,
         /// New value. Bools accept `true|false|on|off|yes|no`;
         /// ints parse as base 10; enums must match a declared
-        /// variant exactly.
-        value: String,
+        /// variant exactly. Omit to set interactively.
+        value: Option<String>,
     },
     /// Remove a field's override from disk. Subsequent reads fall
     /// back to the declared default.

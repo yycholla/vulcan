@@ -54,6 +54,14 @@ pub enum FieldKind {
     /// checked (a config may legitimately point at a not-yet-
     /// created directory).
     Path,
+    /// LLM model selector. Interactive mode fetches the provider
+    /// catalog and presents a fuzzy-search picker. Non-interactive
+    /// mode accepts any string (the model id).
+    Model,
+    /// Embedding model selector. Interactive mode presents a
+    /// curated list of known embedding models with fuzzy search.
+    /// Non-interactive mode accepts any string.
+    EmbeddingModel,
 }
 
 /// Which file under `~/.vulcan/` owns this field. Lets the writer
@@ -193,6 +201,41 @@ const BUILTIN_FIELDS: &[ConfigField] = &[
         help: "Maximum number of recalled hits to inject.",
         file: ConfigFile::Config,
     },
+    // ── cortex.* ─────────────────────────────────────────────
+    ConfigField {
+        path: "cortex.enabled",
+        kind: FieldKind::Bool,
+        default: "false",
+        help: "Enable embedded cortex-memory-core graph memory (semantic search + auto-capture hooks).",
+        file: ConfigFile::Config,
+    },
+    ConfigField {
+        path: "cortex.embedding_model",
+        kind: FieldKind::EmbeddingModel,
+        default: "BAAI/bge-small-en-v1.5",
+        help: "Embedding model for cortex vector search. Interactive picker lists known models.",
+        file: ConfigFile::Config,
+    },
+    ConfigField {
+        path: "cortex.max_search_results",
+        kind: FieldKind::Int {
+            min: Some(1),
+            max: Some(50),
+        },
+        default: "5",
+        help: "Max nodes returned by cortex semantic search per turn.",
+        file: ConfigFile::Config,
+    },
+    ConfigField {
+        path: "cortex.min_importance",
+        kind: FieldKind::Float {
+            min: Some(0.0),
+            max: Some(1.0),
+        },
+        default: "0.3",
+        help: "Minimum importance (0.0-1.0) for auto-stored nodes. Manual stores always pass through.",
+        file: ConfigFile::Config,
+    },
     // ── embeddings.* ──────────────────────────────────────────
     ConfigField {
         path: "embeddings.enabled",
@@ -225,9 +268,9 @@ const BUILTIN_FIELDS: &[ConfigField] = &[
     },
     ConfigField {
         path: "provider.model",
-        kind: FieldKind::String { secret: false },
+        kind: FieldKind::Model,
         default: "(unset)",
-        help: "Default model id sent to the provider.",
+        help: "Default model id sent to the provider. Interactive picker fetches the catalog.",
         file: ConfigFile::Providers,
     },
     ConfigField {

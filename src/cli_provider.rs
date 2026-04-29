@@ -11,6 +11,8 @@
 
 use anyhow::{Context, Result, anyhow, bail};
 use clap::{Args, Subcommand};
+use owo_colors::OwoColorize;
+use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 use toml_edit::{DocumentMut, Item, Table, value};
 
@@ -170,55 +172,221 @@ pub fn lookup_preset(key: &str) -> Option<&'static Preset> {
     presets().iter().find(|p| p.key.eq_ignore_ascii_case(key))
 }
 
-pub async fn run(cmd: ProviderCommand, dir: PathBuf) -> Result<()> {
+pub async fn run(cmd: Option<ProviderCommand>, dir: PathBuf) -> Result<()> {
     match cmd {
-        ProviderCommand::List => list(&dir),
-        ProviderCommand::Presets => {
+        None => interactive_menu(&dir),
+        Some(ProviderCommand::List) => list(&dir),
+        Some(ProviderCommand::Presets) => {
             print_presets();
             Ok(())
         }
-        ProviderCommand::Add(args) => add(args, &dir),
-        ProviderCommand::Remove(args) => remove(args, &dir),
-        ProviderCommand::Use(args) => use_profile(args, &dir),
+        Some(ProviderCommand::Add(args)) => add(args, &dir),
+        Some(ProviderCommand::Remove(args)) => remove(args, &dir),
+        Some(ProviderCommand::Use(args)) => use_profile(args, &dir),
     }
+}
+
+/// Interactive menu when `vulcan provider` is called without a subcommand.
+fn interactive_menu(dir: &Path) -> Result<()> {
+    if !std::io::stdin().is_terminal() {
+        bail!(
+            "vulcan provider (interactive) requires a terminal. Use `vulcan provider list/add/remove/use <args>` for scripting."
+        );
+    }
+
+    let theme = dialoguer::theme::ColorfulTheme::default();
+    let options = &[
+        "List providers",
+        "Add provider",
+        "Remove provider",
+        "Use provider",
+    ];
+    println!();
+    let pick = dialoguer::FuzzySelect::with_theme(&theme)
+        .with_prompt("Provider action")
+        .items(options)
+        .default(0)
+        .interact()
+        .context("cancelled")?;
+
+    match pick {
+        0 => list(dir),
+        1 => interactive_add(dir),
+        2 => interactive_remove(dir),
+        3 => interactive_use(dir),
+        _ => unreachable!(),
+    }
+}
+
+/// Interactive add: pick a preset, enter a name, confirm.
+fn interactive_add(dir: &Path) -> Result<()> {
+    let theme = dialoguer::theme::ColorfulTheme::default();
+    let ps = presets();
+    let labels: Vec<String> = ps
+        .iter()
+        .map(|p| format!("{} ({})", p.display, p.key))
+        .collect();
+
+    println!();
+    let pick = dialoguer::FuzzySelect::with_theme(&theme)
+        .with_prompt("Pick a preset")
+        .items(&labels)
+        .default(0)
+        .interact()
+        .context("picker cancelled")?;
+
+    let preset = &ps[pick];
+    println!();
+    println!("  {} ({})", preset.display, preset.key);
+    println!("  base_url: {}", preset.base_url);
+    println!("  model:    {}", preset.model);
+
+    let name: String = dialoguer::Input::with_theme(&theme)
+        .with_prompt("Profile name")
+        .default(preset.key.to_string())
+        .interact_text()?;
+
+    let confirmed = dialoguer::Confirm::with_theme(&theme)
+        .with_prompt(format!("Add [{}] from {} preset?", name, preset.key))
+        .default(true)
+        .interact()?;
+
+    if !confirmed {
+        println!("Aborted.");
+        return Ok(());
+    }
+
+    add(
+        AddArgs {
+            name,
+            preset: Some(preset.key.to_string()),
+            base_url: None,
+            model: None,
+            api_key: None,
+            max_context: None,
+            disable_catalog: false,
+            force: false,
+        },
+        dir,
+    )?;
+    println!(
+        "{}",
+        "Done. Switch with `/provider <name>` in the TUI or `vulcan provider use <name>`.".dimmed()
+    );
+    Ok(())
+}
+
+/// Interactive remove: pick from existing providers.
+fn interactive_remove(dir: &Path) -> Result<()> {
+    let cfg = crate::config::Config::load_from_dir(dir).unwrap_or_default();
+    let names: Vec<&String> = cfg.providers.keys().collect();
+    if names.is_empty() {
+        bail!("No named provider profiles to remove.");
+    }
+
+    let theme = dialoguer::theme::ColorfulTheme::default();
+    println!();
+    let pick = dialoguer::FuzzySelect::with_theme(&theme)
+        .with_prompt("Pick a provider to remove")
+        .items(&names)
+        .default(0)
+        .interact()
+        .context("cancelled")?;
+
+    let name = names[pick].clone();
+    let confirmed = dialoguer::Confirm::with_theme(&theme)
+        .with_prompt(format!("Permanently remove [{}]?", name))
+        .default(false)
+        .interact()?;
+
+    if !confirmed {
+        println!("Aborted.");
+        return Ok(());
+    }
+
+    remove(RemoveArgs { name: name.clone() }, dir)
+}
+
+/// Interactive use: pick from existing providers.
+fn interactive_use(dir: &Path) -> Result<()> {
+    let cfg = crate::config::Config::load_from_dir(dir).unwrap_or_default();
+    let names: Vec<&String> = cfg.providers.keys().collect();
+    if names.is_empty() {
+        bail!("No named provider profiles to switch to. Add one first.");
+    }
+
+    let theme = dialoguer::theme::ColorfulTheme::default();
+    println!();
+    let pick = dialoguer::FuzzySelect::with_theme(&theme)
+        .with_prompt("Pick a provider to activate")
+        .items(&names)
+        .default(0)
+        .interact()
+        .context("cancelled")?;
+
+    let name = names[pick].clone();
+    use_profile(
+        UseArgs {
+            name: Some(name.clone()),
+            clear: false,
+        },
+        dir,
+    )
 }
 
 fn list(dir: &Path) -> Result<()> {
     let cfg = crate::config::Config::load_from_dir(dir).unwrap_or_default();
-    println!("Provider profiles:");
+    println!("{}", "Provider profiles:".bold());
     println!(
-        "    default · {} · {}",
-        cfg.provider.base_url, cfg.provider.model
+        "  {} {}",
+        "(default)".dimmed(),
+        format!("{} · {}", cfg.provider.base_url, cfg.provider.model)
     );
     let mut names: Vec<&String> = cfg.providers.keys().collect();
     names.sort();
     for name in &names {
         let p = &cfg.providers[*name];
-        println!("    {name} · {} · {}", p.base_url, p.model);
+        let active = match &cfg.active_profile {
+            Some(a) if a == *name => " ●".green().to_string(),
+            _ => String::new(),
+        };
+        println!("  {}{}", name.bold(), active,);
+        println!("    {} {}", "base_url:".dimmed(), p.base_url);
+        println!("    {} {}", "model:".dimmed(), p.model.cyan());
     }
     if cfg.providers.is_empty() {
-        println!("    (no named profiles configured — add one with `vulcan provider add`)");
+        println!(
+            "    {}",
+            "(no named profiles configured — add one with `vulcan provider add`)".dimmed()
+        );
     }
     Ok(())
 }
 
 fn print_presets() {
-    println!("Curated provider presets:");
+    println!("{}", "Curated provider presets:".bold());
     for p in presets() {
         println!();
-        println!("  {} ({})", p.display, p.key);
-        println!("    base_url     : {}", p.base_url);
-        println!("    default_model: {}", p.model);
-        println!("    auth         : {}", p.auth_hint);
+        println!("  {} {}", p.display.bold(), format!("({})", p.key).dimmed());
+        println!("    {}: {}", "base_url".dimmed(), p.base_url);
+        println!("    {}: {}", "default_model".dimmed(), p.model.cyan());
+        println!("    {}: {}", "auth".dimmed(), p.auth_hint.yellow());
         if p.disable_catalog {
-            println!("    catalog      : disabled (self-hosted endpoint)");
+            println!(
+                "    {}: {}",
+                "catalog".dimmed(),
+                "disabled (self-hosted endpoint)".red()
+            );
         }
         if !p.notes.is_empty() {
-            println!("    notes        : {}", p.notes);
+            println!("    {}: {}", "notes".dimmed(), p.notes);
         }
     }
     println!();
-    println!("Add via:  vulcan provider add <name> --preset <key>");
+    println!(
+        "{}",
+        "Add via:  vulcan provider add <name> --preset <key>".dimmed()
+    );
 }
 
 pub fn add(args: AddArgs, dir: &Path) -> Result<()> {
@@ -274,8 +442,16 @@ pub fn add(args: AddArgs, dir: &Path) -> Result<()> {
     doc.insert(&args.name, Item::Table(entry));
 
     write_doc(&providers_path, &doc)?;
-    println!("Wrote [{}] to {}", args.name, providers_path.display());
-    println!("Use `/provider {}` in the TUI to switch.", args.name);
+    println!(
+        "{} Wrote [{}] to {}",
+        "✓".green(),
+        args.name,
+        providers_path.display()
+    );
+    println!(
+        "{}",
+        "Use `/provider <name>` in the TUI to switch.".dimmed()
+    );
     Ok(())
 }
 
@@ -301,7 +477,12 @@ fn remove(args: RemoveArgs, dir: &Path) -> Result<()> {
         );
     }
     write_doc(&providers_path, &doc)?;
-    println!("Removed [{}] from {}", args.name, providers_path.display());
+    println!(
+        "{} Removed [{}] from {}",
+        "✓".green(),
+        args.name,
+        providers_path.display()
+    );
     Ok(())
 }
 
