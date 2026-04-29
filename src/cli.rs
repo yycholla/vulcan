@@ -199,6 +199,13 @@ pub enum Command {
         #[command(subcommand)]
         action: DaemonAction,
     },
+    /// Hidden: end-to-end smoke test for the in-tree client + daemon
+    /// auto-start. Exercises `Client::connect_or_autostart` →
+    /// `daemon.ping` → JSON pretty-print on stdout. Used by the
+    /// `client_autostart` integration test; not a user-facing surface.
+    #[cfg(feature = "daemon")]
+    #[command(name = "__ping", hide = true)]
+    HiddenPing,
 }
 
 /// YYC-266 subcommands under `vulcan daemon`.

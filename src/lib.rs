@@ -19,6 +19,8 @@ pub mod cli_replay;
 pub mod cli_review;
 pub mod cli_run;
 pub mod cli_trust;
+#[cfg(feature = "daemon")]
+pub mod client;
 pub mod code;
 pub mod config;
 pub mod config_registry;
