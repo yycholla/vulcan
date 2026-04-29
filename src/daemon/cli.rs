@@ -121,9 +121,14 @@ async fn reload() -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn install(_systemd: bool) -> anyhow::Result<()> {
-    // Task 0.12 implements the actual systemd unit emission.
-    anyhow::bail!("`daemon install` lands in Task 0.12")
+async fn install(systemd: bool) -> anyhow::Result<()> {
+    if !systemd {
+        anyhow::bail!("`daemon install` requires `--systemd` (only target supported in Slice 0)");
+    }
+    let unit_path = crate::daemon::install::install_systemd_default()?;
+    println!("wrote {}", unit_path.display());
+    println!("enable with: systemctl --user enable --now vulcan.service");
+    Ok(())
 }
 
 async fn call(method: &str, params: serde_json::Value) -> anyhow::Result<serde_json::Value> {
