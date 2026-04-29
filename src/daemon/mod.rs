@@ -6,7 +6,10 @@
 //! length-delimited frame I/O over any [`tokio::io::AsyncRead`] /
 //! [`tokio::io::AsyncWrite`], and the daemon skeleton.
 
+pub mod lifecycle;
 pub mod protocol;
 
+#[cfg(test)]
+mod lifecycle_tests;
 #[cfg(test)]
 mod protocol_tests;
