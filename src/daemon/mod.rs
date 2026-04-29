@@ -12,6 +12,7 @@ pub mod handlers;
 pub mod lifecycle;
 pub mod protocol;
 pub mod server;
+pub mod session;
 pub mod state;
 
 #[cfg(test)]
