@@ -5,10 +5,11 @@
 //! previous daemon crashed without releasing — checks if the recorded PID
 //! is still alive (via `kill(pid, None)`) and overwrites if not.
 
-use std::fs::{File, OpenOptions};
+use std::fs::{File, OpenOptions, Permissions};
 use std::io::{Read, Write};
-use std::os::unix::fs::OpenOptionsExt;
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
+use tokio::net::UnixListener;
 
 /// Owner of a `daemon.pid` file. The file exists for the lifetime of this
 /// struct; `Drop` removes it.
@@ -76,4 +77,50 @@ fn is_alive(pid: i32) -> bool {
     use nix::sys::signal::kill;
     use nix::unistd::Pid;
     kill(Pid::from_raw(pid), None).is_ok()
+}
+
+/// Owns the daemon's listening socket file. Ensures 0600 perms,
+/// cleans up stale leftovers, and unlinks on drop.
+///
+/// Distinguishes "stale leftover" (some non-socket file at the path,
+/// or a dead socket no one is listening on) from "live daemon"
+/// (something accepting connections). Stale files are removed; live
+/// sockets cause `AddrInUse` rather than silent takeover.
+pub struct SocketBinder {
+    pub listener: UnixListener,
+    path: PathBuf,
+}
+
+impl SocketBinder {
+    pub async fn bind(path: &Path) -> std::io::Result<Self> {
+        // If something exists at the path, decide stale vs live.
+        if path.exists() {
+            match tokio::net::UnixStream::connect(path).await {
+                Ok(_) => {
+                    // Live daemon (or some other server) is accepting on it.
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::AddrInUse,
+                        format!("socket already in use at {}", path.display()),
+                    ));
+                }
+                Err(_) => {
+                    // Stale: not a live socket, or a non-socket file. Remove.
+                    std::fs::remove_file(path)?;
+                }
+            }
+        }
+
+        let listener = UnixListener::bind(path)?;
+        std::fs::set_permissions(path, Permissions::from_mode(0o600))?;
+        Ok(Self {
+            listener,
+            path: path.to_path_buf(),
+        })
+    }
+}
+
+impl Drop for SocketBinder {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
+    }
 }
