@@ -126,8 +126,18 @@ pub struct MigrationReport {
     pub main_rewritten: bool,
 }
 
-/// Path to the Vulcan config directory (~/.vulcan/)
+/// Path to the Vulcan config directory (defaults to `~/.vulcan/`).
+///
+/// Honors the `VULCAN_HOME` environment variable when set — this is the
+/// override used by the daemon e2e harness (and by anyone who needs an
+/// alternate config root, e.g. tests, CI sandboxing). When unset, falls
+/// back to `$HOME/.vulcan`.
 pub fn vulcan_home() -> PathBuf {
+    if let Ok(override_path) = std::env::var("VULCAN_HOME") {
+        if !override_path.is_empty() {
+            return PathBuf::from(override_path);
+        }
+    }
     dirs_or_default()
 }
 

@@ -19,11 +19,15 @@ pub mod cli_replay;
 pub mod cli_review;
 pub mod cli_run;
 pub mod cli_trust;
+#[cfg(feature = "daemon")]
+pub mod client;
 pub mod code;
 pub mod config;
 pub mod config_registry;
 pub mod context;
 pub mod context_pack;
+#[cfg(feature = "daemon")]
+pub mod daemon;
 pub mod doctor;
 pub mod extensions;
 #[cfg(feature = "gateway")]

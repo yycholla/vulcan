@@ -1,0 +1,157 @@
+//! `vulcan daemon ...` subcommand action handlers (YYC-266 Slice 0
+//! Task 0.8).
+//!
+//! Translates the parsed [`DaemonAction`] into either an in-process
+//! server bring-up (`start`) or a Unix-socket round trip to a running
+//! daemon (`stop`/`status`/`reload`). `install` is stubbed pending Task
+//! 0.12.
+
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+
+use anyhow::Context;
+
+use crate::cli::DaemonAction;
+use crate::config::vulcan_home;
+use crate::daemon::lifecycle::PidFile;
+use crate::daemon::protocol::{Request, Response, read_frame_bytes, write_request};
+use crate::daemon::server::Server;
+use crate::daemon::state::DaemonState;
+
+/// Entry point dispatched from `main.rs` for `vulcan daemon ...`.
+pub async fn run(action: DaemonAction) -> anyhow::Result<()> {
+    match action {
+        DaemonAction::Start { detach } => start(detach).await,
+        DaemonAction::Stop { force } => stop(force).await,
+        DaemonAction::Status => status().await,
+        DaemonAction::Reload => reload().await,
+        DaemonAction::Install { systemd } => install(systemd).await,
+    }
+}
+
+fn home_paths() -> (PathBuf, PathBuf) {
+    let home = vulcan_home();
+    (home.join("daemon.pid"), home.join("vulcan.sock"))
+}
+
+async fn start(detach: bool) -> anyhow::Result<()> {
+    let home = vulcan_home();
+    std::fs::create_dir_all(&home).with_context(|| format!("creating {}", home.display()))?;
+    let (pid_path, sock_path) = home_paths();
+
+    if detach {
+        return spawn_detached(&sock_path).await;
+    }
+
+    let _pidfile = PidFile::acquire_or_replace_stale(&pid_path)
+        .with_context(|| format!("acquiring pid file {}", pid_path.display()))?;
+    let state = Arc::new(DaemonState::new());
+    let server = Server::bind(&sock_path, state.clone())
+        .await
+        .with_context(|| format!("binding socket {}", sock_path.display()))?;
+
+    install_signal_handlers(state.clone());
+
+    server.run().await;
+    Ok(())
+}
+
+fn install_signal_handlers(state: Arc<DaemonState>) {
+    tokio::spawn(async move {
+        use tokio::signal::unix::{SignalKind, signal};
+        let mut sigterm = match signal(SignalKind::terminate()) {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::warn!(error = %e, "failed to install SIGTERM handler");
+                return;
+            }
+        };
+        let mut sigint = match signal(SignalKind::interrupt()) {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::warn!(error = %e, "failed to install SIGINT handler");
+                return;
+            }
+        };
+        tokio::select! {
+            _ = sigterm.recv() => tracing::info!("daemon: SIGTERM received"),
+            _ = sigint.recv() => tracing::info!("daemon: SIGINT received"),
+        }
+        state.signal_shutdown();
+    });
+}
+
+async fn spawn_detached(sock_path: &Path) -> anyhow::Result<()> {
+    let exe = std::env::current_exe().context("locating own exe")?;
+    // The detached child re-execs `vulcan daemon start` (without
+    // `--detach`) so it runs the in-process server path. stdio is
+    // pointed at `/dev/null` so the parent can return cleanly.
+    std::process::Command::new(&exe)
+        .args(["daemon", "start"])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .context("spawning detached daemon")?;
+
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while Instant::now() < deadline {
+        if tokio::net::UnixStream::connect(sock_path).await.is_ok() {
+            return Ok(());
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    anyhow::bail!("daemon did not come up within 5s")
+}
+
+async fn stop(force: bool) -> anyhow::Result<()> {
+    call("daemon.shutdown", serde_json::json!({ "force": force })).await?;
+    Ok(())
+}
+
+async fn status() -> anyhow::Result<()> {
+    let result = call("daemon.status", serde_json::json!({})).await?;
+    println!("{}", serde_json::to_string_pretty(&result)?);
+    Ok(())
+}
+
+async fn reload() -> anyhow::Result<()> {
+    call("daemon.reload", serde_json::json!({})).await?;
+    Ok(())
+}
+
+async fn install(systemd: bool) -> anyhow::Result<()> {
+    if !systemd {
+        anyhow::bail!("`daemon install` requires `--systemd` (only target supported in Slice 0)");
+    }
+    let unit_path = crate::daemon::install::install_systemd_default()?;
+    println!("wrote {}", unit_path.display());
+    println!("enable with: systemctl --user enable --now vulcan.service");
+    Ok(())
+}
+
+async fn call(method: &str, params: serde_json::Value) -> anyhow::Result<serde_json::Value> {
+    let (_, sock_path) = home_paths();
+    let mut stream = tokio::net::UnixStream::connect(&sock_path)
+        .await
+        .with_context(|| format!("connecting to {}", sock_path.display()))?;
+    let req = Request {
+        version: 1,
+        id: format!("cli-{method}"),
+        session: "main".into(),
+        method: method.into(),
+        params,
+    };
+    write_request(&mut stream, &req)
+        .await
+        .context("writing request frame")?;
+    let body = read_frame_bytes(&mut stream)
+        .await
+        .context("reading response frame")?;
+    let resp: Response = serde_json::from_slice(&body).context("decoding response")?;
+    if let Some(err) = resp.error {
+        anyhow::bail!("{}: {}", err.code, err.message);
+    }
+    Ok(resp.result.unwrap_or_default())
+}

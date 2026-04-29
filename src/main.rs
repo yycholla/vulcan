@@ -248,6 +248,18 @@ async fn main() -> anyhow::Result<()> {
             init_cli_logging();
             vulcan::cli_cortex::run(cmd).await?;
         }
+        #[cfg(feature = "daemon")]
+        Some(Command::Daemon { action }) => {
+            init_cli_logging();
+            vulcan::daemon::cli::run(action).await?;
+        }
+        #[cfg(feature = "daemon")]
+        Some(Command::HiddenPing) => {
+            init_cli_logging();
+            let mut client = vulcan::client::Client::connect_or_autostart().await?;
+            let result = client.call("daemon.ping", serde_json::json!({})).await?;
+            println!("{}", serde_json::to_string_pretty(&result)?);
+        }
     }
 
     Ok(())
