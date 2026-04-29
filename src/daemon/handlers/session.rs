@@ -85,7 +85,18 @@ pub async fn destroy(state: &DaemonState, id: String, session_id: String) -> Res
     // session before we drop the map entry. The actual Agent (if
     // any) will be dropped when the last `AgentHandle` Arc is
     // released.
+    //
+    // Fire BOTH the session-level cancel token and the agent's per-turn
+    // cancel token. The session-level token is for any work bound to
+    // the session lifecycle (e.g. future watchers); the agent_cancel
+    // token signals an in-flight turn to stop at its next cancellation
+    // check. Without firing agent_cancel, a mid-turn agent loop would
+    // keep running and eventually try to send Response::ok into a
+    // oneshot::Sender whose receiver has been dropped.
     sess.cancel.cancel();
+    if let Some(token) = sess.agent_cancel() {
+        token.cancel();
+    }
     state.sessions().destroy(&session_id);
 
     Response::ok(id, json!({ "ok": true }))
@@ -227,5 +238,31 @@ mod tests {
         let resp = list(&state, "r3".into()).await;
         let count = resp.result.unwrap()["sessions"].as_array().unwrap().len();
         assert_eq!(count, 3, "main + a + b");
+    }
+
+    #[tokio::test]
+    async fn destroy_fires_agent_cancel_token_when_present() {
+        use tokio_util::sync::CancellationToken;
+
+        let state = Arc::new(DaemonState::for_tests_minimal());
+        create(&state, "r1".into(), Some("foo".into()), None).await;
+
+        // Install a fake cancel token directly on the session for the test.
+        let foo = state.sessions().get("foo").unwrap();
+        let token = CancellationToken::new();
+        *foo.agent_cancel.lock() = Some(token.clone());
+
+        destroy(&state, "r2".into(), "foo".into()).await;
+        assert!(token.is_cancelled(), "destroy must fire agent_cancel token");
+    }
+
+    #[tokio::test]
+    async fn destroy_without_agent_cancel_still_succeeds() {
+        let state = Arc::new(DaemonState::for_tests_minimal());
+        create(&state, "r1".into(), Some("foo".into()), None).await;
+        // No agent_cancel installed — destroy must still succeed.
+        let resp = destroy(&state, "r2".into(), "foo".into()).await;
+        assert_eq!(resp.result.unwrap()["ok"], true);
+        assert!(state.sessions().get("foo").is_none());
     }
 }

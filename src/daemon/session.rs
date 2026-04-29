@@ -36,6 +36,12 @@ pub struct SessionState {
     /// cheaply clone a handle and lock the Agent across `await`
     /// points without holding the outer `parking_lot::Mutex`.
     pub agent: Mutex<Option<AgentHandle>>,
+    /// Per-turn cancel — clone of the installed agent's turn-cancel
+    /// token. Cheap to fire; doesn't require locking the AsyncMutex.
+    /// `None` until [`SessionState::set_agent`] installs an agent.
+    /// `prompt.cancel` fires this directly so it doesn't deadlock
+    /// against an in-flight `prompt.stream` that holds the AsyncMutex.
+    pub agent_cancel: Mutex<Option<CancellationToken>>,
 }
 
 impl SessionState {
@@ -48,12 +54,16 @@ impl SessionState {
             in_flight: Mutex::new(false),
             cancel: CancellationToken::new(),
             agent: Mutex::new(None),
+            agent_cancel: Mutex::new(None),
         }
     }
 
     /// Install a warm Agent into this session. Called by daemon startup
     /// for the "main" session, and by `session.create` for new sessions.
+    /// Also captures a clone of the agent's per-turn cancel token so
+    /// `prompt.cancel` can fire it without locking the AsyncMutex.
     pub fn set_agent(&self, agent: crate::agent::Agent) {
+        *self.agent_cancel.lock() = Some(agent.cancel_handle());
         *self.agent.lock() = Some(Arc::new(tokio::sync::Mutex::new(agent)));
     }
 
@@ -73,6 +83,14 @@ impl SessionState {
     /// via `session.create` for non-main; lazy-build is deferred).
     pub fn agent_arc(&self) -> Option<AgentHandle> {
         self.agent.lock().clone()
+    }
+
+    /// Cloneable handle to the agent's per-turn cancellation token,
+    /// captured at `set_agent` time. Returns `None` if no agent is
+    /// installed. Firing this token cancels the in-flight turn without
+    /// locking the AsyncMutex.
+    pub fn agent_cancel(&self) -> Option<CancellationToken> {
+        self.agent_cancel.lock().clone()
     }
 }
 

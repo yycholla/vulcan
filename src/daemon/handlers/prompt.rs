@@ -122,8 +122,13 @@ pub async fn run(state: &DaemonState, id: String, session_id: String, input: &st
         Err(e) => return Response::error(id, e),
     };
     sess.touch();
+    *sess.in_flight.lock() = true;
     let mut agent = agent_arc.lock().await;
-    match agent.run_prompt(input).await {
+    let result = agent.run_prompt(input).await;
+    drop(agent);
+    *sess.in_flight.lock() = false;
+    sess.touch();
+    match result {
         Ok(output) => Response::ok(id, json!({ "text": output })),
         Err(e) => Response::error(
             id,
@@ -157,8 +162,14 @@ pub fn stream(
         }
     };
     sess.touch();
+    // Mark in_flight BEFORE spawning so daemon.status / any_in_flight()
+    // see the busy state immediately, even if the spawned task hasn't
+    // been scheduled yet. The spawned task clears it in every
+    // completion path.
+    *sess.in_flight.lock() = true;
 
     let rid = req_id.clone();
+    let sess_for_task = sess.clone();
     tokio::spawn(async move {
         let (event_tx, mut event_rx) = mpsc::channel::<StreamEvent>(32);
         let cancel_token = tokio_util::sync::CancellationToken::new();
@@ -186,31 +197,30 @@ pub fn stream(
         }
 
         // Await final turn result (Result<String> — just text).
-        match prompt_task.await {
-            Ok(Ok(final_text)) => {
-                let _ = done_tx.send(Response::ok(rid.clone(), json!({ "text": final_text })));
-            }
-            Ok(Err(e)) => {
-                let _ = done_tx.send(Response::error(
-                    rid.clone(),
-                    ProtocolError {
-                        code: "PROMPT_RUN_FAILED".into(),
-                        message: format!("{e}"),
-                        retryable: false,
-                    },
-                ));
-            }
-            Err(join_err) => {
-                let _ = done_tx.send(Response::error(
-                    rid.clone(),
-                    ProtocolError {
-                        code: "JOIN_ERROR".into(),
-                        message: format!("{join_err}"),
-                        retryable: false,
-                    },
-                ));
-            }
-        }
+        let final_response = match prompt_task.await {
+            Ok(Ok(final_text)) => Response::ok(rid.clone(), json!({ "text": final_text })),
+            Ok(Err(e)) => Response::error(
+                rid.clone(),
+                ProtocolError {
+                    code: "PROMPT_RUN_FAILED".into(),
+                    message: format!("{e}"),
+                    retryable: false,
+                },
+            ),
+            Err(join_err) => Response::error(
+                rid.clone(),
+                ProtocolError {
+                    code: "JOIN_ERROR".into(),
+                    message: format!("{join_err}"),
+                    retryable: false,
+                },
+            ),
+        };
+
+        // Clear in_flight in all 3 completion paths before signalling done.
+        *sess_for_task.in_flight.lock() = false;
+        sess_for_task.touch();
+        let _ = done_tx.send(final_response);
     });
 
     (frame_rx, done_rx)
@@ -218,15 +228,44 @@ pub fn stream(
 
 // -- prompt.cancel --
 
+/// Fire the session's per-turn cancellation token without locking the
+/// AsyncMutex. This is critical: `prompt.stream` holds the AsyncMutex
+/// for the entire turn, so any cancel path that takes the AsyncMutex
+/// would deadlock against the very stream it's trying to cancel.
+///
+/// The token clone is captured at `set_agent` time and stashed on
+/// `SessionState::agent_cancel`. Firing it cancels the in-flight turn;
+/// the next `run_prompt` swap installs a fresh token.
+///
+/// The response includes `cancelled: <bool>` reflecting whether a turn
+/// was actually in flight when cancel was called.
 pub async fn cancel(state: &DaemonState, id: String, session_id: String) -> Response {
-    let (sess, agent_arc) = match resolve_session_with_agent(state, &session_id) {
-        Ok(pair) => pair,
-        Err(e) => return Response::error(id, e),
+    let Some(sess) = state.sessions().get(&session_id) else {
+        return Response::error(
+            id,
+            ProtocolError {
+                code: "SESSION_NOT_FOUND".into(),
+                message: format!("session '{session_id}' not found"),
+                retryable: false,
+            },
+        );
     };
+    let Some(token) = sess.agent_cancel() else {
+        return Response::error(
+            id,
+            ProtocolError {
+                code: "AGENT_NOT_AVAILABLE".into(),
+                message: format!(
+                    "session '{session_id}' has no agent yet; lazy-build deferred to Task 3.X"
+                ),
+                retryable: false,
+            },
+        );
+    };
+    let was_in_flight = *sess.in_flight.lock();
+    token.cancel();
     sess.touch();
-    let agent = agent_arc.lock().await;
-    agent.cancel_current_turn();
-    Response::ok(id, json!({ "cancelled": true }))
+    Response::ok(id, json!({ "cancelled": was_in_flight }))
 }
 
 #[cfg(test)]
@@ -250,5 +289,52 @@ mod tests {
         let resp = run(&state, "r1".into(), "main".into(), "hi").await;
         let err = resp.error.expect("err");
         assert_eq!(err.code, "AGENT_NOT_AVAILABLE");
+    }
+
+    #[tokio::test]
+    async fn cancel_returns_session_not_found_for_bogus_session() {
+        let state = Arc::new(DaemonState::for_tests_minimal());
+        let resp = cancel(&state, "r1".into(), "ghost".into()).await;
+        let err = resp.error.expect("err");
+        assert_eq!(err.code, "SESSION_NOT_FOUND");
+    }
+
+    #[tokio::test]
+    async fn cancel_returns_agent_not_available_when_no_agent() {
+        let state = Arc::new(DaemonState::for_tests_minimal());
+        // "main" has no agent in for_tests_minimal
+        let resp = cancel(&state, "r1".into(), "main".into()).await;
+        let err = resp.error.expect("err");
+        assert_eq!(err.code, "AGENT_NOT_AVAILABLE");
+    }
+
+    #[tokio::test]
+    async fn cancel_fires_token_and_reports_in_flight_state() {
+        use tokio_util::sync::CancellationToken;
+        let state = Arc::new(DaemonState::for_tests_minimal());
+        let main = state.sessions().get("main").unwrap();
+        let token = CancellationToken::new();
+        *main.agent_cancel.lock() = Some(token.clone());
+        *main.in_flight.lock() = true;
+
+        let resp = cancel(&state, "r1".into(), "main".into()).await;
+        let result = resp.result.expect("ok");
+        assert_eq!(result["cancelled"], true);
+        assert!(token.is_cancelled(), "cancel must fire agent_cancel token");
+    }
+
+    #[tokio::test]
+    async fn cancel_reports_false_when_not_in_flight() {
+        use tokio_util::sync::CancellationToken;
+        let state = Arc::new(DaemonState::for_tests_minimal());
+        let main = state.sessions().get("main").unwrap();
+        let token = CancellationToken::new();
+        *main.agent_cancel.lock() = Some(token.clone());
+        // in_flight stays false (default)
+
+        let resp = cancel(&state, "r1".into(), "main".into()).await;
+        let result = resp.result.expect("ok");
+        assert_eq!(result["cancelled"], false);
+        assert!(token.is_cancelled(), "token still fires even when idle");
     }
 }
