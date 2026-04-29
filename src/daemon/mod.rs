@@ -2,8 +2,9 @@
 //! (YYC-266). This module is gated by the `daemon` feature so embedders /
 //! minimal builds can omit the daemon machinery entirely.
 //!
-//! Slice 0 lays down the wire protocol (this submodule) and the daemon
-//! skeleton. Frame I/O lands in Task 0.3.
+//! Slice 0 lays down the wire protocol (this submodule), the
+//! length-delimited frame I/O over any [`tokio::io::AsyncRead`] /
+//! [`tokio::io::AsyncWrite`], and the daemon skeleton.
 
 pub mod protocol;
 

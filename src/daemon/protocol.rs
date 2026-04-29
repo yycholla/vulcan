@@ -1,9 +1,14 @@
-//! Daemon ↔ client wire protocol types (YYC-266 Slice 0, Task 0.2).
+//! Daemon ↔ client wire protocol types (YYC-266 Slice 0).
 //!
 //! These are the JSON shapes that ride inside length-delimited frames on
-//! the Unix-domain socket. Frame I/O itself lands in Task 0.3 — this
-//! module is purely the envelope structs plus a version-strict request
-//! parser.
+//! the Unix-domain socket, plus the frame I/O helpers that read and write
+//! them over any [`tokio::io::AsyncRead`] / [`tokio::io::AsyncWrite`].
+//!
+//! - Envelope types: [`Request`], [`Response`], [`StreamFrame`],
+//!   [`ProtocolError`].
+//! - Version-strict request parsing: [`parse_request_strict`].
+//! - Length-delimited frame I/O: [`read_frame_bytes`] /
+//!   [`write_frame_bytes`] and the typed `read_*` / `write_*` wrappers.
 //!
 //! ## Envelopes
 //!
@@ -213,7 +218,10 @@ pub async fn write_stream_frame<W: AsyncWrite + Unpin>(
     write_frame_bytes(w, &body).await
 }
 
-/// Convenience: read one frame as a `StreamFrame`.
+/// Convenience: read one frame as a `StreamFrame` (no version check —
+/// like [`read_response`], clients trust the daemon they auto-started.
+/// Daemons must use [`parse_request_strict`] via [`read_request`] for
+/// incoming traffic instead).
 pub async fn read_stream_frame<R: AsyncRead + Unpin>(r: &mut R) -> std::io::Result<StreamFrame> {
     let body = read_frame_bytes(r).await?;
     serde_json::from_slice(&body).map_err(std::io::Error::other)
