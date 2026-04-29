@@ -24,6 +24,8 @@ pub mod config;
 pub mod config_registry;
 pub mod context;
 pub mod context_pack;
+#[cfg(feature = "daemon")]
+pub mod daemon;
 pub mod doctor;
 pub mod extensions;
 #[cfg(feature = "gateway")]
