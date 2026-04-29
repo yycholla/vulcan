@@ -81,3 +81,57 @@ fn daemon_status_fails_when_no_daemon() {
         .assert()
         .failure(); // no socket present
 }
+
+/// Locked-design check: the daemon's socket file must be 0600. Same-user
+/// trust model (ssh-agent precedent) — file mode is the only access
+/// control on the IPC surface.
+#[test]
+fn daemon_socket_is_0600() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempdir().unwrap();
+    vulcan_with_home(dir.path())
+        .args(["daemon", "start", "--detach"])
+        .assert()
+        .success();
+    assert!(
+        wait_for_socket(dir.path(), Duration::from_secs(5)),
+        "socket must come up within 5s"
+    );
+
+    let sock = dir.path().join("vulcan.sock");
+    let mode = std::fs::metadata(&sock).unwrap().permissions().mode() & 0o777;
+    assert_eq!(mode, 0o600, "socket must be owner-only RW");
+
+    vulcan_with_home(dir.path())
+        .args(["daemon", "stop"])
+        .assert()
+        .success();
+}
+
+/// PID file must also be 0600 — it sits next to the socket and is
+/// written under the same threat model.
+#[test]
+fn daemon_pid_file_is_0600() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempdir().unwrap();
+    vulcan_with_home(dir.path())
+        .args(["daemon", "start", "--detach"])
+        .assert()
+        .success();
+    assert!(
+        wait_for_socket(dir.path(), Duration::from_secs(5)),
+        "socket must come up within 5s"
+    );
+
+    let pid = dir.path().join("daemon.pid");
+    assert!(pid.exists(), "pid file present once socket is up");
+    let mode = std::fs::metadata(&pid).unwrap().permissions().mode() & 0o777;
+    assert_eq!(mode, 0o600, "pid file must be owner-only RW");
+
+    vulcan_with_home(dir.path())
+        .args(["daemon", "stop"])
+        .assert()
+        .success();
+}
