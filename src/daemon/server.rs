@@ -36,9 +36,14 @@ impl Server {
         })
     }
 
-    /// Run the accept loop until `state.signal_shutdown()` is observed.
-    /// Per-connection tasks are detached and may outlive shutdown briefly
-    /// while finishing their last request.
+    /// Run the accept loop until shutdown is observed.
+    ///
+    /// On shutdown, this function returns. Per-connection tasks were
+    /// spawned detached; whether they get to finish in-flight work depends
+    /// on whether the surrounding tokio runtime keeps spinning after
+    /// `run()` returns. On a runtime drop they are cancelled at any
+    /// await point — graceful drain is a Slice 1+ concern (see YYC-266
+    /// followup ticket on `JoinSet`-based shutdown).
     pub async fn run(self) {
         let mut shutdown = self.state.shutdown_signal();
 
@@ -208,6 +213,35 @@ mod tests {
             err.code, "VERSION_MISMATCH",
             "structured error preserved across socket boundary"
         );
+
+        state.signal_shutdown();
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(2), handle).await;
+    }
+
+    #[tokio::test]
+    async fn server_returns_unknown_method_error() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("vulcan.sock");
+        let state = Arc::new(DaemonState::new());
+        let server = Server::bind(&path, state.clone()).await.unwrap();
+        let handle = tokio::spawn(server.run());
+
+        let mut client = UnixStream::connect(&path).await.unwrap();
+        let req = Request {
+            version: 1,
+            id: "u1".into(),
+            session: "main".into(),
+            method: "method.does.not.exist".into(),
+            params: serde_json::json!({}),
+        };
+        write_request(&mut client, &req).await.unwrap();
+        let body = read_frame_bytes(&mut client).await.unwrap();
+        let resp: Response = serde_json::from_slice(&body).unwrap();
+        let err = resp
+            .error
+            .expect("dispatcher error survives socket boundary");
+        assert_eq!(err.code, "UNKNOWN_METHOD");
+        assert!(err.message.contains("method.does.not.exist"));
 
         state.signal_shutdown();
         let _ = tokio::time::timeout(std::time::Duration::from_secs(2), handle).await;
