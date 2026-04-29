@@ -3,20 +3,23 @@
 
 use std::sync::Arc;
 use std::time::Instant;
-use tokio::sync::Notify;
+use tokio::sync::{Notify, watch};
 
 /// Per-process daemon state, shared across all connections.
 pub struct DaemonState {
     started_at: Instant,
-    shutdown: Arc<Notify>,
+    shutdown_tx: watch::Sender<bool>,
+    shutdown_rx: watch::Receiver<bool>,
     reload: Arc<Notify>,
 }
 
 impl DaemonState {
     pub fn new() -> Self {
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
         Self {
             started_at: Instant::now(),
-            shutdown: Arc::new(Notify::new()),
+            shutdown_tx,
+            shutdown_rx,
             reload: Arc::new(Notify::new()),
         }
     }
@@ -25,15 +28,24 @@ impl DaemonState {
         self.started_at.elapsed().as_secs()
     }
 
-    /// Notify waiters that the daemon should shut down. Idempotent.
+    /// Signal shutdown. Idempotent and latching — once called, every
+    /// existing AND future call to [`Self::shutdown_signal`] observes
+    /// the latched `true` value via `borrow()`, and any receiver
+    /// acquired *before* the signal will resolve `changed().await`
+    /// immediately. No registration ordering required (unlike `Notify`,
+    /// which only wakes already-parked waiters).
     pub fn signal_shutdown(&self) {
-        self.shutdown.notify_waiters();
+        // Ignore send error: receivers only get dropped when the daemon
+        // is already torn down past the point of caring.
+        let _ = self.shutdown_tx.send(true);
     }
 
-    /// Acquire a clone of the shutdown notifier; await `.notified()` to
-    /// observe shutdown.
-    pub fn shutdown_signal(&self) -> Arc<Notify> {
-        self.shutdown.clone()
+    /// Acquire a watch receiver. Await `recv.changed().await` (or check
+    /// `*recv.borrow()`) to observe shutdown. Safe to call before or
+    /// after [`Self::signal_shutdown`] — late callers see the latched
+    /// `true` value via `borrow()`.
+    pub fn shutdown_signal(&self) -> watch::Receiver<bool> {
+        self.shutdown_rx.clone()
     }
 
     /// Queue a config reload (eventually drained by config_watch's

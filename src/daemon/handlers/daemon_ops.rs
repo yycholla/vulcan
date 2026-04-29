@@ -56,11 +56,15 @@ mod tests {
         assert_eq!(r["pong"], true);
     }
 
-    #[test]
-    fn shutdown_signal_idempotent() {
-        // Multiple signals are fine — Notify::notify_waiters drops if no waiters.
+    #[tokio::test]
+    async fn shutdown_signal_latches() {
+        // Verify the watch-based shutdown is both idempotent (multiple
+        // calls don't panic) and latching (a receiver acquired AFTER
+        // the signal still observes the true value via borrow()).
         let s = DaemonState::new();
         s.signal_shutdown();
         s.signal_shutdown();
+        let rx = s.shutdown_signal();
+        assert!(*rx.borrow(), "late receiver sees latched shutdown");
     }
 }

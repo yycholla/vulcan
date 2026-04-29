@@ -82,28 +82,21 @@ mod tests {
     #[tokio::test]
     async fn shutdown_signals_state() {
         let state = Arc::new(crate::daemon::state::DaemonState::new());
-        let signal = state.shutdown_signal();
+        let mut signal = state.shutdown_signal();
         let dispatcher = Dispatcher::new(state);
 
-        // Spawn a task that waits on the shutdown signal
-        let waiter = tokio::spawn(async move {
-            signal.notified().await;
-        });
-        // Yield so the waiter task reaches `.notified().await` and
-        // registers itself before we trigger `notify_waiters`. Without
-        // this, the single-threaded test runtime races the dispatch
-        // ahead of the waiter.
-        tokio::task::yield_now().await;
-
-        // Dispatch shutdown
+        // Note: with watch, no yield_now needed — the channel is
+        // latching, so even if `changed()` is awaited AFTER the
+        // dispatch fires, it resolves immediately for receivers that
+        // were acquired BEFORE the send.
         let resp = dispatcher.dispatch(req("daemon.shutdown")).await;
         assert_eq!(resp.result.unwrap()["ok"], true);
 
-        // Waiter should resolve quickly
-        tokio::time::timeout(std::time::Duration::from_millis(500), waiter)
+        tokio::time::timeout(std::time::Duration::from_millis(500), signal.changed())
             .await
-            .expect("shutdown signal must fire")
-            .unwrap();
+            .expect("shutdown must propagate")
+            .expect("watch sender alive");
+        assert!(*signal.borrow(), "watch latched true");
     }
 
     #[tokio::test]
@@ -115,8 +108,11 @@ mod tests {
         let waiter = tokio::spawn(async move {
             signal.notified().await;
         });
-        // See `shutdown_signals_state` — yield so the waiter registers
-        // before `notify_waiters` fires.
+        // Shutdown moved to watch (latching); reload still uses Notify
+        // because it's multi-fire and Task 0.10 (config_watch) will
+        // replace the whole reload pipeline anyway. Notify only wakes
+        // already-parked waiters, so yield to let the waiter task
+        // register before `notify_waiters` fires.
         tokio::task::yield_now().await;
 
         let resp = dispatcher.dispatch(req("daemon.reload")).await;
