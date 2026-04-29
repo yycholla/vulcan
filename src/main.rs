@@ -248,6 +248,11 @@ async fn main() -> anyhow::Result<()> {
             init_cli_logging();
             vulcan::cli_cortex::run(cmd).await?;
         }
+        #[cfg(feature = "daemon")]
+        Some(Command::Daemon { action }) => {
+            init_cli_logging();
+            vulcan::daemon::cli::run(action).await?;
+        }
     }
 
     Ok(())

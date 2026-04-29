@@ -192,6 +192,42 @@ pub enum Command {
         #[command(subcommand)]
         cmd: CortexSubcommand,
     },
+    /// YYC-266: daemon process management (long-lived backend
+    /// serving TUI/CLI/gateway over a Unix socket).
+    #[cfg(feature = "daemon")]
+    Daemon {
+        #[command(subcommand)]
+        action: DaemonAction,
+    },
+}
+
+/// YYC-266 subcommands under `vulcan daemon`.
+#[cfg(feature = "daemon")]
+#[derive(Subcommand, Debug)]
+pub enum DaemonAction {
+    /// Start the long-lived daemon process.
+    Start {
+        /// Fork into the background; return when socket is ready.
+        #[arg(long)]
+        detach: bool,
+    },
+    /// Send a graceful shutdown signal to a running daemon.
+    Stop {
+        /// Force shutdown (currently same as graceful — placeholder
+        /// for future hard-kill semantics).
+        #[arg(long)]
+        force: bool,
+    },
+    /// Print daemon status (pid, uptime, sessions).
+    Status,
+    /// Trigger a config reload.
+    Reload,
+    /// Write a systemd user unit at
+    /// `$XDG_CONFIG_HOME/systemd/user/vulcan.service`.
+    Install {
+        #[arg(long)]
+        systemd: bool,
+    },
 }
 
 /// YYC-242 subcommands under `vulcan gateway`. `Run` is the

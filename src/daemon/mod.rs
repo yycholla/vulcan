@@ -6,6 +6,7 @@
 //! length-delimited frame I/O over any [`tokio::io::AsyncRead`] /
 //! [`tokio::io::AsyncWrite`], and the daemon skeleton.
 
+pub mod cli;
 pub mod dispatch;
 pub mod handlers;
 pub mod lifecycle;
