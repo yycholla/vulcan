@@ -155,3 +155,174 @@ fn stream_frame_push_omits_id() {
     assert_eq!(value["stream"], "config_reloaded");
     assert_eq!(value["version"], PROTOCOL_VERSION);
 }
+
+// -----------------------------------------------------------------------------
+// Task 0.3: length-delimited frame I/O over async streams
+// -----------------------------------------------------------------------------
+
+use super::protocol::{
+    read_frame_bytes, read_request, read_response, read_stream_frame, write_frame_bytes,
+    write_request, write_response, write_stream_frame,
+};
+use tokio::io::duplex;
+
+#[tokio::test]
+async fn frame_round_trip_request() {
+    let (mut a, mut b) = duplex(4096);
+    let req = Request {
+        version: 1,
+        id: "x".into(),
+        session: "main".into(),
+        method: "daemon.ping".into(),
+        params: serde_json::json!({}),
+    };
+    write_request(&mut a, &req).await.unwrap();
+    drop(a); // signal EOF to reader after the frame
+    let got = read_request(&mut b).await.unwrap();
+    assert_eq!(got.id, "x");
+    assert_eq!(got.method, "daemon.ping");
+}
+
+#[tokio::test]
+async fn frame_round_trip_response() {
+    let (mut a, mut b) = duplex(4096);
+    let resp = Response::ok("r1".into(), serde_json::json!({"pong": true}));
+    write_response(&mut a, &resp).await.unwrap();
+    drop(a);
+    let got = read_response(&mut b).await.unwrap();
+    assert_eq!(got.id, "r1");
+    assert_eq!(got.result.unwrap()["pong"], true);
+    assert!(got.error.is_none());
+}
+
+#[tokio::test]
+async fn frame_round_trip_stream_frame() {
+    let (mut a, mut b) = duplex(4096);
+    let f = StreamFrame {
+        version: 1,
+        id: Some("s1".into()),
+        stream: "text".into(),
+        data: serde_json::json!({"chunk": "hi"}),
+    };
+    write_stream_frame(&mut a, &f).await.unwrap();
+    drop(a);
+    let got = read_stream_frame(&mut b).await.unwrap();
+    assert_eq!(got.id.as_deref(), Some("s1"));
+    assert_eq!(got.data["chunk"], "hi");
+}
+
+#[tokio::test]
+async fn multiple_frames_round_trip_in_order() {
+    let (mut a, mut b) = duplex(4096);
+    write_frame_bytes(&mut a, b"first").await.unwrap();
+    write_frame_bytes(&mut a, b"second").await.unwrap();
+    write_frame_bytes(&mut a, b"third").await.unwrap();
+    drop(a);
+    assert_eq!(read_frame_bytes(&mut b).await.unwrap(), b"first");
+    assert_eq!(read_frame_bytes(&mut b).await.unwrap(), b"second");
+    assert_eq!(read_frame_bytes(&mut b).await.unwrap(), b"third");
+}
+
+#[tokio::test]
+async fn oversized_frame_rejected_before_alloc() {
+    use tokio::io::AsyncWriteExt;
+    let (mut a, mut b) = duplex(64);
+    // Header claims 5 MiB; never write a body.
+    let huge: u32 = 5 * 1024 * 1024;
+    a.write_all(&huge.to_be_bytes()).await.unwrap();
+    let result = read_frame_bytes(&mut b).await;
+    let err = result.expect_err("must reject oversize");
+    assert!(
+        err.to_string().contains("MAX_FRAME_BYTES"),
+        "error must mention MAX_FRAME_BYTES, got: {err}"
+    );
+}
+
+#[tokio::test]
+async fn eof_mid_header_returns_unexpected_eof() {
+    use tokio::io::AsyncWriteExt;
+    let (mut a, mut b) = duplex(64);
+    // Only 2 of 4 length bytes
+    a.write_all(&[0u8, 0u8]).await.unwrap();
+    drop(a);
+    let err = read_frame_bytes(&mut b).await.expect_err("must error");
+    assert_eq!(err.kind(), std::io::ErrorKind::UnexpectedEof);
+}
+
+#[tokio::test]
+async fn eof_mid_body_returns_unexpected_eof() {
+    use tokio::io::AsyncWriteExt;
+    let (mut a, mut b) = duplex(64);
+    let claimed_len: u32 = 100;
+    a.write_all(&claimed_len.to_be_bytes()).await.unwrap();
+    a.write_all(b"only ten!!").await.unwrap(); // 10 bytes, claimed 100
+    drop(a);
+    let err = read_frame_bytes(&mut b).await.expect_err("must error");
+    assert_eq!(err.kind(), std::io::ErrorKind::UnexpectedEof);
+}
+
+#[tokio::test]
+async fn read_request_propagates_version_mismatch() {
+    let (mut a, mut b) = duplex(4096);
+    let bad = serde_json::json!({
+        "version": 99, "id": "x", "session": "main",
+        "method": "daemon.ping", "params": {}
+    });
+    let body = serde_json::to_vec(&bad).unwrap();
+    write_frame_bytes(&mut a, &body).await.unwrap();
+    drop(a);
+    let err = read_request(&mut b).await.expect_err("must error");
+    // ProtocolError surfaces inside io::Error::other
+    assert!(
+        err.to_string().contains("VERSION_MISMATCH"),
+        "expected VERSION_MISMATCH, got: {err}"
+    );
+}
+
+// -----------------------------------------------------------------------------
+// Backfill from Task 0.2 review
+// -----------------------------------------------------------------------------
+
+#[test]
+fn parse_request_strict_rejects_malformed_json() {
+    let err =
+        super::protocol::parse_request_strict(b"not json").expect_err("must reject malformed JSON");
+    assert_eq!(err.code, "INVALID_PARAMS");
+    assert!(!err.retryable);
+}
+
+#[test]
+fn parse_request_strict_rejects_valid_json_wrong_shape() {
+    // Valid JSON, but an array — not a Request struct
+    let err =
+        super::protocol::parse_request_strict(b"[1, 2, 3]").expect_err("must reject wrong shape");
+    assert_eq!(err.code, "INVALID_PARAMS");
+}
+
+#[test]
+fn protocol_error_display_format() {
+    let err = super::protocol::ProtocolError {
+        code: "FOO".into(),
+        message: "bar baz".into(),
+        retryable: false,
+    };
+    assert_eq!(format!("{err}"), "FOO: bar baz");
+}
+
+#[test]
+fn response_error_round_trips_through_json() {
+    let resp = super::protocol::Response::error(
+        "id-1".into(),
+        super::protocol::ProtocolError {
+            code: "VERSION_MISMATCH".into(),
+            message: "client v2, daemon v1".into(),
+            retryable: false,
+        },
+    );
+    let bytes = serde_json::to_vec(&resp).unwrap();
+    let parsed: super::protocol::Response = serde_json::from_slice(&bytes).unwrap();
+    let err = parsed.error.expect("error preserved");
+    assert_eq!(err.code, "VERSION_MISMATCH");
+    assert_eq!(err.message, "client v2, daemon v1");
+    assert!(parsed.result.is_none());
+}

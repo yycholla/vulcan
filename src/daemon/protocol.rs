@@ -22,6 +22,7 @@
 //!   [`parse_request_strict`].
 
 use serde::{Deserialize, Serialize};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 /// Wire protocol version. Bumped on any breaking change to the envelope
 /// shapes or top-level method dispatch contract.
@@ -139,4 +140,81 @@ pub fn parse_request_strict(bytes: &[u8]) -> Result<Request, ProtocolError> {
         });
     }
     Ok(req)
+}
+
+/// Maximum size of one frame body, in bytes. Reads beyond this size
+/// reject before allocating, so a malformed peer can't OOM us.
+pub const MAX_FRAME_BYTES: usize = 4 * 1024 * 1024; // 4 MiB
+
+/// Write `body` as a length-delimited frame: u32 BE length prefix, then body.
+pub async fn write_frame_bytes<W: AsyncWrite + Unpin>(
+    w: &mut W,
+    body: &[u8],
+) -> std::io::Result<()> {
+    let len: u32 = body
+        .len()
+        .try_into()
+        .map_err(|_| std::io::Error::other("frame body exceeds u32::MAX"))?;
+    w.write_all(&len.to_be_bytes()).await?;
+    w.write_all(body).await?;
+    w.flush().await
+}
+
+/// Read one length-delimited frame body. Rejects frames larger than
+/// `MAX_FRAME_BYTES` before allocating.
+pub async fn read_frame_bytes<R: AsyncRead + Unpin>(r: &mut R) -> std::io::Result<Vec<u8>> {
+    let mut len_buf = [0u8; 4];
+    r.read_exact(&mut len_buf).await?;
+    let len = u32::from_be_bytes(len_buf) as usize;
+    if len > MAX_FRAME_BYTES {
+        return Err(std::io::Error::other(format!(
+            "frame size {len} exceeds MAX_FRAME_BYTES ({MAX_FRAME_BYTES})"
+        )));
+    }
+    let mut body = vec![0u8; len];
+    r.read_exact(&mut body).await?;
+    Ok(body)
+}
+
+/// Convenience: encode `req` as JSON, then frame it.
+pub async fn write_request<W: AsyncWrite + Unpin>(w: &mut W, req: &Request) -> std::io::Result<()> {
+    let body = serde_json::to_vec(req).map_err(std::io::Error::other)?;
+    write_frame_bytes(w, &body).await
+}
+
+/// Convenience: read one frame, decode + version-check as a `Request`.
+pub async fn read_request<R: AsyncRead + Unpin>(r: &mut R) -> std::io::Result<Request> {
+    let body = read_frame_bytes(r).await?;
+    parse_request_strict(&body).map_err(std::io::Error::other)
+}
+
+/// Convenience: encode `resp` as JSON, then frame it.
+pub async fn write_response<W: AsyncWrite + Unpin>(
+    w: &mut W,
+    resp: &Response,
+) -> std::io::Result<()> {
+    let body = serde_json::to_vec(resp).map_err(std::io::Error::other)?;
+    write_frame_bytes(w, &body).await
+}
+
+/// Convenience: read one frame as a `Response` (no version check — clients
+/// trust the daemon they auto-started).
+pub async fn read_response<R: AsyncRead + Unpin>(r: &mut R) -> std::io::Result<Response> {
+    let body = read_frame_bytes(r).await?;
+    serde_json::from_slice(&body).map_err(std::io::Error::other)
+}
+
+/// Convenience: encode `frame` as JSON, then frame it.
+pub async fn write_stream_frame<W: AsyncWrite + Unpin>(
+    w: &mut W,
+    frame: &StreamFrame,
+) -> std::io::Result<()> {
+    let body = serde_json::to_vec(frame).map_err(std::io::Error::other)?;
+    write_frame_bytes(w, &body).await
+}
+
+/// Convenience: read one frame as a `StreamFrame`.
+pub async fn read_stream_frame<R: AsyncRead + Unpin>(r: &mut R) -> std::io::Result<StreamFrame> {
+    let body = read_frame_bytes(r).await?;
+    serde_json::from_slice(&body).map_err(std::io::Error::other)
 }
