@@ -50,8 +50,12 @@ impl Client {
     /// Make a single RPC call. The session defaults to `"main"`. The
     /// request id is a fresh UUIDv4 so that responses on the same
     /// connection cannot be confused with cached/retried prior frames.
+    ///
+    /// Slice 5: takes `&self` so a single Client can serve multiple
+    /// concurrent in-flight calls — the underlying transport's reader
+    /// task demultiplexes responses by request id.
     pub async fn call(
-        &mut self,
+        &self,
         method: &str,
         params: serde_json::Value,
     ) -> ClientResult<serde_json::Value> {
@@ -63,7 +67,7 @@ impl Client {
     /// orchestrator code that maps external lanes to per-session
     /// daemon Agents.
     pub async fn call_at_session(
-        &mut self,
+        &self,
         session: &str,
         method: &str,
         params: serde_json::Value,
@@ -89,7 +93,7 @@ impl Client {
     /// [`crate::daemon::protocol::Response`].
     #[allow(dead_code)]
     pub async fn call_stream(
-        &mut self,
+        &self,
         method: &str,
         params: serde_json::Value,
     ) -> ClientResult<StreamFrames> {
@@ -98,7 +102,7 @@ impl Client {
 
     /// Like [`Self::call_stream`] but targets an explicit session id.
     pub async fn call_stream_at_session(
-        &mut self,
+        &self,
         session: &str,
         method: &str,
         params: serde_json::Value,
@@ -111,5 +115,78 @@ impl Client {
             params,
         };
         self.transport.call_stream(req).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::daemon::protocol::{Response, read_frame_bytes, write_response};
+    use std::sync::Arc;
+    use tempfile::TempDir;
+    use tokio::net::UnixListener;
+
+    /// Bind a UnixListener at a temp path and spawn a fake daemon that
+    /// answers `daemon.ping`-style calls with `{ "echo": id }`. The
+    /// answers are written in **reverse arrival order** to prove that
+    /// the client's id-routing demultiplexes correctly: a naive
+    /// FIFO read loop would route the second response to the first
+    /// caller and fail the assertion.
+    async fn spawn_reordering_echo_daemon(tmp: &TempDir) -> std::path::PathBuf {
+        let sock = tmp.path().join("test.sock");
+        let listener = UnixListener::bind(&sock).expect("bind test sock");
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.expect("accept");
+            let (mut read, mut write) = stream.into_split();
+            // Read two requests, then answer them in reversed order.
+            let body1 = read_frame_bytes(&mut read).await.expect("frame1");
+            let body2 = read_frame_bytes(&mut read).await.expect("frame2");
+            let req1: Request = serde_json::from_slice(&body1).expect("decode req1");
+            let req2: Request = serde_json::from_slice(&body2).expect("decode req2");
+            // Stall a touch so both calls are definitely in-flight.
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            let resp2 = Response::ok(req2.id.clone(), serde_json::json!({"echo": req2.id}));
+            let resp1 = Response::ok(req1.id.clone(), serde_json::json!({"echo": req1.id}));
+            write_response(&mut write, &resp2).await.expect("write2");
+            write_response(&mut write, &resp1).await.expect("write1");
+            // Keep the connection open so the client's reader doesn't
+            // close before we finish the test.
+            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        });
+        sock
+    }
+
+    #[tokio::test]
+    async fn client_handles_concurrent_calls_via_id_routing() {
+        // Slice 5 acceptance: one Client serves multiple in-flight
+        // calls; responses are routed by request id, not arrival
+        // order. The fake daemon writes responses in reverse, so a
+        // FIFO transport would mis-route them and fail.
+        let tmp = TempDir::new().expect("tempdir");
+        let sock = spawn_reordering_echo_daemon(&tmp).await;
+        // Give the listener a tick to be ready.
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+
+        let client = Arc::new(Client::connect_at(&sock).await.expect("connect"));
+
+        let c1 = Arc::clone(&client);
+        let c2 = Arc::clone(&client);
+        let h1 = tokio::spawn(async move {
+            c1.call("ping1", serde_json::json!({}))
+                .await
+                .expect("call1")
+        });
+        let h2 = tokio::spawn(async move {
+            c2.call("ping2", serde_json::json!({}))
+                .await
+                .expect("call2")
+        });
+        let r1 = h1.await.expect("join1");
+        let r2 = h2.await.expect("join2");
+
+        // Each call's response must echo its own id.
+        let echo1 = r1.get("echo").and_then(|v| v.as_str()).unwrap();
+        let echo2 = r2.get("echo").and_then(|v| v.as_str()).unwrap();
+        assert_ne!(echo1, echo2, "different request ids must echo different");
     }
 }

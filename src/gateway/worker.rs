@@ -16,7 +16,6 @@
 
 use std::sync::Arc;
 
-use crate::client::Client;
 use crate::daemon::protocol::StreamFrame;
 use crate::gateway::commands::{CommandDispatcher, DispatchCtx};
 use crate::gateway::lane::LaneKey;
@@ -146,8 +145,12 @@ async fn run_prompt_via_daemon(
         .await
         .map_err(|e| anyhow::anyhow!("ensure_session: {e}"))?;
 
-    let mut client: Client = lane_router
-        .fresh_client()
+    // Slice 6: route through the lane router's shared, multiplexed
+    // [`Client`] instead of opening a fresh socket per inbound row.
+    // The transport demuxes responses by request id (Slice 5), so
+    // concurrent worker calls don't serialize on this handle.
+    let client = lane_router
+        .shared_client()
         .await
         .map_err(|e| anyhow::anyhow!("client connect: {e}"))?;
 
@@ -222,6 +225,7 @@ mod tests {
     use std::sync::Arc;
     use std::time::Duration;
 
+    use crate::client::Client;
     use crate::daemon::server::Server;
     use crate::daemon::state::DaemonState;
     use crate::gateway::commands::CommandDispatcher;

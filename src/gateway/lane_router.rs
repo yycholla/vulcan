@@ -17,8 +17,10 @@
 //! distinct modules.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use parking_lot::Mutex;
+use tokio::sync::Mutex as AsyncMutex;
 
 use crate::client::{Client, ClientError};
 use crate::gateway::lane::LaneKey;
@@ -52,6 +54,11 @@ type ClientFactory = Box<
 pub struct DaemonLaneRouter {
     sessions: Mutex<HashMap<LaneKey, String>>,
     client_factory: ClientFactory,
+    /// Slice 6: the shared, multiplex-capable [`Client`] all worker
+    /// turns flow through. Lazy-built on first use via the factory.
+    /// Async Mutex because building a Client is async (auto-start +
+    /// connect). Reads are cheap once the Arc is installed.
+    shared: AsyncMutex<Option<Arc<Client>>>,
 }
 
 impl DaemonLaneRouter {
@@ -60,6 +67,7 @@ impl DaemonLaneRouter {
         Self {
             sessions: Mutex::new(HashMap::new()),
             client_factory: Box::new(|| Box::pin(Client::connect_or_autostart())),
+            shared: AsyncMutex::new(None),
         }
     }
 
@@ -76,6 +84,7 @@ impl DaemonLaneRouter {
         Self {
             sessions: Mutex::new(HashMap::new()),
             client_factory: Box::new(factory),
+            shared: AsyncMutex::new(None),
         }
     }
 
@@ -96,7 +105,7 @@ impl DaemonLaneRouter {
         }
 
         let sid = Self::derive_session_id(lane);
-        let mut client = (self.client_factory)().await?;
+        let client = self.shared_client().await?;
 
         // session.create with `id` set: re-creating an existing
         // session returns SESSION_EXISTS, which we treat as success
@@ -114,11 +123,28 @@ impl DaemonLaneRouter {
         Ok(sid)
     }
 
-    /// Acquire a fresh [`Client`] for streaming a prompt. Each
-    /// concurrent worker call gets its own connection so they don't
-    /// serialize on a single transport.
-    pub async fn fresh_client(&self) -> Result<Client, LaneRouterError> {
-        Ok((self.client_factory)().await?)
+    /// Slice 6: cloneable handle to the lane router's single shared
+    /// [`Client`]. Lazy-built on first call. Workers stream prompts
+    /// through this Arc instead of opening a fresh socket per inbound
+    /// row — the multiplexed transport (Slice 5) routes responses by
+    /// request id so concurrent calls don't serialize.
+    pub async fn shared_client(&self) -> Result<Arc<Client>, LaneRouterError> {
+        let mut g = self.shared.lock().await;
+        if let Some(client) = g.as_ref() {
+            return Ok(Arc::clone(client));
+        }
+        let new_client = (self.client_factory)().await?;
+        let arc = Arc::new(new_client);
+        *g = Some(Arc::clone(&arc));
+        Ok(arc)
+    }
+
+    /// Drop the cached shared [`Client`] so the next `shared_client`
+    /// call rebuilds a fresh transport. Use after a transport-level
+    /// failure where the daemon connection has been torn down and
+    /// subsequent calls would error with `daemon connection closed`.
+    pub async fn invalidate_shared_client(&self) {
+        *self.shared.lock().await = None;
     }
 
     /// Number of cached lanes (surface for /v1/lanes route).
@@ -187,6 +213,42 @@ mod tests {
             platform: p.into(),
             chat_id: c.into(),
         }
+    }
+
+    #[tokio::test]
+    async fn shared_client_returns_same_arc_across_calls() {
+        // Slice 6 acceptance: workers share a single DaemonClient
+        // instead of opening a new one per inbound row. Lazy-built on
+        // first call.
+        let dir = tempdir().unwrap();
+        let sock = dir.path().join("vulcan.sock");
+        let state = Arc::new(DaemonState::for_tests_minimal());
+        let server = Server::bind(&sock, state.clone()).await.unwrap();
+        let server_handle = tokio::spawn(server.run());
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        let sock_path = sock.clone();
+        let router = DaemonLaneRouter::with_client_factory(move || {
+            let p = sock_path.clone();
+            Box::pin(async move { Client::connect_at(&p).await })
+        });
+
+        let c1 = router.shared_client().await.unwrap();
+        let c2 = router.shared_client().await.unwrap();
+        assert!(
+            Arc::ptr_eq(&c1, &c2),
+            "shared_client must return the same Arc<Client> across calls"
+        );
+
+        router.invalidate_shared_client().await;
+        let c3 = router.shared_client().await.unwrap();
+        assert!(
+            !Arc::ptr_eq(&c1, &c3),
+            "after invalidate, shared_client must rebuild"
+        );
+
+        state.signal_shutdown();
+        let _ = tokio::time::timeout(Duration::from_secs(2), server_handle).await;
     }
 
     #[test]

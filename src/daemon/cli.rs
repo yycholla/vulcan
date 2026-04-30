@@ -63,6 +63,17 @@ async fn start(detach: bool) -> anyhow::Result<()> {
         }
     }
 
+    // Slice 3: open the daemon's RuntimeResourcePool so subsequent
+    // session/agent assembly reuses one SessionStore connection, one
+    // run/artifact store, and one orchestration store across the
+    // whole process. Pool open failure is fatal — without it the
+    // session paths can't run.
+    let pool = Arc::new(
+        crate::runtime_pool::RuntimeResourcePool::try_new()
+            .context("opening daemon RuntimeResourcePool")?,
+    );
+    state = state.with_pool(pool);
+
     // YYC-266 Slice 2/3: boot the warm Agent and install it into the
     // "main" session. Additional sessions are created on-demand.
     match crate::agent::Agent::builder(&config).build().await {

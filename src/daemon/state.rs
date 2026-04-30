@@ -10,6 +10,7 @@ use tokio::sync::{Notify, watch};
 use crate::config::Config;
 use crate::daemon::session::SessionMap;
 use crate::memory::cortex::CortexStore;
+use crate::runtime_pool::RuntimeResourcePool;
 
 /// Per-process daemon state, shared across all connections.
 pub struct DaemonState {
@@ -20,6 +21,11 @@ pub struct DaemonState {
     sessions: Arc<SessionMap>,
     reloads_applied: AtomicU64,
     cortex: Option<Arc<CortexStore>>,
+    /// Slice 3: daemon-owned shared adapters (session store, run
+    /// store, artifact store, orchestration). `Option` so existing
+    /// minimal-test constructors don't pay the SQLite-open cost; the
+    /// production `with_pool` builder installs a real pool.
+    pool: Option<Arc<RuntimeResourcePool>>,
     /// Config snapshot loaded at daemon boot. Lazy-build paths in
     /// `SessionState::ensure_agent` reference this so handlers don't
     /// have to re-load from disk.
@@ -37,8 +43,21 @@ impl DaemonState {
             sessions: Arc::new(SessionMap::with_main()),
             reloads_applied: AtomicU64::new(0),
             cortex: None,
+            pool: None,
             config,
         }
+    }
+
+    /// Slice 3: install the daemon-owned [`RuntimeResourcePool`].
+    /// Called by the daemon startup path after opening the pool.
+    pub fn with_pool(mut self, pool: Arc<RuntimeResourcePool>) -> Self {
+        self.pool = Some(pool);
+        self
+    }
+
+    /// Borrow the daemon-owned runtime resource pool, if installed.
+    pub fn pool(&self) -> Option<&Arc<RuntimeResourcePool>> {
+        self.pool.as_ref()
     }
 
     /// Test-only constructor. Returns a `DaemonState` with the default
@@ -146,5 +165,24 @@ impl DaemonState {
 impl Default for DaemonState {
     fn default() -> Self {
         Self::new(Arc::new(Config::default()))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pool_is_none_by_default_and_some_after_with_pool() {
+        // Slice 3: production startup installs the pool via with_pool;
+        // pre-install code paths see None and fall back to per-session
+        // adapter construction.
+        let state = DaemonState::for_tests_minimal();
+        assert!(state.pool().is_none());
+
+        let pool = Arc::new(RuntimeResourcePool::for_tests());
+        let state = state.with_pool(Arc::clone(&pool));
+        let installed = state.pool().expect("pool installed");
+        assert!(Arc::ptr_eq(installed, &pool));
     }
 }

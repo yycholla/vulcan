@@ -104,6 +104,12 @@ pub struct SpawnSubagentTool {
     /// completes, the tool writes a `SubagentSummary` artifact here
     /// so the parent's `vulcan run show` view can link to it.
     artifact_store: Option<Arc<dyn crate::artifact::ArtifactStore>>,
+    /// Slice 7 (partial): when present, child Agents assemble from
+    /// the daemon's shared [`RuntimeResourcePool`] instead of opening
+    /// their own SQLite connections / orchestration store. Full
+    /// daemon-routed child sessions (parent calls `session.create`
+    /// over the in-process seam) remain follow-up work.
+    pool: Option<Arc<crate::runtime_pool::RuntimeResourcePool>>,
 }
 
 impl SpawnSubagentTool {
@@ -119,6 +125,7 @@ impl SpawnSubagentTool {
             config,
             orchestration,
             artifact_store: None,
+            pool: None,
         }
     }
 
@@ -126,6 +133,14 @@ impl SpawnSubagentTool {
     /// child-summary artifacts land alongside the parent's run.
     pub fn with_artifact_store(mut self, store: Arc<dyn crate::artifact::ArtifactStore>) -> Self {
         self.artifact_store = Some(store);
+        self
+    }
+
+    /// Slice 7: hand the tool the daemon's [`RuntimeResourcePool`]
+    /// so child agents share the parent's storage adapters and
+    /// orchestration store rather than rebuilding them.
+    pub fn with_pool(mut self, pool: Arc<crate::runtime_pool::RuntimeResourcePool>) -> Self {
+        self.pool = Some(pool);
         self
     }
 }
@@ -235,12 +250,17 @@ impl Tool for SpawnSubagentTool {
         // wires those). When the parent passed an explicit
         // `allowed_tools` list instead, fall back to the legacy
         // `restrict_tools` path so the child still narrows correctly.
-        let child = Agent::builder(self.config.as_ref())
+        // Slice 7 (partial): inherit pool when present so the child
+        // shares the parent's session/run/artifact/orchestration
+        // stores. Full daemon-session delegation lands in a follow-up.
+        let mut builder = Agent::builder(self.config.as_ref())
             .with_hooks(HookRegistry::new())
             .with_max_iterations(max_iter)
-            .with_tool_profile(profile_name.clone())
-            .build()
-            .await;
+            .with_tool_profile(profile_name.clone());
+        if let Some(pool) = &self.pool {
+            builder = builder.with_pool(Arc::clone(pool));
+        }
+        let child = builder.build().await;
         let mut child = match child {
             Ok(c) => c,
             Err(e) => {

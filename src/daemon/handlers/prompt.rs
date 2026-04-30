@@ -100,7 +100,10 @@ pub async fn run(state: &DaemonState, id: String, session_id: String, input: &st
         Ok(s) => s,
         Err(e) => return Response::error(id, e),
     };
-    let agent_arc = match sess.ensure_agent(state.config()).await {
+    let agent_arc = match sess
+        .ensure_agent_with_pool(state.config(), state.pool().cloned())
+        .await
+    {
         Ok(a) => a,
         Err(e) => {
             return Response::error(
@@ -165,11 +168,17 @@ pub fn stream(
     // Lazy-build needs `&Config`, but the spawned task can't borrow
     // `state` so we clone the `Arc<Config>` out here.
     let config = Arc::new(state.config().clone());
+    // Slice 3: clone the pool Arc out for the spawned task so the
+    // child Agent build reuses the daemon's shared adapters.
+    let pool_for_task = state.pool().cloned();
     tokio::spawn(async move {
         // Lazy-build the per-session Agent. Failure surfaces on the
         // done channel as AGENT_BUILD_FAILED; in_flight is cleared
         // before returning so daemon.status doesn't get stuck.
-        let agent_arc = match sess_for_task.ensure_agent(&config).await {
+        let agent_arc = match sess_for_task
+            .ensure_agent_with_pool(&config, pool_for_task)
+            .await
+        {
             Ok(a) => a,
             Err(e) => {
                 *sess_for_task.in_flight.lock() = false;

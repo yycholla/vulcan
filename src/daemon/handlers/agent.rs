@@ -26,7 +26,7 @@ async fn resolve(state: &DaemonState, session_id: &str) -> Result<AgentHandle, P
         });
     };
     sess.touch();
-    sess.ensure_agent(state.config())
+    sess.ensure_agent_with_pool(state.config(), state.pool().cloned())
         .await
         .map_err(|e| ProtocolError {
             code: "AGENT_BUILD_FAILED".into(),

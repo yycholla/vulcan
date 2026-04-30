@@ -181,7 +181,7 @@ impl CommandDispatcher {
         // provider profile can't initialize — surface that verbatim
         // so the operator sees the underlying cause.
         let session_id = ctx.lane_router.ensure_session(ctx.lane).await?;
-        let mut client = ctx.lane_router.fresh_client().await?;
+        let client = ctx.lane_router.shared_client().await?;
         let resp = match client
             .call_at_session(&session_id, "agent.status", serde_json::json!({}))
             .await
@@ -217,9 +217,9 @@ impl CommandDispatcher {
         // inbound message for this lane will lazy-create a fresh
         // session via `ensure_session`.
         let session_id = DaemonLaneRouter::derive_session_id(ctx.lane);
-        let mut client = ctx
+        let client = ctx
             .lane_router
-            .fresh_client()
+            .shared_client()
             .await
             .with_context(|| "open daemon client for /clear")?;
         let result = match client
@@ -257,7 +257,7 @@ impl CommandDispatcher {
         // than failing the inbound row outright; the legacy in-process
         // resume relied on the gateway-owned Agent which no longer
         // exists.
-        let mut client = ctx.lane_router.fresh_client().await?;
+        let client = ctx.lane_router.shared_client().await?;
         match client
             .call(
                 "session.resume",

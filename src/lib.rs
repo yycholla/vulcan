@@ -47,6 +47,7 @@ pub mod release;
 pub mod replay;
 pub mod review;
 pub mod run_record;
+pub mod runtime_pool;
 pub mod skills;
 pub mod tools;
 pub mod trust;

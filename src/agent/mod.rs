@@ -13,6 +13,7 @@ use crate::pause::PauseSender;
 use crate::prompt_builder::PromptBuilder;
 use crate::provider::factory::{DefaultProviderFactory, ProviderFactory};
 use crate::provider::{LLMProvider, Message, ToolDefinition};
+use crate::runtime_pool::RuntimeResourcePool;
 use crate::skills::SkillRegistry;
 use crate::tools::{ToolRegistry, ToolResult};
 use anyhow::Result;
@@ -24,6 +25,7 @@ mod provider;
 mod run;
 mod session;
 mod skills;
+mod turn;
 
 #[cfg(test)]
 mod tests;
@@ -87,7 +89,7 @@ pub struct Agent {
     pub(in crate::agent) tools: ToolRegistry,
     pub(in crate::agent) skills: Arc<SkillRegistry>,
     pub(in crate::agent) context: ContextManager,
-    pub(in crate::agent) memory: SessionStore,
+    pub(in crate::agent) memory: Arc<SessionStore>,
     pub(in crate::agent) prompt_builder: PromptBuilder,
     pub(in crate::agent) hooks: Arc<HookRegistry>,
     pub(in crate::agent) session_id: String,
@@ -126,6 +128,17 @@ pub struct Agent {
     /// already been persisted to SQLite. Used to skip the O(n) DELETE + re-INSERT
     /// on every turn — only `messages[last_saved_count..]` are new (YYC-76).
     pub(in crate::agent) last_saved_count: usize,
+    /// Slice 2: canonical in-memory transcript for this live session,
+    /// excluding the leading `System` frame (which the prompt builder
+    /// rebuilds fresh each turn). Loaded once on the first
+    /// `prepare_turn` call; subsequent turns read from this snapshot
+    /// instead of re-running `SessionStore::load_history`. Mirrored
+    /// to durable storage by `save_messages` / `replace_history`.
+    pub(in crate::agent) history_cache: Vec<Message>,
+    /// Slice 2: `true` once the cache has been populated from storage
+    /// for this session (or initialized from a fresh resume). Guards
+    /// the load + sanitize + heal once-on-create path.
+    pub(in crate::agent) history_loaded: bool,
     /// Max agent loop iterations per prompt. 0 = unlimited (default).
     pub(in crate::agent) max_iterations: u32,
     /// Workspace context probed at session start (YYC-107). Used to
@@ -188,6 +201,12 @@ pub struct AgentBuilder<'a> {
     /// start. CLI flag overrides config; `None` means use whatever
     /// the config supplies (or no profile if unset).
     tool_profile: Option<String>,
+    /// Slice 3: optional daemon-owned [`RuntimeResourcePool`].
+    /// When present, session/run/artifact/orchestration stores come
+    /// from the pool instead of being opened fresh per Agent. The
+    /// non-daemon CLI/test paths still pass `None` and fall back to
+    /// the legacy build-everything path.
+    pool: Option<Arc<RuntimeResourcePool>>,
 }
 
 impl<'a> AgentBuilder<'a> {
@@ -214,6 +233,14 @@ impl<'a> AgentBuilder<'a> {
         self
     }
 
+    /// Slice 3: assemble the Agent from the daemon's shared
+    /// [`RuntimeResourcePool`] instead of opening per-Agent SQLite
+    /// connections, run/artifact stores, and orchestration store.
+    pub fn with_pool(mut self, pool: Arc<RuntimeResourcePool>) -> Self {
+        self.pool = Some(pool);
+        self
+    }
+
     pub async fn build(self) -> Result<Agent> {
         Agent::build_from_parts(
             self.config,
@@ -221,6 +248,7 @@ impl<'a> AgentBuilder<'a> {
             self.pause_tx,
             self.max_iterations,
             self.tool_profile,
+            self.pool,
         )
         .await
     }
@@ -234,6 +262,7 @@ impl Agent {
             pause_tx: None,
             max_iterations: None,
             tool_profile: None,
+            pool: None,
         }
     }
 
@@ -251,6 +280,7 @@ impl Agent {
         pause_tx: Option<PauseSender>,
         max_iterations: Option<u32>,
         tool_profile_override: Option<String>,
+        pool: Option<Arc<RuntimeResourcePool>>,
     ) -> Result<Self> {
         // YYC-239: TUI + gateway resolve their starting provider
         // through the same `active_provider_config` indirection.
@@ -326,8 +356,14 @@ impl Agent {
         // `tools::spawn::default_allowed_tools`).
         // YYC-206: shares the agent's `orchestration` store so the
         // TUI / parent can read child-run records the tool produces.
+        // Slice 3: when a pool is wired up, draw the orchestration
+        // store from it so subagents land in the daemon-owned record
+        // instead of a fresh per-Agent in-memory copy.
         let config_arc = Arc::new(config.clone());
-        let orchestration = Arc::new(crate::orchestration::OrchestrationStore::new());
+        let orchestration = match &pool {
+            Some(p) => p.orchestration(),
+            None => Arc::new(crate::orchestration::OrchestrationStore::new()),
+        };
         tools.register(Arc::new(
             crate::tools::spawn::SpawnSubagentTool::with_store(
                 Arc::clone(&config_arc),
@@ -361,7 +397,13 @@ impl Agent {
             }
         }
         let skills = Arc::new(SkillRegistry::default_for(&config.skills_dir, Some(&cwd)));
-        let memory = SessionStore::try_new()?;
+        // Slice 3: shared session store comes from the pool when wired
+        // up; fall back to opening a per-Agent connection for the
+        // legacy direct-mode build path.
+        let memory: Arc<SessionStore> = match &pool {
+            Some(p) => p.session_store(),
+            None => Arc::new(SessionStore::try_new()?),
+        };
         let context =
             ContextManager::with_config(provider.max_context(), config.compaction.clone());
         let session_id = Uuid::new_v4().to_string();
@@ -502,43 +544,52 @@ impl Agent {
         // YYC-107: drop tools that aren't relevant to this workspace.
         tools.filter_for_context(&tool_context);
 
-        // YYC-179: open the durable run-record store. SQLite is the
-        // happy path; an in-memory fallback keeps the agent usable
-        // when the DB can't be opened (read-only home, missing perms,
-        // etc.) without disabling the rest of the agent.
-        let run_store: Arc<dyn crate::run_record::RunStore> =
-            match crate::run_record::SqliteRunStore::try_new() {
+        // YYC-179: durable run-record store.
+        // Slice 3: when a pool is wired up, share its handle so every
+        // session writes into the daemon-owned timeline. The legacy
+        // path opens its own SQLite file (or falls back to in-memory).
+        let run_store: Arc<dyn crate::run_record::RunStore> = match &pool {
+            Some(p) => p.run_store(),
+            None => match crate::run_record::SqliteRunStore::try_new() {
                 Ok(s) => Arc::new(s),
                 Err(e) => {
                     tracing::warn!("run_record store unavailable ({e}); falling back to in-memory");
                     Arc::new(crate::run_record::InMemoryRunStore::default())
                 }
-            };
+            },
+        };
 
-        // YYC-180: artifact store with the same SQLite-or-memory
-        // fallback. Retention will diverge from run records, so the
+        // YYC-180: artifact store. Same pool-or-fallback shape as
+        // run_store. Retention diverges from run records, so the
         // backends stay separate.
-        let artifact_store: Arc<dyn crate::artifact::ArtifactStore> =
-            match crate::artifact::SqliteArtifactStore::try_new() {
+        let artifact_store: Arc<dyn crate::artifact::ArtifactStore> = match &pool {
+            Some(p) => p.artifact_store(),
+            None => match crate::artifact::SqliteArtifactStore::try_new() {
                 Ok(s) => Arc::new(s),
                 Err(e) => {
                     tracing::warn!("artifact store unavailable ({e}); falling back to in-memory");
                     Arc::new(crate::artifact::InMemoryArtifactStore::new())
                 }
-            };
+            },
+        };
 
         // YYC-180: re-register `spawn_subagent` with the parent's
         // artifact store so child summaries land alongside the
         // parent's run. The earlier registration sat without an
         // artifact handle; replacing it here keeps registration
         // ordering deterministic.
-        tools.register(Arc::new(
-            crate::tools::spawn::SpawnSubagentTool::with_store(
-                Arc::clone(&config_arc),
-                Arc::clone(&orchestration),
-            )
-            .with_artifact_store(Arc::clone(&artifact_store)),
-        ));
+        // Slice 7 (partial): when the parent assembled from a pool,
+        // hand the same pool to the spawn tool so its child Agents
+        // also reuse the daemon-owned storage adapters.
+        let mut spawn_tool = crate::tools::spawn::SpawnSubagentTool::with_store(
+            Arc::clone(&config_arc),
+            Arc::clone(&orchestration),
+        )
+        .with_artifact_store(Arc::clone(&artifact_store));
+        if let Some(pool) = &pool {
+            spawn_tool = spawn_tool.with_pool(Arc::clone(pool));
+        }
+        tools.register(Arc::new(spawn_tool));
 
         Ok(Self {
             provider,
@@ -559,6 +610,8 @@ impl Agent {
             active_profile: config.active_profile.clone(),
             lsp_manager,
             last_saved_count: 0,
+            history_cache: Vec::new(),
+            history_loaded: false,
             tool_context,
             max_iterations: max_iterations.unwrap_or(active_provider.max_iterations),
             auto_create_skills: config.auto_create_skills,
@@ -719,7 +772,7 @@ impl Agent {
             tools,
             skills,
             context: ContextManager::new(max_context),
-            memory: SessionStore::in_memory(),
+            memory: Arc::new(SessionStore::in_memory()),
             prompt_builder: PromptBuilder,
             hooks: Arc::new(hooks),
             session_id: Uuid::new_v4().to_string(),
@@ -735,6 +788,8 @@ impl Agent {
                 std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")),
             )),
             last_saved_count: 0,
+            history_cache: Vec::new(),
+            history_loaded: false,
             max_iterations: 0,
             tool_context: crate::tools::ToolContext::probe(
                 std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")),
@@ -800,9 +855,18 @@ impl Agent {
         if new_count < self.last_saved_count {
             self.memory.save_messages(&self.session_id, messages)?;
             self.last_saved_count = new_count;
+            // Slice 2: keep the in-memory snapshot in lockstep with
+            // storage so a compaction-style shrink (handled here as a
+            // defensive fallback) does not drift the cache from
+            // durability.
+            self.history_cache = messages.iter().skip(1).cloned().collect();
         } else if new_count > self.last_saved_count {
             let to_save = &messages[self.last_saved_count..];
             self.memory.append_messages(&self.session_id, to_save)?;
+            // Slice 2: extend the cache with the just-appended tail
+            // so subsequent turns observe live conversation state
+            // without re-running `load_history`.
+            self.history_cache.extend_from_slice(to_save);
             self.last_saved_count = new_count;
         }
         Ok(())
@@ -817,6 +881,11 @@ impl Agent {
     pub fn replace_history(&mut self, messages: &[Message]) -> Result<()> {
         self.memory.save_messages(&self.session_id, messages)?;
         self.last_saved_count = messages.len();
+        // Slice 2: cache mirrors the post-rewrite snapshot. Skip the
+        // leading System frame because it's rebuilt fresh by the
+        // prompt builder on each `prepare_turn`.
+        self.history_cache = messages.iter().skip(1).cloned().collect();
+        self.history_loaded = true;
         Ok(())
     }
 }

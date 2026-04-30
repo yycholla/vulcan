@@ -1,5 +1,6 @@
 use super::dispatch::{elided_lines, preview_output, summarize_tool_args, summarize_tool_result};
 use super::run::sanitize_orphan_tool_messages;
+use super::turn::{TurnEvent, TurnMode, TurnRunnerMut, TurnStatus};
 use super::*;
 use crate::hooks::HookRegistry;
 use crate::provider::StreamEvent;
@@ -289,6 +290,27 @@ async fn prepare_stream_turn_builds_prompt_and_persists_user_message() {
 }
 
 #[tokio::test]
+async fn prepare_turn_builds_prompt_and_persists_user_message() {
+    let (mut agent, _mock) = agent_with_mock();
+    let cancel = CancellationToken::new();
+
+    let turn = agent
+        .prepare_turn("turn this", cancel.clone())
+        .await
+        .unwrap();
+
+    cancel.cancel();
+    assert!(agent.turn_cancel.is_cancelled());
+    assert!(matches!(turn.messages[0], Message::System { .. }));
+    assert!(matches!(
+        turn.messages.last(),
+        Some(Message::User { content }) if content == "turn this"
+    ));
+    assert_eq!(agent.last_saved_count, turn.messages.len());
+    assert!(!turn.tool_defs.is_empty());
+}
+
+#[tokio::test]
 async fn compact_stream_messages_if_needed_replaces_history_with_summary_and_keeps_recent_window() {
     // YYC-128: real compaction calls the provider to summarize the older
     // slice, splices the summary in place of it, and preserves the recent
@@ -349,6 +371,40 @@ async fn compact_stream_messages_if_needed_replaces_history_with_summary_and_kee
 }
 
 #[tokio::test]
+async fn compact_turn_messages_if_needed_emits_domain_event() {
+    let (mut agent, mock) = agent_with_mock();
+    agent.context = ContextManager::new(10);
+    mock.enqueue_text("- user wanted X done\n- file /tmp/foo.txt was created");
+
+    let (tx, mut rx) = tokio::sync::mpsc::channel(crate::provider::STREAM_CHANNEL_CAPACITY);
+    let mut messages = vec![Message::System {
+        content: "system".into(),
+    }];
+    for i in 0..8 {
+        messages.push(Message::User {
+            content: format!("turn {i} user"),
+        });
+        messages.push(Message::Assistant {
+            content: Some(format!("turn {i} answer")),
+            tool_calls: None,
+            reasoning_content: None,
+        });
+    }
+    messages.push(Message::User {
+        content: "new prompt".into(),
+    });
+
+    agent
+        .compact_turn_messages_if_needed(&mut messages, &tx, 0)
+        .await;
+
+    assert!(matches!(
+        rx.try_recv(),
+        Ok(TurnEvent::Compacted { earlier_messages }) if earlier_messages > 0
+    ));
+}
+
+#[tokio::test]
 async fn compact_skips_when_no_user_boundary_in_recent_window() {
     // No User in the trailing window (mid tool-loop): compaction must be a
     // no-op so we don't break the tool_calls/Tool wire invariant.
@@ -398,6 +454,35 @@ async fn collect_stream_response_forwards_text_and_returns_done() {
         rx.try_recv(),
         Ok(StreamEvent::Text(text)) if text == "streamed text"
     ));
+    assert!(
+        rx.try_recv().is_err(),
+        "provider Done stays private; the agent loop emits the final UI Done after turn finalization"
+    );
+}
+
+#[tokio::test]
+async fn collect_turn_response_emits_domain_events() {
+    let (agent, mock) = agent_with_mock();
+    mock.enqueue_text("streamed text");
+    let (tx, mut rx) = tokio::sync::mpsc::channel(crate::provider::STREAM_CHANNEL_CAPACITY);
+    let messages = vec![Message::User {
+        content: "x".into(),
+    }];
+
+    let response = agent
+        .collect_turn_response(&messages, &[], &tx, CancellationToken::new(), 0)
+        .await
+        .unwrap();
+
+    assert_eq!(response.content.as_deref(), Some("streamed text"));
+    assert!(matches!(
+        rx.try_recv(),
+        Ok(TurnEvent::Text { text }) if text == "streamed text"
+    ));
+    assert!(matches!(
+        rx.try_recv(),
+        Ok(TurnEvent::ProviderDone { response }) if response.content.as_deref() == Some("streamed text")
+    ));
 }
 
 #[tokio::test]
@@ -440,6 +525,280 @@ async fn execute_stream_tool_calls_emits_events_and_preserves_result_order() {
         match event {
             StreamEvent::ToolCallStart { .. } => starts += 1,
             StreamEvent::ToolCallEnd { .. } => ends += 1,
+            other => panic!("unexpected event: {other:?}"),
+        }
+    }
+    assert_eq!(starts, 2);
+    assert_eq!(ends, 2);
+}
+
+#[tokio::test]
+async fn cache_matches_persisted_state_after_completed_turn() {
+    // Slice 2 acceptance: cancelled (or simply finished) turns leave
+    // history valid for the next provider request — that means the
+    // in-memory cache must not drift from durable storage.
+    let (mut agent, mock) = agent_with_mock();
+    mock.enqueue_text("done");
+    agent.run_prompt("hi").await.unwrap();
+
+    let stored = agent
+        .memory
+        .load_history(agent.session_id())
+        .unwrap()
+        .unwrap_or_default();
+    assert_eq!(
+        stored.len(),
+        agent.history_cache.len(),
+        "cache and storage must agree on message count after a turn"
+    );
+    for (idx, (cache_msg, store_msg)) in agent.history_cache.iter().zip(stored.iter()).enumerate() {
+        assert!(
+            std::mem::discriminant(cache_msg) == std::mem::discriminant(store_msg),
+            "message {idx} discriminant differs between cache and storage"
+        );
+    }
+}
+
+#[tokio::test]
+async fn compaction_updates_in_memory_history_cache() {
+    // Slice 2 acceptance: compaction routes through one adapter that
+    // updates both durable storage and the live cache, so the next
+    // prepare_turn sees the summarized snapshot — not a stale Vec full
+    // of pre-compaction turns.
+    let (mut agent, mock) = agent_with_mock();
+    agent.context = ContextManager::new(10);
+    mock.enqueue_text("- summary line one\n- summary line two");
+
+    let mut messages = vec![Message::System {
+        content: "system".into(),
+    }];
+    for i in 0..6 {
+        messages.push(Message::User {
+            content: format!("user {i}"),
+        });
+        messages.push(Message::Assistant {
+            content: Some(format!("assistant {i}")),
+            tool_calls: None,
+            reasoning_content: None,
+        });
+    }
+    messages.push(Message::User {
+        content: "fresh".into(),
+    });
+
+    let pre_len = messages.len();
+    let cancel = CancellationToken::new();
+    agent.turn_cancel = cancel.clone();
+    let did_compact = agent
+        .compact_buffered_messages_if_possible(&mut messages, cancel)
+        .await;
+    assert!(did_compact, "compaction must rewrite buffer for this test");
+    assert!(messages.len() < pre_len);
+
+    // The in-memory cache must mirror the post-compaction conversation
+    // (everything past the leading System frame).
+    let expected_cache: Vec<_> = messages.iter().skip(1).cloned().collect();
+    assert_eq!(agent.history_cache.len(), expected_cache.len());
+    assert!(
+        agent.history_loaded,
+        "cache must be marked loaded after replace_history"
+    );
+}
+
+#[tokio::test]
+async fn agent_built_with_pool_shares_pool_session_store() {
+    // Slice 3 acceptance: sessions assemble from pool adapters instead
+    // of opening their own SessionStore. Writing through the agent's
+    // memory must be visible from the pool's handle.
+    let mut config = Config::default();
+    config.provider.base_url = "http://127.0.0.1:11434/v1".into();
+    config.provider.disable_catalog = true;
+    let pool = Arc::new(crate::runtime_pool::RuntimeResourcePool::for_tests());
+
+    let agent = Agent::builder(&config)
+        .with_pool(Arc::clone(&pool))
+        .build()
+        .await
+        .unwrap();
+
+    let session_id = agent.session_id().to_string();
+    agent
+        .memory
+        .save_messages(
+            &session_id,
+            &[Message::User {
+                content: "shared write".into(),
+            }],
+        )
+        .unwrap();
+
+    // Same SessionStore: pool's handle observes the write.
+    let read_back = pool.session_store().load_history(&session_id).unwrap();
+    let messages = read_back.expect("session present");
+    assert!(matches!(
+        messages.first(),
+        Some(Message::User { content }) if content == "shared write"
+    ));
+}
+
+#[tokio::test]
+async fn second_prepare_turn_uses_cached_history_not_storage_reload() {
+    // Slice 2 acceptance: in-memory SessionHistory is canonical; storage
+    // is durability + recovery only. Wiping storage between turns must
+    // not erase the live transcript a session is reasoning over.
+    let (mut agent, mock) = agent_with_mock();
+    mock.enqueue_text("first answer");
+    agent.run_prompt("hello").await.unwrap();
+
+    // Simulate a storage corruption / external wipe between turns. With a
+    // cached SessionHistory, the next prepare_turn still sees prior
+    // conversation; without one, history would silently reset.
+    agent.memory.save_messages(agent.session_id(), &[]).unwrap();
+
+    let cancel = CancellationToken::new();
+    let turn = agent.prepare_turn("again", cancel).await.unwrap();
+
+    let saw_user_hello = turn
+        .messages
+        .iter()
+        .any(|m| matches!(m, Message::User { content } if content == "hello"));
+    let saw_assistant_first = turn.messages.iter().any(|m| {
+        matches!(
+            m,
+            Message::Assistant { content: Some(c), .. } if c == "first answer"
+        )
+    });
+    assert!(
+        saw_user_hello,
+        "cached history must include first user turn"
+    );
+    assert!(
+        saw_assistant_first,
+        "cached history must include first assistant turn"
+    );
+}
+
+#[tokio::test]
+async fn turn_runner_run_buffered_completes_single_iteration() {
+    // Slice 1 acceptance: buffered execution flows through TurnRunner.run,
+    // returning a TurnOutcome instead of duplicating the iteration loop.
+    let (mut agent, mock) = agent_with_mock();
+    mock.enqueue_text("hello");
+    let cancel = CancellationToken::new();
+    let (tx, mut rx) = tokio::sync::mpsc::channel(crate::provider::STREAM_CHANNEL_CAPACITY);
+
+    let outcome = TurnRunnerMut::new(&mut agent)
+        .run("hi", cancel, &tx, TurnMode::Buffered)
+        .await
+        .unwrap();
+    drop(tx);
+    while rx.recv().await.is_some() {}
+
+    assert_eq!(outcome.final_text, "hello");
+    assert!(matches!(outcome.status, TurnStatus::Completed));
+    let response = outcome
+        .final_response
+        .expect("buffered run yields response");
+    assert_eq!(response.content.as_deref(), Some("hello"));
+}
+
+#[tokio::test]
+async fn turn_runner_run_streaming_emits_text_and_completes() {
+    // Slice 1 acceptance: streaming execution shares the same loop, emitting
+    // text tokens through the TurnEvent sink.
+    let (mut agent, mock) = agent_with_mock();
+    mock.enqueue_text("streamed");
+    let cancel = CancellationToken::new();
+    let (tx, mut rx) = tokio::sync::mpsc::channel(crate::provider::STREAM_CHANNEL_CAPACITY);
+
+    let outcome = TurnRunnerMut::new(&mut agent)
+        .run("hi", cancel, &tx, TurnMode::Streaming)
+        .await
+        .unwrap();
+    drop(tx);
+
+    let mut got_text = false;
+    while let Some(event) = rx.recv().await {
+        if let TurnEvent::Text { text } = &event {
+            if text == "streamed" {
+                got_text = true;
+            }
+        }
+    }
+    assert!(got_text, "streaming sink should receive text event");
+    assert_eq!(outcome.final_text, "streamed");
+    assert!(matches!(outcome.status, TurnStatus::Completed));
+}
+
+#[tokio::test]
+async fn turn_runner_run_handles_tool_call_then_terminal_text() {
+    let (mut agent, mock) = agent_with_mock();
+    mock.enqueue_tool_call(
+        "read_file",
+        "call_x",
+        serde_json::json!({"path": "/tmp/vulcan-runner-nope"}),
+    );
+    mock.enqueue_text("done");
+
+    let cancel = CancellationToken::new();
+    let (tx, mut rx) = tokio::sync::mpsc::channel(crate::provider::STREAM_CHANNEL_CAPACITY);
+    let outcome = TurnRunnerMut::new(&mut agent)
+        .run("read it", cancel, &tx, TurnMode::Buffered)
+        .await
+        .unwrap();
+    drop(tx);
+    while rx.recv().await.is_some() {}
+
+    assert_eq!(outcome.final_text, "done");
+    assert!(matches!(outcome.status, TurnStatus::Completed));
+    let calls = mock.captured_calls();
+    assert_eq!(calls.len(), 2);
+    assert!(
+        calls[1].iter().any(|m| matches!(m, Message::Tool { .. })),
+        "tool message must reach the second iteration"
+    );
+}
+
+#[tokio::test]
+async fn execute_turn_tool_calls_emits_domain_events_and_preserves_result_order() {
+    let (agent, _mock) = agent_with_mock();
+    let calls = vec![
+        crate::provider::ToolCall {
+            id: "call_a".into(),
+            call_type: "function".into(),
+            function: crate::provider::ToolCallFunction {
+                name: "read_file".into(),
+                arguments: serde_json::json!({"path": "/tmp/nope-a"}).to_string(),
+            },
+        },
+        crate::provider::ToolCall {
+            id: "call_b".into(),
+            call_type: "function".into(),
+            function: crate::provider::ToolCallFunction {
+                name: "read_file".into(),
+                arguments: serde_json::json!({"path": "/tmp/nope-b"}).to_string(),
+            },
+        },
+    ];
+    let (tx, mut rx) = tokio::sync::mpsc::channel(crate::provider::STREAM_CHANNEL_CAPACITY);
+
+    let results = agent
+        .execute_turn_tool_calls(&calls, &tx, CancellationToken::new())
+        .await;
+
+    assert_eq!(
+        results
+            .iter()
+            .map(|(id, _)| id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["call_a", "call_b"]
+    );
+    let mut starts = 0;
+    let mut ends = 0;
+    while let Ok(event) = rx.try_recv() {
+        match event {
+            TurnEvent::ToolCallStart { .. } => starts += 1,
+            TurnEvent::ToolCallEnd { .. } => ends += 1,
             other => panic!("unexpected event: {other:?}"),
         }
     }

@@ -116,6 +116,18 @@ impl SessionState {
         self: &Arc<Self>,
         config: &crate::config::Config,
     ) -> anyhow::Result<AgentHandle> {
+        self.ensure_agent_with_pool(config, None).await
+    }
+
+    /// Slice 3: assemble the lazy Agent from the daemon's
+    /// [`RuntimeResourcePool`] when one is provided. The
+    /// `pool == None` form still works for tests and any pre-Slice-3
+    /// boot path that hasn't installed the pool yet.
+    pub async fn ensure_agent_with_pool(
+        self: &Arc<Self>,
+        config: &crate::config::Config,
+        pool: Option<Arc<crate::runtime_pool::RuntimeResourcePool>>,
+    ) -> anyhow::Result<AgentHandle> {
         // Fast path: already installed.
         if let Some(handle) = self.agent_arc() {
             return Ok(handle);
@@ -130,7 +142,11 @@ impl SessionState {
             return Ok(handle);
         }
 
-        let agent = crate::agent::Agent::builder(config).build().await?;
+        let mut builder = crate::agent::Agent::builder(config);
+        if let Some(pool) = pool {
+            builder = builder.with_pool(pool);
+        }
+        let agent = builder.build().await?;
         self.set_agent(agent);
         Ok(self.agent_arc().expect("just installed"))
     }
