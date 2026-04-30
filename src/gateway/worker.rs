@@ -4,8 +4,8 @@
 //!
 //! Slice 3 Task 3.4 changed the shape: the gateway no longer owns the
 //! Agent. Each lane maps to a daemon session id (via [`DaemonLaneRouter`])
-//! and the worker opens a fresh [`Client`] per turn, calls
-//! `prompt.stream` against that session, and drains the stream into a
+//! while the gateway owns one shared daemon client. The worker calls
+//! `prompt.stream` against that session and drains the stream into a
 //! buffered reply. Edit-in-place via `StreamRenderer` is deferred to a
 //! follow-up that lands a daemon → gateway streaming-render bridge.
 //!
@@ -18,6 +18,7 @@ use std::sync::Arc;
 
 use crate::daemon::protocol::StreamFrame;
 use crate::gateway::commands::{CommandDispatcher, DispatchCtx};
+use crate::gateway::daemon_client::GatewayDaemonClient;
 use crate::gateway::lane::LaneKey;
 use crate::gateway::lane_router::DaemonLaneRouter;
 use crate::gateway::queue::{InboundQueue, InboundRow, OutboundQueue};
@@ -31,8 +32,8 @@ use crate::platform::{OutboundMessage, PlatformCapabilities};
 ///    [`CommandDispatcher`] first. Any handled command produces an
 ///    atomic outbound row and skips the prompt.* RPC entirely.
 /// 2. Look up (or create) the daemon session id for the row's lane.
-/// 3. Open a fresh [`Client`] and call `prompt.stream` against that
-///    session id with the row's text.
+/// 3. Reuse the gateway-owned daemon client and call `prompt.stream`
+///    against that session id with the row's text.
 /// 4. Drain `text` chunks from the stream into a reply buffer; await
 ///    the final response.
 /// 5. On success: enqueue the reply as a single outbound message and
@@ -41,6 +42,7 @@ use crate::platform::{OutboundMessage, PlatformCapabilities};
 pub async fn process_one(
     row: InboundRow,
     lane_router: &DaemonLaneRouter,
+    daemon_client: &GatewayDaemonClient,
     inbound_queue: &InboundQueue,
     // YYC-266 Slice 3 Task 3.4: outbound rows now flow through
     // `inbound_queue.complete_with_outbound`, which owns the atomic
@@ -68,6 +70,7 @@ pub async fn process_one(
                 lane: &lane,
                 user_id: &row.user_id,
                 lane_router,
+                daemon_client,
                 body: "",
             },
         )
@@ -102,7 +105,7 @@ pub async fn process_one(
     // Drive the prompt through the daemon. Failures here surface as
     // `mark_failed` on the inbound row; the dispatcher loop survives
     // and picks up the next row.
-    let result = run_prompt_via_daemon(&lane, &row.text, lane_router).await;
+    let result = run_prompt_via_daemon(&lane, &row.text, lane_router, daemon_client).await;
 
     match result {
         Ok(reply_text) => {
@@ -130,29 +133,26 @@ pub async fn process_one(
     }
 }
 
-/// Open a fresh [`Client`], ensure the daemon session exists for
-/// `lane`, and stream a `prompt.stream` request. Drains text chunks
-/// into the returned reply string. The final response's `text` field
-/// (if any) takes precedence over the accumulated chunks so we don't
-/// double-emit.
+/// Ensure the daemon session exists for `lane` and stream a
+/// `prompt.stream` request through the gateway-owned shared client.
+/// Drains text chunks into the returned reply string. The final
+/// response's `text` field (if any) takes precedence over the
+/// accumulated chunks so we don't double-emit.
 async fn run_prompt_via_daemon(
     lane: &LaneKey,
     input: &str,
     lane_router: &DaemonLaneRouter,
+    daemon_client: &GatewayDaemonClient,
 ) -> anyhow::Result<String> {
-    let session_id = lane_router
-        .ensure_session(lane)
-        .await
-        .map_err(|e| anyhow::anyhow!("ensure_session: {e}"))?;
-
-    // Slice 6: route through the lane router's shared, multiplexed
-    // [`Client`] instead of opening a fresh socket per inbound row.
-    // The transport demuxes responses by request id (Slice 5), so
-    // concurrent worker calls don't serialize on this handle.
-    let client = lane_router
+    let client = daemon_client
         .shared_client()
         .await
         .map_err(|e| anyhow::anyhow!("client connect: {e}"))?;
+
+    let session_id = lane_router
+        .ensure_session(lane, &client)
+        .await
+        .map_err(|e| anyhow::anyhow!("ensure_session: {e}"))?;
 
     let mut stream = client
         .call_stream_at_session(
@@ -223,30 +223,36 @@ mod tests {
 
     use super::*;
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Duration;
 
     use crate::client::Client;
+    use crate::daemon::protocol::{
+        Request, Response, StreamFrame, read_frame_bytes, write_frame_bytes, write_response,
+    };
     use crate::daemon::server::Server;
     use crate::daemon::state::DaemonState;
     use crate::gateway::commands::CommandDispatcher;
+    use crate::gateway::daemon_client::GatewayDaemonClient;
     use crate::gateway::queue::{InboundQueue, OutboundQueue};
     use crate::gateway::render_registry::RenderRegistry;
     use crate::memory::DbPool;
     use crate::platform::{InboundMessage, PlatformCapabilities};
     use std::collections::HashMap;
     use tempfile::tempdir;
+    use tokio::net::UnixListener;
 
     fn fresh_db() -> DbPool {
         crate::memory::in_memory_gateway_pool().expect("in-memory pool")
     }
 
-    /// Smallest possible router for the `/help` test: no daemon
+    /// Smallest possible daemon client for the `/help` test: no daemon
     /// needed because /help bypasses the prompt path.
-    fn router_no_daemon() -> DaemonLaneRouter {
-        DaemonLaneRouter::with_client_factory(|| {
+    fn client_no_daemon() -> GatewayDaemonClient {
+        GatewayDaemonClient::with_client_factory(|| {
             Box::pin(async {
                 Err(crate::client::ClientError::Protocol(
-                    "test router: client factory must not be invoked".into(),
+                    "test client: client factory must not be invoked".into(),
                 ))
             })
         })
@@ -263,7 +269,8 @@ mod tests {
         let inbound = InboundQueue::new(db.clone());
         let outbound = Arc::new(OutboundQueue::new(db.clone(), 5));
         let render_registry = Arc::new(RenderRegistry::new());
-        let lane_router = router_no_daemon();
+        let lane_router = DaemonLaneRouter::new();
+        let daemon_client = client_no_daemon();
         let commands = CommandDispatcher::new(&HashMap::new());
 
         inbound
@@ -283,6 +290,7 @@ mod tests {
         process_one(
             row,
             &lane_router,
+            &daemon_client,
             &inbound,
             &outbound,
             &render_registry,
@@ -309,6 +317,108 @@ mod tests {
         );
     }
 
+    async fn spawn_prompt_daemon(dir: &tempfile::TempDir) -> std::path::PathBuf {
+        let sock = dir.path().join("gateway.sock");
+        let listener = UnixListener::bind(&sock).expect("bind fake daemon");
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.expect("accept");
+            let (mut read, mut write) = stream.into_split();
+            loop {
+                let body = match read_frame_bytes(&mut read).await {
+                    Ok(body) => body,
+                    Err(_) => break,
+                };
+                let req: Request = serde_json::from_slice(&body).expect("request");
+                match req.method.as_str() {
+                    "session.create" => {
+                        let resp = Response::ok(req.id, serde_json::json!({ "created": true }));
+                        write_response(&mut write, &resp)
+                            .await
+                            .expect("session response");
+                    }
+                    "prompt.stream" => {
+                        let frame = StreamFrame {
+                            version: 1,
+                            id: Some(req.id.clone()),
+                            stream: "text".into(),
+                            data: serde_json::json!({ "chunk": "chunked" }),
+                        };
+                        let body = serde_json::to_vec(&frame).expect("frame body");
+                        write_frame_bytes(&mut write, &body)
+                            .await
+                            .expect("stream frame");
+                        let resp = Response::ok(req.id, serde_json::json!({ "text": "final" }));
+                        write_response(&mut write, &resp)
+                            .await
+                            .expect("prompt response");
+                    }
+                    other => panic!("unexpected daemon method {other}"),
+                }
+            }
+        });
+        sock
+    }
+
+    #[tokio::test]
+    async fn worker_reuses_gateway_owned_daemon_client_across_rows() {
+        let dir = tempdir().unwrap();
+        let sock = spawn_prompt_daemon(&dir).await;
+        let factory_calls = Arc::new(AtomicUsize::new(0));
+        let daemon_client = {
+            let sock = sock.clone();
+            let calls = Arc::clone(&factory_calls);
+            GatewayDaemonClient::with_client_factory(move || {
+                let p = sock.clone();
+                let calls = Arc::clone(&calls);
+                Box::pin(async move {
+                    calls.fetch_add(1, Ordering::SeqCst);
+                    Client::connect_at(&p).await
+                })
+            })
+        };
+
+        let db = fresh_db();
+        let inbound = InboundQueue::new(db.clone());
+        let outbound = Arc::new(OutboundQueue::new(db.clone(), 5));
+        let render_registry = Arc::new(RenderRegistry::new());
+        let lane_router = DaemonLaneRouter::new();
+        let commands = CommandDispatcher::new(&HashMap::new());
+
+        for text in ["one", "two"] {
+            inbound
+                .enqueue(InboundMessage {
+                    platform: "loopback".into(),
+                    chat_id: "c".into(),
+                    user_id: "u".into(),
+                    text: text.into(),
+                    message_id: None,
+                    reply_to: None,
+                    attachments: vec![],
+                })
+                .await
+                .unwrap();
+            let row = inbound.claim_next().await.unwrap().expect("row");
+            process_one(
+                row,
+                &lane_router,
+                &daemon_client,
+                &inbound,
+                &outbound,
+                &render_registry,
+                PlatformCapabilities::default(),
+                &commands,
+            )
+            .await
+            .unwrap();
+        }
+
+        assert_eq!(
+            factory_calls.load(Ordering::SeqCst),
+            1,
+            "gateway worker must reuse one daemon client across inbound rows"
+        );
+    }
+
     /// End-to-end smoke against a real (tempdir) daemon: an inbound
     /// row routed to `process_one` with no agent provider configured
     /// surfaces `AGENT_BUILD_FAILED` from the daemon; the worker
@@ -325,11 +435,14 @@ mod tests {
         let server_handle = tokio::spawn(server.run());
         tokio::time::sleep(Duration::from_millis(50)).await;
 
-        let sock_path = sock.clone();
-        let lane_router = DaemonLaneRouter::with_client_factory(move || {
-            let p = sock_path.clone();
-            Box::pin(async move { Client::connect_at(&p).await })
-        });
+        let lane_router = DaemonLaneRouter::new();
+        let daemon_client = {
+            let sock_path = sock.clone();
+            GatewayDaemonClient::with_client_factory(move || {
+                let p = sock_path.clone();
+                Box::pin(async move { Client::connect_at(&p).await })
+            })
+        };
 
         let db = fresh_db();
         let inbound = crate::gateway::queue::InboundQueue::with_policy(db.clone(), 1, 60);
@@ -354,6 +467,7 @@ mod tests {
         let res = process_one(
             row,
             &lane_router,
+            &daemon_client,
             &inbound,
             &outbound,
             &render_registry,

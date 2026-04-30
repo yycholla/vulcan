@@ -23,6 +23,7 @@ use tokio::process::Command as TokioCommand;
 
 use crate::client::ClientError;
 use crate::config::CommandConfig;
+use crate::gateway::daemon_client::GatewayDaemonClient;
 use crate::gateway::lane::LaneKey;
 use crate::gateway::lane_router::DaemonLaneRouter;
 
@@ -69,6 +70,8 @@ pub struct DispatchCtx<'a> {
     /// previously poked at the in-process Agent cache directly now
     /// route through the daemon's RPC surface (Slice 3 Task 3.4).
     pub lane_router: &'a DaemonLaneRouter,
+    /// Gateway-owned shared daemon client.
+    pub daemon_client: &'a GatewayDaemonClient,
     /// User input AFTER the leading `/` and command name. e.g. for
     /// `"/resume abc-def"` the body is `"abc-def"`. For `/help` it's
     /// the empty string.
@@ -180,8 +183,8 @@ impl CommandDispatcher {
         // produces an `AGENT_BUILD_FAILED` error if the active
         // provider profile can't initialize — surface that verbatim
         // so the operator sees the underlying cause.
-        let session_id = ctx.lane_router.ensure_session(ctx.lane).await?;
-        let client = ctx.lane_router.shared_client().await?;
+        let client = ctx.daemon_client.shared_client().await?;
+        let session_id = ctx.lane_router.ensure_session(ctx.lane, &client).await?;
         let resp = match client
             .call_at_session(&session_id, "agent.status", serde_json::json!({}))
             .await
@@ -218,7 +221,7 @@ impl CommandDispatcher {
         // session via `ensure_session`.
         let session_id = DaemonLaneRouter::derive_session_id(ctx.lane);
         let client = ctx
-            .lane_router
+            .daemon_client
             .shared_client()
             .await
             .with_context(|| "open daemon client for /clear")?;
@@ -257,7 +260,7 @@ impl CommandDispatcher {
         // than failing the inbound row outright; the legacy in-process
         // resume relied on the gateway-owned Agent which no longer
         // exists.
-        let client = ctx.lane_router.shared_client().await?;
+        let client = ctx.daemon_client.shared_client().await?;
         match client
             .call(
                 "session.resume",
@@ -423,11 +426,11 @@ mod tests {
     /// returns an error if invoked, which would surface as an
     /// assertion failure if the dispatcher unexpectedly tried to
     /// connect.
-    fn router_no_daemon() -> DaemonLaneRouter {
-        DaemonLaneRouter::with_client_factory(|| {
+    fn client_no_daemon() -> GatewayDaemonClient {
+        GatewayDaemonClient::with_client_factory(|| {
             Box::pin(async {
                 Err(ClientError::Protocol(
-                    "test router: client factory must not be invoked".into(),
+                    "test client: client factory must not be invoked".into(),
                 ))
             })
         })
@@ -440,11 +443,13 @@ mod tests {
             platform: "loopback".into(),
             chat_id: "c".into(),
         };
-        let lane_router = router_no_daemon();
+        let lane_router = DaemonLaneRouter::new();
+        let daemon_client = client_no_daemon();
         let ctx = DispatchCtx {
             lane: &lane,
             user_id: "u",
             lane_router: &lane_router,
+            daemon_client: &daemon_client,
             body: "",
         };
         let reply = d
@@ -462,11 +467,13 @@ mod tests {
             platform: "loopback".into(),
             chat_id: "c".into(),
         };
-        let lane_router = router_no_daemon();
+        let lane_router = DaemonLaneRouter::new();
+        let daemon_client = client_no_daemon();
         let ctx = DispatchCtx {
             lane: &lane,
             user_id: "u",
             lane_router: &lane_router,
+            daemon_client: &daemon_client,
             body: "",
         };
         assert!(d.dispatch("hello world", ctx).await.unwrap().is_none());

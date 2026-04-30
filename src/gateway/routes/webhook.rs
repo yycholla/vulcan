@@ -69,9 +69,9 @@ mod tests {
         bytes.iter().map(|b| format!("{b:02x}")).collect()
     }
 
-    fn no_daemon_router() -> Arc<crate::gateway::lane_router::DaemonLaneRouter> {
+    fn no_daemon_client() -> Arc<crate::gateway::daemon_client::GatewayDaemonClient> {
         Arc::new(
-            crate::gateway::lane_router::DaemonLaneRouter::with_client_factory(|| {
+            crate::gateway::daemon_client::GatewayDaemonClient::with_client_factory(|| {
                 Box::pin(async {
                     Err(crate::client::ClientError::Protocol(
                         "webhook test: client factory must not be invoked".into(),
@@ -87,7 +87,8 @@ mod tests {
             inbound: Arc::new(crate::gateway::queue::InboundQueue::new(db.clone())),
             outbound: Arc::new(crate::gateway::queue::OutboundQueue::new(db.clone(), 5)),
             registry: Arc::new(registry),
-            lane_router: no_daemon_router(),
+            lane_router: Arc::new(crate::gateway::lane_router::DaemonLaneRouter::new()),
+            daemon_client: no_daemon_client(),
             scheduler_jobs: Arc::new(Vec::new()),
             scheduler_store: None,
         }

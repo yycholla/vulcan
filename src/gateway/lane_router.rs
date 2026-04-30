@@ -1,5 +1,5 @@
 //! Maps a gateway [`LaneKey`] (platform + chat_id) to a daemon session
-//! id and routes prompts through the in-tree [`Client`].
+//! id.
 //!
 //! This replaces the per-lane in-process Agent cache from earlier
 //! slices (Slice 3 Task 3.4). The daemon owns the Agent — one per
@@ -17,10 +17,8 @@
 //! distinct modules.
 
 use std::collections::HashMap;
-use std::sync::Arc;
 
 use parking_lot::Mutex;
-use tokio::sync::Mutex as AsyncMutex;
 
 use crate::client::{Client, ClientError};
 use crate::gateway::lane::LaneKey;
@@ -41,50 +39,17 @@ impl From<ClientError> for LaneRouterError {
     }
 }
 
-/// Closure that produces a connected [`Client`]. Boxed so the test
-/// constructor can swap in a fixture pointing at a tempdir socket.
-type ClientFactory = Box<
-    dyn Fn() -> futures_util::future::BoxFuture<'static, Result<Client, ClientError>> + Send + Sync,
->;
-
-/// Owns the lane → session-id mapping and a `Client` factory that
-/// talks to the daemon. `ensure_session` is idempotent; the daemon's
-/// `session.create` rejects duplicate ids so the cache also serves as
-/// a write-through guard.
+/// Owns the lane → session-id mapping. `ensure_session` is
+/// idempotent; the daemon's `session.create` rejects duplicate ids so
+/// the cache also serves as a write-through guard.
 pub struct DaemonLaneRouter {
     sessions: Mutex<HashMap<LaneKey, String>>,
-    client_factory: ClientFactory,
-    /// Slice 6: the shared, multiplex-capable [`Client`] all worker
-    /// turns flow through. Lazy-built on first use via the factory.
-    /// Async Mutex because building a Client is async (auto-start +
-    /// connect). Reads are cheap once the Arc is installed.
-    shared: AsyncMutex<Option<Arc<Client>>>,
 }
 
 impl DaemonLaneRouter {
-    /// Production constructor — connects via [`Client::connect_or_autostart`].
     pub fn new() -> Self {
         Self {
             sessions: Mutex::new(HashMap::new()),
-            client_factory: Box::new(|| Box::pin(Client::connect_or_autostart())),
-            shared: AsyncMutex::new(None),
-        }
-    }
-
-    /// Test constructor — caller supplies a closure returning a
-    /// connected [`Client`] (typically pointing at a tempdir socket).
-    #[cfg(test)]
-    pub fn with_client_factory<F>(factory: F) -> Self
-    where
-        F: Fn() -> futures_util::future::BoxFuture<'static, Result<Client, ClientError>>
-            + Send
-            + Sync
-            + 'static,
-    {
-        Self {
-            sessions: Mutex::new(HashMap::new()),
-            client_factory: Box::new(factory),
-            shared: AsyncMutex::new(None),
         }
     }
 
@@ -98,14 +63,17 @@ impl DaemonLaneRouter {
     /// Get (or create) the daemon session id for a lane. Idempotent:
     /// a `SESSION_EXISTS` reply from the daemon is treated as success
     /// so reconnects across gateway restarts are no-ops.
-    pub async fn ensure_session(&self, lane: &LaneKey) -> Result<String, LaneRouterError> {
+    pub async fn ensure_session(
+        &self,
+        lane: &LaneKey,
+        client: &Client,
+    ) -> Result<String, LaneRouterError> {
         // Cache hit: skip the RPC entirely.
         if let Some(sid) = self.sessions.lock().get(lane).cloned() {
             return Ok(sid);
         }
 
         let sid = Self::derive_session_id(lane);
-        let client = self.shared_client().await?;
 
         // session.create with `id` set: re-creating an existing
         // session returns SESSION_EXISTS, which we treat as success
@@ -121,30 +89,6 @@ impl DaemonLaneRouter {
 
         self.sessions.lock().insert(lane.clone(), sid.clone());
         Ok(sid)
-    }
-
-    /// Slice 6: cloneable handle to the lane router's single shared
-    /// [`Client`]. Lazy-built on first call. Workers stream prompts
-    /// through this Arc instead of opening a fresh socket per inbound
-    /// row — the multiplexed transport (Slice 5) routes responses by
-    /// request id so concurrent calls don't serialize.
-    pub async fn shared_client(&self) -> Result<Arc<Client>, LaneRouterError> {
-        let mut g = self.shared.lock().await;
-        if let Some(client) = g.as_ref() {
-            return Ok(Arc::clone(client));
-        }
-        let new_client = (self.client_factory)().await?;
-        let arc = Arc::new(new_client);
-        *g = Some(Arc::clone(&arc));
-        Ok(arc)
-    }
-
-    /// Drop the cached shared [`Client`] so the next `shared_client`
-    /// call rebuilds a fresh transport. Use after a transport-level
-    /// failure where the daemon connection has been torn down and
-    /// subsequent calls would error with `daemon connection closed`.
-    pub async fn invalidate_shared_client(&self) {
-        *self.shared.lock().await = None;
     }
 
     /// Number of cached lanes (surface for /v1/lanes route).
@@ -215,42 +159,6 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn shared_client_returns_same_arc_across_calls() {
-        // Slice 6 acceptance: workers share a single DaemonClient
-        // instead of opening a new one per inbound row. Lazy-built on
-        // first call.
-        let dir = tempdir().unwrap();
-        let sock = dir.path().join("vulcan.sock");
-        let state = Arc::new(DaemonState::for_tests_minimal());
-        let server = Server::bind(&sock, state.clone()).await.unwrap();
-        let server_handle = tokio::spawn(server.run());
-        tokio::time::sleep(Duration::from_millis(50)).await;
-
-        let sock_path = sock.clone();
-        let router = DaemonLaneRouter::with_client_factory(move || {
-            let p = sock_path.clone();
-            Box::pin(async move { Client::connect_at(&p).await })
-        });
-
-        let c1 = router.shared_client().await.unwrap();
-        let c2 = router.shared_client().await.unwrap();
-        assert!(
-            Arc::ptr_eq(&c1, &c2),
-            "shared_client must return the same Arc<Client> across calls"
-        );
-
-        router.invalidate_shared_client().await;
-        let c3 = router.shared_client().await.unwrap();
-        assert!(
-            !Arc::ptr_eq(&c1, &c3),
-            "after invalidate, shared_client must rebuild"
-        );
-
-        state.signal_shutdown();
-        let _ = tokio::time::timeout(Duration::from_secs(2), server_handle).await;
-    }
-
     #[test]
     fn derive_session_id_is_stable() {
         let l = lane("discord", "12345");
@@ -281,24 +189,21 @@ mod tests {
         // Wait briefly for the listener to settle.
         tokio::time::sleep(Duration::from_millis(50)).await;
 
-        let sock_path = sock.clone();
-        let router = DaemonLaneRouter::with_client_factory(move || {
-            let p = sock_path.clone();
-            Box::pin(async move { Client::connect_at(&p).await })
-        });
+        let router = DaemonLaneRouter::new();
+        let client = Client::connect_at(&sock).await.unwrap();
 
         let l1 = lane("discord", "111");
         let l2 = lane("discord", "222");
 
-        let s1 = router.ensure_session(&l1).await.unwrap();
+        let s1 = router.ensure_session(&l1, &client).await.unwrap();
         assert_eq!(s1, "gateway:discord:111");
 
-        let s2 = router.ensure_session(&l2).await.unwrap();
+        let s2 = router.ensure_session(&l2, &client).await.unwrap();
         assert_eq!(s2, "gateway:discord:222");
         assert_ne!(s1, s2, "distinct lanes must map to distinct sessions");
 
         // Second call same lane: cache hit. Result must equal first.
-        let s1_again = router.ensure_session(&l1).await.unwrap();
+        let s1_again = router.ensure_session(&l1, &client).await.unwrap();
         assert_eq!(s1_again, s1);
 
         assert_eq!(router.cached_lane_count(), 2);
@@ -326,14 +231,11 @@ mod tests {
         let server_handle = tokio::spawn(server.run());
         tokio::time::sleep(Duration::from_millis(50)).await;
 
-        let sock_path = sock.clone();
-        let router = DaemonLaneRouter::with_client_factory(move || {
-            let p = sock_path.clone();
-            Box::pin(async move { Client::connect_at(&p).await })
-        });
+        let router = DaemonLaneRouter::new();
+        let client = Client::connect_at(&sock).await.unwrap();
 
         let l = lane("discord", "111");
-        let s1 = router.ensure_session(&l).await.unwrap();
+        let s1 = router.ensure_session(&l, &client).await.unwrap();
         assert_eq!(router.cached_lane_count(), 1);
 
         router.forget(&l);
@@ -343,7 +245,7 @@ mod tests {
         // daemon side: the session itself was never destroyed in this
         // test, only the gateway's cache was invalidated, so the
         // re-create round-trips through SESSION_EXISTS).
-        let s2 = router.ensure_session(&l).await.unwrap();
+        let s2 = router.ensure_session(&l, &client).await.unwrap();
         assert_eq!(s1, s2, "same session id after forget+re-ensure");
         assert_eq!(router.cached_lane_count(), 1);
 
@@ -368,22 +270,19 @@ mod tests {
         // session.create gets SESSION_EXISTS.
         let pre_sid = "gateway:loopback:42";
         {
-            let mut c = Client::connect_at(&sock).await.unwrap();
+            let c = Client::connect_at(&sock).await.unwrap();
             let _ = c
                 .call("session.create", serde_json::json!({ "id": pre_sid }))
                 .await
                 .unwrap();
         }
 
-        let sock_path = sock.clone();
-        let router = DaemonLaneRouter::with_client_factory(move || {
-            let p = sock_path.clone();
-            Box::pin(async move { Client::connect_at(&p).await })
-        });
+        let router = DaemonLaneRouter::new();
+        let client = Client::connect_at(&sock).await.unwrap();
 
         let l = lane("loopback", "42");
         let sid = router
-            .ensure_session(&l)
+            .ensure_session(&l, &client)
             .await
             .expect("SESSION_EXISTS must be treated as success");
         assert_eq!(sid, pre_sid);

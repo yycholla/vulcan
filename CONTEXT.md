@@ -92,6 +92,7 @@ _Avoid_: subagent process, child agent
 - A **Frontend** should reuse a **Daemon Client** when it has multiple daemon interactions in one process.
 - A **Daemon Client** owns one read task per socket; normal responses, stream frames, and `id: null` daemon push frames are demultiplexed without stealing the socket.
 - The **Daemon** keeps reading a connection while a streaming **Turn** is in flight; per-request dispatch runs independently and outbound frames are serialized by one writer queue.
+- The gateway runtime owns its shared **Daemon Client** separately from lane/session routing; `DaemonLaneRouter` maps lanes to sessions and does not own daemon connection state.
 - A gateway lane maps to one **Session**; the lane is a platform routing concept, not a daemon connection.
 
 ## Example Dialogue

@@ -4,6 +4,7 @@ use std::time::Duration;
 
 use crate::config::Config;
 use crate::gateway::commands::CommandDispatcher;
+use crate::gateway::daemon_client::GatewayDaemonClient;
 use crate::gateway::discord::DiscordPlatform;
 use crate::gateway::lane::{LaneKey, LaneRouter as PerLaneSerialRouter, from_closure};
 use crate::gateway::lane_router::DaemonLaneRouter;
@@ -18,6 +19,7 @@ use tokio::net::TcpListener;
 use tokio::task::JoinHandle;
 
 pub mod commands;
+pub mod daemon_client;
 pub mod discord;
 pub mod lane;
 pub mod lane_router;
@@ -99,6 +101,7 @@ where
     // gateway.idle_ttl_secs setting is now ignored — daemon-side
     // session eviction handles cleanup.
     let lane_router = Arc::new(DaemonLaneRouter::new());
+    let daemon_client = Arc::new(GatewayDaemonClient::new());
 
     run_on_listener_with_parts(
         gateway,
@@ -108,6 +111,7 @@ where
         db,
         registry,
         lane_router,
+        daemon_client,
     )
     .await
 }
@@ -120,6 +124,7 @@ async fn run_on_listener_with_parts<S>(
     db: DbPool,
     registry: Arc<PlatformRegistry>,
     lane_router: Arc<DaemonLaneRouter>,
+    daemon_client: Arc<GatewayDaemonClient>,
 ) -> Result<()>
 where
     S: Future<Output = ()> + Send + 'static,
@@ -208,6 +213,7 @@ where
         Arc::clone(&inbound),
         Arc::clone(&outbound),
         Arc::clone(&lane_router),
+        Arc::clone(&daemon_client),
         Arc::clone(&render_registry),
         Arc::clone(&registry),
         Arc::clone(&commands),
@@ -228,6 +234,7 @@ where
         outbound,
         registry,
         lane_router,
+        daemon_client,
         scheduler_jobs,
         scheduler_store: scheduler_store_for_route,
     });
@@ -259,6 +266,7 @@ fn spawn_inbound_dispatcher(
     inbound: Arc<InboundQueue>,
     outbound: Arc<OutboundQueue>,
     lane_router: Arc<DaemonLaneRouter>,
+    daemon_client: Arc<GatewayDaemonClient>,
     render_registry: Arc<crate::gateway::render_registry::RenderRegistry>,
     platform_registry: Arc<PlatformRegistry>,
     commands: Arc<CommandDispatcher>,
@@ -271,6 +279,7 @@ fn spawn_inbound_dispatcher(
         let handler_inbound = Arc::clone(&inbound);
         let handler_outbound = Arc::clone(&outbound);
         let handler_lane_router = Arc::clone(&lane_router);
+        let handler_daemon_client = Arc::clone(&daemon_client);
         let handler_render_registry = Arc::clone(&render_registry);
         let handler_platform_registry = Arc::clone(&platform_registry);
         let handler_commands = Arc::clone(&commands);
@@ -278,6 +287,7 @@ fn spawn_inbound_dispatcher(
             let inbound = Arc::clone(&handler_inbound);
             let outbound = Arc::clone(&handler_outbound);
             let lane_router = Arc::clone(&handler_lane_router);
+            let daemon_client = Arc::clone(&handler_daemon_client);
             let render_registry = Arc::clone(&handler_render_registry);
             let platform_registry = Arc::clone(&handler_platform_registry);
             let commands = Arc::clone(&handler_commands);
@@ -293,6 +303,7 @@ fn spawn_inbound_dispatcher(
                 if let Err(e) = worker::process_one(
                     row,
                     &lane_router,
+                    &daemon_client,
                     &inbound,
                     &outbound,
                     &render_registry,
@@ -387,14 +398,14 @@ mod tests {
     /// Build the gateway-side parts the test harness needs. The
     /// previous version returned a mock-Agent-backed cache;
     /// post-Slice 3 the gateway routes through the daemon, so we
-    /// hand back a [`DaemonLaneRouter`] whose factory points at no
+    /// hand back a [`GatewayDaemonClient`] whose factory points at no
     /// daemon — these tests just exercise the Axum surface
     /// (`/health`, validation), not the prompt path.
-    fn no_daemon_router() -> Arc<DaemonLaneRouter> {
-        Arc::new(DaemonLaneRouter::with_client_factory(|| {
+    fn no_daemon_client() -> Arc<GatewayDaemonClient> {
+        Arc::new(GatewayDaemonClient::with_client_factory(|| {
             Box::pin(async {
                 Err(crate::client::ClientError::Protocol(
-                    "test router: prompt path must not be reached".into(),
+                    "test client: prompt path must not be reached".into(),
                 ))
             })
         }))
@@ -432,7 +443,8 @@ mod tests {
         let mut registry = PlatformRegistry::new();
         registry.register("loopback", Arc::new(LoopbackPlatform::default()));
         let registry = Arc::new(registry);
-        let lane_router = no_daemon_router();
+        let lane_router = Arc::new(DaemonLaneRouter::new());
+        let daemon_client = no_daemon_client();
         let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
         let addr = listener.local_addr().expect("addr");
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
@@ -448,6 +460,7 @@ mod tests {
                 db,
                 registry,
                 lane_router,
+                daemon_client,
             )
             .await
         });
@@ -485,7 +498,8 @@ mod tests {
         let loopback = Arc::new(LoopbackPlatform::default());
         registry.register("loopback", loopback.clone());
         let registry = Arc::new(registry);
-        let lane_router = no_daemon_router();
+        let lane_router = Arc::new(DaemonLaneRouter::new());
+        let daemon_client = no_daemon_client();
         let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
         let addr = listener.local_addr().expect("addr");
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
@@ -501,6 +515,7 @@ mod tests {
                 db,
                 registry,
                 lane_router,
+                daemon_client,
             )
             .await
         });
@@ -591,7 +606,8 @@ mod tests {
         let loopback = Arc::new(LoopbackPlatform::default());
         registry.register("loopback", loopback.clone());
         let registry = Arc::new(registry);
-        let lane_router = no_daemon_router();
+        let lane_router = Arc::new(DaemonLaneRouter::new());
+        let daemon_client = no_daemon_client();
         let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
 
@@ -606,6 +622,7 @@ mod tests {
                 db,
                 registry,
                 lane_router,
+                daemon_client,
             )
             .await
         });

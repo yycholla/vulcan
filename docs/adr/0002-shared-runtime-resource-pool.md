@@ -13,3 +13,4 @@ The daemon owns one runtime resource pool for expensive and global adapters, whi
 - Hook instances and tool registries remain session-local, but their factories and heavy dependencies come from the daemon.
 - Store interfaces stay separate by domain, but share daemon-owned storage resources where appropriate.
 - Frontends should reuse a multiplexed daemon client so many interactions can share the daemon-owned resources without opening one socket per call or blocking calls behind a stream.
+- Gateway lane/session routing must stay separate from daemon connection ownership; the gateway runtime owns the reusable daemon client.

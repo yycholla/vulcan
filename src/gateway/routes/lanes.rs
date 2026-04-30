@@ -35,14 +35,16 @@ mod tests {
         crate::memory::in_memory_gateway_pool().expect("in-memory pool")
     }
 
-    fn no_daemon_router() -> Arc<DaemonLaneRouter> {
-        Arc::new(DaemonLaneRouter::with_client_factory(|| {
-            Box::pin(async {
-                Err(ClientError::Protocol(
-                    "lanes test: client factory must not be invoked".into(),
-                ))
-            })
-        }))
+    fn no_daemon_client() -> Arc<crate::gateway::daemon_client::GatewayDaemonClient> {
+        Arc::new(
+            crate::gateway::daemon_client::GatewayDaemonClient::with_client_factory(|| {
+                Box::pin(async {
+                    Err(ClientError::Protocol(
+                        "lanes test: client factory must not be invoked".into(),
+                    ))
+                })
+            }),
+        )
     }
 
     fn build_app_state(db: DbPool, lane_router: Arc<DaemonLaneRouter>) -> AppState {
@@ -52,6 +54,7 @@ mod tests {
             outbound: Arc::new(crate::gateway::queue::OutboundQueue::new(db.clone(), 5)),
             registry: Arc::new(PlatformRegistry::new()),
             lane_router,
+            daemon_client: no_daemon_client(),
             scheduler_jobs: Arc::new(Vec::new()),
             scheduler_store: None,
         }
@@ -61,7 +64,7 @@ mod tests {
     #[tokio::test]
     async fn get_lanes_empty_cache_returns_empty_array() {
         let db = fresh_db();
-        let state = build_app_state(db.clone(), no_daemon_router());
+        let state = build_app_state(db.clone(), Arc::new(DaemonLaneRouter::new()));
 
         let app = build_router(state);
         let resp = app

@@ -120,19 +120,22 @@ mod tests {
         jobs: Vec<SchedulerJobConfig>,
         store: Option<SchedulerStore>,
     ) -> AppState {
-        let lane_router = Arc::new(DaemonLaneRouter::with_client_factory(|| {
-            Box::pin(async {
-                Err(crate::client::ClientError::Protocol(
-                    "scheduler route test: client factory must not be invoked".into(),
-                ))
-            })
-        }));
+        let daemon_client = Arc::new(
+            crate::gateway::daemon_client::GatewayDaemonClient::with_client_factory(|| {
+                Box::pin(async {
+                    Err(crate::client::ClientError::Protocol(
+                        "scheduler route test: client factory must not be invoked".into(),
+                    ))
+                })
+            }),
+        );
         AppState {
             api_token: Arc::new("secret".into()),
             inbound: Arc::new(InboundQueue::new(db.clone())),
             outbound: Arc::new(OutboundQueue::new(db.clone(), 5)),
             registry: Arc::new(PlatformRegistry::new()),
-            lane_router,
+            lane_router: Arc::new(DaemonLaneRouter::new()),
+            daemon_client,
             scheduler_jobs: Arc::new(jobs),
             scheduler_store: store,
         }

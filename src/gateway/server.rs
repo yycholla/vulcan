@@ -6,6 +6,7 @@ use axum::http::{Request, StatusCode};
 use axum::middleware::Next;
 use axum::response::Response;
 
+use crate::gateway::daemon_client::GatewayDaemonClient;
 use crate::gateway::lane_router::DaemonLaneRouter;
 use crate::gateway::queue::{InboundQueue, OutboundQueue};
 use crate::gateway::registry::PlatformRegistry;
@@ -20,6 +21,9 @@ pub struct AppState {
     /// Slice 3 Task 3.4: lane → daemon-session router replaces the
     /// in-process per-lane Agent cache. The daemon owns the Agent.
     pub lane_router: Arc<DaemonLaneRouter>,
+    /// Slice 6: one reusable daemon client shared by gateway workers
+    /// and command handlers.
+    pub daemon_client: Arc<GatewayDaemonClient>,
     /// YYC-17 PR-4: declared scheduler jobs (from `Config.scheduler`).
     /// Empty when the gateway runs without the scheduler enabled.
     /// Owned via `Arc` so the route handler can clone the slice
@@ -122,8 +126,8 @@ mod tests {
         crate::memory::in_memory_gateway_pool().expect("in-memory pool")
     }
 
-    fn no_daemon_router() -> Arc<DaemonLaneRouter> {
-        Arc::new(DaemonLaneRouter::with_client_factory(|| {
+    fn no_daemon_client() -> Arc<GatewayDaemonClient> {
+        Arc::new(GatewayDaemonClient::with_client_factory(|| {
             Box::pin(async {
                 Err(crate::client::ClientError::Protocol(
                     "test app state: client factory must not be invoked".into(),
@@ -139,7 +143,8 @@ mod tests {
             inbound: Arc::new(crate::gateway::queue::InboundQueue::new(db.clone())),
             outbound: Arc::new(crate::gateway::queue::OutboundQueue::new(db.clone(), 5)),
             registry: Arc::new(crate::gateway::registry::PlatformRegistry::new()),
-            lane_router: no_daemon_router(),
+            lane_router: Arc::new(DaemonLaneRouter::new()),
+            daemon_client: no_daemon_client(),
             scheduler_jobs: Arc::new(Vec::new()),
             scheduler_store: None,
         }
