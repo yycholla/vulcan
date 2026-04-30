@@ -1,7 +1,8 @@
 use clap::{CommandFactory, Parser};
 use clap_complete::generate;
 use std::fs::File;
-use std::io::Write;
+use std::io::{Write as _, stdout};
+// use std::io::Write; // covered by Write as _ above
 use std::path::PathBuf;
 use tracing_subscriber::EnvFilter;
 #[cfg(feature = "gateway")]
@@ -73,49 +74,20 @@ async fn main() -> anyhow::Result<()> {
         }
         Some(Command::Prompt { text }) => {
             init_cli_logging();
-            let mut agent = vulcan::agent::Agent::builder(&config)
-                .with_tool_profile(cli.profile.clone())
-                .build()
-                .await?;
-            if cli.r#continue {
-                agent.continue_last_session()?;
-            }
-            // YYC-38: stream tokens to stdout as they arrive instead of
-            // blocking on the buffered chat path. Long generations now
-            // start producing visible output immediately.
-            let (tx, mut rx) = tokio::sync::mpsc::channel::<StreamEvent>(
-                vulcan::provider::STREAM_CHANNEL_CAPACITY,
-            );
-            let stream_task = tokio::spawn(async move { agent.run_prompt_stream(&text, tx).await });
-
-            let mut stdout = std::io::stdout().lock();
-            let mut exit_code = 0;
-            while let Some(ev) = rx.recv().await {
-                match ev {
-                    StreamEvent::Text(chunk) => {
-                        let _ = stdout.write_all(chunk.as_bytes());
-                        let _ = stdout.flush();
+            #[cfg(feature = "daemon")]
+            if !cli.no_daemon {
+                match prompt_via_daemon(text.clone(), cli.profile.clone()).await {
+                    Ok(()) => {}
+                    Err(e) => {
+                        tracing::warn!("daemon prompt failed, falling back to direct: {e}");
+                        run_prompt_direct(&config, text, cli.profile.clone()).await?;
                     }
-                    StreamEvent::Error(msg) => {
-                        eprintln!("\nError: {msg}");
-                        exit_code = 1;
-                    }
-                    StreamEvent::Done(_) => break,
-                    // Reasoning, ToolCallStart/End not surfaced in CLI
-                    // output — they'd mix with the response stream and
-                    // need a richer renderer (the TUI handles them).
-                    _ => {}
                 }
+            } else {
+                run_prompt_direct(&config, text, cli.profile.clone()).await?;
             }
-            // Trailing newline so the next shell prompt isn't glued to
-            // the model's last token.
-            let _ = writeln!(stdout);
-            let _ = stdout.flush();
-            // Surface any task-level error (provider init, etc).
-            stream_task.await??;
-            if exit_code != 0 {
-                std::process::exit(exit_code);
-            }
+            #[cfg(not(feature = "daemon"))]
+            run_prompt_direct(&config, text, cli.profile.clone()).await?;
         }
         Some(Command::Session { id }) => {
             init_tui_logging();
@@ -123,22 +95,20 @@ async fn main() -> anyhow::Result<()> {
         }
         Some(Command::Search { query, limit }) => {
             init_cli_logging();
-            let store = vulcan::memory::SessionStore::try_new()?;
-            let hits = store.search_messages(&query, limit)?;
-            if hits.is_empty() {
-                println!("No matches.");
-            } else {
-                for h in hits {
-                    let preview: String = h.content.chars().take(120).collect();
-                    println!(
-                        "[{}…] {} (score {:.2})\n  {}\n",
-                        &h.session_id[..8],
-                        h.role,
-                        h.score,
-                        preview.replace('\n', " ")
-                    );
+            #[cfg(feature = "daemon")]
+            if !cli.no_daemon {
+                match search_via_daemon(query.clone(), limit).await {
+                    Ok(()) => {}
+                    Err(e) => {
+                        tracing::warn!("daemon search failed, falling back to direct: {e}");
+                        run_search_direct(&query, limit).await?;
+                    }
                 }
+            } else {
+                run_search_direct(&query, limit).await?;
             }
+            #[cfg(not(feature = "daemon"))]
+            run_search_direct(&query, limit).await?;
         }
         #[cfg(feature = "gateway")]
         Some(Command::Gateway { cmd, bind }) => {
@@ -246,10 +216,17 @@ async fn main() -> anyhow::Result<()> {
         }
         Some(Command::Cortex { cmd }) => {
             init_cli_logging();
-            if cli.no_daemon {
+            #[cfg(feature = "daemon")]
+            {
+                if cli.no_daemon {
+                    vulcan::cli_cortex::run(cmd).await?;
+                } else {
+                    vulcan::cli_cortex::run_with_client(cmd).await?;
+                }
+            }
+            #[cfg(not(feature = "daemon"))]
+            {
                 vulcan::cli_cortex::run(cmd).await?;
-            } else {
-                vulcan::cli_cortex::run_with_client(cmd).await?;
             }
         }
         #[cfg(feature = "daemon")]
@@ -327,6 +304,113 @@ fn init_tui_logging() {
             eprintln!("Vulcan TUI starting... log file unavailable ({reason}); logs disabled.");
         }
     }
+}
+
+// ── Slice 2: direct-mode helpers (fallback when daemon is unavailable) ──
+
+async fn run_prompt_direct(
+    config: &Config,
+    text: String,
+    profile: Option<String>,
+) -> anyhow::Result<()> {
+    let mut agent = vulcan::agent::Agent::builder(config)
+        .with_tool_profile(profile)
+        .build()
+        .await?;
+    let (tx, mut rx) =
+        tokio::sync::mpsc::channel::<StreamEvent>(vulcan::provider::STREAM_CHANNEL_CAPACITY);
+    let stream_task = tokio::spawn(async move { agent.run_prompt_stream(&text, tx).await });
+
+    let mut stdout = stdout();
+    let mut exit_code = 0;
+    while let Some(ev) = rx.recv().await {
+        match ev {
+            StreamEvent::Text(chunk) => {
+                let _ = stdout.write_all(chunk.as_bytes());
+                let _ = stdout.flush();
+            }
+            StreamEvent::Error(msg) => {
+                eprintln!("\nError: {msg}");
+                exit_code = 1;
+            }
+            StreamEvent::Done(_) => break,
+            _ => {}
+        }
+    }
+    let _ = writeln!(stdout);
+    let _ = stdout.flush();
+    stream_task.await??;
+    if exit_code != 0 {
+        std::process::exit(exit_code);
+    }
+    Ok(())
+}
+
+async fn run_search_direct(query: &str, limit: usize) -> anyhow::Result<()> {
+    let store = vulcan::memory::SessionStore::try_new()?;
+    let hits = store.search_messages(query, limit)?;
+    if hits.is_empty() {
+        println!("No matches.");
+    } else {
+        for h in hits {
+            let preview: String = h.content.chars().take(120).collect();
+            println!(
+                "[{}…] {} (score {:.2})\n  {}\n",
+                &h.session_id[..8],
+                h.role,
+                h.score,
+                preview.replace('\n', " ")
+            );
+        }
+    }
+    Ok(())
+}
+
+// ── Slice 2: daemon-routed client helpers ──
+
+#[cfg(feature = "daemon")]
+async fn prompt_via_daemon(text: String, _profile: Option<String>) -> anyhow::Result<()> {
+    let mut client = vulcan::client::Client::connect_or_autostart().await?;
+    // For CLI: use prompt.run (buffered, simpler) — the streaming
+    // TUI uses prompt.stream.
+    let result = client
+        .call("prompt.run", serde_json::json!({ "text": text }))
+        .await?;
+    println!("{}", result["text"].as_str().unwrap_or(""));
+    Ok(())
+}
+
+#[cfg(feature = "daemon")]
+async fn search_via_daemon(query: String, limit: usize) -> anyhow::Result<()> {
+    let mut client = vulcan::client::Client::connect_or_autostart().await?;
+    let result = client
+        .call(
+            "session.search",
+            serde_json::json!({ "query": query, "limit": limit }),
+        )
+        .await?;
+    let hits = result["results"].as_array().cloned().unwrap_or_default();
+    if hits.is_empty() {
+        println!("No matches.");
+    } else {
+        for h in hits {
+            let sid = h["session_id"].as_str().unwrap_or("?");
+            let preview = h["content"]
+                .as_str()
+                .unwrap_or("")
+                .chars()
+                .take(120)
+                .collect::<String>();
+            println!(
+                "[{}…] {} (score {:.2})\n  {}\n",
+                &sid[..sid.len().min(8)],
+                h["role"].as_str().unwrap_or("?"),
+                h["score"].as_f64().unwrap_or(0.0),
+                preview.replace('\n', " ")
+            );
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]

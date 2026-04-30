@@ -10,9 +10,11 @@ use std::sync::Arc;
 
 use tokio::net::UnixStream;
 
-use crate::daemon::dispatch::Dispatcher;
+use crate::daemon::dispatch::{DispatchResult, Dispatcher};
 use crate::daemon::lifecycle::SocketBinder;
-use crate::daemon::protocol::{Response, parse_request_strict, read_frame_bytes, write_response};
+use crate::daemon::protocol::{
+    Response, parse_request_strict, read_frame_bytes, write_frame_bytes, write_response,
+};
 use crate::daemon::state::DaemonState;
 
 /// Long-lived daemon server. Holds the bound socket and per-process
@@ -84,12 +86,47 @@ async fn handle_connection(mut stream: UnixStream, dispatcher: Arc<Dispatcher>) 
 
         let response = match parse_request_strict(&body) {
             Ok(req) => dispatcher.dispatch(req).await,
-            Err(proto_err) => Response::error("unknown".into(), proto_err),
+            Err(proto_err) => {
+                DispatchResult::Response(Response::error("unknown".into(), proto_err))
+            }
         };
 
-        if let Err(e) = write_response(&mut stream, &response).await {
-            tracing::warn!(error = %e, "daemon: write failed; dropping connection");
-            return;
+        match response {
+            DispatchResult::Response(resp) => {
+                if let Err(e) = write_response(&mut stream, &resp).await {
+                    tracing::warn!(error = %e, "daemon: write failed; dropping connection");
+                    return;
+                }
+            }
+            DispatchResult::Stream { mut frames, done } => {
+                // Drain all stream frames as they arrive.
+                while let Some(frame) = frames.recv().await {
+                    let body = match serde_json::to_vec(&frame) {
+                        Ok(b) => b,
+                        Err(e) => {
+                            tracing::warn!(error = %e, "daemon: failed to serialize stream frame");
+                            continue;
+                        }
+                    };
+                    if let Err(e) = write_frame_bytes(&mut stream, &body).await {
+                        tracing::warn!(error = %e, "daemon: write stream frame failed; dropping");
+                        return;
+                    }
+                }
+                // Final response (with result/error).
+                match done.await {
+                    Ok(resp) => {
+                        if let Err(e) = write_response(&mut stream, &resp).await {
+                            tracing::warn!(error = %e, "daemon: write final response failed");
+                            return;
+                        }
+                    }
+                    Err(_) => {
+                        tracing::warn!("daemon: stream completion sender dropped without result");
+                        return;
+                    }
+                }
+            }
         }
     }
 }

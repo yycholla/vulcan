@@ -34,6 +34,10 @@ pub enum ClientError {
     #[error("protocol decode failure: {0}")]
     Decode(#[from] serde_json::Error),
 
+    /// A low-level protocol or framing error occurred during streaming.
+    #[error("protocol error: {0}")]
+    Protocol(String),
+
     /// Daemon answered with a structured [`ProtocolError`]. The full
     /// error is preserved so callers can match on `code`.
     #[error("daemon error [{}]: {}", .0.code, .0.message)]
