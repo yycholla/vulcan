@@ -118,8 +118,10 @@ pub async fn run(state: &DaemonState, id: String, session_id: String, input: &st
     };
     sess.touch();
     *sess.in_flight.lock() = true;
+    let cancel_token = tokio_util::sync::CancellationToken::new();
+    sess.set_agent_cancel(cancel_token.clone());
     let mut agent = agent_arc.lock().await;
-    let result = agent.run_prompt(input).await;
+    let result = agent.run_prompt_with_cancel(input, cancel_token).await;
     drop(agent);
     *sess.in_flight.lock() = false;
     sess.touch();
@@ -200,6 +202,7 @@ pub fn stream(
 
         let (event_tx, mut event_rx) = mpsc::channel::<StreamEvent>(32);
         let cancel_token = tokio_util::sync::CancellationToken::new();
+        sess_for_task.set_agent_cancel(cancel_token.clone());
 
         // Clone the Arc for the prompt task so the guard lives inside it.
         let agent_arc2 = agent_arc.clone();

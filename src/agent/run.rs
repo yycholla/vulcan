@@ -318,6 +318,9 @@ impl Agent {
         let ui_tx_forward = ui_tx.clone();
         let forwarder = tokio::spawn(async move {
             while let Some(event) = events_rx.recv().await {
+                if matches!(event, TurnEvent::ProviderDone { .. }) {
+                    continue;
+                }
                 let _ = ui_tx_forward.send(StreamEvent::from(event)).await;
             }
         });

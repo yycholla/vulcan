@@ -75,6 +75,15 @@ impl SessionState {
         *self.agent.lock() = Some(Arc::new(tokio::sync::Mutex::new(agent)));
     }
 
+    /// Replace the cancellation token for the currently active turn.
+    /// `Agent::prepare_turn` swaps in a fresh token per turn, so the
+    /// daemon must update this handle when it starts `prompt.run` or
+    /// `prompt.stream`; otherwise `prompt.cancel` would keep firing the
+    /// stale token captured when the Agent was installed.
+    pub fn set_agent_cancel(&self, token: CancellationToken) {
+        *self.agent_cancel.lock() = Some(token);
+    }
+
     /// Update `last_activity` to `Instant::now()`. Call when this
     /// session services any RPC; idle eviction reads this.
     pub fn touch(&self) {
@@ -312,6 +321,28 @@ mod tests {
         assert!(
             Arc::ptr_eq(&h, &h2),
             "ensure_agent returns the existing handle"
+        );
+    }
+
+    #[test]
+    fn active_agent_cancel_token_can_be_replaced_per_turn() {
+        let sess = SessionState::new("foo".into());
+        let stale = CancellationToken::new();
+        let active = CancellationToken::new();
+
+        *sess.agent_cancel.lock() = Some(stale.clone());
+        sess.set_agent_cancel(active.clone());
+
+        let token = sess.agent_cancel().expect("cancel token installed");
+        token.cancel();
+
+        assert!(
+            active.is_cancelled(),
+            "prompt.cancel must fire the active turn token"
+        );
+        assert!(
+            !stale.is_cancelled(),
+            "replacing the active token must not keep cancelling stale turns"
         );
     }
 

@@ -77,7 +77,7 @@ pub async fn run_with_client(cmd: CortexSubcommand) -> Result<()> {
         _ => {}
     }
 
-    let mut client = match crate::client::Client::connect_or_autostart().await {
+    let client = match crate::client::Client::connect_or_autostart().await {
         Ok(c) => c,
         Err(e) => {
             tracing::warn!("daemon unavailable ({e}), falling back to direct mode");
@@ -304,9 +304,7 @@ async fn cmd_seed(sessions: usize) -> Result<()> {
 
 async fn cmd_recall(limit: usize) -> Result<()> {
     let store = open_cortex()?;
-    let all = store
-        .inner
-        .list_nodes(NodeFilter::new().with_limit(limit.max(50)))?;
+    let all = store.list_nodes(NodeFilter::new().with_limit(limit.max(50)))?;
 
     if all.is_empty() {
         println!("No facts in the graph yet.");
@@ -350,7 +348,7 @@ async fn run_prompt(cmd: PromptSubcommand) -> Result<()> {
 
 /// Find a non-deleted prompt node by name (title match). Returns its index in the list.
 fn find_prompt(store: &CortexStore, name: &str) -> Result<Option<cortex_core::Node>> {
-    let all = store.inner.list_nodes(NodeFilter::new())?;
+    let all = store.list_nodes(NodeFilter::new())?;
     Ok(all
         .into_iter()
         .find(|n| !n.deleted && n.kind.as_str() == "fact" && n.data.title == name))
@@ -393,7 +391,7 @@ async fn cmd_prompt_get(name: &str) -> Result<()> {
 /// `vulcan cortex prompt list`
 async fn cmd_prompt_list() -> Result<()> {
     let store = open_cortex()?;
-    let all = store.inner.list_nodes(NodeFilter::new())?;
+    let all = store.list_nodes(NodeFilter::new())?;
     let prompts: Vec<_> = all
         .into_iter()
         .filter(|n| !n.deleted && n.kind.as_str() == "fact")
@@ -485,7 +483,7 @@ async fn cmd_prompt_performance(name: &str) -> Result<()> {
 
     // Find all observation nodes that reference this prompt's ID
     let prompt_id = node.id.to_string();
-    let all = store.inner.list_nodes(NodeFilter::new())?;
+    let all = store.list_nodes(NodeFilter::new())?;
     let observations: Vec<_> = all
         .into_iter()
         .filter(|n| {
@@ -573,7 +571,7 @@ async fn run_agent(cmd: AgentSubcommand) -> Result<()> {
 
 /// Find an agent node by name (data.title where kind == "agent")
 fn find_agent(store: &CortexStore, name: &str) -> Result<Option<cortex_core::Node>> {
-    let all = store.inner.list_nodes(NodeFilter::new())?;
+    let all = store.list_nodes(NodeFilter::new())?;
     Ok(all
         .into_iter()
         .find(|n| !n.deleted && n.kind.as_str() == "agent" && n.data.title == name))
@@ -611,7 +609,7 @@ fn agent_bindings(store: &CortexStore, agent_id: NodeId) -> Result<Vec<(Edge, co
 /// `vulcan cortex agent list`
 async fn cmd_agent_list() -> Result<()> {
     let store = open_cortex()?;
-    let all = store.inner.list_nodes(NodeFilter::new())?;
+    let all = store.list_nodes(NodeFilter::new())?;
     let agents: Vec<_> = all
         .into_iter()
         .filter(|n| !n.deleted && n.kind.as_str() == "agent")
@@ -667,7 +665,7 @@ async fn cmd_agent_bind(name: &str, prompt_name: &str, weight: f32) -> Result<()
                     created_by: "vulcan".into(),
                 },
             );
-            store.inner.create_edge(updated_edge)?;
+            store.put_edge(updated_edge)?;
             println!(
                 "Updated binding: '{}' → '{}' (weight: {weight:.2})",
                 name, prompt_name
@@ -686,7 +684,7 @@ async fn cmd_agent_bind(name: &str, prompt_name: &str, weight: f32) -> Result<()
             created_by: "vulcan".into(),
         },
     );
-    store.inner.create_edge(edge)?;
+    store.put_edge(edge)?;
     println!("Bound '{}' → '{}' (weight: {weight:.2})", name, prompt_name);
     Ok(())
 }
@@ -842,7 +840,7 @@ async fn cmd_observe(
                 created_by: "vulcan".into(),
             },
         );
-        store.inner.create_edge(updated_edge)?;
+        store.put_edge(updated_edge)?;
 
         println!(
             "Observed: {} on '{}' — updated weight: {:.2} → {:.2}",

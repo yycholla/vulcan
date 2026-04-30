@@ -15,28 +15,31 @@
 //! "Database already open. Cannot acquire lock." because redb uses a
 //! single-writer lock model.
 //!
-//! Instead, edge-management and decay operations that need the raw storage
-//! API open a **transient** `RedbStorage` handle on demand (the CLI commands
-//! that call these methods are short-lived — they open, do work, and exit,
-//! so the lock is held only briefly). The long-lived `CortexStore` held by
-//! the agent and hooks never holds a second handle, so the lock is free
-//! when the TUI exits.
+//! `CortexStore` therefore owns the daemon's one `Arc<RedbStorage>` directly
+//! and builds the high-level search/traversal adapters around it. Edge admin,
+//! stats, and decay all reuse that handle instead of opening a transient
+//! second database.
 
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
 use anyhow::{Context, Result};
 use cortex_core::{
-    Cortex, Edge, EdgeProvenance, LibraryConfig, Node, NodeFilter, NodeId, Relation,
+    Cortex, Edge, EdgeProvenance, FastEmbedService, GraphEngine, GraphEngineImpl, HnswIndex,
+    LibraryConfig, Node, NodeFilter, NodeId, Relation,
     linker::{DecayConfig, DecayEngine},
     storage::{RedbStorage, Storage},
+    vector::{EmbeddingService, VectorIndex, embedding_input},
 };
 
 use crate::config::{CortexConfig, vulcan_home};
 
 /// Wrapper around the embedded Cortex graph memory engine.
 pub struct CortexStore {
-    pub inner: Cortex,
+    storage: Arc<RedbStorage>,
+    embedding: Arc<FastEmbedService>,
+    index: Arc<RwLock<HnswIndex>>,
+    graph_engine: Arc<GraphEngineImpl<RedbStorage>>,
     config: CortexConfig,
 }
 
@@ -56,8 +59,27 @@ impl CortexStore {
             ..LibraryConfig::default()
         };
 
-        let inner = Cortex::open(&db_path, lib_config)
-            .with_context(|| format!("open cortex db at {}", db_path.display()))?;
+        let storage = Arc::new(
+            RedbStorage::open(&db_path)
+                .with_context(|| format!("open cortex db at {}", db_path.display()))?,
+        );
+        let embedding = Arc::new(create_embedding_service(&lib_config.embedding_model)?);
+        let mut idx = HnswIndex::new(embedding.dimension());
+        let mut any_embeddings = false;
+        for node in storage
+            .list_nodes(NodeFilter::new())
+            .context("load cortex nodes")?
+        {
+            if let Some(emb) = &node.embedding {
+                idx.insert(node.id, emb).context("index cortex node")?;
+                any_embeddings = true;
+            }
+        }
+        if any_embeddings {
+            idx.rebuild().context("rebuild cortex vector index")?;
+        }
+        let index = Arc::new(RwLock::new(idx));
+        let graph_engine = Arc::new(GraphEngineImpl::new(Arc::clone(&storage)));
 
         tracing::info!(
             "cortex memory ready at {} (model: {})",
@@ -66,7 +88,10 @@ impl CortexStore {
         );
 
         Ok(Arc::new(Self {
-            inner,
+            storage,
+            embedding,
+            index,
+            graph_engine,
             config: config.clone(),
         }))
     }
@@ -98,18 +123,33 @@ impl CortexStore {
     // ── CRUD ──
 
     /// Store a node with auto-generated embedding.
-    pub fn store(&self, node: Node) -> Result<NodeId> {
-        self.inner.store(node).context("cortex store node")
+    pub fn store(&self, mut node: Node) -> Result<NodeId> {
+        if node.embedding.is_none() {
+            let text = embedding_input(&node);
+            node.embedding = Some(self.embedding.embed(&text).context("cortex embed node")?);
+        }
+        let id = node.id;
+        let embedding = node
+            .embedding
+            .clone()
+            .context("cortex node embedding missing after generation")?;
+        self.storage.put_node(&node).context("cortex store node")?;
+        self.index
+            .write()
+            .map_err(|_| anyhow::anyhow!("cortex vector index lock poisoned"))?
+            .insert(id, &embedding)
+            .context("cortex index node")?;
+        Ok(id)
     }
 
     /// Retrieve a node by ID.
     pub fn get_node(&self, id: NodeId) -> Result<Option<Node>> {
-        self.inner.get_node(id).context("cortex get node")
+        self.storage.get_node(id).context("cortex get node")
     }
 
     /// List nodes matching a filter.
     pub fn list_nodes(&self, filter: NodeFilter) -> Result<Vec<Node>> {
-        self.inner.list_nodes(filter).context("cortex list nodes")
+        self.storage.list_nodes(filter).context("cortex list nodes")
     }
 
     /// Create a directed edge between two nodes.
@@ -125,50 +165,48 @@ impl CortexStore {
                 created_by: "vulcan".into(),
             },
         );
-        self.inner.create_edge(edge).context("cortex create edge")
+        self.put_edge(edge)
     }
 
-    // ── Edge management (requires transient storage handle) ──
+    /// Store a complete edge value. Used by admin paths that need
+    /// explicit provenance or weight updates.
+    pub fn put_edge(&self, edge: Edge) -> Result<()> {
+        self.storage.put_edge(&edge).context("cortex create edge")?;
+        self.graph_engine.invalidate_cache();
+        Ok(())
+    }
+
+    // ── Edge management ──
     //
-    // These methods open a short-lived `RedbStorage` handle because
-    // `Cortex` does not expose the raw storage API. They are intended
-    // for CLI subcommands that run and exit — NOT for the agent loop.
-    // The transient handle is opened, the operation runs, and the
-    // handle is dropped immediately, releasing the file lock.
+    // These methods reuse the daemon-owned storage handle. They must not open
+    // `RedbStorage` again while the daemon is running because redb holds an
+    // exclusive database lock.
 
     /// List all edges originating from `node_id`.
-    ///
-    /// Opens a transient storage handle. Only call from short-lived
-    /// CLI commands, not from agent hooks.
     pub fn edges_from(&self, node_id: NodeId) -> Result<Vec<cortex_core::Edge>> {
-        let storage = open_transient_storage(&self.config)?;
-        storage.edges_from(node_id).context("cortex edges_from")
+        self.storage
+            .edges_from(node_id)
+            .context("cortex edges_from")
     }
 
     /// List all edges terminating at `node_id`.
-    ///
-    /// Opens a transient storage handle. Only call from short-lived
-    /// CLI commands, not from agent hooks.
     pub fn edges_to(&self, node_id: NodeId) -> Result<Vec<cortex_core::Edge>> {
-        let storage = open_transient_storage(&self.config)?;
-        storage.edges_to(node_id).context("cortex edges_to")
+        self.storage.edges_to(node_id).context("cortex edges_to")
     }
 
     /// Delete an edge by its ID.
-    ///
-    /// Opens a transient storage handle. Only call from short-lived
-    /// CLI commands, not from agent hooks.
     pub fn delete_edge(&self, edge_id: cortex_core::EdgeId) -> Result<()> {
-        let storage = open_transient_storage(&self.config)?;
-        storage.delete_edge(edge_id).context("cortex delete_edge")
+        self.storage
+            .delete_edge(edge_id)
+            .context("cortex delete_edge")?;
+        self.graph_engine.invalidate_cache();
+        Ok(())
     }
 
     /// Atomically update the weight of an edge between two nodes.
     /// Takes a relation filter and a weight-update closure.
     /// Returns `(old_weight, new_weight)`.
     ///
-    /// Opens a transient storage handle. Only call from short-lived
-    /// CLI commands, not from agent hooks.
     pub fn update_edge_weight_atomic(
         &self,
         from: NodeId,
@@ -176,35 +214,52 @@ impl CortexStore {
         relation: &cortex_core::Relation,
         f: impl FnOnce(f32) -> f32,
     ) -> Result<(f32, f32)> {
-        let storage = open_transient_storage(&self.config)?;
-        storage
+        let updated = self
+            .storage
             .update_edge_weight_atomic(from, to, relation, f)
-            .context("cortex update edge weight")
+            .context("cortex update edge weight")?;
+        self.graph_engine.invalidate_cache();
+        Ok(updated)
     }
 
     // ── Search ──
 
     /// Semantic vector search. Returns `(score, node)` pairs, highest first.
     pub fn search(&self, query: &str, limit: usize) -> Result<Vec<(f32, Node)>> {
-        self.inner.search(query, limit).context("cortex search")
+        let query_emb = self.embedding.embed(query).context("cortex embed query")?;
+        let hits = self
+            .index
+            .read()
+            .map_err(|_| anyhow::anyhow!("cortex vector index lock poisoned"))?
+            .search(&query_emb, limit, None)
+            .context("cortex vector search")?;
+        let mut out = Vec::new();
+        for hit in hits {
+            if let Some(node) = self
+                .storage
+                .get_node(hit.node_id)
+                .context("cortex search get node")?
+            {
+                out.push((hit.score, node));
+            }
+        }
+        Ok(out)
     }
 
     /// Graph traversal from a node.
     pub fn traverse(&self, from: NodeId, depth: u32) -> Result<cortex_core::graph::Subgraph> {
-        self.inner.traverse(from, depth).context("cortex traverse")
+        self.graph_engine
+            .neighborhood(from, depth)
+            .context("cortex traverse")
     }
 
     // ── Maintenance ──
 
     /// Run edge-decay. Call periodically to age out stale connections.
     /// Returns `(pruned_count, deleted_count)`.
-    ///
-    /// Opens a transient storage handle. Only call from short-lived
-    /// CLI commands, not from agent hooks.
     pub fn run_decay(&self) -> Result<(u64, u64)> {
-        let storage = Arc::new(open_transient_storage(&self.config)?);
         let engine = DecayEngine::new(
-            storage,
+            Arc::clone(&self.storage),
             DecayConfig {
                 daily_decay_rate: 0.01,
                 prune_threshold: 0.1,
@@ -214,32 +269,19 @@ impl CortexStore {
                 exempt_manual: true,
             },
         );
-        engine
+        let result = engine
             .apply_decay(chrono::Utc::now())
-            .context("cortex decay")
+            .context("cortex decay")?;
+        self.graph_engine.invalidate_cache();
+        Ok(result)
     }
 
     /// Simple graph statistics.
     pub fn stats(&self) -> Result<CortexStats> {
-        let nodes = self.inner.list_nodes(NodeFilter::new())?.len();
-        // Count edges by traversing each node's neighbourhood.
-        // This avoids opening a second RedbStorage handle (which
-        // would fail with a lock conflict). We use `traverse` at
-        // depth 1 to get each node's local edges, but dedup since
-        // edges appear from both sides.
-        let mut edge_count: usize = 0;
-        let all_nodes = self.inner.list_nodes(NodeFilter::new())?;
-        for node in &all_nodes {
-            if let Ok(sg) = self.inner.traverse(node.id, 1) {
-                // Each edge is counted from both endpoints; divide by 2.
-                edge_count += sg.edges.len();
-            }
-        }
-        // Each edge appears in two traversals (from + to), so halve.
-        edge_count /= 2;
+        let stats = self.storage.stats().context("cortex storage stats")?;
         Ok(CortexStats {
-            nodes,
-            edges: edge_count,
+            nodes: stats.node_count as usize,
+            edges: stats.edge_count as usize,
         })
     }
 
@@ -247,18 +289,6 @@ impl CortexStore {
     pub fn config(&self) -> &CortexConfig {
         &self.config
     }
-}
-
-/// Open a short-lived `RedbStorage` handle for edge management
-/// and decay operations.
-///
-/// **CAUTION:** This acquires an exclusive file lock on `cortex.redb`.
-/// It MUST only be called from short-lived CLI subcommands that exit
-/// after the operation completes. Calling this from the agent loop
-/// or TUI (which already holds the lock via `Cortex::open`) will fail.
-fn open_transient_storage(config: &CortexConfig) -> Result<RedbStorage> {
-    let db_path = resolve_db_path(config)?;
-    RedbStorage::open(&db_path).context("open transient cortex storage")
 }
 
 #[derive(Debug, Clone)]
@@ -272,5 +302,123 @@ fn resolve_db_path(config: &CortexConfig) -> Result<PathBuf> {
         Ok(p.clone())
     } else {
         Ok(vulcan_home().join("cortex.redb"))
+    }
+}
+
+fn create_embedding_service(model: &str) -> Result<FastEmbedService> {
+    use fastembed::EmbeddingModel;
+    match model {
+        "BAAI/bge-base-en-v1.5" => FastEmbedService::with_model(EmbeddingModel::BGEBaseENV15),
+        "BAAI/bge-large-en-v1.5" => FastEmbedService::with_model(EmbeddingModel::BGELargeENV15),
+        _ => FastEmbedService::new(),
+    }
+    .context("initialize cortex embedding model")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn temp_config() -> (tempfile::TempDir, CortexConfig) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let config = CortexConfig {
+            enabled: true,
+            db_path: Some(dir.path().join("cortex.redb")),
+            ..CortexConfig::default()
+        };
+        (dir, config)
+    }
+
+    #[test]
+    fn edge_admin_operations_use_open_store_handle() {
+        let (_dir, config) = temp_config();
+        let store = CortexStore::try_open(&config).expect("open cortex");
+        let from = store
+            .store(CortexStore::fact("source node", 0.5))
+            .expect("store source");
+        let to = store
+            .store(CortexStore::fact("target node", 0.5))
+            .expect("store target");
+
+        store
+            .create_edge(from, to, "supports", 0.75)
+            .expect("create edge");
+
+        let outgoing = store.edges_from(from).expect("edges_from");
+        assert_eq!(outgoing.len(), 1);
+        assert_eq!(outgoing[0].to, to);
+
+        let incoming = store.edges_to(to).expect("edges_to");
+        assert_eq!(incoming.len(), 1);
+        assert_eq!(incoming[0].from, from);
+
+        let edge_id = outgoing[0].id;
+        store.delete_edge(edge_id).expect("delete edge");
+        assert!(
+            store
+                .edges_from(from)
+                .expect("edges after delete")
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn stats_and_decay_use_open_store_handle() {
+        let (_dir, config) = temp_config();
+        let store = CortexStore::try_open(&config).expect("open cortex");
+        let from = store
+            .store(CortexStore::fact("source node", 0.5))
+            .expect("store source");
+        let to = store
+            .store(CortexStore::fact("target node", 0.5))
+            .expect("store target");
+        store
+            .create_edge(from, to, "supports", 0.75)
+            .expect("create edge");
+
+        let stats = store.stats().expect("stats");
+        assert_eq!(stats.nodes, 2);
+        assert_eq!(stats.edges, 1);
+
+        let (_pruned, _deleted) = store.run_decay().expect("decay");
+    }
+
+    #[test]
+    fn search_and_traverse_still_use_shared_store() {
+        let (_dir, config) = temp_config();
+        let store = CortexStore::try_open(&config).expect("open cortex");
+        let from = store
+            .store(CortexStore::fact_with_body(
+                "rust daemon",
+                "daemon owns runtime resources",
+                0.7,
+            ))
+            .expect("store source");
+        let to = store
+            .store(CortexStore::fact_with_body(
+                "runtime pool",
+                "shared storage and cortex graph",
+                0.7,
+            ))
+            .expect("store target");
+        store
+            .create_edge(from, to, "supports", 0.75)
+            .expect("create edge");
+
+        let hits = store.search("runtime resources", 5).expect("search");
+        assert!(
+            hits.iter()
+                .any(|(_, node)| node.id == from || node.id == to),
+            "search should read nodes indexed through shared store"
+        );
+
+        let graph = store.traverse(from, 1).expect("traverse");
+        assert!(
+            graph
+                .edges
+                .iter()
+                .any(|edge| edge.from == from && edge.to == to),
+            "traverse should read edges through shared store"
+        );
     }
 }

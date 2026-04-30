@@ -269,6 +269,32 @@ async fn streaming_and_buffered_paths_match() {
 }
 
 #[tokio::test]
+async fn run_prompt_stream_emits_one_terminal_done() {
+    let (mut agent, mock) = agent_with_mock();
+    mock.enqueue_text("streamed once");
+    let (tx, mut rx) = tokio::sync::mpsc::channel(crate::provider::STREAM_CHANNEL_CAPACITY);
+
+    let streamed = agent.run_prompt_stream("x", tx).await.unwrap();
+
+    let mut done_count = 0;
+    let mut text = String::new();
+    while let Some(event) = rx.recv().await {
+        match event {
+            StreamEvent::Text(chunk) => text.push_str(&chunk),
+            StreamEvent::Done(resp) => {
+                done_count += 1;
+                assert_eq!(resp.content.as_deref(), Some("streamed once"));
+            }
+            other => panic!("unexpected stream event: {other:?}"),
+        }
+    }
+
+    assert_eq!(streamed, "streamed once");
+    assert_eq!(text, "streamed once");
+    assert_eq!(done_count, 1, "streaming adapter must emit one Done");
+}
+
+#[tokio::test]
 async fn prepare_stream_turn_builds_prompt_and_persists_user_message() {
     let (mut agent, _mock) = agent_with_mock();
     let cancel = CancellationToken::new();

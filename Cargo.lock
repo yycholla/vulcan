@@ -7148,6 +7148,7 @@ dependencies = [
  "dhat",
  "dialoguer",
  "divan",
+ "fastembed",
  "futures-util",
  "gix",
  "globset",

@@ -74,11 +74,11 @@ async fn start(detach: bool) -> anyhow::Result<()> {
         pool_builder = pool_builder.with_cortex_store(Arc::clone(cortex));
     }
     let pool = Arc::new(pool_builder);
-    state = state.with_pool(pool);
+    state = state.with_pool(Arc::clone(&pool));
 
     // YYC-266 Slice 2/3: boot the warm Agent and install it into the
     // "main" session. Additional sessions are created on-demand.
-    match crate::agent::Agent::builder(&config).build().await {
+    match build_daemon_agent(&config, Arc::clone(&pool)).await {
         Ok(agent) => {
             tracing::info!("daemon: agent loaded (model={})", agent.active_model());
             if let Some(main) = state.sessions().get("main") {
@@ -108,6 +108,16 @@ async fn start(detach: bool) -> anyhow::Result<()> {
     Ok(())
 }
 
+async fn build_daemon_agent(
+    config: &crate::config::Config,
+    pool: Arc<crate::runtime_pool::RuntimeResourcePool>,
+) -> anyhow::Result<crate::agent::Agent> {
+    crate::agent::Agent::builder(config)
+        .with_pool(pool)
+        .build()
+        .await
+}
+
 fn install_signal_handlers(state: Arc<DaemonState>) {
     tokio::spawn(async move {
         use tokio::signal::unix::{SignalKind, signal};
@@ -131,6 +141,42 @@ fn install_signal_handlers(state: Arc<DaemonState>) {
         }
         state.signal_shutdown();
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn daemon_agent_build_uses_runtime_pool_session_store() {
+        let mut config = crate::config::Config::default();
+        config.provider.base_url = "http://127.0.0.1:11434/v1".into();
+        config.provider.disable_catalog = true;
+        let pool = Arc::new(crate::runtime_pool::RuntimeResourcePool::for_tests());
+
+        let agent = build_daemon_agent(&config, Arc::clone(&pool))
+            .await
+            .unwrap();
+        let session_id = agent.session_id().to_string();
+        agent
+            .memory()
+            .save_messages(
+                &session_id,
+                &[crate::provider::Message::User {
+                    content: "from daemon agent".into(),
+                }],
+            )
+            .unwrap();
+
+        let loaded = pool.session_store().load_history(&session_id).unwrap();
+        assert!(
+            matches!(
+                loaded.as_deref().and_then(|messages| messages.first()),
+                Some(crate::provider::Message::User { content }) if content == "from daemon agent"
+            ),
+            "daemon-built main Agent must share the RuntimeResourcePool SessionStore"
+        );
+    }
 }
 
 async fn spawn_detached(sock_path: &Path) -> anyhow::Result<()> {

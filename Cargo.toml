@@ -128,6 +128,7 @@ strsim = "0.11.1"
 # auto-linking, trust computation, briefing synthesis, temporal decay, and
 # contradiction detection (YYC-264).
 cortex_core = { version = "0.3.1", package = "cortex-memory-core" }
+fastembed = "4.9.1"
 portable-pty = "0.9.0"
 # Pure-Rust git plumbing (YYC-36). Used today only for repository
 # discovery — write ops dispatch through the `git` binary because gix's
