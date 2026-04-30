@@ -7,6 +7,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 use tokio::sync::{Notify, watch};
 
+use crate::config::Config;
 use crate::daemon::session::SessionMap;
 use crate::memory::cortex::CortexStore;
 
@@ -19,10 +20,14 @@ pub struct DaemonState {
     sessions: Arc<SessionMap>,
     reloads_applied: AtomicU64,
     cortex: Option<Arc<CortexStore>>,
+    /// Config snapshot loaded at daemon boot. Lazy-build paths in
+    /// `SessionState::ensure_agent` reference this so handlers don't
+    /// have to re-load from disk.
+    config: Arc<Config>,
 }
 
 impl DaemonState {
-    pub fn new() -> Self {
+    pub fn new(config: Arc<Config>) -> Self {
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
         Self {
             started_at: Instant::now(),
@@ -32,6 +37,7 @@ impl DaemonState {
             sessions: Arc::new(SessionMap::with_main()),
             reloads_applied: AtomicU64::new(0),
             cortex: None,
+            config,
         }
     }
 
@@ -40,9 +46,11 @@ impl DaemonState {
     /// matching the post-boot, pre-warm-build state. Tests that need a
     /// minimal but realistic daemon state should use this to keep
     /// session-handler / dispatch tests independent from the boot path.
+    /// The carried Config is `Config::default()` — sufficient for
+    /// failure-path tests but won't produce a working Agent build.
     #[doc(hidden)]
     pub fn for_tests_minimal() -> Self {
-        Self::new()
+        Self::new(Arc::new(Config::default()))
     }
 
     /// Initialize with an opened CortexStore. Called by the daemon startup
@@ -55,6 +63,13 @@ impl DaemonState {
     /// Borrow the cortex store, if enabled.
     pub fn cortex(&self) -> Option<&Arc<CortexStore>> {
         self.cortex.as_ref()
+    }
+
+    /// Borrow the daemon's loaded `Config`. Used by lazy-build paths
+    /// (e.g. `SessionState::ensure_agent`) so handlers don't have to
+    /// thread a separate Config reference through every call.
+    pub fn config(&self) -> &Config {
+        &self.config
     }
 
     /// Count of successful config reloads applied since startup.
@@ -130,6 +145,6 @@ impl DaemonState {
 
 impl Default for DaemonState {
     fn default() -> Self {
-        Self::new()
+        Self::new(Arc::new(Config::default()))
     }
 }

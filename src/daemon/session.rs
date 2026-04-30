@@ -42,6 +42,13 @@ pub struct SessionState {
     /// `prompt.cancel` fires this directly so it doesn't deadlock
     /// against an in-flight `prompt.stream` that holds the AsyncMutex.
     pub agent_cancel: Mutex<Option<CancellationToken>>,
+    /// Serializes lazy-build first-touches. Inner type is `()` — this
+    /// Mutex exists purely to dedupe concurrent
+    /// [`SessionState::ensure_agent`] callers down to one Agent build.
+    /// The actual data swap goes through the parking_lot `agent`
+    /// Mutex; the tokio mutex here is required so we can hold the
+    /// lock across the `await` for `Agent::builder.build()`.
+    build_lock: tokio::sync::Mutex<()>,
 }
 
 impl SessionState {
@@ -55,6 +62,7 @@ impl SessionState {
             cancel: CancellationToken::new(),
             agent: Mutex::new(None),
             agent_cancel: Mutex::new(None),
+            build_lock: tokio::sync::Mutex::new(()),
         }
     }
 
@@ -91,6 +99,40 @@ impl SessionState {
     /// locking the AsyncMutex.
     pub fn agent_cancel(&self) -> Option<CancellationToken> {
         self.agent_cancel.lock().clone()
+    }
+
+    /// Get this session's `AgentHandle`, building one inline if absent.
+    ///
+    /// Concurrent first-touches racing on the same session are
+    /// serialized through `build_lock`: only one task performs the
+    /// build, others wait on the lock and observe the just-installed
+    /// Agent on the double-check. Build errors propagate to the
+    /// caller; the next `ensure_agent` call will retry.
+    ///
+    /// This is the lazy-build path that makes non-`"main"` sessions
+    /// usable without changing the wire protocol — `prompt.run`,
+    /// `prompt.stream`, and `agent.*` handlers funnel through here.
+    pub async fn ensure_agent(
+        self: &Arc<Self>,
+        config: &crate::config::Config,
+    ) -> anyhow::Result<AgentHandle> {
+        // Fast path: already installed.
+        if let Some(handle) = self.agent_arc() {
+            return Ok(handle);
+        }
+
+        // Slow path: serialize concurrent first-touches.
+        let _build_guard = self.build_lock.lock().await;
+
+        // Double-check: a racing task may have installed it while we
+        // were waiting for the build lock.
+        if let Some(handle) = self.agent_arc() {
+            return Ok(handle);
+        }
+
+        let agent = crate::agent::Agent::builder(config).build().await?;
+        self.set_agent(agent);
+        Ok(self.agent_arc().expect("just installed"))
     }
 }
 
@@ -197,6 +239,65 @@ impl Default for SessionMap {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Build a minimal MockProvider-backed Agent for tests that need a
+    /// stand-in without going through `Agent::builder` (which requires a
+    /// real provider config / API key).
+    fn test_agent() -> crate::agent::Agent {
+        use crate::hooks::HookRegistry;
+        use crate::provider::{LLMProvider, Message, mock::MockProvider};
+        use crate::skills::SkillRegistry;
+        use crate::tools::ToolRegistry;
+        use anyhow::Result;
+        use async_trait::async_trait;
+        use tokio_util::sync::CancellationToken;
+
+        struct ProviderHandle(Arc<MockProvider>);
+        #[async_trait]
+        impl LLMProvider for ProviderHandle {
+            async fn chat(
+                &self,
+                m: &[Message],
+                t: &[crate::provider::ToolDefinition],
+                c: CancellationToken,
+            ) -> Result<crate::provider::ChatResponse> {
+                self.0.chat(m, t, c).await
+            }
+            async fn chat_stream(
+                &self,
+                m: &[Message],
+                t: &[crate::provider::ToolDefinition],
+                tx: tokio::sync::mpsc::Sender<crate::provider::StreamEvent>,
+                c: CancellationToken,
+            ) -> Result<()> {
+                self.0.chat_stream(m, t, tx, c).await
+            }
+            fn max_context(&self) -> usize {
+                self.0.max_context()
+            }
+        }
+
+        let mock = Arc::new(MockProvider::new(128_000));
+        crate::agent::Agent::for_test(
+            Box::new(ProviderHandle(mock)),
+            ToolRegistry::new(),
+            HookRegistry::new(),
+            Arc::new(SkillRegistry::empty()),
+        )
+    }
+
+    #[tokio::test]
+    async fn ensure_agent_returns_existing_when_set() {
+        let sess = Arc::new(SessionState::new("foo".into()));
+        sess.set_agent(test_agent());
+        let cfg = crate::config::Config::default();
+        let h = sess.ensure_agent(&cfg).await.unwrap();
+        let h2 = sess.agent_arc().unwrap();
+        assert!(
+            Arc::ptr_eq(&h, &h2),
+            "ensure_agent returns the existing handle"
+        );
+    }
 
     #[test]
     fn map_with_main_has_main_session() {

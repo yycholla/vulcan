@@ -157,7 +157,7 @@ mod tests {
     async fn server_responds_to_ping() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("vulcan.sock");
-        let state = Arc::new(DaemonState::new());
+        let state = Arc::new(DaemonState::for_tests_minimal());
         let server = Server::bind(&path, state.clone()).await.unwrap();
         let handle = tokio::spawn(server.run());
 
@@ -177,7 +177,7 @@ mod tests {
     async fn server_handles_concurrent_clients() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("vulcan.sock");
-        let state = Arc::new(DaemonState::new());
+        let state = Arc::new(DaemonState::for_tests_minimal());
         let server = Server::bind(&path, state.clone()).await.unwrap();
         let handle = tokio::spawn(server.run());
 
@@ -211,7 +211,7 @@ mod tests {
     async fn server_keeps_connection_alive_for_multiple_requests() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("vulcan.sock");
-        let state = Arc::new(DaemonState::new());
+        let state = Arc::new(DaemonState::for_tests_minimal());
         let server = Server::bind(&path, state.clone()).await.unwrap();
         let handle = tokio::spawn(server.run());
 
@@ -231,7 +231,7 @@ mod tests {
     async fn server_returns_version_mismatch_error() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("vulcan.sock");
-        let state = Arc::new(DaemonState::new());
+        let state = Arc::new(DaemonState::for_tests_minimal());
         let server = Server::bind(&path, state.clone()).await.unwrap();
         let handle = tokio::spawn(server.run());
 
@@ -259,7 +259,7 @@ mod tests {
     async fn server_returns_unknown_method_error() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("vulcan.sock");
-        let state = Arc::new(DaemonState::new());
+        let state = Arc::new(DaemonState::for_tests_minimal());
         let server = Server::bind(&path, state.clone()).await.unwrap();
         let handle = tokio::spawn(server.run());
 
@@ -288,7 +288,7 @@ mod tests {
     async fn server_shuts_down_on_signal() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("vulcan.sock");
-        let state = Arc::new(DaemonState::new());
+        let state = Arc::new(DaemonState::for_tests_minimal());
         let server = Server::bind(&path, state.clone()).await.unwrap();
         let handle = tokio::spawn(server.run());
 
@@ -307,7 +307,7 @@ mod tests {
         // Client closes; server's per-conn task should exit cleanly without panic.
         let dir = tempdir().unwrap();
         let path = dir.path().join("vulcan.sock");
-        let state = Arc::new(DaemonState::new());
+        let state = Arc::new(DaemonState::for_tests_minimal());
         let server = Server::bind(&path, state.clone()).await.unwrap();
         let handle = tokio::spawn(server.run());
 

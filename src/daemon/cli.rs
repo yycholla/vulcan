@@ -50,7 +50,7 @@ async fn start(detach: bool) -> anyhow::Result<()> {
     // YYC-266 Slice 1: boot the CortexStore once so all CLI/TUI clients
     // share it without fighting over the redb exclusive lock.
     let config = crate::config::Config::load()?;
-    let mut state = DaemonState::new();
+    let mut state = DaemonState::new(Arc::new(config.clone()));
     if config.cortex.enabled {
         match crate::memory::cortex::CortexStore::try_open(&config.cortex) {
             Ok(store) => {

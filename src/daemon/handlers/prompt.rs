@@ -14,7 +14,7 @@ use serde_json::json;
 use tokio::sync::{mpsc, oneshot};
 
 use crate::daemon::protocol::{ProtocolError, Response, StreamFrame};
-use crate::daemon::session::{AgentHandle, SessionState};
+use crate::daemon::session::SessionState;
 use crate::daemon::state::DaemonState;
 use crate::provider::StreamEvent;
 
@@ -93,33 +93,25 @@ fn resolve_session(
         })
 }
 
-/// Resolve `(session, agent_handle)` or surface a structured error.
-/// Returns `AGENT_NOT_AVAILABLE` for sessions without an installed
-/// agent (e.g. non-main sessions created via `session.create` before
-/// lazy-build lands in Task 3.X).
-fn resolve_session_with_agent(
-    state: &DaemonState,
-    session_id: &str,
-) -> Result<(Arc<SessionState>, AgentHandle), ProtocolError> {
-    let sess = resolve_session(state, session_id)?;
-    let Some(agent) = sess.agent_arc() else {
-        return Err(ProtocolError {
-            code: "AGENT_NOT_AVAILABLE".into(),
-            message: format!(
-                "session '{session_id}' has no agent yet; lazy-build deferred to Task 3.X"
-            ),
-            retryable: false,
-        });
-    };
-    Ok((sess, agent))
-}
-
 // -- prompt.run --
 
 pub async fn run(state: &DaemonState, id: String, session_id: String, input: &str) -> Response {
-    let (sess, agent_arc) = match resolve_session_with_agent(state, &session_id) {
-        Ok(pair) => pair,
+    let sess = match resolve_session(state, &session_id) {
+        Ok(s) => s,
         Err(e) => return Response::error(id, e),
+    };
+    let agent_arc = match sess.ensure_agent(state.config()).await {
+        Ok(a) => a,
+        Err(e) => {
+            return Response::error(
+                id,
+                ProtocolError {
+                    code: "AGENT_BUILD_FAILED".into(),
+                    message: format!("agent build for session '{session_id}' failed: {e}"),
+                    retryable: true,
+                },
+            );
+        }
     };
     sess.touch();
     *sess.in_flight.lock() = true;
@@ -154,8 +146,8 @@ pub fn stream(
     let (frame_tx, frame_rx) = mpsc::channel(32);
     let (done_tx, done_rx) = oneshot::channel();
 
-    let (sess, agent_arc) = match resolve_session_with_agent(state, &session_id) {
-        Ok(pair) => pair,
+    let sess = match resolve_session(state, &session_id) {
+        Ok(s) => s,
         Err(e) => {
             let _ = done_tx.send(Response::error(req_id, e));
             return (frame_rx, done_rx);
@@ -170,7 +162,33 @@ pub fn stream(
 
     let rid = req_id.clone();
     let sess_for_task = sess.clone();
+    // Lazy-build needs `&Config`, but the spawned task can't borrow
+    // `state` so we clone the `Arc<Config>` out here.
+    let config = Arc::new(state.config().clone());
     tokio::spawn(async move {
+        // Lazy-build the per-session Agent. Failure surfaces on the
+        // done channel as AGENT_BUILD_FAILED; in_flight is cleared
+        // before returning so daemon.status doesn't get stuck.
+        let agent_arc = match sess_for_task.ensure_agent(&config).await {
+            Ok(a) => a,
+            Err(e) => {
+                *sess_for_task.in_flight.lock() = false;
+                sess_for_task.touch();
+                let _ = done_tx.send(Response::error(
+                    rid.clone(),
+                    ProtocolError {
+                        code: "AGENT_BUILD_FAILED".into(),
+                        message: format!(
+                            "agent build for session '{}' failed: {e}",
+                            sess_for_task.id
+                        ),
+                        retryable: true,
+                    },
+                ));
+                return;
+            }
+        };
+
         let (event_tx, mut event_rx) = mpsc::channel::<StreamEvent>(32);
         let cancel_token = tokio_util::sync::CancellationToken::new();
 
@@ -283,12 +301,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn run_returns_agent_not_available_for_main_without_agent() {
+    async fn run_attempts_lazy_build_for_session_without_agent() {
+        // for_tests_minimal carries `Config::default()` which has no
+        // valid provider config — Agent::builder.build() will fail.
+        // The point is to verify ensure_agent is being called: the
+        // error path now surfaces AGENT_BUILD_FAILED instead of the
+        // pre-Task-3.3 AGENT_NOT_AVAILABLE.
         let state = Arc::new(DaemonState::for_tests_minimal());
-        // for_tests_minimal creates "main" with no Agent installed.
         let resp = run(&state, "r1".into(), "main".into(), "hi").await;
         let err = resp.error.expect("err");
-        assert_eq!(err.code, "AGENT_NOT_AVAILABLE");
+        assert_eq!(err.code, "AGENT_BUILD_FAILED");
     }
 
     #[tokio::test]

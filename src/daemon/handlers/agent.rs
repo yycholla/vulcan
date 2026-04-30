@@ -13,7 +13,11 @@ use crate::daemon::protocol::{ProtocolError, Response};
 use crate::daemon::session::AgentHandle;
 use crate::daemon::state::DaemonState;
 
-fn resolve(state: &DaemonState, session_id: &str) -> Result<AgentHandle, ProtocolError> {
+/// Resolve the per-session AgentHandle, lazy-building if absent.
+/// Returns `SESSION_NOT_FOUND` when the session doesn't exist and
+/// `AGENT_BUILD_FAILED` when the inline build errors. Pre-Task-3.3
+/// this returned `AGENT_NOT_AVAILABLE` for the no-agent case.
+async fn resolve(state: &DaemonState, session_id: &str) -> Result<AgentHandle, ProtocolError> {
     let Some(sess) = state.sessions().get(session_id) else {
         return Err(ProtocolError {
             code: "SESSION_NOT_FOUND".into(),
@@ -22,19 +26,19 @@ fn resolve(state: &DaemonState, session_id: &str) -> Result<AgentHandle, Protoco
         });
     };
     sess.touch();
-    sess.agent_arc().ok_or_else(|| ProtocolError {
-        code: "AGENT_NOT_AVAILABLE".into(),
-        message: format!(
-            "session '{session_id}' has no agent yet; lazy-build deferred to Task 3.X"
-        ),
-        retryable: false,
-    })
+    sess.ensure_agent(state.config())
+        .await
+        .map_err(|e| ProtocolError {
+            code: "AGENT_BUILD_FAILED".into(),
+            message: format!("agent build for session '{session_id}' failed: {e}"),
+            retryable: true,
+        })
 }
 
 // -- agent.status --
 
 pub async fn status(state: &DaemonState, id: String, session_id: String) -> Response {
-    let agent_arc = match resolve(state, &session_id) {
+    let agent_arc = match resolve(state, &session_id).await {
         Ok(a) => a,
         Err(e) => return Response::error(id, e),
     };
@@ -59,7 +63,7 @@ pub async fn switch_model(
     session_id: String,
     model: &str,
 ) -> Response {
-    let agent_arc = match resolve(state, &session_id) {
+    let agent_arc = match resolve(state, &session_id).await {
         Ok(a) => a,
         Err(e) => return Response::error(id, e),
     };
@@ -88,7 +92,7 @@ pub async fn switch_model(
 // -- agent.list_models --
 
 pub async fn list_models(state: &DaemonState, id: String, session_id: String) -> Response {
-    let agent_arc = match resolve(state, &session_id) {
+    let agent_arc = match resolve(state, &session_id).await {
         Ok(a) => a,
         Err(e) => return Response::error(id, e),
     };

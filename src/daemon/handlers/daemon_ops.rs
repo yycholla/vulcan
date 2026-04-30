@@ -49,7 +49,7 @@ mod tests {
 
     #[tokio::test]
     async fn ping_returns_response_with_pong() {
-        let state = Arc::new(DaemonState::new());
+        let state = Arc::new(DaemonState::for_tests_minimal());
         let resp = ping(&state, "id-1".into()).await;
         assert_eq!(resp.id, "id-1");
         let r = resp.result.unwrap();
@@ -61,7 +61,7 @@ mod tests {
         // Verify the watch-based shutdown is both idempotent (multiple
         // calls don't panic) and latching (a receiver acquired AFTER
         // the signal still observes the true value via borrow()).
-        let s = DaemonState::new();
+        let s = DaemonState::for_tests_minimal();
         s.signal_shutdown();
         s.signal_shutdown();
         let rx = s.shutdown_signal();
