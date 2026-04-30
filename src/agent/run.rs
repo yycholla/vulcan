@@ -107,6 +107,28 @@ impl Agent {
         self.run_prompt_inner(input).await
     }
 
+    /// Slice 7: like [`Self::run_prompt_with_cancel`] but stamps the
+    /// run record's `RunOrigin` so child runs land as
+    /// `RunOrigin::Subagent { parent_run_id }` and `vulcan run show`
+    /// can render the parent → child timeline without joining
+    /// against orchestration metadata.
+    pub async fn run_prompt_with_cancel_origin(
+        &mut self,
+        input: &str,
+        cancel: CancellationToken,
+        origin: RunOrigin,
+    ) -> Result<String> {
+        self.turn_cancel = cancel;
+        self.begin_run_record_with_origin(input, origin);
+        let result = self.run_prompt_body(input).await;
+        match &result {
+            Ok(text) if text == "Cancelled" => self.end_run_record(RunStatus::Cancelled, None),
+            Ok(_) => self.end_run_record(RunStatus::Completed, None),
+            Err(e) => self.end_run_record(RunStatus::Failed, Some(e.to_string())),
+        }
+        result
+    }
+
     pub async fn run_prompt(&mut self, input: &str) -> Result<String> {
         // Fresh token for this turn — calling cancel_current_turn between
         // turns shouldn't affect the next one.
@@ -130,10 +152,10 @@ impl Agent {
         let id = record.id;
         if let Err(e) = self.run_store.create(&record) {
             tracing::warn!("run_record create failed: {e}");
-            self.current_run_id = None;
+            *self.current_run_id.lock() = None;
             return;
         }
-        self.current_run_id = Some(id);
+        *self.current_run_id.lock() = Some(id);
         let _ = self.run_store.append_event(
             id,
             RunEvent::StatusChanged {
@@ -166,7 +188,7 @@ impl Agent {
     /// YYC-179: write the terminal status for the current run and
     /// clear `current_run_id`. Safe to call when no run is active.
     fn end_run_record(&mut self, status: RunStatus, error: Option<String>) {
-        if let Some(id) = self.current_run_id.take() {
+        if let Some(id) = self.current_run_id.lock().take() {
             let _ = self.run_store.finalize(id, status, error);
         }
     }
@@ -176,7 +198,7 @@ impl Agent {
     /// running outside a turn) so callers don't have to gate their
     /// emit sites.
     pub(in crate::agent) fn record_run_event(&self, event: RunEvent) {
-        if let Some(id) = self.current_run_id {
+        if let Some(id) = *self.current_run_id.lock() {
             if let Err(e) = self.run_store.append_event(id, event) {
                 tracing::warn!("run_record append failed: {e}");
             }

@@ -168,7 +168,12 @@ pub struct Agent {
     /// YYC-179: id of the run currently in flight, if any. Set by
     /// `run_prompt_inner` on entry, cleared on exit. Other parts of
     /// the agent (hooks, tools) can read it to attach events.
-    pub(in crate::agent) current_run_id: Option<crate::run_record::RunId>,
+    ///
+    /// Slice 7: wrapped in `Arc<Mutex<...>>` so external observers
+    /// (notably `SpawnSubagentTool`) can read live state without
+    /// holding the agent mutex — needed to stamp child runs with the
+    /// parent's `RunId` for `RunOrigin::Subagent` lineage.
+    pub(in crate::agent) current_run_id: Arc<parking_lot::Mutex<Option<crate::run_record::RunId>>>,
     /// YYC-180: durable artifact store. Tools, hooks, and the
     /// agent itself create typed artifacts (plans, diffs, reports,
     /// subagent summaries) here; an `ArtifactCreated` run-record
@@ -595,12 +600,19 @@ impl Agent {
         // Slice 7 (partial): when the parent assembled from a pool,
         // hand the same pool to the spawn tool so its child Agents
         // also reuse the daemon-owned storage adapters.
+        // Slice 7: shared handle to the parent's live `current_run_id`.
+        // Same Arc lives on the Agent and on the spawn tool; the
+        // tool reads it at spawn time to stamp child runs with
+        // `RunOrigin::Subagent { parent_run_id }`.
+        let current_run_id: Arc<parking_lot::Mutex<Option<crate::run_record::RunId>>> =
+            Arc::new(parking_lot::Mutex::new(None));
         let mut spawn_tool = crate::tools::spawn::SpawnSubagentTool::with_store(
             Arc::clone(&config_arc),
             Arc::clone(&orchestration),
         )
         .with_artifact_store(Arc::clone(&artifact_store))
-        .with_parent_session_id(session_id.clone());
+        .with_parent_session_id(session_id.clone())
+        .with_parent_run_handle(Arc::clone(&current_run_id));
         if let Some(pool) = &pool {
             spawn_tool = spawn_tool.with_pool(Arc::clone(pool));
         }
@@ -633,7 +645,7 @@ impl Agent {
             orchestration: Arc::clone(&orchestration),
             tokens_consumed: 0,
             run_store,
-            current_run_id: None,
+            current_run_id,
             artifact_store,
             trust_profile,
         })
@@ -716,7 +728,18 @@ impl Agent {
     /// turns. The TUI uses this to correlate live events with the
     /// timeline view.
     pub fn current_run_id(&self) -> Option<crate::run_record::RunId> {
-        self.current_run_id
+        *self.current_run_id.lock()
+    }
+
+    /// Slice 7: cloneable handle to the per-Agent live `current_run_id`.
+    /// Tools (notably `SpawnSubagentTool`) hold this Arc to read the
+    /// parent's run id at the moment they fire, then stamp child
+    /// runs with `RunOrigin::Subagent { parent_run_id }` so the
+    /// timeline carries explicit lineage.
+    pub fn current_run_id_handle(
+        &self,
+    ) -> Arc<parking_lot::Mutex<Option<crate::run_record::RunId>>> {
+        Arc::clone(&self.current_run_id)
     }
 
     /// YYC-180: handle to the artifact store. Cloned `Arc` so the
@@ -751,8 +774,9 @@ impl Agent {
         &self,
         mut artifact: crate::artifact::Artifact,
     ) -> anyhow::Result<crate::artifact::ArtifactId> {
+        let live_run_id = *self.current_run_id.lock();
         if artifact.run_id.is_none() {
-            artifact.run_id = self.current_run_id;
+            artifact.run_id = live_run_id;
         }
         if artifact.session_id.is_none() {
             artifact.session_id = Some(self.session_id.clone());
@@ -763,7 +787,7 @@ impl Agent {
         // Emit on the run timeline if the agent is mid-turn so
         // `vulcan run show` lists the artifact alongside the events
         // that produced it.
-        if let Some(run_id) = self.current_run_id {
+        if let Some(run_id) = live_run_id {
             let _ = self.run_store.append_event(
                 run_id,
                 crate::run_record::RunEvent::ArtifactCreated {
@@ -813,7 +837,7 @@ impl Agent {
             orchestration: Arc::new(crate::orchestration::OrchestrationStore::new()),
             tokens_consumed: 0,
             run_store: Arc::new(crate::run_record::InMemoryRunStore::default()),
-            current_run_id: None,
+            current_run_id: Arc::new(parking_lot::Mutex::new(None)),
             artifact_store: Arc::new(crate::artifact::InMemoryArtifactStore::new()),
             trust_profile: crate::trust::TrustProfile::for_level_with_reason(
                 crate::trust::TrustLevel::Trusted,

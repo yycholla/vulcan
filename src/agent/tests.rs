@@ -533,6 +533,36 @@ async fn execute_stream_tool_calls_emits_events_and_preserves_result_order() {
 }
 
 #[tokio::test]
+async fn run_prompt_with_cancel_origin_stamps_subagent_run_record() {
+    // Slice 7: child runs land in the run-record store with
+    // `RunOrigin::Subagent { parent_run_id }`, so `vulcan run show`
+    // and analytics queries can discover parent → child lineage
+    // without joining against orchestration metadata.
+    use crate::run_record::{RunId, RunOrigin};
+    let (mut agent, mock) = agent_with_mock();
+    mock.enqueue_text("done");
+    let parent_run_id = RunId::new();
+
+    let cancel = CancellationToken::new();
+    let _text = agent
+        .run_prompt_with_cancel_origin("child task", cancel, RunOrigin::Subagent { parent_run_id })
+        .await
+        .unwrap();
+
+    let recent = agent.run_store().recent(10).expect("list recent runs");
+    let subagent_run = recent
+        .iter()
+        .find(|r| matches!(r.origin, RunOrigin::Subagent { .. }))
+        .expect("subagent run present in store");
+    match &subagent_run.origin {
+        RunOrigin::Subagent {
+            parent_run_id: prid,
+        } => assert_eq!(prid, &parent_run_id),
+        other => panic!("expected Subagent origin, got {other:?}"),
+    }
+}
+
+#[tokio::test]
 async fn cache_matches_persisted_state_after_completed_turn() {
     // Slice 2 acceptance: cancelled (or simply finished) turns leave
     // history valid for the next provider request — that means the

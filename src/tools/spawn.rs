@@ -116,6 +116,11 @@ pub struct SpawnSubagentTool {
     /// originating frontend session without joining run records
     /// against session metadata.
     parent_session_id: Option<String>,
+    /// Slice 7 lineage: shared handle to parent agent's live
+    /// `current_run_id`. Read at spawn time so the child's
+    /// `RunOrigin::Subagent { parent_run_id }` carries the
+    /// parent's in-flight run id, not a stale snapshot.
+    parent_run_handle: Option<Arc<parking_lot::Mutex<Option<crate::run_record::RunId>>>>,
 }
 
 impl SpawnSubagentTool {
@@ -133,7 +138,19 @@ impl SpawnSubagentTool {
             artifact_store: None,
             pool: None,
             parent_session_id: None,
+            parent_run_handle: None,
         }
+    }
+
+    /// Slice 7: install a shared handle to the parent agent's live
+    /// `current_run_id`. The tool reads this at spawn time to stamp
+    /// child runs with `RunOrigin::Subagent { parent_run_id }`.
+    pub fn with_parent_run_handle(
+        mut self,
+        handle: Arc<parking_lot::Mutex<Option<crate::run_record::RunId>>>,
+    ) -> Self {
+        self.parent_run_handle = Some(handle);
+        self
     }
 
     /// Slice 7: stamp the parent agent's session id so child
@@ -306,9 +323,29 @@ impl Tool for SpawnSubagentTool {
         let child_cancel = cancel.child_token();
         self.orchestration
             .register_cancel_handle(child_id, child_cancel.clone());
-        let run_result = child
-            .run_prompt_with_cancel(&task, child_cancel.clone())
-            .await;
+        // Slice 7: stamp the child's run record with
+        // `RunOrigin::Subagent { parent_run_id }` when the parent's
+        // run is in flight. Falls back to the legacy CLI-tagged path
+        // when no parent run handle is wired up (direct-mode tests).
+        let parent_run_id = self.parent_run_handle.as_ref().and_then(|h| *h.lock());
+        let run_result = match parent_run_id {
+            Some(prid) => {
+                child
+                    .run_prompt_with_cancel_origin(
+                        &task,
+                        child_cancel.clone(),
+                        crate::run_record::RunOrigin::Subagent {
+                            parent_run_id: prid,
+                        },
+                    )
+                    .await
+            }
+            None => {
+                child
+                    .run_prompt_with_cancel(&task, child_cancel.clone())
+                    .await
+            }
+        };
         // YYC-209: child run finished one way or another; drop the
         // handle so the store's cancel map only carries live
         // children. Done before the cancellation check below so
