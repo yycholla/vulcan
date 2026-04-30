@@ -126,6 +126,16 @@ impl DaemonLaneRouter {
         self.sessions.lock().len()
     }
 
+    /// Remove the cache entry for this lane. The next call to
+    /// `ensure_session` for this lane will go through the full
+    /// `session.create` round-trip. Used after `/clear` (which
+    /// destroys the daemon session) to keep the cache coherent —
+    /// without this, the stale session id would be reused and the
+    /// next `prompt.stream` would fail with `SESSION_NOT_FOUND`.
+    pub fn forget(&self, lane: &LaneKey) {
+        self.sessions.lock().remove(lane);
+    }
+
     /// Snapshot of the lane → session-id mapping for diagnostics.
     /// Sorted by lane for stable JSON output. Returns owned strings so
     /// callers can serialize without holding the lock.
@@ -236,6 +246,44 @@ mod tests {
         assert_eq!(snap[0].chat_id, "111");
         assert_eq!(snap[0].session_id, "gateway:discord:111");
         assert_eq!(snap[1].chat_id, "222");
+
+        state.signal_shutdown();
+        let _ = tokio::time::timeout(Duration::from_secs(2), server_handle).await;
+    }
+
+    /// `forget` clears the cached lane → session-id entry so the next
+    /// `ensure_session` goes through `session.create` again. Mirrors
+    /// the path taken after `/clear` destroys the daemon session.
+    #[tokio::test]
+    async fn forget_clears_cache_entry() {
+        let dir = tempdir().unwrap();
+        let sock = dir.path().join("vulcan.sock");
+
+        let state = Arc::new(DaemonState::for_tests_minimal());
+        let server = Server::bind(&sock, state.clone()).await.unwrap();
+        let server_handle = tokio::spawn(server.run());
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        let sock_path = sock.clone();
+        let router = DaemonLaneRouter::with_client_factory(move || {
+            let p = sock_path.clone();
+            Box::pin(async move { Client::connect_at(&p).await })
+        });
+
+        let l = lane("discord", "111");
+        let s1 = router.ensure_session(&l).await.unwrap();
+        assert_eq!(router.cached_lane_count(), 1);
+
+        router.forget(&l);
+        assert_eq!(router.cached_lane_count(), 0, "forget removes cache entry",);
+
+        // Re-ensure works (idempotent SESSION_EXISTS handling on the
+        // daemon side: the session itself was never destroyed in this
+        // test, only the gateway's cache was invalidated, so the
+        // re-create round-trips through SESSION_EXISTS).
+        let s2 = router.ensure_session(&l).await.unwrap();
+        assert_eq!(s1, s2, "same session id after forget+re-ensure");
+        assert_eq!(router.cached_lane_count(), 1);
 
         state.signal_shutdown();
         let _ = tokio::time::timeout(Duration::from_secs(2), server_handle).await;

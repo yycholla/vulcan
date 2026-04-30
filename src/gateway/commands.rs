@@ -222,7 +222,7 @@ impl CommandDispatcher {
             .fresh_client()
             .await
             .with_context(|| "open daemon client for /clear")?;
-        match client
+        let result = match client
             .call(
                 "session.destroy",
                 serde_json::json!({ "session_id": session_id }),
@@ -234,7 +234,17 @@ impl CommandDispatcher {
                 Ok("No active session to clear.".into())
             }
             Err(e) => Err(anyhow::anyhow!("session.destroy: {e}")),
-        }
+        };
+        // Invalidate the lane → session-id cache so the next inbound
+        // message goes through `session.create` again. Done
+        // unconditionally (even on SESSION_NOT_FOUND) — the daemon
+        // having no record means our cache is by definition stale,
+        // and a `Daemon(other-error)` path bubbles up below regardless
+        // of whether we forget. Without this, the daemon returns
+        // SESSION_NOT_FOUND on the next prompt.stream and the worker
+        // marks the inbound failed (silent failure to the user).
+        ctx.lane_router.forget(ctx.lane);
+        result
     }
 
     async fn resume(&self, ctx: &DispatchCtx<'_>) -> Result<String> {
