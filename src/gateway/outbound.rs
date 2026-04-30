@@ -44,7 +44,7 @@ impl OutboundDispatcher {
     }
 
     /// Spawn the polling loop. The returned `OutboundDispatcherHandle` aborts
-    /// the loop on drop (mirrors `EvictorHandle` from agent_map.rs).
+    /// the loop on drop (drop-aborted, like other gateway side-task handles).
     pub fn spawn(self) -> OutboundDispatcherHandle {
         let Self {
             queue,

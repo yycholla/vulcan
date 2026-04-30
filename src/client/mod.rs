@@ -16,6 +16,7 @@ mod errors;
 mod transport;
 
 pub use errors::{ClientError, ClientResult};
+pub use transport::StreamFrames;
 
 use crate::config::vulcan_home;
 use crate::daemon::protocol::Request;
@@ -54,10 +55,23 @@ impl Client {
         method: &str,
         params: serde_json::Value,
     ) -> ClientResult<serde_json::Value> {
+        self.call_at_session("main", method, params).await
+    }
+
+    /// Like [`Self::call`] but routes the request to an explicit
+    /// session id rather than the default `"main"`. Used by gateway /
+    /// orchestrator code that maps external lanes to per-session
+    /// daemon Agents.
+    pub async fn call_at_session(
+        &mut self,
+        session: &str,
+        method: &str,
+        params: serde_json::Value,
+    ) -> ClientResult<serde_json::Value> {
         let req = Request {
             version: 1,
             id: uuid::Uuid::new_v4().to_string(),
-            session: "main".into(),
+            session: session.into(),
             method: method.into(),
             params,
         };
@@ -66,5 +80,36 @@ impl Client {
             return Err(err.into());
         }
         Ok(resp.result.unwrap_or_default())
+    }
+
+    /// Initiate a streaming RPC call against the default `"main"`
+    /// session. Returns a [`StreamFrames`] handle whose `frames`
+    /// receiver yields incremental [`crate::daemon::protocol::StreamFrame`]s
+    /// and whose `done` oneshot resolves to the final
+    /// [`crate::daemon::protocol::Response`].
+    #[allow(dead_code)]
+    pub async fn call_stream(
+        &mut self,
+        method: &str,
+        params: serde_json::Value,
+    ) -> ClientResult<StreamFrames> {
+        self.call_stream_at_session("main", method, params).await
+    }
+
+    /// Like [`Self::call_stream`] but targets an explicit session id.
+    pub async fn call_stream_at_session(
+        &mut self,
+        session: &str,
+        method: &str,
+        params: serde_json::Value,
+    ) -> ClientResult<StreamFrames> {
+        let req = Request {
+            version: 1,
+            id: uuid::Uuid::new_v4().to_string(),
+            session: session.into(),
+            method: method.into(),
+            params,
+        };
+        self.transport.call_stream(req).await
     }
 }

@@ -21,9 +21,10 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use tokio::process::Command as TokioCommand;
 
+use crate::client::ClientError;
 use crate::config::CommandConfig;
-use crate::gateway::agent_map::AgentMap;
 use crate::gateway::lane::LaneKey;
+use crate::gateway::lane_router::DaemonLaneRouter;
 
 /// Built-in command. Each variant maps to a single dispatch fn.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -64,7 +65,10 @@ pub enum RegisteredCommand {
 pub struct DispatchCtx<'a> {
     pub lane: &'a LaneKey,
     pub user_id: &'a str,
-    pub agent_map: &'a AgentMap,
+    /// Daemon-backed lane → session-id resolver. Builtins that
+    /// previously poked at the in-process Agent cache directly now
+    /// route through the daemon's RPC surface (Slice 3 Task 3.4).
+    pub lane_router: &'a DaemonLaneRouter,
     /// User input AFTER the leading `/` and command name. e.g. for
     /// `"/resume abc-def"` the body is `"abc-def"`. For `/help` it's
     /// the empty string.
@@ -171,23 +175,65 @@ impl CommandDispatcher {
     }
 
     async fn status_text(&self, ctx: &DispatchCtx<'_>) -> Result<String> {
-        let agent = ctx.agent_map.get_or_spawn(ctx.lane).await?;
-        let agent = agent.lock().await;
+        // Slice 3 Task 3.4: status now queries the daemon for the
+        // per-lane session's Agent. Lazy-build inside the daemon
+        // produces an `AGENT_BUILD_FAILED` error if the active
+        // provider profile can't initialize — surface that verbatim
+        // so the operator sees the underlying cause.
+        let session_id = ctx.lane_router.ensure_session(ctx.lane).await?;
+        let mut client = ctx.lane_router.fresh_client().await?;
+        let resp = match client
+            .call_at_session(&session_id, "agent.status", serde_json::json!({}))
+            .await
+        {
+            Ok(r) => r,
+            Err(ClientError::Daemon(err)) => {
+                anyhow::bail!("agent.status [{}]: {}", err.code, err.message)
+            }
+            Err(e) => return Err(anyhow::anyhow!("{e}")),
+        };
+
+        let unknown = serde_json::Value::String("[unknown]".into());
+        let model = resp.get("model").unwrap_or(&unknown);
+        let provider = resp
+            .get("provider")
+            .and_then(|v| v.as_str())
+            .unwrap_or("[default]");
+        let max_ctx = resp
+            .get("max_context")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        let session = resp
+            .get("session_id")
+            .and_then(|v| v.as_str())
+            .unwrap_or(session_id.as_str());
         Ok(format!(
-            "Session: {}\nProvider: {}\nModel: {}\nContext: {}",
-            agent.session_id(),
-            agent.active_profile().unwrap_or("[default]"),
-            agent.active_model(),
-            agent.max_context(),
+            "Session: {session}\nProvider: {provider}\nModel: {model}\nContext: {max_ctx}"
         ))
     }
 
     async fn clear(&self, ctx: &DispatchCtx<'_>) -> Result<String> {
-        let removed = ctx.agent_map.evict(ctx.lane).await;
-        if removed {
-            Ok("Cleared session — next message starts fresh.".into())
-        } else {
-            Ok("No active session to clear.".into())
+        // /clear maps to `session.destroy` on the daemon. The next
+        // inbound message for this lane will lazy-create a fresh
+        // session via `ensure_session`.
+        let session_id = DaemonLaneRouter::derive_session_id(ctx.lane);
+        let mut client = ctx
+            .lane_router
+            .fresh_client()
+            .await
+            .with_context(|| "open daemon client for /clear")?;
+        match client
+            .call(
+                "session.destroy",
+                serde_json::json!({ "session_id": session_id }),
+            )
+            .await
+        {
+            Ok(_) => Ok("Cleared session — next message starts fresh.".into()),
+            Err(ClientError::Daemon(err)) if err.code == "SESSION_NOT_FOUND" => {
+                Ok("No active session to clear.".into())
+            }
+            Err(e) => Err(anyhow::anyhow!("session.destroy: {e}")),
         }
     }
 
@@ -196,12 +242,25 @@ impl CommandDispatcher {
         if session_id.is_empty() {
             return Ok("Usage: /resume <session-id>".into());
         }
-        let agent = ctx.agent_map.get_or_spawn(ctx.lane).await?;
-        let mut agent = agent.lock().await;
-        agent
-            .resume_session(session_id)
-            .with_context(|| format!("resume {session_id}"))?;
-        Ok(format!("Resumed session {session_id}."))
+        // The daemon's `session.resume` handler is still stubbed
+        // (METHOD_NOT_IMPLEMENTED). Surface a clean message rather
+        // than failing the inbound row outright; the legacy in-process
+        // resume relied on the gateway-owned Agent which no longer
+        // exists.
+        let mut client = ctx.lane_router.fresh_client().await?;
+        match client
+            .call(
+                "session.resume",
+                serde_json::json!({ "session_id": session_id }),
+            )
+            .await
+        {
+            Ok(_) => Ok(format!("Resumed session {session_id}.")),
+            Err(ClientError::Daemon(err)) if err.code == "METHOD_NOT_IMPLEMENTED" => Ok(
+                "/resume is not yet supported with the daemon backend (YYC-266 follow-up).".into(),
+            ),
+            Err(e) => Err(anyhow::anyhow!("session.resume: {e}")),
+        }
     }
 }
 
@@ -349,6 +408,21 @@ mod tests {
         assert!(!d.commands.contains_key("nope"));
     }
 
+    /// Stand-in router for tests where the dispatched command never
+    /// touches the daemon (`/help`, non-slash text). The factory
+    /// returns an error if invoked, which would surface as an
+    /// assertion failure if the dispatcher unexpectedly tried to
+    /// connect.
+    fn router_no_daemon() -> DaemonLaneRouter {
+        DaemonLaneRouter::with_client_factory(|| {
+            Box::pin(async {
+                Err(ClientError::Protocol(
+                    "test router: client factory must not be invoked".into(),
+                ))
+            })
+        })
+    }
+
     #[tokio::test]
     async fn dispatch_is_case_insensitive_for_builtins() {
         let d = CommandDispatcher::new(&empty_overrides());
@@ -356,14 +430,11 @@ mod tests {
             platform: "loopback".into(),
             chat_id: "c".into(),
         };
-        // Build a stand-in AgentMap; /help doesn't actually consult it,
-        // so we only need the type to match.
-        let cfg = std::sync::Arc::new(crate::config::Config::default());
-        let agent_map = AgentMap::new(cfg, std::time::Duration::from_secs(60));
+        let lane_router = router_no_daemon();
         let ctx = DispatchCtx {
             lane: &lane,
             user_id: "u",
-            agent_map: &agent_map,
+            lane_router: &lane_router,
             body: "",
         };
         let reply = d
@@ -381,12 +452,11 @@ mod tests {
             platform: "loopback".into(),
             chat_id: "c".into(),
         };
-        let cfg = std::sync::Arc::new(crate::config::Config::default());
-        let agent_map = AgentMap::new(cfg, std::time::Duration::from_secs(60));
+        let lane_router = router_no_daemon();
         let ctx = DispatchCtx {
             lane: &lane,
             user_id: "u",
-            agent_map: &agent_map,
+            lane_router: &lane_router,
             body: "",
         };
         assert!(d.dispatch("hello world", ctx).await.unwrap().is_none());

@@ -6,7 +6,7 @@ use axum::http::{Request, StatusCode};
 use axum::middleware::Next;
 use axum::response::Response;
 
-use crate::gateway::agent_map::AgentMap;
+use crate::gateway::lane_router::DaemonLaneRouter;
 use crate::gateway::queue::{InboundQueue, OutboundQueue};
 use crate::gateway::registry::PlatformRegistry;
 
@@ -17,7 +17,9 @@ pub struct AppState {
     pub inbound: Arc<InboundQueue>,
     pub outbound: Arc<OutboundQueue>,
     pub registry: Arc<PlatformRegistry>,
-    pub agent_map: Arc<AgentMap>,
+    /// Slice 3 Task 3.4: lane → daemon-session router replaces the
+    /// in-process per-lane Agent cache. The daemon owns the Agent.
+    pub lane_router: Arc<DaemonLaneRouter>,
     /// YYC-17 PR-4: declared scheduler jobs (from `Config.scheduler`).
     /// Empty when the gateway runs without the scheduler enabled.
     /// Owned via `Arc` so the route handler can clone the slice
@@ -109,30 +111,35 @@ async fn bearer_auth(
 mod tests {
     use super::*;
     use std::sync::Arc;
-    use std::time::Duration;
 
     use axum::body::Body;
     use axum::http::{Request, StatusCode};
     use tower::ServiceExt;
 
-    use crate::config::Config;
-    use crate::gateway::agent_map::AgentMap;
     use crate::memory::DbPool;
 
     fn fresh_db() -> DbPool {
         crate::memory::in_memory_gateway_pool().expect("in-memory pool")
     }
 
+    fn no_daemon_router() -> Arc<DaemonLaneRouter> {
+        Arc::new(DaemonLaneRouter::with_client_factory(|| {
+            Box::pin(async {
+                Err(crate::client::ClientError::Protocol(
+                    "test app state: client factory must not be invoked".into(),
+                ))
+            })
+        }))
+    }
+
     fn test_app_state(token: &str) -> AppState {
-        let config = Arc::new(Config::default());
-        let agent_map = AgentMap::new(config, Duration::from_secs(60));
         let db = fresh_db();
         AppState {
             api_token: Arc::new(token.into()),
             inbound: Arc::new(crate::gateway::queue::InboundQueue::new(db.clone())),
             outbound: Arc::new(crate::gateway::queue::OutboundQueue::new(db.clone(), 5)),
             registry: Arc::new(crate::gateway::registry::PlatformRegistry::new()),
-            agent_map: Arc::new(agent_map),
+            lane_router: no_daemon_router(),
             scheduler_jobs: Arc::new(Vec::new()),
             scheduler_store: None,
         }

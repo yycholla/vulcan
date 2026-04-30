@@ -89,7 +89,7 @@ mod tests {
     use tower::ServiceExt;
 
     use crate::config::{OverlapPolicy, SchedulerJobConfig};
-    use crate::gateway::agent_map::AgentMap;
+    use crate::gateway::lane_router::DaemonLaneRouter;
     use crate::gateway::queue::{InboundQueue, OutboundQueue};
     use crate::gateway::registry::PlatformRegistry;
     use crate::gateway::scheduler_store::SchedulerStore;
@@ -120,14 +120,19 @@ mod tests {
         jobs: Vec<SchedulerJobConfig>,
         store: Option<SchedulerStore>,
     ) -> AppState {
-        let config = Arc::new(crate::config::Config::default());
-        let agent_map = AgentMap::new(config, std::time::Duration::from_secs(60));
+        let lane_router = Arc::new(DaemonLaneRouter::with_client_factory(|| {
+            Box::pin(async {
+                Err(crate::client::ClientError::Protocol(
+                    "scheduler route test: client factory must not be invoked".into(),
+                ))
+            })
+        }));
         AppState {
             api_token: Arc::new("secret".into()),
             inbound: Arc::new(InboundQueue::new(db.clone())),
             outbound: Arc::new(OutboundQueue::new(db.clone(), 5)),
             registry: Arc::new(PlatformRegistry::new()),
-            agent_map: Arc::new(agent_map),
+            lane_router,
             scheduler_jobs: Arc::new(jobs),
             scheduler_store: store,
         }

@@ -69,16 +69,25 @@ mod tests {
         bytes.iter().map(|b| format!("{b:02x}")).collect()
     }
 
+    fn no_daemon_router() -> Arc<crate::gateway::lane_router::DaemonLaneRouter> {
+        Arc::new(
+            crate::gateway::lane_router::DaemonLaneRouter::with_client_factory(|| {
+                Box::pin(async {
+                    Err(crate::client::ClientError::Protocol(
+                        "webhook test: client factory must not be invoked".into(),
+                    ))
+                })
+            }),
+        )
+    }
+
     fn app_state_with(registry: PlatformRegistry, db: DbPool) -> AppState {
-        let config = Arc::new(crate::config::Config::default());
-        let agent_map =
-            crate::gateway::agent_map::AgentMap::new(config, std::time::Duration::from_secs(60));
         AppState {
             api_token: Arc::new("secret".into()),
             inbound: Arc::new(crate::gateway::queue::InboundQueue::new(db.clone())),
             outbound: Arc::new(crate::gateway::queue::OutboundQueue::new(db.clone(), 5)),
             registry: Arc::new(registry),
-            agent_map: Arc::new(agent_map),
+            lane_router: no_daemon_router(),
             scheduler_jobs: Arc::new(Vec::new()),
             scheduler_store: None,
         }
