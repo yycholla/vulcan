@@ -21,6 +21,8 @@ pub async fn create(
     id: String,
     requested_id: Option<String>,
     resume_from: Option<String>,
+    parent_session_id: Option<String>,
+    lineage_label: Option<String>,
 ) -> Response {
     // resume_from is reserved for a later slice that re-hydrates a
     // historical session into the new one. For now we just accept
@@ -40,7 +42,11 @@ pub async fn create(
         );
     }
 
-    match state.sessions().create_named(&new_id) {
+    match state.sessions().create_named_with_lineage(
+        &new_id,
+        parent_session_id.clone(),
+        lineage_label.clone(),
+    ) {
         Ok(_) => Response::ok(id, json!({ "session_id": new_id })),
         Err(_) => Response::error(
             id,
@@ -161,7 +167,7 @@ mod tests {
     #[tokio::test]
     async fn create_with_explicit_id_succeeds() {
         let state = Arc::new(DaemonState::for_tests_minimal());
-        let resp = create(&state, "r1".into(), Some("foo".into()), None).await;
+        let resp = create(&state, "r1".into(), Some("foo".into()), None, None, None).await;
         let result = resp.result.expect("ok");
         assert_eq!(result["session_id"], "foo");
         assert!(state.sessions().get("foo").is_some());
@@ -170,7 +176,7 @@ mod tests {
     #[tokio::test]
     async fn create_without_id_generates_uuid() {
         let state = Arc::new(DaemonState::for_tests_minimal());
-        let resp = create(&state, "r1".into(), None, None).await;
+        let resp = create(&state, "r1".into(), None, None, None, None).await;
         let result = resp.result.expect("ok");
         let id = result["session_id"].as_str().unwrap();
         assert!(
@@ -182,8 +188,8 @@ mod tests {
     #[tokio::test]
     async fn create_rejects_duplicate() {
         let state = Arc::new(DaemonState::for_tests_minimal());
-        create(&state, "r1".into(), Some("foo".into()), None).await;
-        let resp = create(&state, "r2".into(), Some("foo".into()), None).await;
+        create(&state, "r1".into(), Some("foo".into()), None, None, None).await;
+        let resp = create(&state, "r2".into(), Some("foo".into()), None, None, None).await;
         let err = resp.error.expect("err");
         assert_eq!(err.code, "SESSION_EXISTS");
     }
@@ -191,7 +197,7 @@ mod tests {
     #[tokio::test]
     async fn create_rejects_main() {
         let state = Arc::new(DaemonState::for_tests_minimal());
-        let resp = create(&state, "r1".into(), Some("main".into()), None).await;
+        let resp = create(&state, "r1".into(), Some("main".into()), None, None, None).await;
         let err = resp.error.expect("err");
         assert_eq!(err.code, "SESSION_EXISTS");
     }
@@ -199,7 +205,7 @@ mod tests {
     #[tokio::test]
     async fn destroy_removes_session() {
         let state = Arc::new(DaemonState::for_tests_minimal());
-        create(&state, "r1".into(), Some("foo".into()), None).await;
+        create(&state, "r1".into(), Some("foo".into()), None, None, None).await;
         let resp = destroy(&state, "r2".into(), "foo".into()).await;
         assert_eq!(resp.result.unwrap()["ok"], true);
         assert!(state.sessions().get("foo").is_none());
@@ -233,11 +239,41 @@ mod tests {
     #[tokio::test]
     async fn list_reflects_create_destroy() {
         let state = Arc::new(DaemonState::for_tests_minimal());
-        create(&state, "r1".into(), Some("a".into()), None).await;
-        create(&state, "r2".into(), Some("b".into()), None).await;
+        create(&state, "r1".into(), Some("a".into()), None, None, None).await;
+        create(&state, "r2".into(), Some("b".into()), None, None, None).await;
         let resp = list(&state, "r3".into()).await;
         let count = resp.result.unwrap()["sessions"].as_array().unwrap().len();
         assert_eq!(count, 3, "main + a + b");
+    }
+
+    #[tokio::test]
+    async fn create_child_session_records_parent_lineage() {
+        let state = Arc::new(DaemonState::for_tests_minimal());
+        let resp = create(
+            &state,
+            "r1".into(),
+            Some("child-1".into()),
+            None,
+            Some("main".into()),
+            Some("spawn_subagent: review worker".into()),
+        )
+        .await;
+        assert!(
+            resp.error.is_none(),
+            "create must succeed: {:?}",
+            resp.error
+        );
+
+        let listed = list(&state, "r2".into()).await;
+        let result = listed.result.expect("list ok");
+        let child = result["sessions"]
+            .as_array()
+            .expect("sessions")
+            .iter()
+            .find(|s| s["id"] == "child-1")
+            .expect("child descriptor");
+        assert_eq!(child["parent_session_id"], "main");
+        assert_eq!(child["lineage_label"], "spawn_subagent: review worker");
     }
 
     #[tokio::test]
@@ -245,7 +281,7 @@ mod tests {
         use tokio_util::sync::CancellationToken;
 
         let state = Arc::new(DaemonState::for_tests_minimal());
-        create(&state, "r1".into(), Some("foo".into()), None).await;
+        create(&state, "r1".into(), Some("foo".into()), None, None, None).await;
 
         // Install a fake cancel token directly on the session for the test.
         let foo = state.sessions().get("foo").unwrap();
@@ -259,7 +295,7 @@ mod tests {
     #[tokio::test]
     async fn destroy_without_agent_cancel_still_succeeds() {
         let state = Arc::new(DaemonState::for_tests_minimal());
-        create(&state, "r1".into(), Some("foo".into()), None).await;
+        create(&state, "r1".into(), Some("foo".into()), None, None, None).await;
         // No agent_cancel installed — destroy must still succeed.
         let resp = destroy(&state, "r2".into(), "foo".into()).await;
         assert_eq!(resp.result.unwrap()["ok"], true);

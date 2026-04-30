@@ -95,8 +95,8 @@ fn resolve_session(
 
 // -- prompt.run --
 
-pub async fn run(state: &DaemonState, id: String, session_id: String, input: &str) -> Response {
-    let sess = match resolve_session(state, &session_id) {
+pub async fn run(state: Arc<DaemonState>, id: String, session_id: String, input: &str) -> Response {
+    let sess = match resolve_session(&state, &session_id) {
         Ok(s) => s,
         Err(e) => return Response::error(id, e),
     };
@@ -121,6 +121,7 @@ pub async fn run(state: &DaemonState, id: String, session_id: String, input: &st
     let cancel_token = tokio_util::sync::CancellationToken::new();
     sess.set_agent_cancel(cancel_token.clone());
     let mut agent = agent_arc.lock().await;
+    install_daemon_subagent_runner(&mut agent, Arc::clone(&state), &session_id);
     let result = agent.run_prompt_with_cancel(input, cancel_token).await;
     drop(agent);
     *sess.in_flight.lock() = false;
@@ -143,7 +144,7 @@ pub async fn run(state: &DaemonState, id: String, session_id: String, input: &st
 /// Returns `(frame_rx, done_rx)` so the server can stream Text and
 /// ToolCall events to the TUI while awaiting the final result.
 pub fn stream(
-    state: &DaemonState,
+    state: Arc<DaemonState>,
     req_id: String,
     session_id: String,
     input: String,
@@ -151,7 +152,7 @@ pub fn stream(
     let (frame_tx, frame_rx) = mpsc::channel(32);
     let (done_tx, done_rx) = oneshot::channel();
 
-    let sess = match resolve_session(state, &session_id) {
+    let sess = match resolve_session(&state, &session_id) {
         Ok(s) => s,
         Err(e) => {
             let _ = done_tx.send(Response::error(req_id, e));
@@ -173,6 +174,7 @@ pub fn stream(
     // Slice 3: clone the pool Arc out for the spawned task so the
     // child Agent build reuses the daemon's shared adapters.
     let pool_for_task = state.pool().cloned();
+    let state_for_runner = Arc::clone(&state);
     tokio::spawn(async move {
         // Lazy-build the per-session Agent. Failure surfaces on the
         // done channel as AGENT_BUILD_FAILED; in_flight is cleared
@@ -208,8 +210,10 @@ pub fn stream(
         let agent_arc2 = agent_arc.clone();
         let input2 = input.clone();
         let cancel2 = cancel_token.clone();
+        let session_id_for_runner = session_id.clone();
         let prompt_task = tokio::spawn(async move {
             let mut agent = agent_arc2.lock().await;
+            install_daemon_subagent_runner(&mut agent, state_for_runner, &session_id_for_runner);
             agent
                 .run_prompt_stream_with_cancel(&input2, event_tx, cancel2)
                 .await
@@ -254,6 +258,22 @@ pub fn stream(
     });
 
     (frame_rx, done_rx)
+}
+
+fn install_daemon_subagent_runner(
+    agent: &mut crate::agent::Agent,
+    state: Arc<DaemonState>,
+    parent_session_id: &str,
+) {
+    let runner = Arc::new(crate::daemon::subagent::DaemonSubagentRunner::new(
+        Arc::clone(&state),
+    ));
+    agent.install_subagent_runner(
+        Arc::new(state.config().clone()),
+        state.pool().cloned(),
+        parent_session_id.to_string(),
+        runner,
+    );
 }
 
 // -- prompt.cancel --
@@ -307,7 +327,7 @@ mod tests {
     #[tokio::test]
     async fn run_returns_session_not_found_for_bogus_session() {
         let state = Arc::new(DaemonState::for_tests_minimal());
-        let resp = run(&state, "r1".into(), "ghost".into(), "hi").await;
+        let resp = run(state, "r1".into(), "ghost".into(), "hi").await;
         let err = resp.error.expect("err");
         assert_eq!(err.code, "SESSION_NOT_FOUND");
     }
@@ -320,7 +340,7 @@ mod tests {
         // error path now surfaces AGENT_BUILD_FAILED instead of the
         // pre-Task-3.3 AGENT_NOT_AVAILABLE.
         let state = Arc::new(DaemonState::for_tests_minimal());
-        let resp = run(&state, "r1".into(), "main".into(), "hi").await;
+        let resp = run(state, "r1".into(), "main".into(), "hi").await;
         let err = resp.error.expect("err");
         assert_eq!(err.code, "AGENT_BUILD_FAILED");
     }

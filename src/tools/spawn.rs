@@ -1,19 +1,19 @@
 //! YYC-82: spawn_subagent tool — scoped child agent with budget.
 //!
-//! The parent agent dispatches a focused task to a child agent
-//! that runs a complete `Agent` loop in-process. The child shares
-//! the parent's provider config (same API key + base URL + model)
-//! but gets a fresh hook registry and a *restricted* tool registry
-//! filtered to an explicit allowlist. The parent receives a bounded
-//! summary and budget usage stats — not a live transcript dump.
+//! The parent agent dispatches a focused task to a child agent.
+//! Daemon-managed parents delegate execution to daemon child sessions;
+//! direct-mode parents keep the legacy in-process path. The child
+//! receives a restricted tool registry filtered to an explicit
+//! allowlist, and the parent receives a bounded summary plus budget
+//! usage stats, not a live transcript dump.
 //!
 //! ## Scope of this PR
 //!
-//! - Build child via `Agent::builder` + restrict tools by name.
+//! - Run child work behind the `SubagentRunner` seam when installed.
+//! - Keep a direct `Agent::builder` fallback for non-daemon callers.
 //! - Hard cap on loop iterations (`max_iterations`).
 //! - Conservative default tool allowlist (read-only).
-//! - Fresh in-memory session for the child so its turn history
-//!   doesn't pollute the parent's session store.
+//! - Daemon child-session lineage when running under the daemon.
 //!
 //! ## Deliberately deferred
 //!
@@ -38,7 +38,7 @@ use tokio_util::sync::CancellationToken;
 use crate::agent::Agent;
 use crate::config::Config;
 use crate::hooks::HookRegistry;
-use crate::orchestration::OrchestrationStore;
+use crate::orchestration::{ChildAgentId, OrchestrationStore};
 use crate::tools::{Tool, ToolResult, parse_tool_params};
 
 #[derive(Deserialize)]
@@ -93,6 +93,33 @@ const SUBAGENT_MAX_ITERATIONS_CAP: u32 = 32;
 /// Default when caller doesn't supply `max_iterations`.
 const SUBAGENT_DEFAULT_ITERATIONS: u32 = 8;
 
+#[derive(Debug, Clone)]
+pub struct SubagentRunRequest {
+    pub child_id: ChildAgentId,
+    pub parent_session_id: Option<String>,
+    pub parent_run_id: Option<crate::run_record::RunId>,
+    pub task: String,
+    pub allowed_tools: Vec<String>,
+    pub profile_name: Option<String>,
+    pub max_iterations: u32,
+}
+
+#[derive(Debug, Clone)]
+pub struct SubagentRunOutput {
+    pub final_text: String,
+    pub iterations: u32,
+    pub tokens_consumed: u64,
+}
+
+#[async_trait]
+pub trait SubagentRunner: Send + Sync {
+    async fn run_subagent(
+        &self,
+        request: SubagentRunRequest,
+        cancel: CancellationToken,
+    ) -> Result<SubagentRunOutput>;
+}
+
 #[derive(Clone)]
 pub struct SpawnSubagentTool {
     config: Arc<Config>,
@@ -121,6 +148,9 @@ pub struct SpawnSubagentTool {
     /// `RunOrigin::Subagent { parent_run_id }` carries the
     /// parent's in-flight run id, not a stale snapshot.
     parent_run_handle: Option<Arc<parking_lot::Mutex<Option<crate::run_record::RunId>>>>,
+    /// Slice 7: when present, delegate child execution to a daemon
+    /// child-session runner instead of building a direct child Agent.
+    subagent_runner: Option<Arc<dyn SubagentRunner>>,
 }
 
 impl SpawnSubagentTool {
@@ -139,6 +169,7 @@ impl SpawnSubagentTool {
             pool: None,
             parent_session_id: None,
             parent_run_handle: None,
+            subagent_runner: None,
         }
     }
 
@@ -174,6 +205,11 @@ impl SpawnSubagentTool {
     /// orchestration store rather than rebuilding them.
     pub fn with_pool(mut self, pool: Arc<crate::runtime_pool::RuntimeResourcePool>) -> Self {
         self.pool = Some(pool);
+        self
+    }
+
+    pub fn with_subagent_runner(mut self, runner: Arc<dyn SubagentRunner>) -> Self {
+        self.subagent_runner = Some(runner);
         self
     }
 }
@@ -280,15 +316,44 @@ impl Tool for SpawnSubagentTool {
             return Ok(ToolResult::ok(serde_json::to_string_pretty(&payload)?));
         }
 
+        self.orchestration
+            .update_status(child_id, crate::orchestration::ChildStatus::Running);
+
+        // YYC-208: fork a child cancellation token from the parent's
+        // so cancelling the parent turn aborts the child's loop.
+        // `child_token` cancels when the parent's token cancels and
+        // can also be cancelled independently — which YYC-209
+        // hands to the orchestration store so a TUI kill action
+        // can target this specific child by id.
+        let child_cancel = cancel.child_token();
+        self.orchestration
+            .register_cancel_handle(child_id, child_cancel.clone());
+        let parent_run_id = self.parent_run_handle.as_ref().and_then(|h| *h.lock());
+        if let Some(runner) = &self.subagent_runner {
+            let request = SubagentRunRequest {
+                child_id,
+                parent_session_id: self.parent_session_id.clone(),
+                parent_run_id,
+                task: task.clone(),
+                allowed_tools: allowed.clone(),
+                profile_name: profile_name.clone(),
+                max_iterations: max_iter,
+            };
+            let run_result = runner.run_subagent(request, child_cancel.clone()).await;
+            self.orchestration.forget_cancel_handle(child_id);
+            return self
+                .finish_child_result(child_id, task, allowed.len(), max_iter, run_result, cancel)
+                .await;
+        }
+
+        // Slice 7 fallback: direct-mode callers that don't install a
+        // daemon runner still use the legacy child Agent path.
         // YYC-181: when a named profile was requested, build the
         // child under it so the child's registry records the
-        // `active_profile` for run-record / doctor visibility (PR-4
-        // wires those). When the parent passed an explicit
-        // `allowed_tools` list instead, fall back to the legacy
-        // `restrict_tools` path so the child still narrows correctly.
-        // Slice 7 (partial): inherit pool when present so the child
-        // shares the parent's session/run/artifact/orchestration
-        // stores. Full daemon-session delegation lands in a follow-up.
+        // `active_profile` for run-record / doctor visibility. When
+        // the parent passed an explicit `allowed_tools` list instead,
+        // fall back to `restrict_tools` so the child still narrows
+        // correctly.
         let mut builder = Agent::builder(self.config.as_ref())
             .with_hooks(HookRegistry::new())
             .with_max_iterations(max_iter)
@@ -311,23 +376,6 @@ impl Tool for SpawnSubagentTool {
         if profile_name.is_none() {
             child.restrict_tools(&allowed);
         }
-        self.orchestration
-            .update_status(child_id, crate::orchestration::ChildStatus::Running);
-
-        // YYC-208: fork a child cancellation token from the parent's
-        // so cancelling the parent turn aborts the child's loop.
-        // `child_token` cancels when the parent's token cancels and
-        // can also be cancelled independently — which YYC-209
-        // hands to the orchestration store so a TUI kill action
-        // can target this specific child by id.
-        let child_cancel = cancel.child_token();
-        self.orchestration
-            .register_cancel_handle(child_id, child_cancel.clone());
-        // Slice 7: stamp the child's run record with
-        // `RunOrigin::Subagent { parent_run_id }` when the parent's
-        // run is in flight. Falls back to the legacy CLI-tagged path
-        // when no parent run handle is wired up (direct-mode tests).
-        let parent_run_id = self.parent_run_handle.as_ref().and_then(|h| *h.lock());
         let run_result = match parent_run_id {
             Some(prid) => {
                 child
@@ -356,11 +404,32 @@ impl Tool for SpawnSubagentTool {
         // because subsequent calls would observe the same fresh
         // child agent's lifetime tally.
         let tokens_consumed = child.tokens_consumed();
-        self.orchestration.update_tokens(child_id, tokens_consumed);
         let iterations = child.iterations();
-        // If parent cancelled, mark Cancelled regardless of how the
-        // child's run_prompt happened to surface — its Err shape on
-        // cancellation isn't load-bearing here.
+        let run_result = run_result.map(|final_text| SubagentRunOutput {
+            final_text,
+            iterations,
+            tokens_consumed,
+        });
+        self.finish_child_result(child_id, task, allowed.len(), max_iter, run_result, cancel)
+            .await
+    }
+}
+
+impl SpawnSubagentTool {
+    async fn finish_child_result(
+        &self,
+        child_id: ChildAgentId,
+        task: String,
+        tools_granted: usize,
+        max_iter: u32,
+        run_result: Result<SubagentRunOutput>,
+        cancel: CancellationToken,
+    ) -> Result<ToolResult> {
+        let (iterations, tokens_consumed) = match &run_result {
+            Ok(out) => (out.iterations, out.tokens_consumed),
+            Err(_) => (0, 0),
+        };
+        self.orchestration.update_tokens(child_id, tokens_consumed);
         if cancel.is_cancelled() {
             self.orchestration.mark_cancelled(child_id);
             let payload = json!({
@@ -376,7 +445,8 @@ impl Tool for SpawnSubagentTool {
             return Ok(ToolResult::ok(serde_json::to_string_pretty(&payload)?));
         }
         match run_result {
-            Ok(final_text) => {
+            Ok(out) => {
+                let final_text = out.final_text;
                 self.orchestration
                     .mark_completed(child_id, final_text.clone(), iterations);
                 // YYC-180: persist the child's final summary as a
@@ -408,7 +478,7 @@ impl Tool for SpawnSubagentTool {
                         "max_iterations": max_iter,
                         "tokens": tokens_consumed,
                     },
-                    "tools_granted": allowed.len(),
+                    "tools_granted": tools_granted,
                 });
                 Ok(ToolResult::ok(serde_json::to_string_pretty(&payload)?))
             }
@@ -435,6 +505,7 @@ impl Tool for SpawnSubagentTool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     #[test]
     fn default_allowed_tools_contains_read_only_set() {
@@ -523,5 +594,65 @@ mod tests {
             "expected typed denial, got {:?}",
             result.output
         );
+    }
+
+    struct FakeRunner {
+        calls: Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl SubagentRunner for FakeRunner {
+        async fn run_subagent(
+            &self,
+            request: SubagentRunRequest,
+            _cancel: CancellationToken,
+        ) -> Result<SubagentRunOutput> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            assert_eq!(request.parent_session_id.as_deref(), Some("parent-session"));
+            assert_eq!(request.task, "inspect daemon");
+            assert_eq!(request.max_iterations, 3);
+            assert!(request.allowed_tools.contains(&"read_file".to_string()));
+            Ok(SubagentRunOutput {
+                final_text: "runner summary".into(),
+                iterations: 2,
+                tokens_consumed: 11,
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn installed_runner_executes_subagent_without_child_builder() {
+        let cfg = Arc::new(Config::default());
+        let store = Arc::new(OrchestrationStore::new());
+        let calls = Arc::new(AtomicUsize::new(0));
+        let runner = Arc::new(FakeRunner {
+            calls: Arc::clone(&calls),
+        });
+        let tool = SpawnSubagentTool::with_store(cfg, Arc::clone(&store))
+            .with_parent_session_id("parent-session")
+            .with_subagent_runner(runner);
+
+        let result = tool
+            .call(
+                json!({
+                    "task": "inspect daemon",
+                    "allowed_tools": ["read_file"],
+                    "max_iterations": 3
+                }),
+                CancellationToken::new(),
+            )
+            .await
+            .expect("call ok");
+
+        assert!(!result.is_error, "runner path should succeed");
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert!(result.output.contains("\"summary\": \"runner summary\""));
+        let recent = store.recent(1);
+        assert_eq!(
+            recent[0].status,
+            crate::orchestration::ChildStatus::Completed
+        );
+        assert_eq!(recent[0].iterations_used, 2);
+        assert_eq!(recent[0].tokens_consumed, 11);
     }
 }

@@ -100,7 +100,9 @@ impl Dispatcher {
                     .get("text")
                     .and_then(|v| v.as_str())
                     .unwrap_or("");
-                DispatchResult::Response(prompt::run(&self.state, req.id, session, input).await)
+                DispatchResult::Response(
+                    prompt::run(Arc::clone(&self.state), req.id, session, input).await,
+                )
             }
             "prompt.stream" => {
                 let session = req.session.clone();
@@ -110,7 +112,8 @@ impl Dispatcher {
                     .and_then(|v| v.as_str())
                     .unwrap_or("")
                     .to_string();
-                let (frames, done) = prompt::stream(&self.state, req.id, session, input);
+                let (frames, done) =
+                    prompt::stream(Arc::clone(&self.state), req.id, session, input);
                 DispatchResult::Stream { frames, done }
             }
             "prompt.cancel" => {
@@ -268,8 +271,26 @@ impl Dispatcher {
                     .get("resume_from")
                     .and_then(|v| v.as_str())
                     .map(|s| s.to_string());
+                let parent_session_id = req
+                    .params
+                    .get("parent_session_id")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string());
+                let lineage_label = req
+                    .params
+                    .get("lineage_label")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string());
                 DispatchResult::Response(
-                    session::create(&self.state, req.id, id, resume_from).await,
+                    session::create(
+                        &self.state,
+                        req.id,
+                        id,
+                        resume_from,
+                        parent_session_id,
+                        lineage_label,
+                    )
+                    .await,
                 )
             }
             "session.destroy" => {
@@ -470,6 +491,41 @@ mod tests {
             result["sessions"].is_array(),
             "sessions should be array (Slice 0: empty)"
         );
+    }
+
+    #[tokio::test]
+    async fn session_create_dispatches_child_lineage_params() {
+        let dispatcher = Dispatcher::new(Arc::new(
+            crate::daemon::state::DaemonState::for_tests_minimal(),
+        ));
+        let create = req_with_params(
+            "session.create",
+            serde_json::json!({
+                "id": "child-dispatch",
+                "parent_session_id": "main",
+                "lineage_label": "spawn_subagent: inspect daemon",
+            }),
+        );
+        match dispatcher.dispatch(create).await {
+            DispatchResult::Response(resp) => {
+                assert!(resp.error.is_none(), "got {:?}", resp.error);
+                assert_eq!(resp.result.unwrap()["session_id"], "child-dispatch");
+            }
+            DispatchResult::Stream { .. } => panic!("session.create should not stream"),
+        }
+
+        match dispatcher.dispatch(req("session.list")).await {
+            DispatchResult::Response(resp) => {
+                let sessions = resp.result.unwrap()["sessions"].as_array().unwrap().clone();
+                let child = sessions
+                    .iter()
+                    .find(|s| s["id"] == "child-dispatch")
+                    .expect("child session listed");
+                assert_eq!(child["parent_session_id"], "main");
+                assert_eq!(child["lineage_label"], "spawn_subagent: inspect daemon");
+            }
+            DispatchResult::Stream { .. } => panic!("session.list should not stream"),
+        }
     }
 
     #[tokio::test]

@@ -26,6 +26,8 @@ pub type AgentHandle = Arc<tokio::sync::Mutex<crate::agent::Agent>>;
 /// Per-session state.
 pub struct SessionState {
     pub id: String,
+    pub parent_session_id: Option<String>,
+    pub lineage_label: Option<String>,
     pub created_at: Instant,
     pub last_activity: Mutex<Instant>,
     pub in_flight: Mutex<bool>,
@@ -53,9 +55,19 @@ pub struct SessionState {
 
 impl SessionState {
     pub fn new(id: String) -> Self {
+        Self::new_with_lineage(id, None, None)
+    }
+
+    pub fn new_with_lineage(
+        id: String,
+        parent_session_id: Option<String>,
+        lineage_label: Option<String>,
+    ) -> Self {
         let now = Instant::now();
         Self {
             id,
+            parent_session_id,
+            lineage_label,
             created_at: now,
             last_activity: Mutex::new(now),
             in_flight: Mutex::new(false),
@@ -137,6 +149,21 @@ impl SessionState {
         config: &crate::config::Config,
         pool: Option<Arc<crate::runtime_pool::RuntimeResourcePool>>,
     ) -> anyhow::Result<AgentHandle> {
+        self.ensure_agent_with_options(config, pool, None, None, None)
+            .await
+    }
+
+    /// Slice 7: daemon child sessions can carry spawn-time tool
+    /// profile, allowlist, and iteration cap before their Agent is
+    /// installed. Existing sessions ignore these options once warm.
+    pub async fn ensure_agent_with_options(
+        self: &Arc<Self>,
+        config: &crate::config::Config,
+        pool: Option<Arc<crate::runtime_pool::RuntimeResourcePool>>,
+        max_iterations: Option<u32>,
+        tool_profile: Option<String>,
+        allowed_tools: Option<&[String]>,
+    ) -> anyhow::Result<AgentHandle> {
         // Fast path: already installed.
         if let Some(handle) = self.agent_arc() {
             return Ok(handle);
@@ -155,7 +182,17 @@ impl SessionState {
         if let Some(pool) = pool {
             builder = builder.with_pool(pool);
         }
+        if let Some(max_iterations) = max_iterations {
+            builder = builder.with_max_iterations(max_iterations);
+        }
+        builder = builder.with_tool_profile(tool_profile.clone());
         let agent = builder.build().await?;
+        let mut agent = agent;
+        if tool_profile.is_none() {
+            if let Some(allowed_tools) = allowed_tools {
+                agent.restrict_tools(allowed_tools);
+            }
+        }
         self.set_agent(agent);
         Ok(self.agent_arc().expect("just installed"))
     }
@@ -191,11 +228,27 @@ impl SessionMap {
     /// already present. Returns the id on success (convenience for
     /// chaining).
     pub fn create_named(&self, id: &str) -> anyhow::Result<String> {
+        self.create_named_with_lineage(id, None, None)
+    }
+
+    pub fn create_named_with_lineage(
+        &self,
+        id: &str,
+        parent_session_id: Option<String>,
+        lineage_label: Option<String>,
+    ) -> anyhow::Result<String> {
         let mut g = self.inner.write();
         if g.contains_key(id) {
             anyhow::bail!("session already exists: {id}");
         }
-        g.insert(id.into(), Arc::new(SessionState::new(id.into())));
+        g.insert(
+            id.into(),
+            Arc::new(SessionState::new_with_lineage(
+                id.into(),
+                parent_session_id,
+                lineage_label,
+            )),
+        );
         Ok(id.into())
     }
 
@@ -223,6 +276,8 @@ impl SessionMap {
                 let last = s.last_activity.lock();
                 serde_json::json!({
                     "id": s.id,
+                    "parent_session_id": s.parent_session_id,
+                    "lineage_label": s.lineage_label,
                     "in_flight": *s.in_flight.lock(),
                     "last_activity_secs_ago": last.elapsed().as_secs(),
                     "has_agent": s.has_agent(),

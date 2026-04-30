@@ -765,6 +765,30 @@ impl Agent {
         &self.trust_profile
     }
 
+    /// Slice 7: replace `spawn_subagent` with a daemon child-session
+    /// runner for daemon-managed Agents. Direct-mode Agents keep the
+    /// legacy runner-free tool installed by the builder.
+    pub(crate) fn install_subagent_runner(
+        &mut self,
+        config: Arc<Config>,
+        pool: Option<Arc<RuntimeResourcePool>>,
+        parent_session_id: impl Into<String>,
+        runner: Arc<dyn crate::tools::spawn::SubagentRunner>,
+    ) {
+        let mut spawn_tool = crate::tools::spawn::SpawnSubagentTool::with_store(
+            config,
+            Arc::clone(&self.orchestration),
+        )
+        .with_artifact_store(Arc::clone(&self.artifact_store))
+        .with_parent_session_id(parent_session_id)
+        .with_parent_run_handle(Arc::clone(&self.current_run_id))
+        .with_subagent_runner(runner);
+        if let Some(pool) = pool {
+            spawn_tool = spawn_tool.with_pool(pool);
+        }
+        self.tools.register(Arc::new(spawn_tool));
+    }
+
     /// YYC-180: persist a typed artifact and (when a run is in
     /// flight) emit a `RunEvent::ArtifactCreated` so the timeline
     /// references it. The artifact's `run_id` and `session_id` are

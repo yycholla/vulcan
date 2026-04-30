@@ -17,6 +17,7 @@ pub mod protocol;
 pub mod server;
 pub mod session;
 pub mod state;
+pub mod subagent;
 
 #[cfg(test)]
 mod lifecycle_tests;
