@@ -166,6 +166,71 @@ impl Dispatcher {
             "cortex.run_decay" => {
                 DispatchResult::Response(cortex::run_decay(&self.state, req.id).await)
             }
+            "cortex.prompt.create" => {
+                let name = req
+                    .params
+                    .get("name")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                let body = req
+                    .params
+                    .get("body")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                DispatchResult::Response(
+                    cortex::prompt_create(&self.state, req.id, name, body).await,
+                )
+            }
+            "cortex.prompt.get" => {
+                let name = req
+                    .params
+                    .get("name")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                DispatchResult::Response(cortex::prompt_get(&self.state, req.id, name).await)
+            }
+            "cortex.prompt.list" => {
+                DispatchResult::Response(cortex::prompt_list(&self.state, req.id).await)
+            }
+            "cortex.prompt.set" => {
+                let name = req
+                    .params
+                    .get("name")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                let body = req
+                    .params
+                    .get("body")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                DispatchResult::Response(cortex::prompt_set(&self.state, req.id, name, body).await)
+            }
+            "cortex.prompt.remove" => {
+                let name = req
+                    .params
+                    .get("name")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                DispatchResult::Response(cortex::prompt_remove(&self.state, req.id, name).await)
+            }
+            "cortex.prompt.migrate" => {
+                let entries = req
+                    .params
+                    .get("entries")
+                    .cloned()
+                    .unwrap_or(serde_json::Value::Null);
+                DispatchResult::Response(cortex::prompt_migrate(&self.state, req.id, entries).await)
+            }
+            "cortex.prompt.performance" => {
+                let name = req
+                    .params
+                    .get("name")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                DispatchResult::Response(
+                    cortex::prompt_performance(&self.state, req.id, name).await,
+                )
+            }
 
             // -- Session --
             "session.list" => DispatchResult::Response(session::list(&self.state, req.id).await),
@@ -251,7 +316,9 @@ impl Dispatcher {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::{Config, CortexConfig};
     use crate::daemon::protocol::*;
+    use crate::memory::cortex::CortexStore;
     use std::sync::Arc;
 
     fn req(method: &str) -> Request {
@@ -262,6 +329,31 @@ mod tests {
             method: method.into(),
             params: serde_json::json!({}),
         }
+    }
+
+    fn req_with_params(method: &str, params: serde_json::Value) -> Request {
+        Request {
+            version: 1,
+            id: format!("test-{method}"),
+            session: "main".into(),
+            method: method.into(),
+            params,
+        }
+    }
+
+    fn cortex_state() -> (tempfile::TempDir, Arc<crate::daemon::state::DaemonState>) {
+        let dir = tempfile::tempdir().unwrap();
+        let config = CortexConfig {
+            enabled: true,
+            db_path: Some(dir.path().join("cortex.redb")),
+            ..CortexConfig::default()
+        };
+        let store = CortexStore::try_open(&config).expect("open cortex");
+        let mut daemon_config = Config::default();
+        daemon_config.cortex = config;
+        let state =
+            crate::daemon::state::DaemonState::new(Arc::new(daemon_config)).with_cortex(store);
+        (dir, Arc::new(state))
     }
 
     #[tokio::test]
@@ -385,6 +477,40 @@ mod tests {
                 assert_eq!(err.code, "CORTEX_DISABLED");
             }
             DispatchResult::Stream { .. } => panic!("cortex.stats should not stream"),
+        }
+    }
+
+    #[tokio::test]
+    async fn cortex_prompt_create_and_list_use_daemon_store() {
+        let (_dir, state) = cortex_state();
+        let dispatcher = Dispatcher::new(state);
+
+        let create = req_with_params(
+            "cortex.prompt.create",
+            serde_json::json!({
+                "name": "daily",
+                "body": "summarize the day",
+            }),
+        );
+        match dispatcher.dispatch(create).await {
+            DispatchResult::Response(resp) => {
+                assert!(resp.error.is_none(), "got {:?}", resp.error);
+                let result = resp.result.expect("prompt create result");
+                assert_eq!(result["name"], "daily");
+                assert!(result["node_id"].as_str().is_some());
+            }
+            DispatchResult::Stream { .. } => panic!("cortex.prompt.create should not stream"),
+        }
+
+        match dispatcher.dispatch(req("cortex.prompt.list")).await {
+            DispatchResult::Response(resp) => {
+                assert!(resp.error.is_none(), "got {:?}", resp.error);
+                let prompts = resp.result.unwrap()["prompts"].as_array().unwrap().clone();
+                assert_eq!(prompts.len(), 1);
+                assert_eq!(prompts[0]["title"], "daily");
+                assert_eq!(prompts[0]["body"], "summarize the day");
+            }
+            DispatchResult::Stream { .. } => panic!("cortex.prompt.list should not stream"),
         }
     }
 

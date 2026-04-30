@@ -505,11 +505,12 @@ pub async fn run_tui(
                                             // active one.
                                             let active = a.active_profile().map(str::to_string);
                                             if active != profile {
-                                                if let Err(e) = a.switch_provider(profile.as_deref(), config).await {
-                                                    Err(e)
-                                                } else {
-                                                    a.switch_model(&id).await
-                                                }
+                                                a.switch_provider_model(
+                                                    profile.as_deref(),
+                                                    config,
+                                                    &id,
+                                                )
+                                                .await
                                             } else {
                                                 a.switch_model(&id).await
                                             }

@@ -1290,6 +1290,7 @@ impl Config {
             "gateway",
             "keybinds",
             "recall",
+            "cortex",
             "scheduler",
             "workspace_trust",
             "extensions",

@@ -58,7 +58,8 @@ async fn start(detach: bool) -> anyhow::Result<()> {
                 state = state.with_cortex(store);
             }
             Err(e) => {
-                tracing::warn!("daemon: cortex store failed to open: {e}");
+                tracing::warn!("daemon: cortex store failed to open: {e:#}");
+                state = state.with_cortex_error(format!("{e:#}"));
             }
         }
     }

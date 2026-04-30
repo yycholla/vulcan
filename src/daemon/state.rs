@@ -21,6 +21,7 @@ pub struct DaemonState {
     sessions: Arc<SessionMap>,
     reloads_applied: AtomicU64,
     cortex: Option<Arc<CortexStore>>,
+    cortex_error: Option<String>,
     /// Slice 3: daemon-owned shared adapters (session store, run
     /// store, artifact store, orchestration). `Option` so existing
     /// minimal-test constructors don't pay the SQLite-open cost; the
@@ -43,6 +44,7 @@ impl DaemonState {
             sessions: Arc::new(SessionMap::with_main()),
             reloads_applied: AtomicU64::new(0),
             cortex: None,
+            cortex_error: None,
             pool: None,
             config,
         }
@@ -76,12 +78,24 @@ impl DaemonState {
     /// path after loading config.
     pub fn with_cortex(mut self, store: Arc<CortexStore>) -> Self {
         self.cortex = Some(store);
+        self.cortex_error = None;
+        self
+    }
+
+    /// Record why cortex is unavailable even though config requested it.
+    pub fn with_cortex_error(mut self, error: String) -> Self {
+        self.cortex_error = Some(error);
         self
     }
 
     /// Borrow the cortex store, if enabled.
     pub fn cortex(&self) -> Option<&Arc<CortexStore>> {
         self.cortex.as_ref()
+    }
+
+    /// Borrow the startup/open failure for cortex, if any.
+    pub fn cortex_error(&self) -> Option<&str> {
+        self.cortex_error.as_deref()
     }
 
     /// Borrow the daemon's loaded `Config`. Used by lazy-build paths

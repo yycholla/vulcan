@@ -512,6 +512,8 @@ fn detect_unknown_keys_returns_empty_for_canonical_config() {
             [tools]
             [recall]
             enabled = false
+            [cortex]
+            enabled = true
             [keybinds]
             [tui]
             theme = "system"

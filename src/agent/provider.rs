@@ -60,17 +60,43 @@ impl Agent {
         profile: Option<&str>,
         config: &Config,
     ) -> Result<ModelSelection> {
+        self.switch_provider_with_model(profile, config, None).await
+    }
+
+    /// Switch provider and model as one transaction. Used by model pickers
+    /// that already selected a concrete model from the target provider's
+    /// catalog. This avoids validating a stale configured model on the
+    /// profile before applying the user's chosen model.
+    pub async fn switch_provider_model(
+        &mut self,
+        profile: Option<&str>,
+        config: &Config,
+        model_id: &str,
+    ) -> Result<ModelSelection> {
+        self.switch_provider_with_model(profile, config, Some(model_id))
+            .await
+    }
+
+    async fn switch_provider_with_model(
+        &mut self,
+        profile: Option<&str>,
+        config: &Config,
+        model_override: Option<&str>,
+    ) -> Result<ModelSelection> {
         if self.turn_cancel.is_cancelled() {
             self.turn_cancel = CancellationToken::new();
         }
 
-        let next_config =
+        let mut next_config =
             match profile {
                 Some(name) => config.providers.get(name).cloned().ok_or_else(|| {
                     anyhow::anyhow!("Provider profile '{name}' not found in config")
                 })?,
                 None => config.provider.clone(),
             };
+        if let Some(model_id) = model_override {
+            next_config.model = model_id.to_string();
+        }
         // Local / self-hosted endpoints (Ollama, llama.cpp, vLLM unauth)
         // typically don't need an API key; skip the requirement when the
         // base URL looks local or the user explicitly disabled catalog

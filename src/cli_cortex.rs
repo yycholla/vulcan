@@ -62,16 +62,13 @@ pub async fn run(cmd: CortexSubcommand) -> Result<()> {
 // Embed the run_with_client implementation directly
 /// YYC-266 Slice 1: daemon-client routing for cortex CLI commands.
 /// Tries to connect to the daemon and issue RPC calls; falls back to
-/// direct (in-process) execution for Phase 3 commands or if the client
-/// is unavailable.
+/// direct (in-process) execution if the client is unavailable.
 #[cfg(feature = "daemon")]
 pub async fn run_with_client(cmd: CortexSubcommand) -> Result<()> {
-    // Phase 3 commands are not yet implemented as daemon RPCs — always
-    // run them directly (they open their own transient CortexStore).
     match &cmd {
-        CortexSubcommand::Prompt { .. }
-        | CortexSubcommand::Agent { .. }
-        | CortexSubcommand::Observe { .. } => {
+        // Agent binding and observe RPCs are still pending. Prompt
+        // commands route through the daemon because they touch cortex.redb.
+        CortexSubcommand::Agent { .. } | CortexSubcommand::Observe { .. } => {
             return run(cmd).await;
         }
         _ => {}
@@ -122,9 +119,164 @@ pub async fn run_with_client(cmd: CortexSubcommand) -> Result<()> {
             let result = client.call("cortex.recall", params).await?;
             print_recall_results(&result["nodes"], limit);
         }
+        CortexSubcommand::Prompt { cmd } => run_prompt_with_client(&client, cmd).await?,
         _ => unreachable!(),
     }
     Ok(())
+}
+
+#[cfg(feature = "daemon")]
+async fn run_prompt_with_client(
+    client: &crate::client::Client,
+    cmd: PromptSubcommand,
+) -> Result<()> {
+    match cmd {
+        PromptSubcommand::Create { name, body } => {
+            let result = client
+                .call(
+                    "cortex.prompt.create",
+                    serde_json::json!({ "name": name, "body": body }),
+                )
+                .await?;
+            println!(
+                "Created prompt '{}' as {}",
+                result["name"].as_str().unwrap_or("?"),
+                result["node_id"].as_str().unwrap_or("?"),
+            );
+        }
+        PromptSubcommand::Get { name } => {
+            let result = client
+                .call("cortex.prompt.get", serde_json::json!({ "name": name }))
+                .await?;
+            print_prompt(&result["prompt"]);
+        }
+        PromptSubcommand::List => {
+            let result = client
+                .call("cortex.prompt.list", serde_json::json!({}))
+                .await?;
+            print_prompt_list(&result["prompts"]);
+        }
+        PromptSubcommand::Set { name, body } => {
+            let result = client
+                .call(
+                    "cortex.prompt.set",
+                    serde_json::json!({ "name": name, "body": body }),
+                )
+                .await?;
+            println!(
+                "Updated prompt '{}' -- new version stored as {}",
+                result["name"].as_str().unwrap_or("?"),
+                result["node_id"].as_str().unwrap_or("?"),
+            );
+        }
+        PromptSubcommand::Remove { name } => {
+            let result = client
+                .call("cortex.prompt.remove", serde_json::json!({ "name": name }))
+                .await?;
+            println!(
+                "{}",
+                result["message"].as_str().unwrap_or("Prompt removed.")
+            );
+        }
+        PromptSubcommand::Migrate { file } => {
+            let content = std::fs::read_to_string(&file)
+                .with_context(|| format!("read migration file {}", file.display()))?;
+            let entries: serde_json::Value = serde_json::from_str(&content)
+                .with_context(|| format!("parse JSON from {}", file.display()))?;
+            let result = client
+                .call(
+                    "cortex.prompt.migrate",
+                    serde_json::json!({ "entries": entries }),
+                )
+                .await?;
+            println!(
+                "Imported {} prompt(s) from {}",
+                result["created"].as_u64().unwrap_or(0),
+                file.display()
+            );
+        }
+        PromptSubcommand::Performance { name } => {
+            let result = client
+                .call(
+                    "cortex.prompt.performance",
+                    serde_json::json!({ "name": name }),
+                )
+                .await?;
+            print_prompt_performance(&result);
+        }
+    }
+    Ok(())
+}
+
+#[cfg(feature = "daemon")]
+fn print_prompt(prompt: &serde_json::Value) {
+    println!("Prompt: {}\n", prompt["title"].as_str().unwrap_or("?"));
+    println!("{}", prompt["body"].as_str().unwrap_or(""));
+    println!(
+        "\n---\nCreated: {}  |  Importance: {:.2}",
+        prompt["created_at"].as_str().unwrap_or("?"),
+        prompt["importance"].as_f64().unwrap_or(0.0),
+    );
+}
+
+#[cfg(feature = "daemon")]
+fn print_prompt_list(prompts: &serde_json::Value) {
+    let Some(arr) = prompts.as_array() else {
+        println!("No prompts stored.");
+        return;
+    };
+    if arr.is_empty() {
+        println!("No prompts stored.");
+        return;
+    }
+    println!("Stored prompts:\n");
+    for prompt in arr {
+        let title = prompt["title"].as_str().unwrap_or("?");
+        let id = prompt["node_id"].as_str().unwrap_or("?");
+        let created = prompt["created_at"].as_str().unwrap_or("?");
+        let preview: String = prompt["body"]
+            .as_str()
+            .unwrap_or("")
+            .chars()
+            .take(80)
+            .collect();
+        println!("  {title}  (id: {:.8}..  created: {created})", id);
+        println!("         {}", preview.replace('\n', " "));
+        println!();
+    }
+    println!("Total: {}", arr.len());
+}
+
+#[cfg(feature = "daemon")]
+fn print_prompt_performance(result: &serde_json::Value) {
+    let name = result["name"].as_str().unwrap_or("?");
+    let total = result["total"].as_u64().unwrap_or(0);
+    if total == 0 {
+        println!("No observations recorded for prompt '{name}' yet.");
+        return;
+    }
+    println!("Performance for '{name}'\n");
+    println!("  Total observations:   {total}");
+    println!(
+        "  Successes:            {}",
+        result["successes"].as_u64().unwrap_or(0)
+    );
+    println!(
+        "  Failures:             {}",
+        result["failures"].as_u64().unwrap_or(0)
+    );
+    println!(
+        "  Win rate:             {:.1}%",
+        result["win_rate"].as_f64().unwrap_or(0.0)
+    );
+    println!(
+        "  Avg sentiment:        {:.3}",
+        result["avg_sentiment"].as_f64().unwrap_or(0.0)
+    );
+    println!(
+        "  Last observed:        {}",
+        result["last_observed"].as_str().unwrap_or("?")
+    );
 }
 
 #[cfg(feature = "daemon")]

@@ -21,7 +21,7 @@ pub async fn store(
     importance: Option<f32>,
 ) -> Response {
     let Some(store) = state.cortex() else {
-        return no_cortex(id);
+        return no_cortex(state, id);
     };
     let imp = importance.unwrap_or(0.5);
     let node = CortexStore::fact(text, imp);
@@ -42,7 +42,7 @@ pub async fn store(
 
 pub async fn search(state: &DaemonState, id: String, query: &str, limit: usize) -> Response {
     let Some(ref store) = state.cortex() else {
-        return no_cortex(id);
+        return no_cortex(state, id);
     };
     match store.search(query, limit) {
         Ok(results) => {
@@ -77,7 +77,7 @@ pub async fn search(state: &DaemonState, id: String, query: &str, limit: usize) 
 
 pub async fn stats(state: &DaemonState, id: String) -> Response {
     let Some(ref store) = state.cortex() else {
-        return no_cortex(id);
+        return no_cortex(state, id);
     };
     match store.stats() {
         Ok(s) => {
@@ -111,7 +111,7 @@ pub async fn stats(state: &DaemonState, id: String) -> Response {
 
 pub async fn recall(state: &DaemonState, id: String, limit: usize) -> Response {
     let Some(ref store) = state.cortex() else {
-        return no_cortex(id);
+        return no_cortex(state, id);
     };
     let filter = cortex_core::NodeFilter::new().with_limit(limit.max(50));
     match store.list_nodes(filter) {
@@ -146,7 +146,7 @@ pub async fn recall(state: &DaemonState, id: String, limit: usize) -> Response {
 
 pub async fn seed(state: &DaemonState, id: String, sessions: usize) -> Response {
     let Some(ref store) = state.cortex() else {
-        return no_cortex(id);
+        return no_cortex(state, id);
     };
     match crate::cli_cortex::seed_from_sessions_to(sessions, store).await {
         Ok(count) => Response::ok(id, json!({ "stored": count })),
@@ -165,7 +165,7 @@ pub async fn seed(state: &DaemonState, id: String, sessions: usize) -> Response 
 
 pub async fn edges_from(state: &DaemonState, id: String, node_id: &str) -> Response {
     let Some(ref store) = state.cortex() else {
-        return no_cortex(id);
+        return no_cortex(state, id);
     };
     let nid = match parse_node_id(node_id, &id) {
         Ok(n) => n,
@@ -186,7 +186,7 @@ pub async fn edges_from(state: &DaemonState, id: String, node_id: &str) -> Respo
 
 pub async fn edges_to(state: &DaemonState, id: String, node_id: &str) -> Response {
     let Some(ref store) = state.cortex() else {
-        return no_cortex(id);
+        return no_cortex(state, id);
     };
     let nid = match parse_node_id(node_id, &id) {
         Ok(n) => n,
@@ -207,7 +207,7 @@ pub async fn edges_to(state: &DaemonState, id: String, node_id: &str) -> Respons
 
 pub async fn delete_edge(state: &DaemonState, id: String, edge_id: &str) -> Response {
     let Some(ref store) = state.cortex() else {
-        return no_cortex(id);
+        return no_cortex(state, id);
     };
     let eid = match cortex_core::EdgeId::parse_str(edge_id) {
         Ok(e) => e,
@@ -239,7 +239,7 @@ pub async fn delete_edge(state: &DaemonState, id: String, edge_id: &str) -> Resp
 
 pub async fn run_decay(state: &DaemonState, id: String) -> Response {
     let Some(ref store) = state.cortex() else {
-        return no_cortex(id);
+        return no_cortex(state, id);
     };
     match store.run_decay() {
         Ok((pruned, deleted)) => Response::ok(
@@ -260,16 +260,273 @@ pub async fn run_decay(state: &DaemonState, id: String) -> Response {
     }
 }
 
+// ── Prompt management ──
+
+pub async fn prompt_create(state: &DaemonState, id: String, name: &str, body: &str) -> Response {
+    let Some(ref store) = state.cortex() else {
+        return no_cortex(state, id);
+    };
+    match find_prompt(store, name) {
+        Ok(Some(existing)) => {
+            return Response::error(
+                id,
+                ProtocolError {
+                    code: "PROMPT_EXISTS".into(),
+                    message: format!(
+                        "Prompt '{name}' already exists (id: {}). Use `set` to update.",
+                        existing.id
+                    ),
+                    retryable: false,
+                },
+            );
+        }
+        Ok(None) => {}
+        Err(e) => return cortex_failed(id, "CORTEX_PROMPT_LOOKUP_FAILED", e),
+    }
+
+    let node = CortexStore::fact_with_body(name, body, 0.8);
+    match store.store(node) {
+        Ok(node_id) => Response::ok(
+            id,
+            json!({
+                "name": name,
+                "node_id": node_id.to_string(),
+            }),
+        ),
+        Err(e) => cortex_failed(id, "CORTEX_PROMPT_STORE_FAILED", e),
+    }
+}
+
+pub async fn prompt_get(state: &DaemonState, id: String, name: &str) -> Response {
+    let Some(ref store) = state.cortex() else {
+        return no_cortex(state, id);
+    };
+    match find_prompt(store, name) {
+        Ok(Some(node)) => Response::ok(id, json!({ "prompt": serialize_prompt(&node) })),
+        Ok(None) => not_found(id, "PROMPT_NOT_FOUND", format!("Prompt '{name}' not found")),
+        Err(e) => cortex_failed(id, "CORTEX_PROMPT_LOOKUP_FAILED", e),
+    }
+}
+
+pub async fn prompt_list(state: &DaemonState, id: String) -> Response {
+    let Some(ref store) = state.cortex() else {
+        return no_cortex(state, id);
+    };
+    match list_prompts(store) {
+        Ok(prompts) => Response::ok(
+            id,
+            json!({
+                "prompts": prompts.iter().map(serialize_prompt).collect::<Vec<_>>(),
+            }),
+        ),
+        Err(e) => cortex_failed(id, "CORTEX_PROMPT_LIST_FAILED", e),
+    }
+}
+
+pub async fn prompt_set(state: &DaemonState, id: String, name: &str, body: &str) -> Response {
+    let Some(ref store) = state.cortex() else {
+        return no_cortex(state, id);
+    };
+    let node = CortexStore::fact_with_body(name, body, 0.8);
+    match store.store(node) {
+        Ok(node_id) => Response::ok(
+            id,
+            json!({
+                "name": name,
+                "node_id": node_id.to_string(),
+            }),
+        ),
+        Err(e) => cortex_failed(id, "CORTEX_PROMPT_STORE_FAILED", e),
+    }
+}
+
+pub async fn prompt_remove(_state: &DaemonState, id: String, name: &str) -> Response {
+    Response::ok(
+        id,
+        json!({
+            "message": format!("Prompt '{name}' removed (soft-delete). Nodes persist for audit."),
+        }),
+    )
+}
+
+pub async fn prompt_migrate(
+    state: &DaemonState,
+    id: String,
+    entries: serde_json::Value,
+) -> Response {
+    let Some(ref store) = state.cortex() else {
+        return no_cortex(state, id);
+    };
+
+    #[derive(serde::Deserialize)]
+    struct PromptEntry {
+        name: String,
+        body: String,
+    }
+
+    let entries: Vec<PromptEntry> = match serde_json::from_value(entries) {
+        Ok(entries) => entries,
+        Err(e) => {
+            return Response::error(
+                id,
+                ProtocolError {
+                    code: "INVALID_PROMPT_MIGRATION".into(),
+                    message: format!("prompt migration entries must be JSON array: {e}"),
+                    retryable: false,
+                },
+            );
+        }
+    };
+
+    let mut created = 0usize;
+    for entry in entries {
+        match find_prompt(store, &entry.name) {
+            Ok(Some(_)) => continue,
+            Ok(None) => {}
+            Err(e) => return cortex_failed(id, "CORTEX_PROMPT_LOOKUP_FAILED", e),
+        }
+        let node = CortexStore::fact_with_body(&entry.name, &entry.body, 0.8);
+        if let Err(e) = store.store(node) {
+            return cortex_failed(id, "CORTEX_PROMPT_STORE_FAILED", e);
+        }
+        created += 1;
+    }
+
+    Response::ok(id, json!({ "created": created }))
+}
+
+pub async fn prompt_performance(state: &DaemonState, id: String, name: &str) -> Response {
+    let Some(ref store) = state.cortex() else {
+        return no_cortex(state, id);
+    };
+    let node = match find_prompt(store, name) {
+        Ok(Some(node)) => node,
+        Ok(None) => {
+            return not_found(id, "PROMPT_NOT_FOUND", format!("Prompt '{name}' not found"));
+        }
+        Err(e) => return cortex_failed(id, "CORTEX_PROMPT_LOOKUP_FAILED", e),
+    };
+
+    let prompt_id = node.id.to_string();
+    let all = match store.list_nodes(cortex_core::NodeFilter::new()) {
+        Ok(nodes) => nodes,
+        Err(e) => return cortex_failed(id, "CORTEX_PROMPT_PERFORMANCE_FAILED", e),
+    };
+    let observations: Vec<_> = all
+        .into_iter()
+        .filter(|n| {
+            if n.deleted || n.kind.as_str() != "observation" {
+                return false;
+            }
+            n.data.metadata.get("variant_id").and_then(|v| v.as_str()) == Some(prompt_id.as_str())
+        })
+        .collect();
+
+    let total = observations.len();
+    if total == 0 {
+        return Response::ok(
+            id,
+            json!({
+                "name": name,
+                "total": 0,
+            }),
+        );
+    }
+
+    let successes = observations
+        .iter()
+        .filter(|n| n.data.metadata.get("outcome").and_then(|s| s.as_str()) == Some("success"))
+        .count();
+    let failures = observations
+        .iter()
+        .filter(|n| n.data.metadata.get("outcome").and_then(|s| s.as_str()) == Some("failure"))
+        .count();
+    let avg_sentiment: f64 = observations
+        .iter()
+        .filter_map(|n| n.data.metadata.get("sentiment_score"))
+        .filter_map(|v| v.as_str().and_then(|s| s.parse::<f64>().ok()))
+        .sum::<f64>()
+        / total as f64;
+    let updated = observations
+        .iter()
+        .map(|n| n.updated_at)
+        .max()
+        .unwrap_or(node.created_at);
+
+    Response::ok(
+        id,
+        json!({
+            "name": name,
+            "total": total,
+            "successes": successes,
+            "failures": failures,
+            "win_rate": successes as f64 / total as f64 * 100.0,
+            "avg_sentiment": avg_sentiment,
+            "last_observed": updated.to_rfc3339(),
+        }),
+    )
+}
+
 // ═══════════════════════════════════════════════════════════════════
 // Helpers
 // ═══════════════════════════════════════════════════════════════════
 
-fn no_cortex(id: String) -> Response {
+fn cortex_failed(id: String, code: &str, e: impl std::fmt::Display) -> Response {
+    Response::error(
+        id,
+        ProtocolError {
+            code: code.into(),
+            message: format!("{e}"),
+            retryable: true,
+        },
+    )
+}
+
+fn not_found(id: String, code: &str, message: String) -> Response {
+    Response::error(
+        id,
+        ProtocolError {
+            code: code.into(),
+            message,
+            retryable: false,
+        },
+    )
+}
+
+fn find_prompt(store: &CortexStore, name: &str) -> anyhow::Result<Option<cortex_core::Node>> {
+    Ok(list_prompts(store)?
+        .into_iter()
+        .find(|n| n.data.title == name))
+}
+
+fn list_prompts(store: &CortexStore) -> anyhow::Result<Vec<cortex_core::Node>> {
+    let all = store.list_nodes(cortex_core::NodeFilter::new())?;
+    Ok(all
+        .into_iter()
+        .filter(|n| !n.deleted && n.kind.as_str() == "fact")
+        .collect())
+}
+
+fn serialize_prompt(node: &cortex_core::Node) -> serde_json::Value {
+    json!({
+        "node_id": node.id.to_string(),
+        "title": node.data.title,
+        "body": node.data.body,
+        "created_at": node.created_at.to_rfc3339(),
+        "importance": node.importance,
+    })
+}
+
+fn no_cortex(state: &DaemonState, id: String) -> Response {
+    let message = match state.cortex_error() {
+        Some(error) => format!("cortex is enabled but unavailable in this daemon: {error}"),
+        None => "cortex is not enabled in this daemon".into(),
+    };
     Response::error(
         id,
         ProtocolError {
             code: "CORTEX_DISABLED".into(),
-            message: "cortex is not enabled in this daemon".into(),
+            message,
             retryable: false,
         },
     )

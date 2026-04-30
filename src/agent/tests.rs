@@ -917,6 +917,50 @@ async fn switch_model_rebuilds_provider_metadata_without_restarting_session() {
     assert_eq!(agent.pricing().map(|p| p.output_per_token), Some(0.000004));
 }
 
+#[tokio::test]
+async fn switch_provider_model_uses_selected_model_before_catalog_validation() {
+    let base_url = spawn_model_catalog_server().await;
+    let mut providers = std::collections::HashMap::new();
+    providers.insert(
+        "qwen".into(),
+        crate::config::ProviderConfig {
+            base_url: base_url.clone(),
+            api_key: Some("test-key".into()),
+            model: "missing-model".into(),
+            catalog_cache_ttl_hours: 0,
+            ..Default::default()
+        },
+    );
+    let config = Config {
+        provider: crate::config::ProviderConfig {
+            base_url,
+            api_key: Some("test-key".into()),
+            model: "model-a".into(),
+            catalog_cache_ttl_hours: 0,
+            ..Default::default()
+        },
+        providers,
+        ..Default::default()
+    };
+
+    let mut agent = Agent::builder(&config).build().await.unwrap();
+    let stale_profile = agent.switch_provider(Some("qwen"), &config).await;
+    assert!(
+        stale_profile.is_err(),
+        "plain provider switch should still validate configured profile model"
+    );
+
+    let selection = agent
+        .switch_provider_model(Some("qwen"), &config, "model-b")
+        .await
+        .unwrap();
+
+    assert_eq!(selection.model.id, "model-b");
+    assert_eq!(agent.active_profile(), Some("qwen"));
+    assert_eq!(agent.active_model(), "model-b");
+    assert_eq!(agent.max_context(), 2_000);
+}
+
 async fn spawn_model_catalog_server() -> String {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
