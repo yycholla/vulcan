@@ -86,6 +86,12 @@ impl ChildStatus {
 pub struct ChildAgentRecord {
     pub id: ChildAgentId,
     pub parent_id: Option<ChildAgentId>,
+    /// Slice 7: parent agent's session id, captured when the child
+    /// was registered. `None` for legacy callers that didn't supply
+    /// one. Surfacing this lets the TUI / `vulcan run show` link a
+    /// child run back to the originating session without going
+    /// through the run-record store.
+    pub parent_session_id: Option<String>,
     pub task_summary: String,
     pub status: ChildStatus,
     pub started_at: DateTime<Utc>,
@@ -166,9 +172,23 @@ impl OrchestrationStore {
         task_summary: impl Into<String>,
         max_iterations: u32,
     ) -> ChildAgentRecord {
+        self.register_with_parent_session(parent_id, None, task_summary, max_iterations)
+    }
+
+    /// Slice 7: like [`Self::register`] but stamps the parent
+    /// agent's session id on the record so the TUI / run viewer can
+    /// trace the child back to its originating frontend session.
+    pub fn register_with_parent_session(
+        &self,
+        parent_id: Option<ChildAgentId>,
+        parent_session_id: Option<String>,
+        task_summary: impl Into<String>,
+        max_iterations: u32,
+    ) -> ChildAgentRecord {
         let record = ChildAgentRecord {
             id: ChildAgentId::new(),
             parent_id,
+            parent_session_id,
             task_summary: task_summary.into(),
             status: ChildStatus::Pending,
             started_at: Utc::now(),
@@ -374,6 +394,20 @@ mod tests {
 
     fn store() -> OrchestrationStore {
         OrchestrationStore::new()
+    }
+
+    #[test]
+    fn register_with_parent_session_stamps_lineage() {
+        // Slice 7: child orchestration record carries the parent
+        // agent's session id so the TUI / run viewer can link a
+        // child run back to its originating session.
+        let s = store();
+        let parent_session = "session-abc-123";
+        let r = s.register_with_parent_session(None, Some(parent_session.into()), "summarize", 4);
+        assert_eq!(r.parent_session_id.as_deref(), Some(parent_session));
+        assert!(r.parent_id.is_none());
+        let stored = s.get(r.id).expect("get");
+        assert_eq!(stored.parent_session_id.as_deref(), Some(parent_session));
     }
 
     #[test]

@@ -110,6 +110,12 @@ pub struct SpawnSubagentTool {
     /// daemon-routed child sessions (parent calls `session.create`
     /// over the in-process seam) remain follow-up work.
     pool: Option<Arc<crate::runtime_pool::RuntimeResourcePool>>,
+    /// Slice 7 lineage: parent agent's session id, captured at
+    /// build time. Stamped onto the orchestration record so the
+    /// TUI / run viewer can link a child run back to the
+    /// originating frontend session without joining run records
+    /// against session metadata.
+    parent_session_id: Option<String>,
 }
 
 impl SpawnSubagentTool {
@@ -126,7 +132,17 @@ impl SpawnSubagentTool {
             orchestration,
             artifact_store: None,
             pool: None,
+            parent_session_id: None,
         }
+    }
+
+    /// Slice 7: stamp the parent agent's session id so child
+    /// orchestration records carry lineage back to the originating
+    /// frontend session. Set at Agent build time — the parent's
+    /// session id doesn't change across the parent's lifetime.
+    pub fn with_parent_session_id(mut self, session_id: impl Into<String>) -> Self {
+        self.parent_session_id = Some(session_id.into());
+        self
     }
 
     /// YYC-180: extra wiring — share the parent's artifact store so
@@ -222,9 +238,12 @@ impl Tool for SpawnSubagentTool {
         // tool's JSON payload so callers can correlate against the
         // store snapshot.
         let summary_for_store = task.chars().take(120).collect::<String>();
-        let record = self
-            .orchestration
-            .register(None, summary_for_store, max_iter);
+        let record = self.orchestration.register_with_parent_session(
+            None,
+            self.parent_session_id.clone(),
+            summary_for_store,
+            max_iter,
+        );
         let child_id = record.id;
 
         // YYC-208: pre-cancellation short-circuit. Skip the agent

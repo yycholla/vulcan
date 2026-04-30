@@ -19,7 +19,10 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 
+use std::path::PathBuf;
+
 use crate::artifact::{ArtifactStore, InMemoryArtifactStore, SqliteArtifactStore};
+use crate::code::lsp::LspManager;
 use crate::memory::SessionStore;
 use crate::orchestration::OrchestrationStore;
 use crate::run_record::{InMemoryRunStore, RunStore, SqliteRunStore};
@@ -34,6 +37,10 @@ pub struct RuntimeResourcePool {
     run_store: Arc<dyn RunStore>,
     artifact_store: Arc<dyn ArtifactStore>,
     orchestration: Arc<OrchestrationStore>,
+    /// Slice 3: shared LSP server pool. Sessions reuse the same pool
+    /// instead of spawning per-Agent server processes; idle servers
+    /// stay warm across session lifetimes.
+    lsp_manager: Arc<LspManager>,
 }
 
 impl RuntimeResourcePool {
@@ -69,11 +76,17 @@ impl RuntimeResourcePool {
 
         let orchestration = Arc::new(OrchestrationStore::new());
 
+        // Daemon process cwd defines the workspace root. Sessions
+        // inherit this by virtue of running inside the daemon.
+        let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+        let lsp_manager = Arc::new(LspManager::new(cwd));
+
         Ok(Self {
             session_store,
             run_store,
             artifact_store,
             orchestration,
+            lsp_manager,
         })
     }
 
@@ -81,11 +94,13 @@ impl RuntimeResourcePool {
     /// callers always go through [`Self::try_new`].
     #[doc(hidden)]
     pub fn for_tests() -> Self {
+        let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
         Self {
             session_store: Arc::new(SessionStore::in_memory()),
             run_store: Arc::new(InMemoryRunStore::default()),
             artifact_store: Arc::new(InMemoryArtifactStore::new()),
             orchestration: Arc::new(OrchestrationStore::new()),
+            lsp_manager: Arc::new(LspManager::new(cwd)),
         }
     }
 
@@ -109,6 +124,11 @@ impl RuntimeResourcePool {
     /// Cloneable handle to the shared orchestration store.
     pub fn orchestration(&self) -> Arc<OrchestrationStore> {
         Arc::clone(&self.orchestration)
+    }
+
+    /// Cloneable handle to the shared LSP server pool.
+    pub fn lsp_manager(&self) -> Arc<LspManager> {
+        Arc::clone(&self.lsp_manager)
     }
 }
 
@@ -135,5 +155,13 @@ mod tests {
         assert!(Arc::ptr_eq(&pool.run_store(), &pool.run_store()));
         assert!(Arc::ptr_eq(&pool.artifact_store(), &pool.artifact_store()));
         assert!(Arc::ptr_eq(&pool.orchestration(), &pool.orchestration()));
+    }
+
+    #[test]
+    fn for_tests_shares_lsp_manager() {
+        // Slice 3 deepening: LSP servers stay warm across sessions —
+        // the pool hands out the same Arc.
+        let pool = RuntimeResourcePool::for_tests();
+        assert!(Arc::ptr_eq(&pool.lsp_manager(), &pool.lsp_manager()));
     }
 }

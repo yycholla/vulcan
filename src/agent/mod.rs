@@ -323,7 +323,13 @@ impl Agent {
 
         let diff_sink = crate::tools::new_diff_sink();
         let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
-        let lsp_manager = Arc::new(crate::code::lsp::LspManager::new(cwd.clone()));
+        // Slice 3: shared LSP manager from the pool when available so
+        // language servers stay warm across sessions instead of
+        // spawning per Agent.
+        let lsp_manager = match &pool {
+            Some(p) => p.lsp_manager(),
+            None => Arc::new(crate::code::lsp::LspManager::new(cwd.clone())),
+        };
         // YYC-107: probe the workspace once so tool registration can
         // drop irrelevant tools (cargo_check off-Rust, etc.) and the
         // remaining tools can render runtime-aware descriptions.
@@ -585,7 +591,8 @@ impl Agent {
             Arc::clone(&config_arc),
             Arc::clone(&orchestration),
         )
-        .with_artifact_store(Arc::clone(&artifact_store));
+        .with_artifact_store(Arc::clone(&artifact_store))
+        .with_parent_session_id(session_id.clone());
         if let Some(pool) = &pool {
             spawn_tool = spawn_tool.with_pool(Arc::clone(pool));
         }
