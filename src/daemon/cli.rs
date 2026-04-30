@@ -84,6 +84,13 @@ async fn start(detach: bool) -> anyhow::Result<()> {
 
     install_signal_handlers(state.clone());
 
+    // YYC-266 Slice 3 Task 3.2: idle-eviction sweeper for non-"main"
+    // sessions. The handle is `_`-bound on purpose — the loop
+    // self-terminates on the watch-based shutdown signal.
+    let idle_ttl = Duration::from_secs(config.daemon.session_idle_ttl_secs);
+    let sweep_interval = Duration::from_secs(config.daemon.eviction_sweep_interval_secs);
+    let _evictor_handle = crate::daemon::eviction::spawn(state.clone(), idle_ttl, sweep_interval);
+
     server.run().await;
     Ok(())
 }
