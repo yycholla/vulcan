@@ -488,8 +488,16 @@ impl Agent {
         //   2. CortexCaptureHook — AfterToolCall: auto-stores notable tool
         //      outputs as fact nodes in the graph.
         // Both share the same `Arc<CortexStore>`. Non-fatal on failure.
+        // Slice 3 deepening: prefer the daemon-owned cortex from the
+        // pool so multi-session daemons don't deadlock on the redb
+        // exclusive lock. Direct-mode callers fall back to opening
+        // their own store.
         if config.cortex.enabled {
-            match crate::memory::cortex::CortexStore::try_open(&config.cortex) {
+            let store_result = match pool.as_ref().and_then(|p| p.cortex_store()) {
+                Some(store) => Ok(store),
+                None => crate::memory::cortex::CortexStore::try_open(&config.cortex),
+            };
+            match store_result {
                 Ok(store) => {
                     let max_results = config.cortex.max_search_results;
                     hooks.register(Arc::new(

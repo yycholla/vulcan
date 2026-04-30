@@ -24,6 +24,7 @@ use std::path::PathBuf;
 use crate::artifact::{ArtifactStore, InMemoryArtifactStore, SqliteArtifactStore};
 use crate::code::lsp::LspManager;
 use crate::memory::SessionStore;
+use crate::memory::cortex::CortexStore;
 use crate::orchestration::OrchestrationStore;
 use crate::run_record::{InMemoryRunStore, RunStore, SqliteRunStore};
 
@@ -41,6 +42,12 @@ pub struct RuntimeResourcePool {
     /// instead of spawning per-Agent server processes; idle servers
     /// stay warm across session lifetimes.
     lsp_manager: Arc<LspManager>,
+    /// Slice 3 deepening: shared cortex graph memory. The daemon
+    /// owns the redb lock for the lifetime of the process; sessions
+    /// must share this handle rather than opening their own (which
+    /// would fail with `DatabaseAlreadyOpen`). `None` when cortex is
+    /// disabled in config.
+    cortex_store: Option<Arc<CortexStore>>,
 }
 
 impl RuntimeResourcePool {
@@ -87,7 +94,16 @@ impl RuntimeResourcePool {
             artifact_store,
             orchestration,
             lsp_manager,
+            cortex_store: None,
         })
+    }
+
+    /// Install a daemon-owned [`CortexStore`] on the pool. Called by
+    /// daemon boot after `CortexStore::try_open` succeeds; sessions
+    /// pull this handle instead of opening their own.
+    pub fn with_cortex_store(mut self, store: Arc<CortexStore>) -> Self {
+        self.cortex_store = Some(store);
+        self
     }
 
     /// Test-only constructor with in-memory backends. Production
@@ -101,6 +117,7 @@ impl RuntimeResourcePool {
             artifact_store: Arc::new(InMemoryArtifactStore::new()),
             orchestration: Arc::new(OrchestrationStore::new()),
             lsp_manager: Arc::new(LspManager::new(cwd)),
+            cortex_store: None,
         }
     }
 
@@ -129,6 +146,13 @@ impl RuntimeResourcePool {
     /// Cloneable handle to the shared LSP server pool.
     pub fn lsp_manager(&self) -> Arc<LspManager> {
         Arc::clone(&self.lsp_manager)
+    }
+
+    /// Cloneable handle to the shared cortex graph memory, when the
+    /// daemon installed one at boot. `None` for tests / disabled
+    /// configurations.
+    pub fn cortex_store(&self) -> Option<Arc<CortexStore>> {
+        self.cortex_store.as_ref().map(Arc::clone)
     }
 }
 
@@ -163,5 +187,14 @@ mod tests {
         // the pool hands out the same Arc.
         let pool = RuntimeResourcePool::for_tests();
         assert!(Arc::ptr_eq(&pool.lsp_manager(), &pool.lsp_manager()));
+    }
+
+    #[test]
+    fn cortex_store_is_none_by_default_and_some_after_install() {
+        // Slice 3 deepening: cortex is install-on-demand. Default
+        // pool has no cortex store; the daemon installs one at boot
+        // when config.cortex.enabled.
+        let pool = RuntimeResourcePool::for_tests();
+        assert!(pool.cortex_store().is_none());
     }
 }

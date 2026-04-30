@@ -68,10 +68,12 @@ async fn start(detach: bool) -> anyhow::Result<()> {
     // run/artifact store, and one orchestration store across the
     // whole process. Pool open failure is fatal — without it the
     // session paths can't run.
-    let pool = Arc::new(
-        crate::runtime_pool::RuntimeResourcePool::try_new()
-            .context("opening daemon RuntimeResourcePool")?,
-    );
+    let mut pool_builder = crate::runtime_pool::RuntimeResourcePool::try_new()
+        .context("opening daemon RuntimeResourcePool")?;
+    if let Some(cortex) = state.cortex() {
+        pool_builder = pool_builder.with_cortex_store(Arc::clone(cortex));
+    }
+    let pool = Arc::new(pool_builder);
     state = state.with_pool(pool);
 
     // YYC-266 Slice 2/3: boot the warm Agent and install it into the
