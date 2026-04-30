@@ -57,7 +57,7 @@ The daemon-owned graph memory shared across sessions and scoped by metadata or q
 _Avoid_: session cortex, memory database
 
 **Daemon Client**:
-A reusable frontend adapter that owns daemon socket communication and routes responses by request id.
+A reusable frontend adapter that owns daemon socket communication and routes responses, stream frames, and daemon push frames by request id.
 _Avoid_: one-shot socket, per-turn connection
 
 **Storage Pool**:
@@ -90,6 +90,8 @@ _Avoid_: subagent process, child agent
 - Session history, run records, and artifacts keep separate interfaces but share the daemon-owned **Storage Pool**.
 - Delegated agent work runs in a **Child Session**, not by constructing an in-process child agent directly.
 - A **Frontend** should reuse a **Daemon Client** when it has multiple daemon interactions in one process.
+- A **Daemon Client** owns one read task per socket; normal responses, stream frames, and `id: null` daemon push frames are demultiplexed without stealing the socket.
+- The **Daemon** keeps reading a connection while a streaming **Turn** is in flight; per-request dispatch runs independently and outbound frames are serialized by one writer queue.
 - A gateway lane maps to one **Session**; the lane is a platform routing concept, not a daemon connection.
 
 ## Example Dialogue

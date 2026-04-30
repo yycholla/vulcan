@@ -37,11 +37,6 @@ pub struct Transport {
     write_half: Arc<Mutex<OwnedWriteHalf>>,
     pending: Arc<Mutex<PendingMap>>,
     streams: Arc<Mutex<StreamMap>>,
-    /// Broadcast for `id == None` server push frames (config_reloaded,
-    /// session_evicted, etc.). Subscribers register via
-    /// [`Transport::take_push_receiver`]; only one taker is supported in
-    /// Slice 5.
-    push_tx: mpsc::Sender<StreamFrame>,
     push_rx: Mutex<Option<mpsc::Receiver<StreamFrame>>>,
     /// Background read loop. Dropped (cancelled) when the transport
     /// drops, which closes the socket and wakes every pending
@@ -71,7 +66,6 @@ impl Transport {
             write_half: Arc::new(Mutex::new(write_half)),
             pending,
             streams,
-            push_tx,
             push_rx: Mutex::new(Some(push_rx)),
             _read_task: read_task,
         })

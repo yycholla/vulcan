@@ -9,11 +9,12 @@ use std::path::Path;
 use std::sync::Arc;
 
 use tokio::net::UnixStream;
+use tokio::sync::mpsc;
 
 use crate::daemon::dispatch::{DispatchResult, Dispatcher};
 use crate::daemon::lifecycle::SocketBinder;
 use crate::daemon::protocol::{
-    Response, parse_request_strict, read_frame_bytes, write_frame_bytes, write_response,
+    Response, parse_request_strict, read_frame_bytes, write_frame_bytes,
 };
 use crate::daemon::state::DaemonState;
 
@@ -73,62 +74,86 @@ impl Server {
     }
 }
 
-async fn handle_connection(mut stream: UnixStream, dispatcher: Arc<Dispatcher>) {
+async fn handle_connection(stream: UnixStream, dispatcher: Arc<Dispatcher>) {
+    let (mut read_half, mut write_half) = stream.into_split();
+    let (write_tx, mut write_rx) = mpsc::channel::<Vec<u8>>(32);
+    let writer = tokio::spawn(async move {
+        while let Some(body) = write_rx.recv().await {
+            if let Err(e) = write_frame_bytes(&mut write_half, &body).await {
+                tracing::warn!(error = %e, "daemon: write failed; dropping connection");
+                break;
+            }
+        }
+    });
+
     loop {
-        let body = match read_frame_bytes(&mut stream).await {
+        let body = match read_frame_bytes(&mut read_half).await {
             Ok(b) => b,
-            Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => return,
+            Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => break,
             Err(e) => {
                 tracing::warn!(error = %e, "daemon: read failed; dropping connection");
-                return;
+                break;
             }
         };
 
         let response = match parse_request_strict(&body) {
-            Ok(req) => dispatcher.dispatch(req).await,
+            Ok(req) => {
+                let dispatcher = Arc::clone(&dispatcher);
+                let write_tx = write_tx.clone();
+                tokio::spawn(async move {
+                    let response = dispatcher.dispatch(req).await;
+                    write_dispatch_result(write_tx, response).await;
+                });
+                continue;
+            }
             Err(proto_err) => {
                 DispatchResult::Response(Response::error("unknown".into(), proto_err))
             }
         };
 
-        match response {
-            DispatchResult::Response(resp) => {
-                if let Err(e) = write_response(&mut stream, &resp).await {
-                    tracing::warn!(error = %e, "daemon: write failed; dropping connection");
+        write_dispatch_result(write_tx.clone(), response).await;
+    }
+
+    drop(write_tx);
+    writer.abort();
+}
+
+async fn write_dispatch_result(write_tx: mpsc::Sender<Vec<u8>>, response: DispatchResult) {
+    match response {
+        DispatchResult::Response(resp) => {
+            send_body(&write_tx, &resp, "response").await;
+        }
+        DispatchResult::Stream { mut frames, done } => {
+            while let Some(frame) = frames.recv().await {
+                if !send_body(&write_tx, &frame, "stream frame").await {
                     return;
                 }
             }
-            DispatchResult::Stream { mut frames, done } => {
-                // Drain all stream frames as they arrive.
-                while let Some(frame) = frames.recv().await {
-                    let body = match serde_json::to_vec(&frame) {
-                        Ok(b) => b,
-                        Err(e) => {
-                            tracing::warn!(error = %e, "daemon: failed to serialize stream frame");
-                            continue;
-                        }
-                    };
-                    if let Err(e) = write_frame_bytes(&mut stream, &body).await {
-                        tracing::warn!(error = %e, "daemon: write stream frame failed; dropping");
-                        return;
-                    }
+            match done.await {
+                Ok(resp) => {
+                    send_body(&write_tx, &resp, "final response").await;
                 }
-                // Final response (with result/error).
-                match done.await {
-                    Ok(resp) => {
-                        if let Err(e) = write_response(&mut stream, &resp).await {
-                            tracing::warn!(error = %e, "daemon: write final response failed");
-                            return;
-                        }
-                    }
-                    Err(_) => {
-                        tracing::warn!("daemon: stream completion sender dropped without result");
-                        return;
-                    }
+                Err(_) => {
+                    tracing::warn!("daemon: stream completion sender dropped without result");
                 }
             }
         }
     }
+}
+
+async fn send_body<T: serde::Serialize>(
+    write_tx: &mpsc::Sender<Vec<u8>>,
+    value: &T,
+    label: &str,
+) -> bool {
+    let body = match serde_json::to_vec(value) {
+        Ok(body) => body,
+        Err(e) => {
+            tracing::warn!(error = %e, "daemon: failed to serialize {label}");
+            return true;
+        }
+    };
+    write_tx.send(body).await.is_ok()
 }
 
 #[cfg(test)]
@@ -222,6 +247,48 @@ mod tests {
         assert_eq!(r2.id, "r2");
         let r3 = ping(&mut client, "r3").await;
         assert_eq!(r3.id, "r3");
+
+        state.signal_shutdown();
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(2), handle).await;
+    }
+
+    #[tokio::test]
+    async fn server_reads_next_request_while_stream_is_in_flight() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("vulcan.sock");
+        let state = Arc::new(DaemonState::for_tests_minimal());
+        let server = Server::bind(&path, state.clone()).await.unwrap();
+        let handle = tokio::spawn(server.run());
+
+        let mut client = UnixStream::connect(&path).await.unwrap();
+        let stream_req = Request {
+            version: 1,
+            id: "stream-1".into(),
+            session: "main".into(),
+            method: "test.slow_stream".into(),
+            params: serde_json::json!({}),
+        };
+        let ping_req = Request {
+            version: 1,
+            id: "ping-while-streaming".into(),
+            session: "main".into(),
+            method: "daemon.ping".into(),
+            params: serde_json::json!({}),
+        };
+
+        write_request(&mut client, &stream_req).await.unwrap();
+        write_request(&mut client, &ping_req).await.unwrap();
+
+        let body = tokio::time::timeout(
+            std::time::Duration::from_millis(100),
+            read_frame_bytes(&mut client),
+        )
+        .await
+        .expect("ping should not wait for slow stream")
+        .unwrap();
+        let resp: Response = serde_json::from_slice(&body).expect("first frame should be response");
+        assert_eq!(resp.id, "ping-while-streaming");
+        assert_eq!(resp.result.unwrap()["pong"], true);
 
         state.signal_shutdown();
         let _ = tokio::time::timeout(std::time::Duration::from_secs(2), handle).await;

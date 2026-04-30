@@ -31,6 +31,29 @@ impl Dispatcher {
 
     pub async fn dispatch(&self, req: Request) -> DispatchResult {
         match req.method.as_str() {
+            #[cfg(test)]
+            "test.slow_stream" => {
+                let (frame_tx, frame_rx) = mpsc::channel(4);
+                let (done_tx, done_rx) = oneshot::channel();
+                let req_id = req.id;
+                tokio::spawn(async move {
+                    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+                    let _ = frame_tx
+                        .send(StreamFrame {
+                            version: 1,
+                            id: Some(req_id.clone()),
+                            stream: "text".into(),
+                            data: serde_json::json!({ "text": "slow" }),
+                        })
+                        .await;
+                    let _ = done_tx.send(Response::ok(req_id, serde_json::json!({ "done": true })));
+                });
+                DispatchResult::Stream {
+                    frames: frame_rx,
+                    done: done_rx,
+                }
+            }
+
             // -- Daemon --
             "daemon.ping" => DispatchResult::Response(daemon_ops::ping(&self.state, req.id).await),
             "daemon.shutdown" => {

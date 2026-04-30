@@ -19,7 +19,7 @@ pub use errors::{ClientError, ClientResult};
 pub use transport::StreamFrames;
 
 use crate::config::vulcan_home;
-use crate::daemon::protocol::Request;
+use crate::daemon::protocol::{Request, StreamFrame};
 
 use transport::Transport;
 
@@ -116,12 +116,20 @@ impl Client {
         };
         self.transport.call_stream(req).await
     }
+
+    /// Take the daemon push-frame receiver for this client. Returns
+    /// `None` if another consumer already took it.
+    pub async fn take_push_receiver(&self) -> Option<tokio::sync::mpsc::Receiver<StreamFrame>> {
+        self.transport.take_push_receiver().await
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::daemon::protocol::{Response, read_frame_bytes, write_response};
+    use crate::daemon::protocol::{
+        Response, StreamFrame, read_frame_bytes, write_frame_bytes, write_response,
+    };
     use std::sync::Arc;
     use tempfile::TempDir;
     use tokio::net::UnixListener;
@@ -188,5 +196,90 @@ mod tests {
         let echo1 = r1.get("echo").and_then(|v| v.as_str()).unwrap();
         let echo2 = r2.get("echo").and_then(|v| v.as_str()).unwrap();
         assert_ne!(echo1, echo2, "different request ids must echo different");
+    }
+
+    async fn spawn_streaming_echo_daemon(tmp: &TempDir) -> std::path::PathBuf {
+        let sock = tmp.path().join("stream.sock");
+        let listener = UnixListener::bind(&sock).expect("bind test sock");
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.expect("accept");
+            let (mut read, mut write) = stream.into_split();
+            let body1 = read_frame_bytes(&mut read).await.expect("frame1");
+            let body2 = read_frame_bytes(&mut read).await.expect("frame2");
+            let req1: Request = serde_json::from_slice(&body1).expect("decode req1");
+            let req2: Request = serde_json::from_slice(&body2).expect("decode req2");
+            let (stream_req, call_req) = if req1.method == "prompt.stream" {
+                (req1, req2)
+            } else {
+                (req2, req1)
+            };
+
+            let ping = Response::ok(call_req.id.clone(), serde_json::json!({"pong": true}));
+            write_response(&mut write, &ping).await.expect("write ping");
+
+            let frame = StreamFrame {
+                version: 1,
+                id: Some(stream_req.id.clone()),
+                stream: "text".into(),
+                data: serde_json::json!({"text": "hello"}),
+            };
+            let body = serde_json::to_vec(&frame).unwrap();
+            write_frame_bytes(&mut write, &body)
+                .await
+                .expect("write frame");
+            let done = Response::ok(stream_req.id, serde_json::json!({"ok": true}));
+            write_response(&mut write, &done).await.expect("write done");
+
+            let push = StreamFrame {
+                version: 1,
+                id: None,
+                stream: "config_reloaded".into(),
+                data: serde_json::json!({"reloads": 1}),
+            };
+            let body = serde_json::to_vec(&push).unwrap();
+            write_frame_bytes(&mut write, &body)
+                .await
+                .expect("write push");
+        });
+        sock
+    }
+
+    #[tokio::test]
+    async fn client_routes_stream_frames_calls_and_pushes_on_one_socket() {
+        let tmp = TempDir::new().expect("tempdir");
+        let sock = spawn_streaming_echo_daemon(&tmp).await;
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+
+        let client = Client::connect_at(&sock).await.expect("connect");
+        let mut pushes = client
+            .take_push_receiver()
+            .await
+            .expect("push receiver available");
+
+        let mut stream = client
+            .call_stream("prompt.stream", serde_json::json!({"text": "hi"}))
+            .await
+            .expect("stream call starts");
+        let ping = client
+            .call("daemon.ping", serde_json::json!({}))
+            .await
+            .expect("normal call can share socket");
+        assert_eq!(ping["pong"], true);
+
+        let frame = stream.frames.recv().await.expect("stream frame");
+        assert_eq!(frame.stream, "text");
+        assert_eq!(frame.data["text"], "hello");
+        let done = stream
+            .done
+            .await
+            .expect("done channel")
+            .expect("done response");
+        assert!(done.error.is_none());
+        assert_eq!(done.result.unwrap()["ok"], true);
+
+        let push = pushes.recv().await.expect("push frame");
+        assert_eq!(push.id, None);
+        assert_eq!(push.stream, "config_reloaded");
+        assert_eq!(push.data["reloads"], 1);
     }
 }
