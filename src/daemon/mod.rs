@@ -9,6 +9,7 @@
 pub mod cli;
 pub mod config_watch;
 pub mod dispatch;
+pub mod eviction;
 pub mod handlers;
 pub mod install;
 pub mod lifecycle;

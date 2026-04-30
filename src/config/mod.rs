@@ -235,6 +235,37 @@ pub struct Config {
     /// store, code-graph, or any future retrieval layer.
     #[serde(default)]
     pub knowledge: KnowledgeConfig,
+
+    /// YYC-266: long-lived daemon process configuration. Today
+    /// this just carries the idle-eviction sweeper's TTL +
+    /// interval, but it's the natural home for any future
+    /// daemon-only knob (auto-rebuild backoff, per-session caps,
+    /// etc.).
+    #[serde(default)]
+    pub daemon: DaemonConfig,
+}
+
+/// YYC-266: daemon-process configuration.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct DaemonConfig {
+    /// Idle TTL for non-`"main"` sessions, in seconds. Sessions
+    /// whose `last_activity` exceeds this AND are not currently
+    /// `in_flight` are evicted by the sweeper. The `"main"`
+    /// session is exempt regardless.
+    pub session_idle_ttl_secs: u64,
+
+    /// How often the eviction sweeper runs, in seconds.
+    pub eviction_sweep_interval_secs: u64,
+}
+
+impl Default for DaemonConfig {
+    fn default() -> Self {
+        Self {
+            session_idle_ttl_secs: 30 * 60,   // 30 minutes
+            eviction_sweep_interval_secs: 60, // 1 minute
+        }
+    }
 }
 
 /// YYC-216: knowledge index governance. Today the only field is
@@ -1173,6 +1204,7 @@ impl Default for Config {
             extensions: ExtensionsConfig::default(),
             active_profile: None,
             knowledge: KnowledgeConfig::default(),
+            daemon: DaemonConfig::default(),
         }
     }
 }
@@ -1263,6 +1295,7 @@ impl Config {
             "extensions",
             "active_profile",
             "knowledge",
+            "daemon",
         ];
         let Ok(value) = toml::from_str::<toml::Value>(raw) else {
             return Vec::new();

@@ -118,7 +118,7 @@ mod tests {
         let cfg = dir.path().join("config.toml");
         std::fs::write(&cfg, "key = 1").unwrap();
 
-        let state = Arc::new(DaemonState::new());
+        let state = Arc::new(DaemonState::for_tests_minimal());
         let _watcher = ConfigWatcher::start(&cfg, state.clone()).unwrap();
 
         let baseline = state.reloads_applied();
@@ -139,7 +139,7 @@ mod tests {
         let cfg = dir.path().join("config.toml");
         std::fs::write(&cfg, "key = 1").unwrap();
 
-        let state = Arc::new(DaemonState::new());
+        let state = Arc::new(DaemonState::for_tests_minimal());
         let main = state.sessions().get("main").unwrap();
         *main.in_flight.lock() = true;
 
@@ -171,7 +171,7 @@ mod tests {
         let cfg = dir.path().join("config.toml");
         std::fs::write(&cfg, "key = 1").unwrap();
 
-        let state = Arc::new(DaemonState::new());
+        let state = Arc::new(DaemonState::for_tests_minimal());
         let _watcher = ConfigWatcher::start(&cfg, state.clone()).unwrap();
         let baseline = state.reloads_applied();
 

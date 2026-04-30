@@ -27,7 +27,11 @@ daemon = ["dep:notify", "dep:nix"]
 # profiler that swaps the global allocator) and hdrhistogram (latency
 # percentiles) — both optional so production builds skip them entirely.
 bench-soak = ["dep:dhat", "dep:hdrhistogram"]
+# YYC-266 Slice 3 Task 3.4: gateway now routes prompts through the
+# in-tree daemon Client, so it implies `daemon` (which gates `client`
+# and `daemon`).
 gateway = [
+    "daemon",
     "dep:axum",
     "dep:tower",
     "dep:subtle",

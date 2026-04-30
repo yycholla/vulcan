@@ -761,6 +761,15 @@ impl Agent {
         self.turn_cancel.cancel();
     }
 
+    /// Clone the underlying turn-cancellation token. Cheap; safe to hold
+    /// outside the agent's lock and to fire from any task. The daemon
+    /// stashes this on `SessionState` so `prompt.cancel` can fire
+    /// cancellation without ever locking the AsyncMutex that
+    /// `prompt.stream` holds for the duration of a turn.
+    pub fn cancel_handle(&self) -> CancellationToken {
+        self.turn_cancel.clone()
+    }
+
     /// Borrow the shared LSP manager (YYC-46). Used by the
     /// auto-diagnostics hook (YYC-51) to query post-edit diagnostics
     /// without re-spawning servers.

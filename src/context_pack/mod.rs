@@ -122,8 +122,9 @@ pub fn builtin_packs() -> Vec<ContextPack> {
                     why: "durable inbound/outbound queues".into(),
                 },
                 ContextSource::File {
-                    path: "src/gateway/agent_map.rs".into(),
-                    why: "long-lived per-lane agents + idle eviction".into(),
+                    path: "src/gateway/lane_router.rs".into(),
+                    why: "lane → daemon-session routing (replaces agent_map; daemon owns Agent)"
+                        .into(),
                 },
                 ContextSource::Note {
                     text: "Gateway lanes default to the `gateway-safe` capability profile (YYC-181)."

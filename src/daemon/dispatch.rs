@@ -49,39 +49,51 @@ impl Dispatcher {
             }
 
             // -- Agent --
-            "agent.status" => DispatchResult::Response(agent::status(&self.state, req.id).await),
+            "agent.status" => {
+                let session = req.session.clone();
+                DispatchResult::Response(agent::status(&self.state, req.id, session).await)
+            }
             "agent.switch_model" => {
+                let session = req.session.clone();
                 let model = req
                     .params
                     .get("model")
                     .and_then(|v| v.as_str())
                     .unwrap_or("");
-                DispatchResult::Response(agent::switch_model(&self.state, req.id, model).await)
+                DispatchResult::Response(
+                    agent::switch_model(&self.state, req.id, session, model).await,
+                )
             }
             "agent.list_models" => {
-                DispatchResult::Response(agent::list_models(&self.state, req.id).await)
+                let session = req.session.clone();
+                DispatchResult::Response(agent::list_models(&self.state, req.id, session).await)
             }
 
             // -- Prompt --
             "prompt.run" => {
+                let session = req.session.clone();
                 let input = req
                     .params
                     .get("text")
                     .and_then(|v| v.as_str())
                     .unwrap_or("");
-                DispatchResult::Response(prompt::run(&self.state, req.id, input).await)
+                DispatchResult::Response(prompt::run(&self.state, req.id, session, input).await)
             }
             "prompt.stream" => {
+                let session = req.session.clone();
                 let input = req
                     .params
                     .get("text")
                     .and_then(|v| v.as_str())
                     .unwrap_or("")
                     .to_string();
-                let (frames, done) = prompt::stream(&self.state, req.id, input);
+                let (frames, done) = prompt::stream(&self.state, req.id, session, input);
                 DispatchResult::Stream { frames, done }
             }
-            "prompt.cancel" => DispatchResult::Response(prompt::cancel(&self.state, req.id).await),
+            "prompt.cancel" => {
+                let session = req.session.clone();
+                DispatchResult::Response(prompt::cancel(&self.state, req.id, session).await)
+            }
 
             // -- Cortex --
             "cortex.store" => {
@@ -157,6 +169,30 @@ impl Dispatcher {
 
             // -- Session --
             "session.list" => DispatchResult::Response(session::list(&self.state, req.id).await),
+            "session.create" => {
+                let id = req
+                    .params
+                    .get("id")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string());
+                let resume_from = req
+                    .params
+                    .get("resume_from")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string());
+                DispatchResult::Response(
+                    session::create(&self.state, req.id, id, resume_from).await,
+                )
+            }
+            "session.destroy" => {
+                let sid = req
+                    .params
+                    .get("session_id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                DispatchResult::Response(session::destroy(&self.state, req.id, sid).await)
+            }
             "session.search" => {
                 let query = req
                     .params
@@ -230,7 +266,9 @@ mod tests {
 
     #[tokio::test]
     async fn ping_dispatches_to_daemon_ops() {
-        let dispatcher = Dispatcher::new(Arc::new(crate::daemon::state::DaemonState::new()));
+        let dispatcher = Dispatcher::new(Arc::new(
+            crate::daemon::state::DaemonState::for_tests_minimal(),
+        ));
         match dispatcher.dispatch(req("daemon.ping")).await {
             DispatchResult::Response(resp) => {
                 let result = resp.result.expect("ping returns ok");
@@ -245,7 +283,9 @@ mod tests {
 
     #[tokio::test]
     async fn unknown_method_returns_unknown_method_error() {
-        let dispatcher = Dispatcher::new(Arc::new(crate::daemon::state::DaemonState::new()));
+        let dispatcher = Dispatcher::new(Arc::new(
+            crate::daemon::state::DaemonState::for_tests_minimal(),
+        ));
         match dispatcher.dispatch(req("does.not.exist")).await {
             DispatchResult::Response(resp) => {
                 assert!(resp.result.is_none());
@@ -259,7 +299,7 @@ mod tests {
 
     #[tokio::test]
     async fn shutdown_signals_state() {
-        let state = Arc::new(crate::daemon::state::DaemonState::new());
+        let state = Arc::new(crate::daemon::state::DaemonState::for_tests_minimal());
         let mut signal = state.shutdown_signal();
         let dispatcher = Dispatcher::new(state);
 
@@ -278,7 +318,7 @@ mod tests {
 
     #[tokio::test]
     async fn reload_queues_reload_signal() {
-        let state = Arc::new(crate::daemon::state::DaemonState::new());
+        let state = Arc::new(crate::daemon::state::DaemonState::for_tests_minimal());
         let signal = state.reload_signal();
         let dispatcher = Dispatcher::new(state);
 
@@ -301,7 +341,9 @@ mod tests {
 
     #[tokio::test]
     async fn status_includes_pid_uptime_sessions() {
-        let dispatcher = Dispatcher::new(Arc::new(crate::daemon::state::DaemonState::new()));
+        let dispatcher = Dispatcher::new(Arc::new(
+            crate::daemon::state::DaemonState::for_tests_minimal(),
+        ));
         let resp = match dispatcher.dispatch(req("daemon.status")).await {
             DispatchResult::Response(r) => r,
             DispatchResult::Stream { .. } => panic!("status should not stream"),
@@ -317,7 +359,9 @@ mod tests {
 
     #[tokio::test]
     async fn cortex_store_without_cortex_returns_disabled_error() {
-        let dispatcher = Dispatcher::new(Arc::new(crate::daemon::state::DaemonState::new()));
+        let dispatcher = Dispatcher::new(Arc::new(
+            crate::daemon::state::DaemonState::for_tests_minimal(),
+        ));
         let mut r = req("cortex.store");
         r.params = serde_json::json!({ "text": "hello", "importance": 0.5 });
         match dispatcher.dispatch(r).await {
@@ -332,7 +376,9 @@ mod tests {
 
     #[tokio::test]
     async fn cortex_stats_without_cortex_returns_disabled_error() {
-        let dispatcher = Dispatcher::new(Arc::new(crate::daemon::state::DaemonState::new()));
+        let dispatcher = Dispatcher::new(Arc::new(
+            crate::daemon::state::DaemonState::for_tests_minimal(),
+        ));
         match dispatcher.dispatch(req("cortex.stats")).await {
             DispatchResult::Response(resp) => {
                 let err = resp.error.expect("error returned");
@@ -343,28 +389,38 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn agent_status_without_agent_returns_noagent_error() {
-        let dispatcher = Dispatcher::new(Arc::new(crate::daemon::state::DaemonState::new()));
+    async fn agent_status_without_agent_attempts_lazy_build() {
+        // Task 3.3: agent.* now lazy-builds via ensure_agent. With
+        // for_tests_minimal()'s default Config (no real provider),
+        // build fails → AGENT_BUILD_FAILED instead of the pre-Task-3.3
+        // AGENT_NOT_AVAILABLE.
+        let dispatcher = Dispatcher::new(Arc::new(
+            crate::daemon::state::DaemonState::for_tests_minimal(),
+        ));
         match dispatcher.dispatch(req("agent.status")).await {
             DispatchResult::Response(resp) => {
                 assert!(resp.result.is_none());
                 let err = resp.error.expect("error returned");
-                assert_eq!(err.code, "AGENT_NOT_AVAILABLE");
+                assert_eq!(err.code, "AGENT_BUILD_FAILED");
             }
             DispatchResult::Stream { .. } => panic!("agent.status should not stream"),
         }
     }
 
     #[tokio::test]
-    async fn prompt_run_without_agent_returns_noagent_error() {
-        let dispatcher = Dispatcher::new(Arc::new(crate::daemon::state::DaemonState::new()));
+    async fn prompt_run_without_agent_attempts_lazy_build() {
+        // Task 3.3: prompt.run lazy-builds; build fails on the
+        // for_tests_minimal default config → AGENT_BUILD_FAILED.
+        let dispatcher = Dispatcher::new(Arc::new(
+            crate::daemon::state::DaemonState::for_tests_minimal(),
+        ));
         let mut r = req("prompt.run");
         r.params = serde_json::json!({ "text": "hello" });
         match dispatcher.dispatch(r).await {
             DispatchResult::Response(resp) => {
                 assert!(resp.result.is_none());
                 let err = resp.error.expect("error returned");
-                assert_eq!(err.code, "AGENT_NOT_AVAILABLE");
+                assert_eq!(err.code, "AGENT_BUILD_FAILED");
             }
             DispatchResult::Stream { .. } => panic!("prompt.run should not stream"),
         }

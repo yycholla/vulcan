@@ -66,19 +66,28 @@ mod tests {
         crate::memory::in_memory_gateway_pool().expect("in-memory pool")
     }
 
+    fn no_daemon_router() -> Arc<crate::gateway::lane_router::DaemonLaneRouter> {
+        Arc::new(
+            crate::gateway::lane_router::DaemonLaneRouter::with_client_factory(|| {
+                Box::pin(async {
+                    Err(crate::client::ClientError::Protocol(
+                        "inbound test: client factory must not be invoked".into(),
+                    ))
+                })
+            }),
+        )
+    }
+
     fn app_state_with(registry: PlatformRegistry, db: DbPool) -> AppState {
-        // Build an AppState pointing at the given db + registry. Use
-        // Config::default() and an AgentMap::new — neither is exercised
-        // by /v1/inbound (it just enqueues), so that's fine.
-        let config = Arc::new(crate::config::Config::default());
-        let agent_map =
-            crate::gateway::agent_map::AgentMap::new(config, std::time::Duration::from_secs(60));
+        // Build an AppState pointing at the given db + registry. The
+        // /v1/inbound route only enqueues; it never opens a daemon
+        // client, so a no-daemon router is fine here.
         AppState {
             api_token: Arc::new("secret".into()),
             inbound: Arc::new(crate::gateway::queue::InboundQueue::new(db.clone())),
             outbound: Arc::new(crate::gateway::queue::OutboundQueue::new(db.clone(), 5)),
             registry: Arc::new(registry),
-            agent_map: Arc::new(agent_map),
+            lane_router: no_daemon_router(),
             scheduler_jobs: Arc::new(Vec::new()),
             scheduler_store: None,
         }
@@ -184,9 +193,6 @@ mod tests {
             .build(r2d2_sqlite::SqliteConnectionManager::memory())
             .expect("unschemed in-memory pool");
         // Build the state pointing at the unschemed db.
-        let config = Arc::new(crate::config::Config::default());
-        let agent_map =
-            crate::gateway::agent_map::AgentMap::new(config, std::time::Duration::from_secs(60));
         let state = AppState {
             api_token: Arc::new("secret".into()),
             inbound: Arc::new(crate::gateway::queue::InboundQueue::new(unschemed.clone())),
@@ -195,7 +201,7 @@ mod tests {
                 5,
             )),
             registry: Arc::new(registry_with_loopback()),
-            agent_map: Arc::new(agent_map),
+            lane_router: no_daemon_router(),
             scheduler_jobs: Arc::new(Vec::new()),
             scheduler_store: None,
         };
