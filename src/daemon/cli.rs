@@ -113,9 +113,12 @@ async fn build_daemon_agent(
     config: &crate::config::Config,
     pool: Arc<crate::runtime_pool::RuntimeResourcePool>,
 ) -> anyhow::Result<crate::agent::Agent> {
-    crate::agent::Agent::builder(config)
-        .with_pool(pool)
-        .build()
+    let assembler = crate::daemon::session_agent::SessionAgentAssembler::new(
+        Arc::new(config.clone()),
+        Some(pool),
+    );
+    assembler
+        .assemble(crate::daemon::session_agent::SessionAgentOptions::default())
         .await
 }
 
