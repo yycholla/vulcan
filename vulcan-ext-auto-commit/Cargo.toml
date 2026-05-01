@@ -1,0 +1,28 @@
+[package]
+name = "vulcan-ext-auto-commit"
+version = "0.1.0"
+edition = "2024"
+description = "Auto-commit Vulcan extension — runs `git commit -am` on session_end"
+authors = ["Colin Hanway"]
+license = "MIT"
+repository = "https://github.com/yycholla/vulcan"
+
+[lib]
+name = "vulcan_ext_auto_commit"
+path = "src/lib.rs"
+
+[dependencies]
+# Renamed import: package is `vulcan-core`, lib is `vulcan`. Extension
+# crates write `use vulcan::extensions::api::*` per the same convention
+# as the daemon binary.
+vulcan = { package = "vulcan-core", path = ".." }
+
+inventory = "0.3.24"
+async-trait = "0.1"
+anyhow = "1"
+tracing = "0.1"
+tokio = { version = "1", features = ["process", "macros", "rt"] }
+
+[dev-dependencies]
+tempfile = "3.27.0"
+tokio = { version = "1", features = ["process", "macros", "rt", "test-util"] }

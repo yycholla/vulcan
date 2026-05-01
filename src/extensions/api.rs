@@ -13,10 +13,27 @@
 //! alongside this module while migration is in flight; new extensions
 //! target this API.
 
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use super::ExtensionMetadata;
 use crate::hooks::HookHandler;
+
+/// Per-**Session** instantiation context handed to a
+/// `DaemonCodeExtension::instantiate` call. Carries the bare minimum
+/// the auto-commit dogfood needs today; grows toward the full
+/// `ExtensionContext` (model, provider, pause, state, ui, ...) as
+/// later slices land.
+#[derive(Debug, Clone)]
+pub struct SessionExtensionCtx {
+    /// Working directory of the **Session** the extension is being
+    /// instantiated for. Auto-commit reads this to know which repo to
+    /// `git commit` against.
+    pub cwd: PathBuf,
+    /// **Session** identifier. Routes telemetry, audit log entries,
+    /// and per-session state under a stable key.
+    pub session_id: String,
+}
 
 /// Daemon-global registration for an extension. One implementation per
 /// installed extension crate that ships a daemon module; registered
@@ -30,7 +47,7 @@ pub trait DaemonCodeExtension: Send + Sync {
     /// construction with the session's context. Returns an
     /// `Arc<dyn SessionExtension>` that owns hooks, tools, commands,
     /// providers, and lifecycle handlers for that session.
-    fn instantiate(&self) -> Arc<dyn SessionExtension>;
+    fn instantiate(&self, ctx: SessionExtensionCtx) -> Arc<dyn SessionExtension>;
 }
 
 /// Per-**Session** instantiation of a `DaemonCodeExtension`. Owns
@@ -98,10 +115,18 @@ mod tests {
                 ExtensionSource::Builtin,
             )
         }
-        fn instantiate(&self) -> Arc<dyn SessionExtension> {
+        fn instantiate(&self, _ctx: SessionExtensionCtx) -> Arc<dyn SessionExtension> {
             struct StubSession;
             impl SessionExtension for StubSession {}
             Arc::new(StubSession)
+        }
+    }
+
+    /// Test-only ctx with deterministic placeholder values.
+    fn test_ctx() -> SessionExtensionCtx {
+        SessionExtensionCtx {
+            cwd: PathBuf::from("/tmp/test-session"),
+            session_id: "test-session-id".to_string(),
         }
     }
 
@@ -187,7 +212,7 @@ mod tests {
                 m.status = crate::extensions::ExtensionStatus::Active;
                 m
             }
-            fn instantiate(&self) -> Arc<dyn SessionExtension> {
+            fn instantiate(&self, _ctx: SessionExtensionCtx) -> Arc<dyn SessionExtension> {
                 Arc::new(WatcherSession)
             }
         }
@@ -196,10 +221,43 @@ mod tests {
         registry.register_daemon_extension(Arc::new(WatcherExtension));
 
         let mut hooks = HookRegistry::new();
-        let registered = registry.wire_daemon_extensions(&mut hooks);
+        let registered = registry.wire_daemon_extensions(test_ctx(), &mut hooks);
 
         assert_eq!(registered, 1);
         assert_eq!(hooks.handler_count(), 1);
+    }
+
+    #[test]
+    fn session_extension_ctx_carries_cwd_and_session_id_to_instantiate() {
+        use parking_lot::RwLock;
+        use std::path::PathBuf;
+
+        struct CapturingExtension {
+            seen: Arc<RwLock<Option<(PathBuf, String)>>>,
+        }
+        impl DaemonCodeExtension for CapturingExtension {
+            fn metadata(&self) -> ExtensionMetadata {
+                ExtensionMetadata::new("capturing", "Capturing", "0.0.1", ExtensionSource::Builtin)
+            }
+            fn instantiate(&self, ctx: SessionExtensionCtx) -> Arc<dyn SessionExtension> {
+                struct Noop;
+                impl SessionExtension for Noop {}
+                *self.seen.write() = Some((ctx.cwd, ctx.session_id));
+                Arc::new(Noop)
+            }
+        }
+
+        let seen = Arc::new(RwLock::new(None));
+        let ext: Arc<dyn DaemonCodeExtension> = Arc::new(CapturingExtension { seen: seen.clone() });
+        let ctx = SessionExtensionCtx {
+            cwd: PathBuf::from("/tmp/example-session"),
+            session_id: "sess-42".to_string(),
+        };
+        let _ = ext.instantiate(ctx);
+
+        let captured = seen.read().clone().expect("instantiate ran");
+        assert_eq!(captured.0, PathBuf::from("/tmp/example-session"));
+        assert_eq!(captured.1, "sess-42");
     }
 
     #[test]
@@ -227,13 +285,13 @@ mod tests {
             fn metadata(&self) -> ExtensionMetadata {
                 ExtensionMetadata::new("watcher", "Watcher", "0.0.1", ExtensionSource::Builtin)
             }
-            fn instantiate(&self) -> Arc<dyn SessionExtension> {
+            fn instantiate(&self, _ctx: SessionExtensionCtx) -> Arc<dyn SessionExtension> {
                 Arc::new(WatcherSession)
             }
         }
 
         let daemon_ext: Arc<dyn DaemonCodeExtension> = Arc::new(WatcherExtension);
-        let session_ext = daemon_ext.instantiate();
+        let session_ext = daemon_ext.instantiate(test_ctx());
         let handlers = session_ext.hook_handlers();
         assert_eq!(handlers.len(), 1);
         assert_eq!(handlers[0].name(), "watcher");

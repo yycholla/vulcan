@@ -1,0 +1,32 @@
+[package]
+name = "vulcan"
+version = "0.1.0"
+edition = "2024"
+description = "Vulcan daemon binary"
+authors = ["Colin Hanway"]
+license = "MIT"
+repository = "https://github.com/yycholla/vulcan"
+default-run = "vulcan"
+
+[features]
+default = ["daemon"]
+# Re-export of the vulcan-core daemon feature. Keep the bin's feature
+# set in lockstep with the lib's so `cargo run --features ...` here
+# composes naturally.
+daemon = ["vulcan/daemon"]
+gateway = ["vulcan/gateway"]
+telegram = ["vulcan/telegram"]
+
+[dependencies]
+# In-source name is `vulcan` (lib name) but the package is published
+# as `vulcan-core`. The `package =` rename keeps the existing
+# `use vulcan::*` imports compiling.
+vulcan = { package = "vulcan-core", path = ".." }
+
+tokio = { version = "1", features = ["full"] }
+clap = { version = "4", features = ["derive"] }
+clap_complete = "4.6"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+anyhow = "1"
+serde_json = "1"

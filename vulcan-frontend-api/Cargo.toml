@@ -1,0 +1,10 @@
+[package]
+name = "vulcan-frontend-api"
+version = "0.1.0"
+edition = "2024"
+description = "Frontend extension registration API for Vulcan extension authors"
+authors = ["Colin Hanway"]
+license = "MIT"
+repository = "https://github.com/yycholla/vulcan"
+
+[dependencies]

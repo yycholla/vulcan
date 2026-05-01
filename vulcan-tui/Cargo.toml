@@ -1,0 +1,11 @@
+[package]
+name = "vulcan-tui"
+version = "0.1.0"
+edition = "2024"
+description = "Vulcan TUI frontend binary"
+authors = ["Colin Hanway"]
+license = "MIT"
+repository = "https://github.com/yycholla/vulcan"
+
+[dependencies]
+anyhow = "1"

@@ -9,7 +9,7 @@
 use parking_lot::RwLock;
 use std::sync::Arc;
 
-use super::api::DaemonCodeExtension;
+use super::api::{DaemonCodeExtension, SessionExtensionCtx};
 use super::{ExtensionCapability, ExtensionConfigField, ExtensionMetadata, ExtensionStatus};
 use crate::hooks::{HookHandler, HookRegistry};
 
@@ -208,12 +208,16 @@ impl ExtensionRegistry {
 
     /// GH issue #549: per-**Session** wire-up. For each `Active`
     /// daemon-side extension registered via `register_daemon_extension`,
-    /// calls `instantiate` to get a fresh `SessionExtension`, then
+    /// calls `instantiate(ctx)` to get a fresh `SessionExtension`, then
     /// registers each of that session extension's `hook_handlers` into
     /// the supplied `HookRegistry`. Returns the number of session
     /// extensions instantiated. Inactive / Draft / Broken extensions
     /// are skipped.
-    pub fn wire_daemon_extensions(&self, hooks: &mut HookRegistry) -> usize {
+    pub fn wire_daemon_extensions(
+        &self,
+        ctx: SessionExtensionCtx,
+        hooks: &mut HookRegistry,
+    ) -> usize {
         let mut count = 0usize;
         let metadata_snapshot = self.inner.read().clone();
         let daemon_snapshot = self.daemon_extensions.read().clone();
@@ -227,7 +231,7 @@ impl ExtensionRegistry {
             if !active {
                 continue;
             }
-            let session_ext = ext.instantiate();
+            let session_ext = ext.instantiate(ctx.clone());
             for handler in session_ext.hook_handlers() {
                 hooks.register(handler);
             }

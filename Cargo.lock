@@ -7144,6 +7144,20 @@ name = "vulcan"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "clap",
+ "clap_complete",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "vulcan-core",
+]
+
+[[package]]
+name = "vulcan-core"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
  "assert_cmd",
  "async-trait",
  "axum",
@@ -7210,6 +7224,30 @@ dependencies = [
  "tree-sitter-typescript",
  "url",
  "uuid",
+]
+
+[[package]]
+name = "vulcan-ext-auto-commit"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "inventory",
+ "tempfile",
+ "tokio",
+ "tracing",
+ "vulcan-core",
+]
+
+[[package]]
+name = "vulcan-frontend-api"
+version = "0.1.0"
+
+[[package]]
+name = "vulcan-tui"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
 ]
 
 [[package]]

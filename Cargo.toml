@@ -1,5 +1,18 @@
+[workspace]
+# GH issue #549: cargo-crate extension distribution model. Root
+# package stays as `vulcan-core` (current `src/`); new bins/extensions
+# live in sibling member crates.
+members = [
+    ".",
+    "vulcan",
+    "vulcan-tui",
+    "vulcan-frontend-api",
+    "vulcan-ext-auto-commit",
+]
+resolver = "2"
+
 [package]
-name = "vulcan"
+name = "vulcan-core"
 version = "0.1.0"
 edition = "2024"
 description = "A Rust AI agent — forged at the forge, tested by fire"
@@ -11,10 +24,13 @@ readme = "README.md"
 # doesn't also register it as a bench target (which would conflict with the
 # explicit [[bin]] declaration).
 autobenches = false
-# `cargo run` (no args) defaults to the main `vulcan` binary so quick
-# iteration doesn't require `--bin vulcan`. The bench/soak targets stay
-# explicit.
-default-run = "vulcan"
+
+# Keep the in-source crate name as `vulcan` so existing `use vulcan::*`
+# imports across the codebase, tests, and benches continue to compile
+# unchanged after the workspace split.
+[lib]
+name = "vulcan"
+path = "src/lib.rs"
 
 [features]
 default = ["daemon"]
