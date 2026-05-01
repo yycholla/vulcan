@@ -6,6 +6,7 @@
 //! loop. First non-Continue outcome wins for blocking-style events; injection
 //! events accumulate across all handlers.
 
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
@@ -16,6 +17,7 @@ use serde_json::Value;
 use tokio::time::timeout;
 use tokio_util::sync::CancellationToken;
 
+use crate::pause::{AgentPause, AgentResume, OptionKind, PauseKind, PauseOption, PauseSender};
 use crate::provider::{ChatResponse, Message, StreamEvent, ToolCall};
 use crate::tools::{ToolProgress, ToolResult};
 
@@ -291,6 +293,11 @@ pub struct HookRegistry {
     /// records every non-Continue outcome as an `InputIntercept`
     /// event. `None` means audit silently skips (CLI one-shot path).
     audit_log: Option<Arc<crate::extensions::ExtensionAuditLog>>,
+    /// Extension ids whose `ReplaceInput` outcomes need explicit user
+    /// approval before the rewritten text is applied.
+    input_rewrite_approval_required: HashSet<String>,
+    /// Pause channel used to ask the active Frontend for approval.
+    input_rewrite_pause_tx: Option<PauseSender>,
 }
 
 impl HookRegistry {
@@ -298,6 +305,8 @@ impl HookRegistry {
         Self {
             handlers: Vec::new(),
             audit_log: None,
+            input_rewrite_approval_required: HashSet::new(),
+            input_rewrite_pause_tx: None,
             handler_timeout: Duration::from_secs(30),
             failure_metrics: HookFailureMetrics::default(),
         }
@@ -315,6 +324,22 @@ impl HookRegistry {
     pub fn with_audit_log(mut self, log: Arc<crate::extensions::ExtensionAuditLog>) -> Self {
         self.audit_log = Some(log);
         self
+    }
+
+    pub fn with_input_rewrite_pause_channel(mut self, pause_tx: PauseSender) -> Self {
+        self.input_rewrite_pause_tx = Some(pause_tx);
+        self
+    }
+
+    pub fn require_input_rewrite_approval(mut self, extension_id: impl Into<String>) -> Self {
+        self.input_rewrite_approval_required
+            .insert(extension_id.into());
+        self
+    }
+
+    pub fn mark_input_rewrite_approval_required(&mut self, extension_id: impl Into<String>) {
+        self.input_rewrite_approval_required
+            .insert(extension_id.into());
     }
 
     pub fn register(&mut self, handler: Arc<dyn HookHandler>) {
@@ -636,6 +661,24 @@ impl HookRegistry {
                     return InputDecision::Block(reason);
                 }
                 Some(HookOutcome::ReplaceInput(rewrite)) => {
+                    if let Err(reason) = self
+                        .approve_input_rewrite_if_required(h.name(), raw, &rewrite)
+                        .await
+                    {
+                        tracing::info!(
+                            "hook {} input rewrite blocked before approval: {reason}",
+                            h.name()
+                        );
+                        self.record_input_intercept(
+                            h.name(),
+                            raw,
+                            raw,
+                            crate::extensions::InputInterceptAction::Block {
+                                reason: reason.clone(),
+                            },
+                        );
+                        return InputDecision::Block(reason);
+                    }
                     tracing::info!("hook {} replaced input", h.name());
                     self.record_input_intercept(
                         h.name(),
@@ -656,6 +699,65 @@ impl HookRegistry {
             }
         }
         InputDecision::Continue
+    }
+
+    async fn approve_input_rewrite_if_required(
+        &self,
+        extension_id: &str,
+        before: &str,
+        after: &str,
+    ) -> std::result::Result<(), String> {
+        if !self.input_rewrite_approval_required.contains(extension_id) {
+            return Ok(());
+        }
+        let Some(tx) = &self.input_rewrite_pause_tx else {
+            return Err(format!(
+                "extension `{extension_id}` requires user approval for input rewrite but no pause channel is wired"
+            ));
+        };
+        let (reply, rx) = tokio::sync::oneshot::channel();
+        let pause = AgentPause {
+            kind: PauseKind::InputRewriteApproval {
+                extension_id: extension_id.to_string(),
+                before: before.to_string(),
+                after: after.to_string(),
+            },
+            reply,
+            options: vec![
+                PauseOption {
+                    key: 'a',
+                    label: "allow once".to_string(),
+                    kind: OptionKind::Primary,
+                    resume: AgentResume::Allow,
+                },
+                PauseOption {
+                    key: 'd',
+                    label: "deny".to_string(),
+                    kind: OptionKind::Destructive,
+                    resume: AgentResume::Deny,
+                },
+            ],
+        };
+        if tx.send(pause).await.is_err() {
+            return Err(format!(
+                "extension `{extension_id}` requires user approval for input rewrite but pause consumer dropped"
+            ));
+        }
+        match rx.await {
+            Ok(AgentResume::Allow | AgentResume::AllowAndRemember) => Ok(()),
+            Ok(AgentResume::Deny) => Err(format!(
+                "input rewrite denied for extension `{extension_id}`"
+            )),
+            Ok(AgentResume::DenyWithReason(reason)) => Err(format!(
+                "input rewrite denied for extension `{extension_id}`: {reason}"
+            )),
+            Ok(other) => Err(format!(
+                "input rewrite denied for extension `{extension_id}`: unsupported resume {other:?}"
+            )),
+            Err(_) => Err(format!(
+                "extension `{extension_id}` requires user approval for input rewrite but pause reply was dropped"
+            )),
+        }
     }
 
     fn record_input_intercept(
@@ -1682,6 +1784,119 @@ mod tests {
         match decision {
             InputDecision::Replace(text) => assert_eq!(text, "rewritten"),
             other => panic!("expected Replace, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn apply_on_input_allows_rewrite_when_approval_required_and_user_allows() {
+        use crate::pause::{AgentResume, PauseKind};
+
+        struct Rewriter;
+
+        #[async_trait::async_trait]
+        impl HookHandler for Rewriter {
+            fn name(&self) -> &str {
+                "approval-rewriter"
+            }
+            async fn on_input(
+                &self,
+                _raw: &str,
+                _cancel: CancellationToken,
+            ) -> Result<HookOutcome> {
+                Ok(HookOutcome::ReplaceInput("rewritten".into()))
+            }
+        }
+
+        let (pause_tx, mut pause_rx) = crate::pause::channel(4);
+        let mut reg = HookRegistry::new()
+            .with_input_rewrite_pause_channel(pause_tx)
+            .require_input_rewrite_approval("approval-rewriter");
+        reg.register(Arc::new(Rewriter));
+
+        let decision_task =
+            tokio::spawn(async move { reg.apply_on_input("raw", CancellationToken::new()).await });
+        let pause = pause_rx.recv().await.expect("approval pause should emit");
+        match &pause.kind {
+            PauseKind::InputRewriteApproval {
+                extension_id,
+                before,
+                after,
+            } => {
+                assert_eq!(extension_id, "approval-rewriter");
+                assert_eq!(before, "raw");
+                assert_eq!(after, "rewritten");
+            }
+            other => panic!("expected input rewrite approval, got {other:?}"),
+        }
+        pause.reply.send(AgentResume::Allow).unwrap();
+
+        match decision_task.await.unwrap() {
+            InputDecision::Replace(text) => assert_eq!(text, "rewritten"),
+            other => panic!("expected Replace, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn apply_on_input_blocks_rewrite_when_approval_required_and_user_denies() {
+        use crate::pause::AgentResume;
+
+        struct Rewriter;
+
+        #[async_trait::async_trait]
+        impl HookHandler for Rewriter {
+            fn name(&self) -> &str {
+                "approval-rewriter"
+            }
+            async fn on_input(
+                &self,
+                _raw: &str,
+                _cancel: CancellationToken,
+            ) -> Result<HookOutcome> {
+                Ok(HookOutcome::ReplaceInput("rewritten".into()))
+            }
+        }
+
+        let (pause_tx, mut pause_rx) = crate::pause::channel(4);
+        let mut reg = HookRegistry::new()
+            .with_input_rewrite_pause_channel(pause_tx)
+            .require_input_rewrite_approval("approval-rewriter");
+        reg.register(Arc::new(Rewriter));
+
+        let decision_task =
+            tokio::spawn(async move { reg.apply_on_input("raw", CancellationToken::new()).await });
+        let pause = pause_rx.recv().await.expect("approval pause should emit");
+        pause.reply.send(AgentResume::Deny).unwrap();
+
+        match decision_task.await.unwrap() {
+            InputDecision::Block(reason) => assert!(reason.contains("denied")),
+            other => panic!("expected Block, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn apply_on_input_blocks_rewrite_when_approval_required_without_pause_channel() {
+        struct Rewriter;
+
+        #[async_trait::async_trait]
+        impl HookHandler for Rewriter {
+            fn name(&self) -> &str {
+                "approval-rewriter"
+            }
+            async fn on_input(
+                &self,
+                _raw: &str,
+                _cancel: CancellationToken,
+            ) -> Result<HookOutcome> {
+                Ok(HookOutcome::ReplaceInput("rewritten".into()))
+            }
+        }
+
+        let mut reg = HookRegistry::new().require_input_rewrite_approval("approval-rewriter");
+        reg.register(Arc::new(Rewriter));
+
+        match reg.apply_on_input("raw", CancellationToken::new()).await {
+            InputDecision::Block(reason) => assert!(reason.contains("no pause channel")),
+            other => panic!("expected Block, got {other:?}"),
         }
     }
 

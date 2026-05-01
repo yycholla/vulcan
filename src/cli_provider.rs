@@ -360,7 +360,38 @@ fn list(dir: &Path) -> Result<()> {
             "(no named profiles configured — add one with `vulcan provider add`)".dimmed()
         );
     }
+    let extension_providers = collect_extension_provider_names();
+    if !extension_providers.is_empty() {
+        println!();
+        println!("{}", "Extension providers:".bold());
+        for name in extension_providers {
+            println!("  {}", name.bold());
+            println!(
+                "    {} set a profile with {} to select it",
+                "usage:".dimmed(),
+                format!("type = \"{name}\"").cyan()
+            );
+        }
+    }
     Ok(())
+}
+
+fn collect_extension_provider_names() -> Vec<String> {
+    let registry = crate::extensions::ExtensionRegistry::new();
+    crate::extensions::api::wire_inventory_into_registry(&registry);
+    let catalog = crate::provider::factory::ExtensionProviderCatalog::new();
+    let ctx = crate::extensions::api::SessionExtensionCtx {
+        cwd: std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")),
+        session_id: "__provider_list__".into(),
+        memory: std::sync::Arc::new(crate::memory::SessionStore::in_memory()),
+        frontend_capabilities: crate::extensions::FrontendCapability::full_set(),
+        state: crate::extensions::ExtensionStateContext::in_memory_for_tests(
+            "__provider_list__",
+            "__pending__",
+        ),
+    };
+    registry.wire_daemon_extension_providers(ctx, &catalog);
+    catalog.names()
 }
 
 fn print_presets() {

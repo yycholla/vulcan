@@ -86,6 +86,7 @@ fn is_local_ipv4(ip: std::net::Ipv4Addr) -> bool {
 /// outlives a single prompt.
 pub struct Agent {
     pub(in crate::agent) provider: Box<dyn LLMProvider>,
+    pub(in crate::agent) provider_factory: Arc<dyn ProviderFactory>,
     pub(in crate::agent) tools: ToolRegistry,
     pub(in crate::agent) skills: Arc<SkillRegistry>,
     pub(in crate::agent) context: ContextManager,
@@ -299,6 +300,38 @@ impl Agent {
         pool: Option<Arc<RuntimeResourcePool>>,
         frontend_capabilities: Vec<crate::extensions::FrontendCapability>,
     ) -> Result<Self> {
+        let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+        let memory: Arc<SessionStore> = match &pool {
+            Some(p) => p.session_store(),
+            None => Arc::new(SessionStore::try_new()?),
+        };
+        let session_id = Uuid::new_v4().to_string();
+
+        let extension_provider_catalog = pool.as_ref().map(|p| p.extension_provider_catalog());
+        if let Some(p) = pool.as_ref() {
+            let ctx = crate::extensions::api::SessionExtensionCtx {
+                cwd: cwd.clone(),
+                session_id: session_id.clone(),
+                memory: Arc::clone(&memory),
+                frontend_capabilities: frontend_capabilities.clone(),
+                state: crate::extensions::ExtensionStateContext::new(
+                    p.extension_state_store(),
+                    session_id.clone(),
+                    "__pending__",
+                    Vec::new(),
+                ),
+            };
+            let registered = p
+                .extension_registry()
+                .wire_daemon_extension_providers(ctx, &p.extension_provider_catalog());
+            if registered > 0 {
+                tracing::info!(
+                    extension_providers = registered,
+                    "Agent: registered daemon-side extension providers"
+                );
+            }
+        }
+
         // YYC-239: TUI + gateway resolve their starting provider
         // through the same `active_provider_config` indirection.
         // When `active_profile` is set + present in `[providers]`,
@@ -307,8 +340,12 @@ impl Agent {
 
         // Local / self-hosted endpoints don't require auth; allow empty
         // string in that case (matches `switch_provider` semantics).
+        let provider_is_extension = extension_provider_catalog
+            .as_ref()
+            .is_some_and(|catalog| catalog.contains(&active_provider.r#type));
         let api_key = match config.api_key() {
             Some(k) => k,
+            None if provider_is_extension => String::new(),
             None if active_provider.disable_catalog
                 || is_local_base_url(&active_provider.base_url) =>
             {
@@ -325,12 +362,37 @@ impl Agent {
         // max_context with whatever the catalog says it actually is. Non-fatal:
         // if the catalog endpoint fails, we log + continue with the configured
         // values rather than blocking startup over a metadata fetch.
-        let selection = Self::resolve_model_selection(active_provider, &api_key).await?;
+        let selection = if provider_is_extension {
+            ModelSelection {
+                model: crate::provider::catalog::ModelInfo {
+                    id: active_provider.model.clone(),
+                    display_name: active_provider.model.clone(),
+                    context_length: active_provider.max_context,
+                    pricing: None,
+                    features: crate::provider::catalog::ModelFeatures {
+                        tools: true,
+                        vision: false,
+                        json_mode: false,
+                        reasoning: false,
+                    },
+                    top_provider: Some(active_provider.r#type.clone()),
+                },
+                max_context: active_provider.max_context,
+                pricing: None,
+            }
+        } else {
+            Self::resolve_model_selection(active_provider, &api_key).await?
+        };
         let effective_max_context = selection.max_context;
         let supports_json_mode = selection.model.features.json_mode;
         let pricing = selection.pricing.clone();
 
-        let provider_factory: Arc<dyn ProviderFactory> = Arc::new(DefaultProviderFactory);
+        let provider_factory: Arc<dyn ProviderFactory> = match extension_provider_catalog {
+            Some(catalog) => {
+                Arc::new(crate::provider::factory::ExtensionAwareProviderFactory::new(catalog))
+            }
+            None => Arc::new(DefaultProviderFactory),
+        };
         let provider = provider_factory.build(
             active_provider,
             &api_key,
@@ -339,7 +401,6 @@ impl Agent {
         )?;
 
         let diff_sink = crate::tools::new_diff_sink();
-        let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
         // Slice 3: shared LSP manager from the pool when available so
         // language servers stay warm across sessions instead of
         // spawning per Agent.
@@ -423,13 +484,8 @@ impl Agent {
         // Slice 3: shared session store comes from the pool when wired
         // up; fall back to opening a per-Agent connection for the
         // legacy direct-mode build path.
-        let memory: Arc<SessionStore> = match &pool {
-            Some(p) => p.session_store(),
-            None => Arc::new(SessionStore::try_new()?),
-        };
         let context =
             ContextManager::with_config(provider.max_context(), config.compaction.clone());
-        let session_id = Uuid::new_v4().to_string();
 
         // Built-in hook: surface available skills to the LLM via BeforePrompt.
         hooks.register(Arc::new(SkillsHook::new(skills.clone())));
@@ -511,6 +567,9 @@ impl Agent {
             // any `on_input` outcome they emit lands on the same ring
             // the CLI / `vulcan extension audit` reads from.
             hooks = hooks.with_audit_log(p.extension_audit_log());
+            if let Some(tx) = pause_tx.clone() {
+                hooks = hooks.with_input_rewrite_pause_channel(tx);
+            }
             hooks.register(Arc::new(
                 crate::extensions::state::ExtensionStateReaperHook::new(p.extension_state_store()),
             ));
@@ -667,6 +726,7 @@ impl Agent {
 
         Ok(Self {
             provider,
+            provider_factory,
             tools,
             skills,
             context,
@@ -875,6 +935,7 @@ impl Agent {
         let max_context = provider.max_context();
         Self {
             provider,
+            provider_factory: Arc::new(DefaultProviderFactory),
             tools,
             skills,
             context: ContextManager::new(max_context),

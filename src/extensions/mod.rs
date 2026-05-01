@@ -103,6 +103,7 @@ pub enum ExtensionCapability {
     PromptInjection,
     HookHandler,
     ToolProvider,
+    Provider,
     MemoryBackend,
     LifecycleObserver,
     /// GH issue #557: extension may register an `on_input` handler
@@ -121,6 +122,7 @@ impl ExtensionCapability {
             ExtensionCapability::PromptInjection => "prompt_injection",
             ExtensionCapability::HookHandler => "hook_handler",
             ExtensionCapability::ToolProvider => "tool_provider",
+            ExtensionCapability::Provider => "provider",
             ExtensionCapability::MemoryBackend => "memory_backend",
             ExtensionCapability::LifecycleObserver => "lifecycle_observer",
             ExtensionCapability::InputInterceptor => "input_interceptor",
@@ -203,9 +205,18 @@ pub struct ExtensionMetadata {
     /// activate for a Session.
     #[serde(default)]
     pub requires: Vec<FrontendCapability>,
+    /// When true, `ReplaceInput` outcomes from this extension's
+    /// `on_input` hook must be confirmed by the user before they
+    /// change the prompt text.
+    #[serde(default)]
+    pub requires_user_approval: bool,
     /// Default state branch behavior declared by the manifest.
     #[serde(default)]
     pub branch_policy: BranchPolicy,
+    /// Provider defaults contributed by the extension manifest.
+    /// User overrides live under `extensions.<id>.provider`.
+    #[serde(default)]
+    pub provider_defaults: Option<ExtensionProviderDefaults>,
     /// Optional human-readable permissions summary surfaced in
     /// `vulcan extension show`. Caller-provided; the registry
     /// does not interpret it.
@@ -237,10 +248,22 @@ impl ExtensionMetadata {
             status: ExtensionStatus::Inactive,
             capabilities: Vec::new(),
             requires: Vec::new(),
+            requires_user_approval: false,
             branch_policy: BranchPolicy::Fork,
+            provider_defaults: None,
             permissions_summary: None,
             broken_reason: None,
             priority: 100,
         }
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct ExtensionProviderDefaults {
+    #[serde(default)]
+    pub model: Option<String>,
+    #[serde(default)]
+    pub base_url: Option<String>,
+    #[serde(default)]
+    pub timeout_ms: Option<u64>,
 }

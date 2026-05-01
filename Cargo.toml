@@ -11,6 +11,7 @@ members = [
     "vulcan-ext-auto-commit",
     "vulcan-ext-todo",
     "vulcan-ext-input-demo",
+    "vulcan-ext-provider-demo",
 ]
 resolver = "2"
 

@@ -15,6 +15,7 @@ use super::{
     FrontendCapability,
 };
 use crate::hooks::{HookHandler, HookRegistry};
+use crate::provider::factory::ExtensionProviderCatalog;
 use crate::tools::ToolRegistry;
 
 /// YYC-227 (YYC-165 PR-4): trait an in-process, code-backed
@@ -201,6 +202,14 @@ impl ExtensionRegistry {
             if !active {
                 continue;
             }
+            if metadata_snapshot
+                .iter()
+                .find(|m| m.id == id)
+                .map(|m| m.requires_user_approval)
+                .unwrap_or(false)
+            {
+                hooks.mark_input_rewrite_approval_required(&id);
+            }
             for handler in ext.hook_handlers() {
                 hooks.register(handler);
                 total += 1;
@@ -277,6 +286,9 @@ impl ExtensionRegistry {
             let Some(meta) = metadata_snapshot.iter().find(|m| m.id == id) else {
                 continue;
             };
+            if meta.requires_user_approval {
+                hooks.mark_input_rewrite_approval_required(&id);
+            }
             if let Some(reason) =
                 missing_frontend_capability_reason(&meta.requires, &ctx.frontend_capabilities, &id)
             {
@@ -312,6 +324,71 @@ impl ExtensionRegistry {
             count += 1;
         }
         (count, tool_count)
+    }
+
+    /// GH issue #554: register active daemon-extension providers into
+    /// the daemon-owned provider catalog. Names are validated by the
+    /// catalog and must be full extension-prefixed names such as
+    /// `demo.echo`; collisions mark the contributing extension Broken.
+    pub fn wire_daemon_extension_providers(
+        &self,
+        ctx: SessionExtensionCtx,
+        catalog: &ExtensionProviderCatalog,
+    ) -> usize {
+        let mut total = 0usize;
+        let metadata_snapshot = self.inner.read().clone();
+        let daemon_snapshot = self.daemon_extensions.read().clone();
+        for ext in daemon_snapshot {
+            let id = ext.metadata().id;
+            let active = metadata_snapshot
+                .iter()
+                .find(|m| m.id == id)
+                .map(|m| m.status == ExtensionStatus::Active)
+                .unwrap_or(false);
+            if !active {
+                continue;
+            }
+            let Some(meta) = metadata_snapshot.iter().find(|m| m.id == id) else {
+                continue;
+            };
+            if let Some(reason) =
+                missing_frontend_capability_reason(&meta.requires, &ctx.frontend_capabilities, &id)
+            {
+                tracing::info!(
+                    extension_id = %id,
+                    reason = %reason,
+                    "skipping extension provider registration for frontend capability mismatch"
+                );
+                continue;
+            }
+            let session_ext =
+                ext.instantiate(ctx.clone().with_extension(&id, meta.capabilities.clone()));
+            for (name, provider) in session_ext.providers() {
+                match catalog.register_singleton(&id, name, provider) {
+                    Ok(()) => total += 1,
+                    Err(reason) => {
+                        self.mark_broken(&id, reason.to_string());
+                        break;
+                    }
+                }
+            }
+            if self
+                .get(&id)
+                .is_some_and(|m| m.status == ExtensionStatus::Broken)
+            {
+                continue;
+            }
+            for (name, factory) in session_ext.provider_factories() {
+                match catalog.register_factory(&id, name, factory) {
+                    Ok(()) => total += 1,
+                    Err(reason) => {
+                        self.mark_broken(&id, reason.to_string());
+                        break;
+                    }
+                }
+            }
+        }
+        total
     }
 
     /// YYC-232 (YYC-166 PR-4): discover installed extensions in
@@ -391,6 +468,7 @@ impl ExtensionRegistry {
                             }
                         })
                         .collect();
+                    meta.requires_user_approval = manifest.requires_user_approval;
                     if let Some(policy) = manifest.branch_policy.as_deref() {
                         match policy.parse::<crate::extensions::BranchPolicy>() {
                             Ok(policy) => meta.branch_policy = policy,
@@ -401,6 +479,14 @@ impl ExtensionRegistry {
                                 "ignoring unknown extension branch policy"
                             ),
                         }
+                    }
+                    if let Some(defaults) = manifest.provider_defaults.clone() {
+                        meta.provider_defaults =
+                            Some(crate::extensions::ExtensionProviderDefaults {
+                                model: defaults.model,
+                                base_url: defaults.base_url,
+                                timeout_ms: defaults.timeout_ms,
+                            });
                     }
                     if let Some(perm) = manifest.permissions.clone() {
                         meta.permissions_summary = Some(perm);
@@ -464,6 +550,56 @@ impl ExtensionRegistry {
             }
             for field in ext.config_fields() {
                 out.push((id.clone(), field));
+            }
+        }
+        let daemon_snapshot = self.daemon_extensions.read().clone();
+        for ext in daemon_snapshot {
+            let meta = ext.metadata();
+            let active = metadata_snapshot
+                .iter()
+                .find(|m| m.id == meta.id)
+                .map(|m| m.status == ExtensionStatus::Active)
+                .unwrap_or(false);
+            if !active {
+                continue;
+            }
+            if let Some(defaults) = meta.provider_defaults {
+                if let Some(model) = defaults.model {
+                    out.push((
+                        meta.id.clone(),
+                        ExtensionConfigField::string_field(
+                            "provider.model",
+                            false,
+                            model,
+                            "Default model for this extension provider.",
+                        ),
+                    ));
+                }
+                if let Some(base_url) = defaults.base_url {
+                    out.push((
+                        meta.id.clone(),
+                        ExtensionConfigField::string_field(
+                            "provider.base_url",
+                            false,
+                            base_url,
+                            "Default endpoint for this extension provider.",
+                        ),
+                    ));
+                }
+                if let Some(timeout_ms) = defaults.timeout_ms {
+                    out.push((
+                        meta.id.clone(),
+                        ExtensionConfigField {
+                            path: "provider.timeout_ms".into(),
+                            kind: crate::extensions::ExtensionFieldKind::Int {
+                                min: Some(1),
+                                max: None,
+                            },
+                            default: timeout_ms.to_string(),
+                            help: "Default provider timeout in milliseconds.".into(),
+                        },
+                    ));
+                }
             }
         }
         out

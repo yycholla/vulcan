@@ -59,6 +59,13 @@ pub fn include_manifest(_input: TokenStream) -> TokenStream {
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default();
+    let provider_defaults = vulcan
+        .get("provider_defaults")
+        .and_then(toml::Value::as_table);
+    let requires_user_approval = vulcan
+        .get("requires_user_approval")
+        .and_then(toml::Value::as_bool)
+        .unwrap_or(false);
 
     let id_lit = rust_string_literal(id);
     let version_lit = rust_string_literal(version);
@@ -71,9 +78,25 @@ pub fn include_manifest(_input: TokenStream) -> TokenStream {
         .map(|value| format!("{}.to_string()", rust_string_literal(value)))
         .collect::<Vec<_>>()
         .join(", ");
+    let provider_defaults_tokens = match provider_defaults {
+        Some(defaults) => {
+            let model = option_string_tokens(defaults.get("model").and_then(toml::Value::as_str));
+            let base_url =
+                option_string_tokens(defaults.get("base_url").and_then(toml::Value::as_str));
+            let timeout_ms = defaults
+                .get("timeout_ms")
+                .and_then(toml::Value::as_integer)
+                .map(|value| format!("Some({value}u64)"))
+                .unwrap_or_else(|| "None".to_string());
+            format!(
+                "Some(::vulcan::extensions::api::ExtensionProviderDefaults {{ model: {model}, base_url: {base_url}, timeout_ms: {timeout_ms} }})"
+            )
+        }
+        None => "None".to_string(),
+    };
 
     format!(
-        "::vulcan::extensions::api::ExtensionManifest {{ id: {id_lit}.to_string(), version: {version_lit}.to_string(), daemon_entry: {daemon_entry_tokens}, requires: vec![{requires_tokens}] }}"
+        "::vulcan::extensions::api::ExtensionManifest {{ id: {id_lit}.to_string(), version: {version_lit}.to_string(), daemon_entry: {daemon_entry_tokens}, requires: vec![{requires_tokens}], requires_user_approval: {requires_user_approval}, provider_defaults: {provider_defaults_tokens} }}"
     )
     .parse()
     .expect("include_manifest! generated invalid tokens")
@@ -81,4 +104,10 @@ pub fn include_manifest(_input: TokenStream) -> TokenStream {
 
 fn rust_string_literal(value: &str) -> String {
     format!("{value:?}")
+}
+
+fn option_string_tokens(value: Option<&str>) -> String {
+    value
+        .map(|value| format!("Some({}.to_string())", rust_string_literal(value)))
+        .unwrap_or_else(|| "None".to_string())
 }

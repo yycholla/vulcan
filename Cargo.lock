@@ -7177,6 +7177,7 @@ dependencies = [
  "vulcan-core",
  "vulcan-ext-auto-commit",
  "vulcan-ext-input-demo",
+ "vulcan-ext-provider-demo",
  "vulcan-ext-todo",
 ]
 
@@ -7276,6 +7277,19 @@ dependencies = [
  "async-trait",
  "inventory",
  "parking_lot",
+ "tokio",
+ "tokio-util",
+ "vulcan-core",
+ "vulcan-extension-macros",
+]
+
+[[package]]
+name = "vulcan-ext-provider-demo"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "inventory",
  "tokio",
  "tokio-util",
  "vulcan-core",

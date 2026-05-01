@@ -53,6 +53,11 @@ pub struct ExtensionManifest {
     /// extension does not choose a policy at write time.
     #[serde(default)]
     pub branch_policy: Option<String>,
+    /// Provider defaults shipped by the extension. These seed the
+    /// extension-owned provider profile before user overrides are
+    /// applied from `~/.vulcan/config.toml`.
+    #[serde(default)]
+    pub provider_defaults: Option<ProviderDefaults>,
     /// Human-readable permissions summary surfaced in
     /// `vulcan extension list/show`.
     #[serde(default)]
@@ -73,6 +78,16 @@ pub struct ExtensionManifest {
     /// on the wire. Defaults to `false`.
     #[serde(default)]
     pub requires_user_approval: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct ProviderDefaults {
+    #[serde(default)]
+    pub model: Option<String>,
+    #[serde(default)]
+    pub base_url: Option<String>,
+    #[serde(default)]
+    pub timeout_ms: Option<u64>,
 }
 
 #[derive(Debug, Error)]
@@ -211,6 +226,31 @@ kind = "builtin"
 "#;
         let m = ExtensionManifest::from_toml_str(raw).unwrap();
         assert_eq!(m.branch_policy.as_deref(), Some("inherit_ref"));
+    }
+
+    #[test]
+    fn parses_provider_defaults() {
+        let raw = r#"
+id = "demo"
+name = "Demo"
+version = "0.1.0"
+
+[entry]
+kind = "builtin"
+
+[provider_defaults]
+model = "demo-echo"
+base_url = "vulcan-extension://demo.echo"
+timeout_ms = 30000
+"#;
+        let m = ExtensionManifest::from_toml_str(raw).unwrap();
+        let defaults = m.provider_defaults.unwrap();
+        assert_eq!(defaults.model.as_deref(), Some("demo-echo"));
+        assert_eq!(
+            defaults.base_url.as_deref(),
+            Some("vulcan-extension://demo.echo")
+        );
+        assert_eq!(defaults.timeout_ms, Some(30000));
     }
 
     #[test]

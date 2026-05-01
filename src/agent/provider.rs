@@ -5,11 +5,9 @@
 use anyhow::Result;
 use tokio_util::sync::CancellationToken;
 
+use super::{Agent, ModelSelection, is_local_base_url};
 use crate::config::{Config, ProviderConfig};
 use crate::context::ContextManager;
-use crate::provider::factory::{DefaultProviderFactory, ProviderFactory};
-
-use super::{Agent, ModelSelection, is_local_base_url};
 
 impl Agent {
     pub async fn available_models(&self) -> Result<Vec<crate::provider::catalog::ModelInfo>> {
@@ -27,12 +25,16 @@ impl Agent {
 
         let mut next_config = self.provider_config.clone();
         next_config.model = model_id.to_string();
-        let selection = Self::resolve_model_selection(
-            &next_config,
-            secrecy::ExposeSecret::expose_secret(&self.provider_api_key),
-        )
-        .await?;
-        let provider = DefaultProviderFactory.build(
+        let selection = if next_config.r#type.contains('.') {
+            extension_model_selection(&next_config)
+        } else {
+            Self::resolve_model_selection(
+                &next_config,
+                secrecy::ExposeSecret::expose_secret(&self.provider_api_key),
+            )
+            .await?
+        };
+        let provider = self.provider_factory.build(
             &next_config,
             secrecy::ExposeSecret::expose_secret(&self.provider_api_key),
             selection.max_context,
@@ -102,8 +104,10 @@ impl Agent {
         // base URL looks local or the user explicitly disabled catalog
         // fetching. Falls back to empty string so the OpenAI-compat path
         // sends `Authorization: Bearer ` and the server ignores it.
+        let provider_is_extension = next_config.r#type.contains('.');
         let api_key = match config.api_key_for(&next_config) {
             Some(k) => k,
+            None if provider_is_extension => String::new(),
             None if next_config.disable_catalog || is_local_base_url(&next_config.base_url) => {
                 String::new()
             }
@@ -115,8 +119,12 @@ impl Agent {
             }
         };
 
-        let selection = Self::resolve_model_selection(&next_config, &api_key).await?;
-        let provider = DefaultProviderFactory.build(
+        let selection = if provider_is_extension {
+            extension_model_selection(&next_config)
+        } else {
+            Self::resolve_model_selection(&next_config, &api_key).await?
+        };
+        let provider = self.provider_factory.build(
             &next_config,
             &api_key,
             selection.max_context,
@@ -276,5 +284,25 @@ impl Agent {
             model: model_info,
             max_context: effective_max_context,
         })
+    }
+}
+
+fn extension_model_selection(config: &ProviderConfig) -> ModelSelection {
+    ModelSelection {
+        model: crate::provider::catalog::ModelInfo {
+            id: config.model.clone(),
+            display_name: config.model.clone(),
+            context_length: config.max_context,
+            pricing: None,
+            features: crate::provider::catalog::ModelFeatures {
+                tools: true,
+                vision: false,
+                json_mode: false,
+                reasoning: false,
+            },
+            top_provider: Some(config.r#type.clone()),
+        },
+        max_context: config.max_context,
+        pricing: None,
     }
 }

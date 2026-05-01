@@ -686,7 +686,41 @@ fn list() -> Result<()> {
             f.path, kind_str, current_str, default_str, file_str, f.help
         );
     }
+    for (extension_id, field) in extension_provider_config_fields() {
+        let key = format!("extensions.{extension_id}.{}", field.path);
+        println!(
+            "{:<48} {:<14} {:<20} {:<20} {:<14} {}",
+            key,
+            extension_kind_label(&field.kind),
+            "(default)".yellow().to_string(),
+            field.default.dimmed().to_string(),
+            "config".green().to_string(),
+            field.help
+        );
+    }
     Ok(())
+}
+
+fn extension_provider_config_fields() -> Vec<(String, crate::extensions::ExtensionConfigField)> {
+    let registry = crate::extensions::ExtensionRegistry::new();
+    crate::extensions::api::wire_inventory_into_registry(&registry);
+    registry.active_config_fields()
+}
+
+fn extension_kind_label(kind: &crate::extensions::ExtensionFieldKind) -> String {
+    match kind {
+        crate::extensions::ExtensionFieldKind::Bool => "bool".cyan().to_string(),
+        crate::extensions::ExtensionFieldKind::Int { .. } => "int".blue().to_string(),
+        crate::extensions::ExtensionFieldKind::Float { .. } => "float".blue().to_string(),
+        crate::extensions::ExtensionFieldKind::Enum { .. } => "enum".yellow().to_string(),
+        crate::extensions::ExtensionFieldKind::String { secret: true } => {
+            "secret".red().to_string()
+        }
+        crate::extensions::ExtensionFieldKind::String { secret: false } => {
+            "string".green().to_string()
+        }
+        crate::extensions::ExtensionFieldKind::Path => "path".magenta().to_string(),
+    }
 }
 
 /// Colored kind badge for `list`.
@@ -762,6 +796,14 @@ fn show(reveal: bool) -> Result<()> {
                 println!("✓ {} = {}", f.path, display.green());
             }
         }
+    }
+    for (extension_id, field) in extension_provider_config_fields() {
+        println!(
+            "extensions.{extension_id}.{} {} {}",
+            field.path,
+            "=".dimmed(),
+            field.default.yellow()
+        );
     }
     Ok(())
 }

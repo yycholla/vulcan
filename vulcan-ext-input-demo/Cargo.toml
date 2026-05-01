@@ -13,6 +13,7 @@ path = "src/lib.rs"
 
 [dependencies]
 vulcan = { package = "vulcan-core", path = ".." }
+vulcan-extension-macros = { path = "../vulcan-extension-macros" }
 
 inventory = "0.3.24"
 async-trait = "0.1"

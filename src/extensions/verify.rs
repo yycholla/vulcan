@@ -133,6 +133,7 @@ mod tests {
             capabilities: Vec::new(),
             requires: Vec::new(),
             branch_policy: None,
+            provider_defaults: None,
             permissions: None,
             checksum: checksum.map(String::from),
             min_vulcan_version: min.map(String::from),

@@ -40,6 +40,7 @@ impl DaemonCodeExtension for AutoCommitExtension {
             ExtensionSource::Builtin,
         );
         m.status = ExtensionStatus::Active;
+        m.requires_user_approval = manifest.requires_user_approval;
         m.description = "Runs `git commit -am` on session_end when there are uncommitted \
                          changes in the Session's cwd."
             .to_string();
@@ -268,5 +269,6 @@ mod tests {
             manifest.daemon_entry.as_deref(),
             Some("vulcan_ext_auto_commit::AutoCommitExtension")
         );
+        assert!(!manifest.requires_user_approval);
     }
 }

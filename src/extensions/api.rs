@@ -31,6 +31,15 @@ pub struct ExtensionManifest {
     pub version: String,
     pub daemon_entry: Option<String>,
     pub requires: Vec<String>,
+    pub requires_user_approval: bool,
+    pub provider_defaults: Option<ExtensionProviderDefaults>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ExtensionProviderDefaults {
+    pub model: Option<String>,
+    pub base_url: Option<String>,
+    pub timeout_ms: Option<u64>,
 }
 
 /// Per-**Session** instantiation context handed to a
@@ -116,12 +125,12 @@ pub trait SessionExtension: Send + Sync {
     }
 
     /// Concrete provider instances this session extension contributes.
-    fn providers(&self) -> Vec<Box<dyn LLMProvider>> {
+    fn providers(&self) -> Vec<(String, Arc<dyn LLMProvider>)> {
         Vec::new()
     }
 
     /// Provider factories this session extension contributes.
-    fn provider_factories(&self) -> Vec<Arc<dyn ProviderFactory>> {
+    fn provider_factories(&self) -> Vec<(String, Arc<dyn ProviderFactory>)> {
         Vec::new()
     }
 
@@ -296,6 +305,66 @@ mod tests {
 
         assert_eq!(registered, 1);
         assert_eq!(hooks.handler_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn wire_daemon_extensions_marks_input_rewrite_approval_requirement() {
+        use crate::extensions::ExtensionRegistry;
+        use crate::hooks::{HookHandler, HookOutcome, HookRegistry, InputDecision};
+        use tokio_util::sync::CancellationToken;
+
+        struct RewriterSession;
+        struct RewriterHook;
+
+        #[async_trait::async_trait]
+        impl HookHandler for RewriterHook {
+            fn name(&self) -> &str {
+                "approval-ext"
+            }
+            async fn on_input(
+                &self,
+                _raw: &str,
+                _cancel: CancellationToken,
+            ) -> anyhow::Result<HookOutcome> {
+                Ok(HookOutcome::ReplaceInput("rewritten".into()))
+            }
+        }
+
+        impl SessionExtension for RewriterSession {
+            fn hook_handlers(&self) -> Vec<Arc<dyn HookHandler>> {
+                vec![Arc::new(RewriterHook)]
+            }
+        }
+
+        struct RewriterExtension;
+        impl DaemonCodeExtension for RewriterExtension {
+            fn metadata(&self) -> ExtensionMetadata {
+                let mut m = ExtensionMetadata::new(
+                    "approval-ext",
+                    "Approval Ext",
+                    "0.0.1",
+                    ExtensionSource::Builtin,
+                );
+                m.status = crate::extensions::ExtensionStatus::Active;
+                m.requires_user_approval = true;
+                m
+            }
+            fn instantiate(&self, _ctx: SessionExtensionCtx) -> Arc<dyn SessionExtension> {
+                Arc::new(RewriterSession)
+            }
+        }
+
+        let registry = ExtensionRegistry::new();
+        registry.register_daemon_extension(Arc::new(RewriterExtension));
+
+        let mut hooks = HookRegistry::new();
+        let registered = registry.wire_daemon_extensions(test_ctx(), &mut hooks);
+        assert_eq!(registered, 1);
+
+        match hooks.apply_on_input("raw", CancellationToken::new()).await {
+            InputDecision::Block(reason) => assert!(reason.contains("no pause channel")),
+            other => panic!("expected approval block, got {other:?}"),
+        }
     }
 
     #[test]

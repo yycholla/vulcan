@@ -20,6 +20,7 @@ use vulcan::extensions::{
     ExtensionCapability, ExtensionMetadata, ExtensionSource, ExtensionStatus,
 };
 use vulcan::hooks::{HookHandler, HookOutcome};
+use vulcan_extension_macros::include_manifest;
 
 const ID: &str = "input-demo";
 
@@ -33,14 +34,16 @@ impl Default for InputDemoExtension {
 
 impl DaemonCodeExtension for InputDemoExtension {
     fn metadata(&self) -> ExtensionMetadata {
+        let manifest = include_manifest!();
         let mut m = ExtensionMetadata::new(
-            ID,
+            manifest.id,
             "Input Demo",
-            env!("CARGO_PKG_VERSION"),
+            manifest.version,
             ExtensionSource::Builtin,
         );
         m.status = ExtensionStatus::Active;
         m.capabilities = vec![ExtensionCapability::InputInterceptor];
+        m.requires_user_approval = manifest.requires_user_approval;
         m.description = "Expands `!!` to the previous non-`!!` user message.".to_string();
         m
     }
@@ -112,6 +115,17 @@ mod tests {
                 "input-demo",
             ),
         }
+    }
+
+    #[test]
+    fn metadata_reads_manifest_approval_policy() {
+        let meta = InputDemoExtension.metadata();
+        assert_eq!(meta.id, ID);
+        assert!(
+            meta.capabilities
+                .contains(&ExtensionCapability::InputInterceptor)
+        );
+        assert!(!meta.requires_user_approval);
     }
 
     #[tokio::test]

@@ -141,6 +141,7 @@ fn parse_capability(raw: &str) -> Option<ExtensionCapability> {
         "prompt_injection" => Some(ExtensionCapability::PromptInjection),
         "hook_handler" => Some(ExtensionCapability::HookHandler),
         "tool_provider" => Some(ExtensionCapability::ToolProvider),
+        "provider" => Some(ExtensionCapability::Provider),
         "memory_backend" => Some(ExtensionCapability::MemoryBackend),
         "lifecycle_observer" => Some(ExtensionCapability::LifecycleObserver),
         "input_interceptor" => Some(ExtensionCapability::InputInterceptor),

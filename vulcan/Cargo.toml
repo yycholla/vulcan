@@ -32,6 +32,7 @@ vulcan-ext-todo = { path = "../vulcan-ext-todo" }
 # GH issue #557: input-intercept dogfood extension; same `extern crate`
 # anchoring rationale as auto-commit.
 vulcan-ext-input-demo = { path = "../vulcan-ext-input-demo" }
+vulcan-ext-provider-demo = { path = "../vulcan-ext-provider-demo" }
 
 tokio = { version = "1", features = ["full"] }
 clap = { version = "4", features = ["derive"] }

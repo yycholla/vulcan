@@ -30,6 +30,7 @@ use crate::extensions::{
 use crate::memory::SessionStore;
 use crate::memory::cortex::CortexStore;
 use crate::orchestration::OrchestrationStore;
+use crate::provider::factory::ExtensionProviderCatalog;
 use crate::run_record::{InMemoryRunStore, RunStore, SqliteRunStore};
 
 /// Daemon-owned set of expensive adapters shared across sessions.
@@ -60,6 +61,10 @@ pub struct RuntimeResourcePool {
     /// GH issue #552: daemon-owned extension state table, shared by
     /// every per-Session extension context.
     extension_state_store: Arc<dyn ExtensionStateStore>,
+    /// GH issue #554: extension-contributed providers and provider
+    /// factories keyed by their full extension-prefixed names
+    /// (`<extension_id>.<provider>`).
+    extension_provider_catalog: Arc<ExtensionProviderCatalog>,
     /// GH issue #557: daemon-owned **`ExtensionAuditLog`**. Shared
     /// across sessions — every per-Session `HookRegistry` records
     /// `InputIntercept` outcomes here. `vulcan extension audit`
@@ -115,6 +120,7 @@ impl RuntimeResourcePool {
         let extension_audit_log = Arc::new(ExtensionAuditLog::default());
         let extension_state_store: Arc<dyn ExtensionStateStore> =
             Arc::new(SqliteExtensionStateStore::try_new()?);
+        let extension_provider_catalog = Arc::new(ExtensionProviderCatalog::new());
 
         Ok(Self {
             session_store,
@@ -125,6 +131,7 @@ impl RuntimeResourcePool {
             cortex_store: None,
             extension_registry,
             extension_state_store,
+            extension_provider_catalog,
             extension_audit_log,
         })
     }
@@ -156,6 +163,7 @@ impl RuntimeResourcePool {
                 SqliteExtensionStateStore::try_open_in_memory()
                     .expect("in-memory extension state store"),
             ),
+            extension_provider_catalog: Arc::new(ExtensionProviderCatalog::new()),
             extension_audit_log: Arc::new(ExtensionAuditLog::default()),
         }
     }
@@ -204,6 +212,10 @@ impl RuntimeResourcePool {
 
     pub fn extension_state_store(&self) -> Arc<dyn ExtensionStateStore> {
         Arc::clone(&self.extension_state_store)
+    }
+
+    pub fn extension_provider_catalog(&self) -> Arc<ExtensionProviderCatalog> {
+        Arc::clone(&self.extension_provider_catalog)
     }
 
     /// GH issue #557: cloneable handle to the daemon-owned
