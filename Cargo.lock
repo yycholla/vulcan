@@ -7176,6 +7176,7 @@ dependencies = [
  "tracing-subscriber",
  "vulcan-core",
  "vulcan-ext-auto-commit",
+ "vulcan-ext-input-demo",
 ]
 
 [[package]]
@@ -7263,6 +7264,19 @@ dependencies = [
  "tracing",
  "vulcan-core",
  "vulcan-extension-macros",
+]
+
+[[package]]
+name = "vulcan-ext-input-demo"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "inventory",
+ "parking_lot",
+ "tokio",
+ "tokio-util",
+ "vulcan-core",
 ]
 
 [[package]]

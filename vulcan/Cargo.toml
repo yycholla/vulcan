@@ -28,6 +28,9 @@ vulcan = { package = "vulcan-core", path = ".." }
 # `use` the linker can drop unreferenced static items; the explicit
 # dep keeps the registration alive.
 vulcan-ext-auto-commit = { path = "../vulcan-ext-auto-commit" }
+# GH issue #557: input-intercept dogfood extension; same `extern crate`
+# anchoring rationale as auto-commit.
+vulcan-ext-input-demo = { path = "../vulcan-ext-input-demo" }
 
 tokio = { version = "1", features = ["full"] }
 clap = { version = "4", features = ["derive"] }
