@@ -39,6 +39,17 @@ async fn interactive_pick(config: &Config) -> Result<()> {
     }
 
     let id = interactive_pick_id(config).await?;
+    let theme = dialoguer::theme::ColorfulTheme::default();
+    let confirmed = dialoguer::Confirm::with_theme(&theme)
+        .with_prompt(format!("Use {id} as the active model?"))
+        .default(true)
+        .interact()
+        .context("confirmation cancelled")?;
+    if !confirmed {
+        println!("{}", "No changes.".dimmed());
+        return Ok(());
+    }
+
     let dir = vulcan_home();
     let force = false;
     use_model(&dir, config, &id, force).await
@@ -46,6 +57,12 @@ async fn interactive_pick(config: &Config) -> Result<()> {
 
 /// Fuzzy pick a model from the catalog. Returns the chosen model id.
 async fn interactive_pick_id(config: &Config) -> Result<String> {
+    if !std::io::stdin().is_terminal() {
+        bail!(
+            "interactive model selection requires a terminal. Use `vulcan model list` to browse, or `vulcan model use <id>` to set."
+        );
+    }
+
     let provider = config.active_provider_config();
     let api_key = config.api_key().unwrap_or_else(String::new);
     let models = fetch_catalog(provider, &api_key)
@@ -59,14 +76,7 @@ async fn interactive_pick_id(config: &Config) -> Result<String> {
     let theme = dialoguer::theme::ColorfulTheme::default();
     let labels: Vec<String> = models
         .iter()
-        .map(|m| {
-            let ctx = if m.context_length > 0 {
-                format!(" {}", m.context_length.to_string().dimmed())
-            } else {
-                String::new()
-            };
-            format!("{}{}", m.id, ctx)
-        })
+        .map(|m| format_model_picker_label(m))
         .collect();
 
     println!();
@@ -82,14 +92,8 @@ async fn interactive_pick_id(config: &Config) -> Result<String> {
 
 fn show(config: &Config) -> Result<()> {
     let provider = config.active_provider_config();
-    let label = config
-        .active_profile
-        .as_deref()
-        .unwrap_or("[provider] (legacy)");
-    println!("{}", "Active provider:".bold());
-    println!("  {} {label}", "profile:".dimmed());
-    println!("  {}  {}", "base_url:".dimmed(), provider.base_url);
-    println!("  {}      {}", "model:".dimmed(), provider.model.green());
+    let label = active_provider_label(config);
+    println!("{}", render_active_model_line(&label, provider));
     Ok(())
 }
 
@@ -106,22 +110,73 @@ async fn list(config: &Config) -> Result<()> {
         println!("(catalog empty)");
         return Ok(());
     }
-    // Styled header
-    println!(
-        "{} {} {}",
-        "id".bold().white().on_blue(),
-        "context".bold().white().on_blue(),
-        "display".bold().white().on_blue(),
-    );
-    for m in models {
-        let ctx = if m.context_length > 0 {
-            m.context_length.to_string().cyan().to_string()
-        } else {
-            "-".dimmed().to_string()
-        };
-        println!("{:<40} {:<10} {}", m.id, ctx, m.display_name.dimmed());
-    }
+    let label = active_provider_label(config);
+    print!("{}", render_model_list(&label, &models));
     Ok(())
+}
+
+fn active_provider_label(config: &Config) -> String {
+    config
+        .active_profile
+        .as_deref()
+        .filter(|name| config.providers.contains_key(*name))
+        .unwrap_or("legacy")
+        .to_string()
+}
+
+fn format_model_picker_label(model: &crate::provider::catalog::ModelInfo) -> String {
+    if model.context_length > 0 {
+        format!(
+            "{}  · ctx {}",
+            model.id,
+            format_token_count(model.context_length).dimmed()
+        )
+    } else {
+        format!("{}  · ctx {}", model.id, "unknown".dimmed())
+    }
+}
+
+fn render_active_model_line(label: &str, provider: &ProviderConfig) -> String {
+    let active = format!("{label} · {}", provider.model);
+    format!(
+        "{} {} {} {}\n",
+        "Active model:".bold(),
+        active.green(),
+        "· context".dimmed(),
+        format_token_count(provider.max_context).cyan()
+    )
+}
+
+fn render_model_list(label: &str, models: &[crate::provider::catalog::ModelInfo]) -> String {
+    let mut out = String::new();
+    out.push_str(&format!(
+        "{:<44} {:>12}  {}\n",
+        "MODEL ID".bold().white().on_blue(),
+        "CONTEXT".bold().white().on_blue(),
+        "PROVIDER".bold().white().on_blue()
+    ));
+    for model in models {
+        let context = if model.context_length > 0 {
+            format_token_count(model.context_length).cyan().to_string()
+        } else {
+            "unknown".dimmed().to_string()
+        };
+        out.push_str(&format!("{:<44} {:>12}  {}\n", model.id, context, label));
+    }
+    out
+}
+
+fn format_token_count(value: usize) -> String {
+    let raw = value.to_string();
+    let mut out = String::with_capacity(raw.len() + raw.len() / 3);
+    let first_group = raw.len() % 3;
+    for (idx, ch) in raw.chars().enumerate() {
+        if idx > 0 && (idx == first_group || (idx > first_group && (idx - first_group) % 3 == 0)) {
+            out.push(',');
+        }
+        out.push(ch);
+    }
+    out
 }
 
 async fn use_model(dir: &std::path::Path, config: &Config, id: &str, force: bool) -> Result<()> {
@@ -209,7 +264,52 @@ pub async fn fetch_catalog(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::provider::catalog::{ModelFeatures, ModelInfo};
     use tempfile::tempdir;
+
+    fn model(id: &str, display_name: &str, context_length: usize) -> ModelInfo {
+        ModelInfo {
+            id: id.to_string(),
+            display_name: display_name.to_string(),
+            context_length,
+            pricing: None,
+            features: ModelFeatures::default(),
+            top_provider: None,
+        }
+    }
+
+    #[test]
+    fn model_list_rows_include_id_context_and_provider() {
+        let models = vec![
+            model("openai/gpt-5", "GPT-5", 400_000),
+            model("openai/o4-mini", "o4 mini", 0),
+        ];
+
+        let rendered = render_model_list("openrouter", &models);
+
+        assert!(rendered.contains("MODEL ID"));
+        assert!(rendered.contains("CONTEXT"));
+        assert!(rendered.contains("PROVIDER"));
+        assert!(rendered.contains("openai/gpt-5"));
+        assert!(rendered.contains("400,000"));
+        assert!(rendered.contains("openrouter"));
+        assert!(rendered.contains("unknown"));
+    }
+
+    #[test]
+    fn active_model_line_includes_provider_model_and_context() {
+        let provider = ProviderConfig {
+            model: "gpt-5".into(),
+            max_context: 400_000,
+            ..ProviderConfig::default()
+        };
+
+        let rendered = render_active_model_line("fast", &provider);
+
+        assert!(rendered.contains("fast"));
+        assert!(rendered.contains("gpt-5"));
+        assert!(rendered.contains("400,000"));
+    }
 
     #[test]
     fn use_model_writes_to_named_provider_when_active_profile_set() {

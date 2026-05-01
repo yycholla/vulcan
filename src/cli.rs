@@ -451,6 +451,27 @@ pub enum AgentSubcommand {
     },
 }
 
+#[cfg(test)]
+mod model_tests {
+    use super::*;
+
+    #[test]
+    fn model_use_accepts_missing_id_for_interactive_picker() {
+        let cli = Cli::parse_from(["vulcan", "model", "use"]);
+
+        match cli.command {
+            Some(Command::Model {
+                cmd:
+                    Some(ModelSubcommand::Use {
+                        id: None,
+                        force: false,
+                    }),
+            }) => {}
+            other => panic!("unexpected parse: {other:?}"),
+        }
+    }
+}
+
 #[cfg(all(test, feature = "gateway"))]
 mod tests {
     use super::*;
