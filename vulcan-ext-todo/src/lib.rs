@@ -23,6 +23,9 @@ use vulcan::tools::{ProgressSink, ReplaySafety, Tool, ToolResult, details_from_t
 
 const ID: &str = "todo";
 
+#[cfg(feature = "tui")]
+pub mod tui;
+
 #[derive(Default)]
 pub struct TodoExtension;
 

@@ -9,3 +9,6 @@ repository = "https://github.com/yycholla/vulcan"
 
 [dependencies]
 anyhow = "1"
+vulcan = { package = "vulcan-core", path = ".." }
+vulcan-frontend-api = { path = "../vulcan-frontend-api" }
+vulcan-ext-todo = { path = "../vulcan-ext-todo", features = ["tui"] }

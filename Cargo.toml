@@ -106,6 +106,7 @@ async-trait = "0.1"
 # iterates `inventory::iter` at startup. Pure compile-time / link-time;
 # no dynamic loading.
 inventory = "0.3.24"
+vulcan-frontend-api = { path = "vulcan-frontend-api" }
 
 # Stream processing for SSE responses
 futures-util = "0.3"

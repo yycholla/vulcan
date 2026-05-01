@@ -7253,6 +7253,7 @@ dependencies = [
  "url",
  "uuid",
  "vulcan-ext-todo",
+ "vulcan-frontend-api",
 ]
 
 [[package]]
@@ -7308,6 +7309,7 @@ dependencies = [
  "tokio",
  "tokio-util",
  "vulcan-core",
+ "vulcan-frontend-api",
 ]
 
 [[package]]
@@ -7320,12 +7322,19 @@ dependencies = [
 [[package]]
 name = "vulcan-frontend-api"
 version = "0.1.0"
+dependencies = [
+ "inventory",
+ "serde_json",
+]
 
 [[package]]
 name = "vulcan-tui"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "vulcan-core",
+ "vulcan-ext-todo",
+ "vulcan-frontend-api",
 ]
 
 [[package]]

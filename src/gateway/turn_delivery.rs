@@ -337,7 +337,12 @@ fn stream_frame_to_event(frame: StreamFrame) -> Option<StreamEvent> {
                 .get("ok")
                 .and_then(|v| v.as_bool())
                 .unwrap_or(false),
-            output_preview: None,
+            output_preview: frame
+                .data
+                .get("output_preview")
+                .and_then(|v| v.as_str())
+                .map(str::to_string),
+            details: frame.data.get("details").cloned(),
             result_meta: frame
                 .data
                 .get("result_meta")

@@ -441,6 +441,8 @@ fn finish_tool_with_stamps_preview_and_timing() {
         Some("2 lines".into()),
         0,
         Some(345),
+        None,
+        None,
     );
     match &m.segments[0] {
         MessageSegment::ToolCall {

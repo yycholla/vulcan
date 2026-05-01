@@ -63,6 +63,8 @@ fn synthetic_transcript(count: usize) -> Vec<ChatMessage> {
                     Some("240 lines".to_string()),
                     0,
                     Some(7),
+                    None,
+                    None,
                 );
                 message.append_text(&format!(
                     "Agent response {i}: retained blocks avoid rebuilding offscreen markdown."

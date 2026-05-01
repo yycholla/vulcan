@@ -905,6 +905,7 @@ impl Agent {
                 // over the LLM-facing terse `output`.
                 let preview_source = result.display_preview.as_deref().unwrap_or(&result.output);
                 let output_preview = preview_output(preview_source);
+                let details = result.details.clone();
                 let result_meta = summarize_tool_result(&name, &result.output);
                 let elided = elided_lines(preview_source, output_preview.as_deref());
                 let _ = turn_tx
@@ -913,6 +914,7 @@ impl Agent {
                         name: name.clone(),
                         ok,
                         output_preview,
+                        details,
                         result_meta,
                         elided_lines: elided,
                         elapsed_ms,

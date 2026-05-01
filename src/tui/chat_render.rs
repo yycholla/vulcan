@@ -215,20 +215,31 @@ impl ChatRenderStore {
                         params_summary,
                         output_preview,
                         result_meta,
+                        custom_lines,
                         elided_lines,
                         elapsed_ms,
+                        ..
                     } => {
-                        lines.extend(tool_card(
-                            name,
-                            *status,
-                            params_summary.as_deref(),
-                            output_preview.as_deref(),
-                            result_meta.as_deref(),
-                            *elided_lines,
-                            *elapsed_ms,
-                            accent,
-                            options.width,
-                        ));
+                        if let Some(custom_lines) = custom_lines {
+                            lines.extend(custom_lines.iter().map(|line| {
+                                Line::from(vec![
+                                    Span::styled("▎ ", Style::default().fg(accent)),
+                                    Span::styled(line.clone(), Style::default()),
+                                ])
+                            }));
+                        } else {
+                            lines.extend(tool_card(
+                                name,
+                                *status,
+                                params_summary.as_deref(),
+                                output_preview.as_deref(),
+                                result_meta.as_deref(),
+                                *elided_lines,
+                                *elapsed_ms,
+                                accent,
+                                options.width,
+                            ));
+                        }
                     }
                     MessageSegment::Text(text) if !text.is_empty() => {
                         text_emitted = true;
@@ -436,6 +447,8 @@ mod tests {
             params_summary: Some("src/lib.rs".into()),
             output_preview: None,
             result_meta: None,
+            details: None,
+            custom_lines: None,
             elided_lines: 0,
             elapsed_ms: None,
         });
@@ -726,6 +739,8 @@ mod tests {
             Some("1 line".to_string()),
             0,
             Some(12),
+            None,
+            None,
         );
         message.append_text("The file is small.");
 
@@ -767,6 +782,41 @@ mod tests {
         assert!(rendered.iter().any(|line| line.contains("OK")));
     }
 
+    #[test]
+    fn custom_tool_render_lines_replace_default_tool_card() {
+        let mut store = ChatRenderStore::default();
+        let mut message = ChatMessage::new(ChatRole::Agent, "");
+        message.push_tool_start("todo_list");
+        message.finish_tool_with(
+            "todo_list",
+            true,
+            Some("1. buy milk".into()),
+            None,
+            0,
+            Some(12),
+            None,
+            Some(vec!["TODO".into(), "[ ] buy milk".into()]),
+        );
+
+        let options = ChatRenderOptions {
+            show_reasoning: true,
+            dense: true,
+            width: 80,
+            muted_style: Style::default(),
+        };
+        let block = store.render_message_block(0, &message, options, &Theme::system());
+        let text = block
+            .lines
+            .iter()
+            .map(line_text)
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(text.contains("TODO"), "{text}");
+        assert!(text.contains("[ ] buy milk"), "{text}");
+        assert!(!text.contains("todo_list"), "{text}");
+    }
+
     /// Snapshot-locks the visible rendering of a small fixed transcript.
     /// Catches accidental changes to spacing, prefixes, tool-card layout,
     /// and reasoning placement that the per-assertion tests above wouldn't
@@ -789,6 +839,8 @@ mod tests {
                     Some("1 line".to_string()),
                     0,
                     Some(12),
+                    None,
+                    None,
                 );
                 m.append_text("The file is a one-line `main`.");
                 m

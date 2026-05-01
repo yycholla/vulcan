@@ -31,6 +31,8 @@ pub enum MessageSegment {
         /// "5 matches", "+12 -3"). Renders as a dimmed sub-header in
         /// the YYC-74 card.
         result_meta: Option<String>,
+        details: Option<serde_json::Value>,
+        custom_lines: Option<Vec<String>>,
         /// Lines elided beyond the preview (YYC-78). When > 0 the card
         /// renders a "… N more lines elided" footer.
         elided_lines: usize,
@@ -156,6 +158,8 @@ impl ChatMessage {
             params_summary,
             output_preview: None,
             result_meta: None,
+            details: None,
+            custom_lines: None,
             elided_lines: 0,
             elapsed_ms: None,
         });
@@ -166,7 +170,7 @@ impl ChatMessage {
     /// Walks segments in reverse so concurrent dispatch (YYC-34) still
     /// pairs each end with its own start as the matching tail.
     pub fn finish_tool(&mut self, name: &str, ok: bool) {
-        self.finish_tool_with(name, ok, None, None, 0, None);
+        self.finish_tool_with(name, ok, None, None, 0, None, None, None);
     }
 
     /// Same as `finish_tool` but also stamps the result preview, meta
@@ -179,6 +183,8 @@ impl ChatMessage {
         result_meta: Option<String>,
         elided_lines: usize,
         elapsed_ms: Option<u64>,
+        details: Option<serde_json::Value>,
+        custom_lines: Option<Vec<String>>,
     ) {
         for seg in self.segments.iter_mut().rev() {
             if let MessageSegment::ToolCall {
@@ -186,6 +192,8 @@ impl ChatMessage {
                 status,
                 output_preview: op,
                 result_meta: rm,
+                details: d,
+                custom_lines: cl,
                 elided_lines: el,
                 elapsed_ms: em,
                 ..
@@ -196,6 +204,8 @@ impl ChatMessage {
                 *status = ToolStatus::Done(ok);
                 *op = output_preview;
                 *rm = result_meta;
+                *d = details;
+                *cl = custom_lines;
                 *el = elided_lines;
                 *em = elapsed_ms;
                 self.bump_render_version();

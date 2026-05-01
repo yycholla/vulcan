@@ -245,6 +245,7 @@ pub struct AppState {
     pub prompt_tokens_last: u32,
     pub token_max: u32,
     pub chat_render_store: RefCell<super::chat_render::ChatRenderStore>,
+    pub frontend: super::frontend::TuiFrontend,
 
     /// When true, overlays a session picker on top of the normal view.
     /// Set by `ResumeTarget::Pick` at startup; cleared when the user
@@ -386,6 +387,7 @@ impl AppState {
             prompt_tokens_last: 0,
             token_max,
             chat_render_store: RefCell::new(super::chat_render::ChatRenderStore::default()),
+            frontend: super::frontend::TuiFrontend::default(),
 
             show_session_picker: false,
             session_picker_selection: 0,

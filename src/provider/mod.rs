@@ -376,6 +376,7 @@ pub enum StreamEvent {
         name: String,
         ok: bool,
         output_preview: Option<String>,
+        details: Option<Value>,
         /// One-line metadata derived from the tool result (e.g.
         /// "847 lines · 26.8 KB", "5 matches", "+142 -3"). Rendered as
         /// a dimmed sub-header in the YYC-74 card.
