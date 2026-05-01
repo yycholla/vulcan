@@ -23,8 +23,8 @@ use std::path::PathBuf;
 
 use crate::artifact::{ArtifactStore, InMemoryArtifactStore, SqliteArtifactStore};
 use crate::code::lsp::LspManager;
-use crate::extensions::ExtensionRegistry;
 use crate::extensions::api::wire_inventory_into_registry;
+use crate::extensions::{ExtensionAuditLog, ExtensionRegistry};
 use crate::memory::SessionStore;
 use crate::memory::cortex::CortexStore;
 use crate::orchestration::OrchestrationStore;
@@ -55,6 +55,11 @@ pub struct RuntimeResourcePool {
     /// active daemon-side extensions from this registry to wire their
     /// per-Session hook handlers, tools, commands, providers.
     extension_registry: Arc<ExtensionRegistry>,
+    /// GH issue #557: daemon-owned **`ExtensionAuditLog`**. Shared
+    /// across sessions — every per-Session `HookRegistry` records
+    /// `InputIntercept` outcomes here. `vulcan extension audit`
+    /// reads from this same handle.
+    extension_audit_log: Arc<ExtensionAuditLog>,
 }
 
 impl RuntimeResourcePool {
@@ -102,6 +107,8 @@ impl RuntimeResourcePool {
             "RuntimeResourcePool: extension registry populated from inventory"
         );
 
+        let extension_audit_log = Arc::new(ExtensionAuditLog::default());
+
         Ok(Self {
             session_store,
             run_store,
@@ -110,6 +117,7 @@ impl RuntimeResourcePool {
             lsp_manager,
             cortex_store: None,
             extension_registry,
+            extension_audit_log,
         })
     }
 
@@ -136,6 +144,7 @@ impl RuntimeResourcePool {
             lsp_manager: Arc::new(LspManager::new(cwd)),
             cortex_store: None,
             extension_registry,
+            extension_audit_log: Arc::new(ExtensionAuditLog::default()),
         }
     }
 
@@ -179,6 +188,14 @@ impl RuntimeResourcePool {
     /// per-Session daemon extensions.
     pub fn extension_registry(&self) -> Arc<ExtensionRegistry> {
         Arc::clone(&self.extension_registry)
+    }
+
+    /// GH issue #557: cloneable handle to the daemon-owned
+    /// **`ExtensionAuditLog`**. Per-Session `HookRegistry`s record
+    /// `InputIntercept` outcomes here so `vulcan extension audit`
+    /// can surface them across sessions.
+    pub fn extension_audit_log(&self) -> Arc<ExtensionAuditLog> {
+        Arc::clone(&self.extension_audit_log)
     }
 }
 

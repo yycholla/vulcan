@@ -107,6 +107,18 @@ impl Agent {
         self.run_prompt_inner(input).await
     }
 
+    /// GH issue #557: invoke registered `on_input` hooks against
+    /// `raw` and surface the decision. Daemon entry points
+    /// (`prompt.run`, `prompt.stream`, gateway lane drains) call
+    /// this before slash dispatch / `run_prompt_*` so extensions can
+    /// block or rewrite raw user input. Audit log records every
+    /// non-Continue outcome via the registry's installed audit log.
+    pub async fn apply_on_input(&self, raw: &str) -> crate::hooks::InputDecision {
+        self.hooks
+            .apply_on_input(raw, self.turn_cancel.clone())
+            .await
+    }
+
     /// Slice 7: like [`Self::run_prompt_with_cancel`] but stamps the
     /// run record's `RunOrigin` so child runs land as
     /// `RunOrigin::Subagent { parent_run_id }` and `vulcan run show`

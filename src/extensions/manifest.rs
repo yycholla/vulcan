@@ -59,6 +59,12 @@ pub struct ExtensionManifest {
     pub min_vulcan_version: Option<String>,
     #[serde(default)]
     pub description: Option<String>,
+    /// GH issue #557: when `true`, the daemon routes a `ReplaceInput`
+    /// proposal from this extension's `on_input` hook through
+    /// `AgentPause` so the user confirms the rewrite before it lands
+    /// on the wire. Defaults to `false`.
+    #[serde(default)]
+    pub requires_user_approval: bool,
 }
 
 #[derive(Debug, Error)]
@@ -256,5 +262,33 @@ kind = "builtin"
         let serialized = toml::to_string(&m).unwrap();
         let parsed_back = ExtensionManifest::from_toml_str(&serialized).unwrap();
         assert_eq!(m, parsed_back);
+    }
+
+    #[test]
+    fn requires_user_approval_defaults_to_false_and_parses_when_present() {
+        let default_raw = r#"
+id = "input-demo"
+name = "Input Demo"
+version = "0.1.0"
+capabilities = ["input_interceptor"]
+
+[entry]
+kind = "builtin"
+"#;
+        let default_m = ExtensionManifest::from_toml_str(default_raw).unwrap();
+        assert!(!default_m.requires_user_approval);
+
+        let opted_in_raw = r#"
+id = "input-demo"
+name = "Input Demo"
+version = "0.1.0"
+capabilities = ["input_interceptor"]
+requires_user_approval = true
+
+[entry]
+kind = "builtin"
+"#;
+        let opted_in_m = ExtensionManifest::from_toml_str(opted_in_raw).unwrap();
+        assert!(opted_in_m.requires_user_approval);
     }
 }

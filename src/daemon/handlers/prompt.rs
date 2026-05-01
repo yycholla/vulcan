@@ -122,7 +122,33 @@ pub async fn run(state: Arc<DaemonState>, id: String, session_id: String, input:
     sess.set_agent_cancel(cancel_token.clone());
     let mut agent = agent_arc.lock().await;
     install_daemon_subagent_runner(&mut agent, Arc::clone(&state), &session_id);
-    let result = agent.run_prompt_with_cancel(input, cancel_token).await;
+
+    // GH issue #557: extensions with the `InputInterceptor` capability
+    // can block or rewrite raw user input via `on_input` before slash
+    // dispatch + turn execution. Block short-circuits here with the
+    // hook's reason; Replace swaps the input on the wire path; Continue
+    // forwards as-is.
+    let effective_input: String = match agent.apply_on_input(input).await {
+        crate::hooks::InputDecision::Continue => input.to_string(),
+        crate::hooks::InputDecision::Replace(rewrite) => rewrite,
+        crate::hooks::InputDecision::Block(reason) => {
+            drop(agent);
+            *sess.in_flight.lock() = false;
+            sess.touch();
+            return Response::error(
+                id,
+                ProtocolError {
+                    code: "INPUT_BLOCKED".into(),
+                    message: format!("input blocked by extension: {reason}"),
+                    retryable: false,
+                },
+            );
+        }
+    };
+
+    let result = agent
+        .run_prompt_with_cancel(&effective_input, cancel_token)
+        .await;
     drop(agent);
     *sess.in_flight.lock() = false;
     sess.touch();
@@ -206,9 +232,34 @@ pub fn stream(
         let cancel_token = tokio_util::sync::CancellationToken::new();
         sess_for_task.set_agent_cancel(cancel_token.clone());
 
+        // GH issue #557: run `on_input` interception before spawning
+        // the streaming task. Block short-circuits with INPUT_BLOCKED;
+        // Replace swaps the input forwarded to `run_prompt_stream_with_cancel`.
+        let effective_input: String = {
+            let agent = agent_arc.lock().await;
+            match agent.apply_on_input(&input).await {
+                crate::hooks::InputDecision::Continue => input.clone(),
+                crate::hooks::InputDecision::Replace(rewrite) => rewrite,
+                crate::hooks::InputDecision::Block(reason) => {
+                    drop(agent);
+                    *sess_for_task.in_flight.lock() = false;
+                    sess_for_task.touch();
+                    let _ = done_tx.send(Response::error(
+                        rid.clone(),
+                        ProtocolError {
+                            code: "INPUT_BLOCKED".into(),
+                            message: format!("input blocked by extension: {reason}"),
+                            retryable: false,
+                        },
+                    ));
+                    return;
+                }
+            }
+        };
+
         // Clone the Arc for the prompt task so the guard lives inside it.
         let agent_arc2 = agent_arc.clone();
-        let input2 = input.clone();
+        let input2 = effective_input;
         let cancel2 = cancel_token.clone();
         let session_id_for_runner = session_id.clone();
         let prompt_task = tokio::spawn(async move {

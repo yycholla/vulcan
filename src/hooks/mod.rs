@@ -84,6 +84,17 @@ pub enum ToolCallDecision {
     ReplaceArgs(Value),
 }
 
+/// Decision returned to the agent / daemon loop by `on_input`.
+/// `Block` short-circuits the prompt entirely; `Replace` swaps the raw
+/// user text before slash dispatch and turn execution; `Continue`
+/// passes the original input through unchanged.
+#[derive(Debug, Clone)]
+pub enum InputDecision {
+    Continue,
+    Block(String),
+    Replace(String),
+}
+
 /// A handler subscribes to the events it cares about by overriding the matching
 /// async methods. The default impls are no-ops, so a handler only needs to
 /// implement the ones it uses.
@@ -109,6 +120,13 @@ pub trait HookHandler: Send + Sync {
     }
 
     async fn on_turn_end(&self, _turn: u32, _cancel: CancellationToken) -> Result<HookOutcome> {
+        Ok(HookOutcome::Continue)
+    }
+
+    /// GH issue #557: intercept raw user input before slash dispatch
+    /// + turn execution. Outcomes honored: `Continue`, `BlockInput`,
+    /// `ReplaceInput`. Default `Continue`.
+    async fn on_input(&self, _raw: &str, _cancel: CancellationToken) -> Result<HookOutcome> {
         Ok(HookOutcome::Continue)
     }
 
@@ -269,12 +287,17 @@ pub struct HookRegistry {
     handlers: Vec<Arc<dyn HookHandler>>,
     handler_timeout: Duration,
     failure_metrics: HookFailureMetrics,
+    /// GH issue #557: optional audit log. When set, `apply_on_input`
+    /// records every non-Continue outcome as an `InputIntercept`
+    /// event. `None` means audit silently skips (CLI one-shot path).
+    audit_log: Option<Arc<crate::extensions::ExtensionAuditLog>>,
 }
 
 impl HookRegistry {
     pub fn new() -> Self {
         Self {
             handlers: Vec::new(),
+            audit_log: None,
             handler_timeout: Duration::from_secs(30),
             failure_metrics: HookFailureMetrics::default(),
         }
@@ -282,6 +305,15 @@ impl HookRegistry {
 
     pub fn with_timeout(mut self, timeout: Duration) -> Self {
         self.handler_timeout = timeout;
+        self
+    }
+
+    /// GH issue #557: install the daemon's `ExtensionAuditLog` so
+    /// `apply_on_input` can record `InputIntercept` rows on Block /
+    /// Replace outcomes. Optional — registries without an audit log
+    /// silently skip recording.
+    pub fn with_audit_log(mut self, log: Arc<crate::extensions::ExtensionAuditLog>) -> Self {
+        self.audit_log = Some(log);
         self
     }
 
@@ -579,6 +611,72 @@ impl HookRegistry {
                 self.run(h, h.on_session_shutdown(cancel.clone())).await,
             );
         }
+    }
+
+    /// GH issue #557: emit `on_input` to every handler. First
+    /// non-Continue outcome wins. `BlockInput` short-circuits the
+    /// prompt; `ReplaceInput` swaps the raw user text. Other outcome
+    /// variants are logged + ignored. Block / Replace outcomes are
+    /// also recorded to the registry's `ExtensionAuditLog` (when
+    /// installed via `with_audit_log`), with the handler's `name()`
+    /// as the audit `extension_id`.
+    pub async fn apply_on_input(&self, raw: &str, cancel: CancellationToken) -> InputDecision {
+        for h in &self.handlers {
+            match self.run(h, h.on_input(raw, cancel.clone())).await {
+                Some(HookOutcome::BlockInput { reason }) => {
+                    tracing::info!("hook {} blocked input: {reason}", h.name());
+                    self.record_input_intercept(
+                        h.name(),
+                        raw,
+                        raw,
+                        crate::extensions::InputInterceptAction::Block {
+                            reason: reason.clone(),
+                        },
+                    );
+                    return InputDecision::Block(reason);
+                }
+                Some(HookOutcome::ReplaceInput(rewrite)) => {
+                    tracing::info!("hook {} replaced input", h.name());
+                    self.record_input_intercept(
+                        h.name(),
+                        raw,
+                        &rewrite,
+                        crate::extensions::InputInterceptAction::Replace,
+                    );
+                    return InputDecision::Replace(rewrite);
+                }
+                Some(HookOutcome::Continue) | None => {}
+                Some(other) => {
+                    tracing::warn!(
+                        "hook {} returned {:?} for on_input (ignored)",
+                        h.name(),
+                        other
+                    );
+                }
+            }
+        }
+        InputDecision::Continue
+    }
+
+    fn record_input_intercept(
+        &self,
+        extension_id: &str,
+        before: &str,
+        after: &str,
+        action: crate::extensions::InputInterceptAction,
+    ) {
+        let Some(log) = self.audit_log.as_ref() else {
+            return;
+        };
+        log.record(crate::extensions::ExtensionAuditEvent::InputIntercept(
+            crate::extensions::InputInterceptEvent {
+                extension_id: extension_id.to_string(),
+                before: before.to_string(),
+                after: after.to_string(),
+                action,
+                occurred_at: chrono::Utc::now(),
+            },
+        ));
     }
 
     /// Emit BeforeToolCall. First non-Continue outcome wins.
@@ -1450,5 +1548,242 @@ mod tests {
                 .await
         );
         assert_eq!(later_calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn apply_on_input_records_audit_event_for_replace() {
+        use crate::extensions::{ExtensionAuditEvent, ExtensionAuditLog, InputInterceptAction};
+
+        struct Rewriter;
+
+        #[async_trait::async_trait]
+        impl HookHandler for Rewriter {
+            fn name(&self) -> &str {
+                "input-demo"
+            }
+            async fn on_input(
+                &self,
+                _raw: &str,
+                _cancel: CancellationToken,
+            ) -> Result<HookOutcome> {
+                Ok(HookOutcome::ReplaceInput("rewritten".into()))
+            }
+        }
+
+        let audit = Arc::new(ExtensionAuditLog::new(8));
+        let mut reg = HookRegistry::new().with_audit_log(audit.clone());
+        reg.register(Arc::new(Rewriter));
+
+        let _ = reg.apply_on_input("raw", CancellationToken::new()).await;
+
+        let recent = audit.recent(1);
+        assert_eq!(recent.len(), 1);
+        match &recent[0] {
+            ExtensionAuditEvent::InputIntercept(e) => {
+                assert_eq!(e.extension_id, "input-demo");
+                assert_eq!(e.before, "raw");
+                assert_eq!(e.after, "rewritten");
+                assert!(matches!(e.action, InputInterceptAction::Replace));
+            }
+            other => panic!("expected InputIntercept, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn apply_on_input_records_audit_event_for_block() {
+        use crate::extensions::{ExtensionAuditEvent, ExtensionAuditLog, InputInterceptAction};
+
+        struct Blocker;
+
+        #[async_trait::async_trait]
+        impl HookHandler for Blocker {
+            fn name(&self) -> &str {
+                "input-policy"
+            }
+            async fn on_input(
+                &self,
+                _raw: &str,
+                _cancel: CancellationToken,
+            ) -> Result<HookOutcome> {
+                Ok(HookOutcome::BlockInput {
+                    reason: "denied".into(),
+                })
+            }
+        }
+
+        let audit = Arc::new(ExtensionAuditLog::new(8));
+        let mut reg = HookRegistry::new().with_audit_log(audit.clone());
+        reg.register(Arc::new(Blocker));
+
+        let _ = reg.apply_on_input("hello", CancellationToken::new()).await;
+
+        let recent = audit.recent(1);
+        match &recent[0] {
+            ExtensionAuditEvent::InputIntercept(e) => {
+                assert_eq!(e.extension_id, "input-policy");
+                assert_eq!(e.before, "hello");
+                assert_eq!(e.after, "hello");
+                match &e.action {
+                    InputInterceptAction::Block { reason } => assert_eq!(reason, "denied"),
+                    _ => panic!("expected Block action"),
+                }
+            }
+            other => panic!("expected InputIntercept, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn apply_on_input_does_not_record_audit_when_continue() {
+        use crate::extensions::ExtensionAuditLog;
+
+        struct Noop;
+
+        #[async_trait::async_trait]
+        impl HookHandler for Noop {
+            fn name(&self) -> &str {
+                "noop"
+            }
+        }
+
+        let audit = Arc::new(ExtensionAuditLog::new(8));
+        let mut reg = HookRegistry::new().with_audit_log(audit.clone());
+        reg.register(Arc::new(Noop));
+
+        let _ = reg.apply_on_input("hello", CancellationToken::new()).await;
+
+        assert_eq!(audit.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn apply_on_input_returns_replace_when_hook_returns_replace_input() {
+        struct Rewriter;
+
+        #[async_trait::async_trait]
+        impl HookHandler for Rewriter {
+            fn name(&self) -> &str {
+                "rewriter"
+            }
+            async fn on_input(
+                &self,
+                _raw: &str,
+                _cancel: CancellationToken,
+            ) -> Result<HookOutcome> {
+                Ok(HookOutcome::ReplaceInput("rewritten".into()))
+            }
+        }
+
+        let mut reg = HookRegistry::new();
+        reg.register(Arc::new(Rewriter));
+
+        let decision = reg
+            .apply_on_input("original", CancellationToken::new())
+            .await;
+
+        match decision {
+            InputDecision::Replace(text) => assert_eq!(text, "rewritten"),
+            other => panic!("expected Replace, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn apply_on_input_returns_continue_when_no_hook_intervenes() {
+        struct Noop;
+
+        #[async_trait::async_trait]
+        impl HookHandler for Noop {
+            fn name(&self) -> &str {
+                "noop"
+            }
+        }
+
+        let mut reg = HookRegistry::new();
+        reg.register(Arc::new(Noop));
+
+        let decision = reg
+            .apply_on_input("untouched", CancellationToken::new())
+            .await;
+
+        assert!(matches!(decision, InputDecision::Continue));
+    }
+
+    #[tokio::test]
+    async fn apply_on_input_first_decision_wins_short_circuits_later_handlers() {
+        struct Rewriter;
+        struct LaterCounter(Arc<AtomicUsize>);
+
+        #[async_trait::async_trait]
+        impl HookHandler for Rewriter {
+            fn name(&self) -> &str {
+                "rewriter"
+            }
+            fn priority(&self) -> i32 {
+                10
+            }
+            async fn on_input(
+                &self,
+                _raw: &str,
+                _cancel: CancellationToken,
+            ) -> Result<HookOutcome> {
+                Ok(HookOutcome::ReplaceInput("rewritten".into()))
+            }
+        }
+
+        #[async_trait::async_trait]
+        impl HookHandler for LaterCounter {
+            fn name(&self) -> &str {
+                "later"
+            }
+            fn priority(&self) -> i32 {
+                20
+            }
+            async fn on_input(
+                &self,
+                _raw: &str,
+                _cancel: CancellationToken,
+            ) -> Result<HookOutcome> {
+                self.0.fetch_add(1, Ordering::SeqCst);
+                Ok(HookOutcome::Continue)
+            }
+        }
+
+        let later = Arc::new(AtomicUsize::new(0));
+        let mut reg = HookRegistry::new();
+        reg.register(Arc::new(Rewriter));
+        reg.register(Arc::new(LaterCounter(later.clone())));
+
+        let _ = reg.apply_on_input("hello", CancellationToken::new()).await;
+
+        assert_eq!(later.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn apply_on_input_returns_block_when_hook_returns_block_input() {
+        struct BlockingInput;
+
+        #[async_trait::async_trait]
+        impl HookHandler for BlockingInput {
+            fn name(&self) -> &str {
+                "blocking-input"
+            }
+            async fn on_input(
+                &self,
+                _raw: &str,
+                _cancel: CancellationToken,
+            ) -> Result<HookOutcome> {
+                Ok(HookOutcome::BlockInput {
+                    reason: "policy".into(),
+                })
+            }
+        }
+
+        let mut reg = HookRegistry::new();
+        reg.register(Arc::new(BlockingInput));
+
+        let decision = reg.apply_on_input("hello", CancellationToken::new()).await;
+
+        match decision {
+            InputDecision::Block(reason) => assert_eq!(reason, "policy"),
+            other => panic!("expected Block, got {other:?}"),
+        }
     }
 }

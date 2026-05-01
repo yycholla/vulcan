@@ -494,6 +494,12 @@ impl Agent {
         // No-op when the agent runs without a pool (CLI one-shot) or
         // when no daemon extensions are registered.
         if let Some(p) = pool.as_ref() {
+            // GH issue #557: install the daemon's shared audit log on
+            // the registry before extension hook handlers register so
+            // any `on_input` outcome they emit lands on the same ring
+            // the CLI / `vulcan extension audit` reads from.
+            hooks = hooks.with_audit_log(p.extension_audit_log());
+
             let ctx = crate::extensions::api::SessionExtensionCtx {
                 cwd: cwd.clone(),
                 session_id: session_id.clone(),

@@ -28,7 +28,10 @@ pub mod registry;
 pub mod store;
 pub mod verify;
 
-pub use audit::{ExtensionAuditEvent, ExtensionAuditLog, QuotaTracker};
+pub use audit::{
+    ExtensionAuditEvent, ExtensionAuditLog, InputInterceptAction, InputInterceptEvent,
+    PermissionAuditEvent, QuotaTracker,
+};
 pub use config_field::{ExtensionConfigField, ExtensionFieldKind};
 pub use draft::parse_skill_extension;
 pub use install_state::{InstallState, InstallStateStore, SqliteInstallStateStore};
@@ -96,6 +99,11 @@ pub enum ExtensionCapability {
     ToolProvider,
     MemoryBackend,
     LifecycleObserver,
+    /// GH issue #557: extension may register an `on_input` handler
+    /// that blocks or rewrites raw user input. Activation refuses
+    /// extensions that contribute an `on_input` hook without
+    /// declaring this capability.
+    InputInterceptor,
 }
 
 impl ExtensionCapability {
@@ -106,6 +114,7 @@ impl ExtensionCapability {
             ExtensionCapability::ToolProvider => "tool_provider",
             ExtensionCapability::MemoryBackend => "memory_backend",
             ExtensionCapability::LifecycleObserver => "lifecycle_observer",
+            ExtensionCapability::InputInterceptor => "input_interceptor",
         }
     }
 }
