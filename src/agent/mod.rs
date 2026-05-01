@@ -92,6 +92,7 @@ pub struct Agent {
     pub(in crate::agent) memory: Arc<SessionStore>,
     pub(in crate::agent) prompt_builder: PromptBuilder,
     pub(in crate::agent) hooks: Arc<HookRegistry>,
+    pub(in crate::agent) session_extensions: Vec<crate::extensions::api::SessionExtensionRuntime>,
     pub(in crate::agent) session_id: String,
     pub(in crate::agent) turns: u32,
     /// Per-turn cancellation token. `cancel_current_turn()` fires it; the
@@ -493,6 +494,7 @@ impl Agent {
         // `hook_handlers` registered into this Agent's `HookRegistry`.
         // No-op when the agent runs without a pool (CLI one-shot) or
         // when no daemon extensions are registered.
+        let mut session_extensions = Vec::new();
         if let Some(p) = pool.as_ref() {
             // GH issue #557: install the daemon's shared audit log on
             // the registry before extension hook handlers register so
@@ -504,12 +506,18 @@ impl Agent {
                 cwd: cwd.clone(),
                 session_id: session_id.clone(),
             };
-            let registered = p
+            session_extensions = p
                 .extension_registry()
-                .wire_daemon_extensions(ctx, &mut hooks);
-            if registered > 0 {
+                .wire_daemon_extensions_runtime(ctx, &hooks);
+            for ext in &session_extensions {
+                for tool in ext.wrapped_tools() {
+                    tools.register(tool);
+                }
+                ext.activate().await;
+            }
+            if !session_extensions.is_empty() {
                 tracing::info!(
-                    daemon_extensions = registered,
+                    daemon_extensions = session_extensions.len(),
                     "Agent: wired daemon-side cargo-crate extensions"
                 );
             }
@@ -649,6 +657,7 @@ impl Agent {
             memory,
             prompt_builder: PromptBuilder,
             hooks: Arc::new(hooks),
+            session_extensions,
             session_id,
             turns: 0,
             turn_cancel: CancellationToken::new(),
@@ -857,6 +866,7 @@ impl Agent {
             memory: Arc::new(SessionStore::in_memory()),
             prompt_builder: PromptBuilder,
             hooks: Arc::new(hooks),
+            session_extensions: Vec::new(),
             session_id: Uuid::new_v4().to_string(),
             turns: 0,
             turn_cancel: CancellationToken::new(),
@@ -905,6 +915,64 @@ impl Agent {
     /// `prompt.stream` holds for the duration of a turn.
     pub fn cancel_handle(&self) -> CancellationToken {
         self.turn_cancel.clone()
+    }
+
+    pub fn session_extension_ids(&self) -> Vec<String> {
+        self.session_extensions
+            .iter()
+            .map(|ext| ext.id().to_string())
+            .collect()
+    }
+
+    pub fn drain_session_extension(&self, id: &str) -> bool {
+        let mut changed = false;
+        for ext in &self.session_extensions {
+            if ext.id() == id {
+                ext.set_draining(true);
+                changed = true;
+            }
+        }
+        changed
+    }
+
+    pub async fn kill_session_extension(&mut self, id: &str) -> bool {
+        let mut kept = Vec::new();
+        let mut killed = false;
+        for ext in self.session_extensions.drain(..) {
+            if ext.id() == id {
+                ext.set_draining(true);
+                ext.deactivate().await;
+                killed = true;
+            } else {
+                kept.push(ext);
+            }
+        }
+        self.session_extensions = kept;
+        killed
+    }
+
+    pub async fn attach_session_extension(
+        &mut self,
+        id: &str,
+        registry: &crate::extensions::ExtensionRegistry,
+    ) -> Result<bool> {
+        if self.session_extensions.iter().any(|ext| ext.id() == id) {
+            return Ok(false);
+        }
+        let ctx = crate::extensions::api::SessionExtensionCtx {
+            cwd: self.tool_context.cwd.clone(),
+            session_id: self.session_id.clone(),
+        };
+        let Some(runtime) = registry.instantiate_daemon_extension_runtime(id, ctx, &self.hooks)
+        else {
+            return Ok(false);
+        };
+        for tool in runtime.wrapped_tools() {
+            self.tools.register(tool);
+        }
+        runtime.activate().await;
+        self.session_extensions.push(runtime);
+        Ok(true)
     }
 
     /// Borrow the shared LSP manager (YYC-46). Used by the

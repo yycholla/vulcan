@@ -11,7 +11,9 @@
 
 use std::path::{Path, PathBuf};
 
+use super::ExtensionSource;
 use super::manifest::{ExtensionManifest, ManifestError};
+use sha2::{Digest, Sha256};
 
 /// One entry surfaced by [`discover`]. Either the manifest
 /// parsed cleanly (`manifest = Some`) or the file parsed wrong
@@ -25,6 +27,10 @@ pub struct DiscoveredExtension {
     pub dir_id: String,
     /// Absolute path to the install directory.
     pub dir: PathBuf,
+    /// Scope this manifest came from.
+    pub source: ExtensionSource,
+    /// Stable checksum of the manifest file used for workspace trust.
+    pub manifest_checksum: Option<String>,
     /// Parsed manifest. `None` when the file is missing or
     /// invalid.
     pub manifest: Option<ExtensionManifest>,
@@ -42,8 +48,24 @@ pub struct DiscoveredExtension {
 /// `home` is the explicit Vulcan home — production code passes
 /// `crate::config::vulcan_home()`; tests pass a temp dir.
 pub fn discover(home: &Path) -> Vec<DiscoveredExtension> {
+    discover_root(home, ExtensionSource::LocalManifest)
+}
+
+/// Walk both the home extension store and `<workspace>/.vulcan/extensions`.
+pub fn discover_with_workspace(home: &Path, workspace: &Path) -> Vec<DiscoveredExtension> {
     let mut out = Vec::new();
-    let extensions_root = home.join("extensions");
+    out.extend(discover_root(home, ExtensionSource::LocalManifest));
+    out.extend(discover_root(
+        &workspace.join(".vulcan"),
+        ExtensionSource::UntrustedSource,
+    ));
+    out.sort_by(|a, b| a.dir_id.cmp(&b.dir_id).then_with(|| a.dir.cmp(&b.dir)));
+    out
+}
+
+fn discover_root(root: &Path, source: ExtensionSource) -> Vec<DiscoveredExtension> {
+    let mut out = Vec::new();
+    let extensions_root = root.join("extensions");
     if !extensions_root.is_dir() {
         return out;
     }
@@ -71,12 +93,16 @@ pub fn discover(home: &Path) -> Vec<DiscoveredExtension> {
                 Ok(manifest) => out.push(DiscoveredExtension {
                     dir_id,
                     dir,
+                    source: source.clone(),
+                    manifest_checksum: Some(manifest_checksum(&raw)),
                     manifest: Some(manifest),
                     parse_error: None,
                 }),
                 Err(err) => out.push(DiscoveredExtension {
                     dir_id,
                     dir,
+                    source: source.clone(),
+                    manifest_checksum: Some(manifest_checksum(&raw)),
                     manifest: None,
                     parse_error: Some(err),
                 }),
@@ -88,6 +114,19 @@ pub fn discover(home: &Path) -> Vec<DiscoveredExtension> {
     // OS-level readdir ordering.
     out.sort_by(|a, b| a.dir_id.cmp(&b.dir_id));
     out
+}
+
+pub fn manifest_checksum(raw: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(raw.as_bytes());
+    let digest = hasher.finalize();
+    let mut hex = String::with_capacity(7 + digest.len() * 2);
+    hex.push_str("sha256:");
+    for byte in digest.iter() {
+        use std::fmt::Write as _;
+        let _ = write!(&mut hex, "{byte:02x}");
+    }
+    hex
 }
 
 #[cfg(test)]

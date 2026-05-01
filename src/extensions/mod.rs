@@ -83,6 +83,10 @@ pub enum ExtensionSource {
     /// today this only carries metadata; code execution arrives
     /// once dynamic loading lands.
     LocalManifest,
+    /// Read from `<workspace>/.vulcan/extensions/<id>/extension.toml`.
+    /// Workspace-local manifests stay inactive until the user trusts
+    /// the exact workspace/id/checksum tuple.
+    UntrustedSource,
     /// Imported from a markdown skill (`<skills_dir>/<id>.md`)
     /// via the YYC-165 PR-2 promotion path.
     SkillDraft,

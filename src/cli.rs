@@ -295,6 +295,12 @@ pub enum ExtensionSubcommand {
     Enable { id: String },
     /// Demote install state to `enabled = false`.
     Disable { id: String },
+    /// Force-stop a live extension and disable future activation.
+    Kill { id: String },
+    /// Trust a workspace-discovered extension for this manifest checksum.
+    Trust { id: String },
+    /// Remove the workspace trust marker for an extension.
+    Untrust { id: String },
     /// Permanently delete the install directory + state row.
     Uninstall {
         id: String,

@@ -1347,7 +1347,7 @@ async fn fork_session_with_hooks_emits_before_fork_event() {
     }
 
     let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    let mut hooks = HookRegistry::new();
+    let hooks = HookRegistry::new();
     hooks.register(Arc::new(ForkHook(calls.clone())));
     let mut agent = Agent::for_test(
         Box::new(ProviderHandle(mock)),

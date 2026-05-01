@@ -15,12 +15,16 @@
 
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use super::ExtensionMetadata;
-use crate::hooks::HookHandler;
-use crate::provider::LLMProvider;
+use crate::hooks::{HookHandler, HookOutcome};
 use crate::provider::factory::ProviderFactory;
-use crate::tools::Tool;
+use crate::provider::{ChatResponse, LLMProvider, Message, StreamEvent, ToolCall};
+use crate::tools::{Tool, ToolProgress, ToolResult};
+use anyhow::Result;
+use serde_json::Value;
+use tokio_util::sync::CancellationToken;
 
 /// Parsed `[package.metadata.vulcan]` block for a cargo-crate
 /// extension. Produced by `vulcan_extension_macros::include_manifest!()`.
@@ -109,6 +113,294 @@ pub trait SessionExtension: Send + Sync {
 
     /// Lifecycle hook invoked when the session extension is deactivated.
     async fn on_deactivate(&self) {}
+}
+
+#[derive(Clone)]
+pub struct SessionExtensionRuntime {
+    id: String,
+    extension: Arc<dyn SessionExtension>,
+    draining: Arc<AtomicBool>,
+}
+
+impl SessionExtensionRuntime {
+    pub fn new(id: impl Into<String>, extension: Arc<dyn SessionExtension>) -> Self {
+        Self {
+            id: id.into(),
+            extension,
+            draining: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    pub fn id(&self) -> &str {
+        &self.id
+    }
+
+    pub fn is_draining(&self) -> bool {
+        self.draining.load(Ordering::SeqCst)
+    }
+
+    pub fn set_draining(&self, draining: bool) {
+        self.draining.store(draining, Ordering::SeqCst);
+    }
+
+    pub async fn deactivate(&self) {
+        self.extension.on_deactivate().await;
+    }
+
+    pub async fn activate(&self) {
+        self.extension.on_activate().await;
+    }
+
+    pub fn wrapped_hook_handlers(&self) -> Vec<Arc<dyn HookHandler>> {
+        self.extension
+            .hook_handlers()
+            .into_iter()
+            .map(|inner| {
+                Arc::new(DrainingHookHandler {
+                    inner,
+                    draining: Arc::clone(&self.draining),
+                }) as Arc<dyn HookHandler>
+            })
+            .collect()
+    }
+
+    pub fn wrapped_tools(&self) -> Vec<Arc<dyn Tool>> {
+        self.extension
+            .tools()
+            .into_iter()
+            .map(|inner| {
+                Arc::new(DrainingTool {
+                    inner,
+                    draining: Arc::clone(&self.draining),
+                }) as Arc<dyn Tool>
+            })
+            .collect()
+    }
+}
+
+struct DrainingHookHandler {
+    inner: Arc<dyn HookHandler>,
+    draining: Arc<AtomicBool>,
+}
+
+impl DrainingHookHandler {
+    fn should_skip_before_prompt(&self) -> bool {
+        self.draining.load(Ordering::SeqCst)
+    }
+}
+
+#[async_trait::async_trait]
+impl HookHandler for DrainingHookHandler {
+    fn name(&self) -> &str {
+        self.inner.name()
+    }
+
+    fn priority(&self) -> i32 {
+        self.inner.priority()
+    }
+
+    async fn before_prompt(
+        &self,
+        messages: &[Message],
+        cancel: CancellationToken,
+    ) -> Result<HookOutcome> {
+        if self.should_skip_before_prompt() {
+            return Ok(HookOutcome::Continue);
+        }
+        self.inner.before_prompt(messages, cancel).await
+    }
+
+    async fn on_turn_start(&self, turn: u32, cancel: CancellationToken) -> Result<HookOutcome> {
+        self.inner.on_turn_start(turn, cancel).await
+    }
+
+    async fn on_turn_end(&self, turn: u32, cancel: CancellationToken) -> Result<HookOutcome> {
+        self.inner.on_turn_end(turn, cancel).await
+    }
+
+    async fn on_input(&self, raw: &str, cancel: CancellationToken) -> Result<HookOutcome> {
+        self.inner.on_input(raw, cancel).await
+    }
+
+    async fn on_message_start(
+        &self,
+        delta: &StreamEvent,
+        cancel: CancellationToken,
+    ) -> Result<HookOutcome> {
+        self.inner.on_message_start(delta, cancel).await
+    }
+
+    async fn on_message_update(
+        &self,
+        delta: &StreamEvent,
+        cancel: CancellationToken,
+    ) -> Result<HookOutcome> {
+        self.inner.on_message_update(delta, cancel).await
+    }
+
+    async fn on_message_end(
+        &self,
+        delta: &StreamEvent,
+        cancel: CancellationToken,
+    ) -> Result<HookOutcome> {
+        self.inner.on_message_end(delta, cancel).await
+    }
+
+    async fn on_tool_execution_start(
+        &self,
+        call: &ToolCall,
+        cancel: CancellationToken,
+    ) -> Result<HookOutcome> {
+        self.inner.on_tool_execution_start(call, cancel).await
+    }
+
+    async fn on_tool_execution_update(
+        &self,
+        call: &ToolCall,
+        progress: &ToolProgress,
+        cancel: CancellationToken,
+    ) -> Result<HookOutcome> {
+        self.inner
+            .on_tool_execution_update(call, progress, cancel)
+            .await
+    }
+
+    async fn on_tool_execution_end(
+        &self,
+        call: &ToolCall,
+        cancel: CancellationToken,
+    ) -> Result<HookOutcome> {
+        self.inner.on_tool_execution_end(call, cancel).await
+    }
+
+    async fn on_context(
+        &self,
+        messages: &[Message],
+        cancel: CancellationToken,
+    ) -> Result<HookOutcome> {
+        if self.should_skip_before_prompt() {
+            return Ok(HookOutcome::Continue);
+        }
+        self.inner.on_context(messages, cancel).await
+    }
+
+    async fn on_before_provider_request(
+        &self,
+        messages: &[Message],
+        cancel: CancellationToken,
+    ) -> Result<HookOutcome> {
+        self.inner
+            .on_before_provider_request(messages, cancel)
+            .await
+    }
+
+    async fn on_after_provider_response(
+        &self,
+        response: &ChatResponse,
+        cancel: CancellationToken,
+    ) -> Result<HookOutcome> {
+        self.inner
+            .on_after_provider_response(response, cancel)
+            .await
+    }
+
+    async fn on_session_before_compact(
+        &self,
+        messages: &[Message],
+        cancel: CancellationToken,
+    ) -> Result<HookOutcome> {
+        self.inner.on_session_before_compact(messages, cancel).await
+    }
+
+    async fn on_session_compact(
+        &self,
+        summary: &str,
+        cancel: CancellationToken,
+    ) -> Result<HookOutcome> {
+        self.inner.on_session_compact(summary, cancel).await
+    }
+
+    async fn on_session_before_fork(&self, cancel: CancellationToken) -> Result<HookOutcome> {
+        self.inner.on_session_before_fork(cancel).await
+    }
+
+    async fn on_session_shutdown(&self, cancel: CancellationToken) -> Result<HookOutcome> {
+        self.inner.on_session_shutdown(cancel).await
+    }
+
+    async fn before_tool_call(
+        &self,
+        tool: &str,
+        args: &Value,
+        cancel: CancellationToken,
+    ) -> Result<HookOutcome> {
+        self.inner.before_tool_call(tool, args, cancel).await
+    }
+
+    async fn after_tool_call(
+        &self,
+        tool: &str,
+        result: &ToolResult,
+        cancel: CancellationToken,
+    ) -> Result<HookOutcome> {
+        self.inner.after_tool_call(tool, result, cancel).await
+    }
+
+    async fn before_agent_end(
+        &self,
+        final_response: &str,
+        cancel: CancellationToken,
+    ) -> Result<HookOutcome> {
+        self.inner.before_agent_end(final_response, cancel).await
+    }
+
+    async fn session_start(&self, session_id: &str) {
+        self.inner.session_start(session_id).await;
+    }
+
+    async fn session_end(&self, session_id: &str, total_turns: u32) {
+        self.inner.session_end(session_id, total_turns).await;
+    }
+}
+
+struct DrainingTool {
+    inner: Arc<dyn Tool>,
+    draining: Arc<AtomicBool>,
+}
+
+#[async_trait::async_trait]
+impl Tool for DrainingTool {
+    fn name(&self) -> &str {
+        self.inner.name()
+    }
+
+    fn description(&self) -> &str {
+        self.inner.description()
+    }
+
+    fn schema(&self) -> Value {
+        self.inner.schema()
+    }
+
+    async fn call(
+        &self,
+        params: Value,
+        cancel: CancellationToken,
+        progress: Option<crate::tools::ProgressSink>,
+    ) -> Result<ToolResult> {
+        if self.draining.load(Ordering::SeqCst) {
+            return Ok(ToolResult::err("extension draining"));
+        }
+        self.inner.call(params, cancel, progress).await
+    }
+
+    fn is_relevant(&self, ctx: &crate::tools::ToolContext) -> bool {
+        self.inner.is_relevant(ctx)
+    }
+
+    fn dynamic_description(&self, ctx: &crate::tools::ToolContext) -> Option<String> {
+        self.inner.dynamic_description(ctx)
+    }
 }
 
 /// Inventory-collected registration entry. Each extension crate
@@ -266,8 +558,8 @@ mod tests {
         let registry = ExtensionRegistry::new();
         registry.register_daemon_extension(Arc::new(WatcherExtension));
 
-        let mut hooks = HookRegistry::new();
-        let registered = registry.wire_daemon_extensions(test_ctx(), &mut hooks);
+        let hooks = HookRegistry::new();
+        let registered = registry.wire_daemon_extensions(test_ctx(), &hooks);
 
         assert_eq!(registered, 1);
         assert_eq!(hooks.handler_count(), 1);
@@ -356,5 +648,133 @@ mod tests {
         assert!(session.provider_factories().is_empty());
         session.on_activate().await;
         session.on_deactivate().await;
+    }
+
+    #[tokio::test]
+    async fn draining_runtime_skips_prompt_hooks_but_keeps_handler_registered() {
+        use crate::hooks::{HookOutcome, HookRegistry, InjectPosition};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        struct PromptSession {
+            calls: Arc<AtomicUsize>,
+        }
+
+        impl SessionExtension for PromptSession {
+            fn hook_handlers(&self) -> Vec<Arc<dyn HookHandler>> {
+                vec![Arc::new(PromptHook {
+                    calls: Arc::clone(&self.calls),
+                })]
+            }
+        }
+
+        struct PromptHook {
+            calls: Arc<AtomicUsize>,
+        }
+
+        #[async_trait::async_trait]
+        impl HookHandler for PromptHook {
+            fn name(&self) -> &str {
+                "prompt-hook"
+            }
+
+            async fn before_prompt(
+                &self,
+                _messages: &[Message],
+                _cancel: CancellationToken,
+            ) -> Result<HookOutcome> {
+                self.calls.fetch_add(1, Ordering::SeqCst);
+                Ok(HookOutcome::InjectMessages {
+                    messages: vec![Message::System {
+                        content: "injected".into(),
+                    }],
+                    position: InjectPosition::Append,
+                })
+            }
+        }
+
+        let calls = Arc::new(AtomicUsize::new(0));
+        let runtime = SessionExtensionRuntime::new(
+            "prompt-ext",
+            Arc::new(PromptSession {
+                calls: Arc::clone(&calls),
+            }),
+        );
+        let hooks = HookRegistry::new();
+        for handler in runtime.wrapped_hook_handlers() {
+            hooks.register(handler);
+        }
+        assert_eq!(hooks.handler_count(), 1);
+
+        let input = vec![Message::User {
+            content: "hi".into(),
+        }];
+        let out = hooks
+            .apply_before_prompt(&input, CancellationToken::new())
+            .await;
+        assert_eq!(out.len(), 2);
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+
+        runtime.set_draining(true);
+        let out = hooks
+            .apply_before_prompt(&input, CancellationToken::new())
+            .await;
+        assert_eq!(out.len(), 1);
+        assert!(matches!(
+            out.first(),
+            Some(Message::User { content }) if content == "hi"
+        ));
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn draining_runtime_refuses_new_tool_calls() {
+        struct ToolSession;
+        impl SessionExtension for ToolSession {
+            fn tools(&self) -> Vec<Arc<dyn Tool>> {
+                vec![Arc::new(EchoTool)]
+            }
+        }
+
+        struct EchoTool;
+        #[async_trait::async_trait]
+        impl Tool for EchoTool {
+            fn name(&self) -> &str {
+                "echo_ext"
+            }
+
+            fn description(&self) -> &str {
+                "echo"
+            }
+
+            fn schema(&self) -> Value {
+                serde_json::json!({})
+            }
+
+            async fn call(
+                &self,
+                _params: Value,
+                _cancel: CancellationToken,
+                _progress: Option<crate::tools::ProgressSink>,
+            ) -> Result<ToolResult> {
+                Ok(ToolResult::ok("ran"))
+            }
+        }
+
+        let runtime = SessionExtensionRuntime::new("tool-ext", Arc::new(ToolSession));
+        let tool = runtime.wrapped_tools().remove(0);
+        let result = tool
+            .call(serde_json::json!({}), CancellationToken::new(), None)
+            .await
+            .unwrap();
+        assert_eq!(result.output, "ran");
+        assert!(!result.is_error);
+
+        runtime.set_draining(true);
+        let result = tool
+            .call(serde_json::json!({}), CancellationToken::new(), None)
+            .await
+            .unwrap();
+        assert_eq!(result.output, "extension draining");
+        assert!(result.is_error);
     }
 }

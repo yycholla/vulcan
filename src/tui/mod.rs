@@ -122,7 +122,7 @@ pub async fn run_tui(
 
     // ── Hook registry: audit-log + (room for safety-gate, etc.). Built-in
     // hooks (skills) are registered by AgentBuilder.
-    let mut hook_reg = HookRegistry::new();
+    let hook_reg = HookRegistry::new();
     let (audit_hook, audit_buf) = AuditHook::new(200);
     hook_reg.register(audit_hook);
 

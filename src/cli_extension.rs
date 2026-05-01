@@ -10,8 +10,11 @@ use std::path::Path;
 
 use crate::cli::ExtensionSubcommand;
 use crate::config::vulcan_home;
+use crate::daemon::protocol::{Request, Response, read_frame_bytes, write_request};
 use crate::extensions::ExtensionRegistry;
-use crate::extensions::install_state::{InstallState, InstallStateStore, SqliteInstallStateStore};
+use crate::extensions::install_state::{
+    ExtensionTrustStore, InstallState, InstallStateStore, SqliteInstallStateStore,
+};
 
 pub async fn run(cmd: ExtensionSubcommand) -> Result<()> {
     let home = vulcan_home();
@@ -19,8 +22,11 @@ pub async fn run(cmd: ExtensionSubcommand) -> Result<()> {
     match cmd {
         ExtensionSubcommand::List => list(&home, &install),
         ExtensionSubcommand::Show { id } => show(&home, &install, &id),
-        ExtensionSubcommand::Enable { id } => set_enabled(&home, &install, &id, true),
-        ExtensionSubcommand::Disable { id } => set_enabled(&home, &install, &id, false),
+        ExtensionSubcommand::Enable { id } => set_enabled(&home, &install, &id, true).await,
+        ExtensionSubcommand::Disable { id } => set_enabled(&home, &install, &id, false).await,
+        ExtensionSubcommand::Kill { id } => kill(&home, &install, &id).await,
+        ExtensionSubcommand::Trust { id } => trust_workspace(&install, &id),
+        ExtensionSubcommand::Untrust { id } => untrust_workspace(&install, &id),
         ExtensionSubcommand::Uninstall { id, yes } => uninstall(&home, &install, &id, yes),
         ExtensionSubcommand::New { name, kind } => scaffold_new(&name, &kind),
         ExtensionSubcommand::Validate { path } => validate_at(&path),
@@ -33,7 +39,8 @@ fn list(home: &Path, install: &SqliteInstallStateStore) -> Result<()> {
     // GH issue #549: surface cargo-crate extensions registered via
     // `inventory::submit!` alongside manifest-discovered ones.
     crate::extensions::api::wire_inventory_into_registry(&registry);
-    let (ok, broken) = registry.load_from_store(home, install);
+    let cwd = std::env::current_dir()?;
+    let (ok, broken) = registry.load_from_store_and_workspace(home, &cwd, install, install);
     let entries = registry.list();
     if entries.is_empty() {
         println!("(no extensions installed)");
@@ -48,6 +55,7 @@ fn list(home: &Path, install: &SqliteInstallStateStore) -> Result<()> {
         let source = match meta.source {
             crate::extensions::ExtensionSource::Builtin => "builtin",
             crate::extensions::ExtensionSource::LocalManifest => "local",
+            crate::extensions::ExtensionSource::UntrustedSource => "workspace",
             crate::extensions::ExtensionSource::SkillDraft => "skill",
         };
         let desc_preview: String = meta
@@ -73,7 +81,8 @@ fn list(home: &Path, install: &SqliteInstallStateStore) -> Result<()> {
 fn show(home: &Path, install: &SqliteInstallStateStore, id: &str) -> Result<()> {
     let registry = ExtensionRegistry::new();
     crate::extensions::api::wire_inventory_into_registry(&registry);
-    registry.load_from_store(home, install);
+    let cwd = std::env::current_dir()?;
+    registry.load_from_store_and_workspace(home, &cwd, install, install);
     let meta = registry
         .get(id)
         .ok_or_else(|| anyhow!("extension `{id}` not installed"))?;
@@ -84,6 +93,7 @@ fn show(home: &Path, install: &SqliteInstallStateStore, id: &str) -> Result<()> 
     let source = match meta.source {
         crate::extensions::ExtensionSource::Builtin => "builtin",
         crate::extensions::ExtensionSource::LocalManifest => "local-manifest",
+        crate::extensions::ExtensionSource::UntrustedSource => "workspace-untrusted",
         crate::extensions::ExtensionSource::SkillDraft => "skill-draft",
     };
     println!("  source:      {source}");
@@ -116,7 +126,7 @@ fn show(home: &Path, install: &SqliteInstallStateStore, id: &str) -> Result<()> 
     Ok(())
 }
 
-fn set_enabled(
+async fn set_enabled(
     home: &Path,
     install: &SqliteInstallStateStore,
     id: &str,
@@ -125,14 +135,24 @@ fn set_enabled(
     // Confirm the manifest exists before flipping state — flipping
     // state on an unknown id would silently rot.
     let registry = ExtensionRegistry::new();
-    registry.load_from_store(home, install);
-    if registry.get(id).is_none() {
-        return Err(anyhow!("extension `{id}` not installed"));
+    let cwd = std::env::current_dir()?;
+    registry.load_from_store_and_workspace(home, &cwd, install, install);
+    let meta = registry
+        .get(id)
+        .ok_or_else(|| anyhow!("extension `{id}` not installed"))?;
+    if meta.source == crate::extensions::ExtensionSource::UntrustedSource
+        && meta.broken_reason.as_deref() == Some("workspace extension requires trust")
+        && enabled
+    {
+        return Err(anyhow!(
+            "extension `{id}` was discovered from this workspace and must be trusted first"
+        ));
     }
     // Upsert a state row if missing so subsequent flips have
     // something to mutate.
     if install.get(id)?.is_none() {
-        let manifest_path = home.join(format!("extensions/{id}/extension.toml"));
+        let manifest_path = manifest_path_for(home, &cwd, id)
+            .ok_or_else(|| anyhow!("extension `{id}` manifest not found"))?;
         let raw = std::fs::read_to_string(&manifest_path)
             .with_context(|| format!("read {}", manifest_path.display()))?;
         let manifest = crate::extensions::ExtensionManifest::from_toml_str(&raw)?;
@@ -148,6 +168,7 @@ fn set_enabled(
             if enabled { "enabled" } else { "disabled" },
             id
         );
+        notify_daemon_lifecycle(id, enabled).await?;
         return Ok(());
     }
     let flipped = install.set_enabled(id, enabled)?;
@@ -155,7 +176,109 @@ fn set_enabled(
         return Err(anyhow!("extension `{id}` not installed"));
     }
     println!("{} {id}", if enabled { "enabled" } else { "disabled" });
+    notify_daemon_lifecycle(id, enabled).await?;
     Ok(())
+}
+
+async fn kill(home: &Path, install: &SqliteInstallStateStore, id: &str) -> Result<()> {
+    set_enabled(home, install, id, false).await?;
+    if let Some(result) = call_daemon("extension.kill", serde_json::json!({ "id": id })).await? {
+        println!("live daemon: {}", serde_json::to_string(&result)?);
+    }
+    println!("warning: kill may break in-flight tool calls for `{id}`");
+    println!("force-stopped {id}");
+    Ok(())
+}
+
+async fn notify_daemon_lifecycle(id: &str, enabled: bool) -> Result<()> {
+    let method = if enabled {
+        "extension.enable"
+    } else {
+        "extension.disable"
+    };
+    if let Some(result) = call_daemon(method, serde_json::json!({ "id": id })).await? {
+        println!("live daemon: {}", serde_json::to_string(&result)?);
+    }
+    Ok(())
+}
+
+fn trust_workspace(install: &SqliteInstallStateStore, id: &str) -> Result<()> {
+    let cwd = std::env::current_dir()?;
+    let manifest_path = cwd.join(format!(".vulcan/extensions/{id}/extension.toml"));
+    let raw = std::fs::read_to_string(&manifest_path)
+        .with_context(|| format!("read {}", manifest_path.display()))?;
+    let manifest = crate::extensions::ExtensionManifest::from_toml_str(&raw)?;
+    if manifest.id != id {
+        return Err(anyhow!(
+            "manifest id `{}` does not match requested extension `{id}`",
+            manifest.id
+        ));
+    }
+    let checksum = crate::extensions::store::manifest_checksum(&raw);
+    let workspace_hash = workspace_hash(&cwd);
+    install.trust(&workspace_hash, id, &checksum)?;
+    if install.get(id)?.is_none() {
+        install.upsert(&InstallState {
+            id: manifest.id,
+            version: manifest.version,
+            enabled: false,
+            installed_at: chrono::Utc::now(),
+            last_load_error: None,
+        })?;
+    }
+    println!("trusted {id} for workspace {}", cwd.display());
+    println!("Run `vulcan extension enable {id}` to activate.");
+    Ok(())
+}
+
+fn untrust_workspace(install: &SqliteInstallStateStore, id: &str) -> Result<()> {
+    let cwd = std::env::current_dir()?;
+    let removed = install.untrust(&workspace_hash(&cwd), id)?;
+    if removed {
+        println!("untrusted {id} for workspace {}", cwd.display());
+    } else {
+        println!("no trust marker for {id} in workspace {}", cwd.display());
+    }
+    Ok(())
+}
+
+fn manifest_path_for(home: &Path, workspace: &Path, id: &str) -> Option<std::path::PathBuf> {
+    let home_path = home.join(format!("extensions/{id}/extension.toml"));
+    if home_path.is_file() {
+        return Some(home_path);
+    }
+    let workspace_path = workspace.join(format!(".vulcan/extensions/{id}/extension.toml"));
+    workspace_path.is_file().then_some(workspace_path)
+}
+
+fn workspace_hash(workspace: &Path) -> String {
+    crate::extensions::store::manifest_checksum(&workspace.display().to_string())
+}
+
+async fn call_daemon(method: &str, params: serde_json::Value) -> Result<Option<serde_json::Value>> {
+    let sock_path = vulcan_home().join("vulcan.sock");
+    let mut stream = match tokio::net::UnixStream::connect(&sock_path).await {
+        Ok(stream) => stream,
+        Err(_) => return Ok(None),
+    };
+    let req = Request {
+        version: 1,
+        id: format!("cli-{method}"),
+        session: "main".into(),
+        method: method.into(),
+        params,
+    };
+    write_request(&mut stream, &req)
+        .await
+        .context("writing daemon lifecycle request")?;
+    let body = read_frame_bytes(&mut stream)
+        .await
+        .context("reading daemon lifecycle response")?;
+    let resp: Response = serde_json::from_slice(&body).context("decoding daemon response")?;
+    if let Some(err) = resp.error {
+        anyhow::bail!("{}: {}", err.code, err.message);
+    }
+    Ok(resp.result)
 }
 
 fn uninstall(
