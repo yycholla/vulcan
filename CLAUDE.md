@@ -61,7 +61,7 @@ The project was renamed from `ferris` → `vulcan`. Some references still say "f
 <!-- gitnexus:start -->
 # GitNexus — Code Intelligence
 
-This project is indexed by GitNexus as **vulcan** (6393 symbols, 16795 relationships, 300 execution flows). Use the GitNexus MCP tools to understand code, assess impact, and navigate safely.
+This project is indexed by GitNexus as **vulcan** (6752 symbols, 17643 relationships, 300 execution flows). Use the GitNexus MCP tools to understand code, assess impact, and navigate safely.
 
 > If any GitNexus tool warns the index is stale, run `npx gitnexus analyze` in terminal first.
 
@@ -101,3 +101,17 @@ This project is indexed by GitNexus as **vulcan** (6393 symbols, 16795 relations
 | Index, status, clean, wiki CLI commands | `.claude/skills/gitnexus/gitnexus-cli/SKILL.md` |
 
 <!-- gitnexus:end -->
+
+## Agent skills
+
+### Backlog
+
+GitHub Issues on `yycholla/vulcan` via `gh` CLI. See `docs/agents/backlog.md`.
+
+### Triage labels
+
+Canonical strings (`needs-triage`, `needs-info`, `ready-for-agent`, `ready-for-human`, `wontfix`); only `wontfix` exists today, others to be created. See `docs/agents/triage-labels.md`.
+
+### Domain docs
+
+Multi-context: `CONTEXT-MAP.md` + root `CONTEXT.md` + per-area `src/<area>/CONTEXT.md` (agent, daemon, gateway, hooks, provider, tools, tui). See `docs/agents/domain.md`.
