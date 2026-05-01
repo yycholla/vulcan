@@ -18,6 +18,7 @@ use std::sync::Arc;
 
 use super::ExtensionMetadata;
 use crate::hooks::HookHandler;
+use crate::memory::SessionStore;
 use crate::provider::LLMProvider;
 use crate::provider::factory::ProviderFactory;
 use crate::tools::Tool;
@@ -36,7 +37,7 @@ pub struct ExtensionManifest {
 /// the auto-commit dogfood needs today; grows toward the full
 /// `ExtensionContext` (model, provider, pause, state, ui, ...) as
 /// later slices land.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct SessionExtensionCtx {
     /// Working directory of the **Session** the extension is being
     /// instantiated for. Auto-commit reads this to know which repo to
@@ -45,6 +46,9 @@ pub struct SessionExtensionCtx {
     /// **Session** identifier. Routes telemetry, audit log entries,
     /// and per-session state under a stable key.
     pub session_id: String,
+    /// Durable Session History store for replaying extension state from
+    /// prior tool results during `session_start`.
+    pub memory: Arc<SessionStore>,
 }
 
 /// Daemon-global registration for an extension. One implementation per
@@ -148,6 +152,7 @@ pub fn wire_inventory_into_registry(registry: &super::ExtensionRegistry) -> usiz
 mod tests {
     use super::*;
     use crate::extensions::ExtensionSource;
+    use crate::hooks::HookRegistry;
 
     struct StubExtension;
 
@@ -172,6 +177,7 @@ mod tests {
         SessionExtensionCtx {
             cwd: PathBuf::from("/tmp/test-session"),
             session_id: "test-session-id".to_string(),
+            memory: Arc::new(SessionStore::in_memory()),
         }
     }
 
@@ -273,6 +279,73 @@ mod tests {
     }
 
     #[test]
+    fn wire_daemon_extensions_registers_session_tools_with_prefix() {
+        use crate::extensions::ExtensionRegistry;
+        use crate::tools::{Tool, ToolRegistry, ToolResult};
+        use serde_json::json;
+        use tokio_util::sync::CancellationToken;
+
+        struct LocalTool;
+        #[async_trait::async_trait]
+        impl Tool for LocalTool {
+            fn name(&self) -> &str {
+                "ping"
+            }
+            fn description(&self) -> &str {
+                "Ping"
+            }
+            fn schema(&self) -> serde_json::Value {
+                json!({ "type": "object", "properties": {} })
+            }
+            async fn call(
+                &self,
+                _params: serde_json::Value,
+                _cancel: CancellationToken,
+                _progress: Option<crate::tools::ProgressSink>,
+            ) -> anyhow::Result<ToolResult> {
+                Ok(ToolResult::ok("pong"))
+            }
+        }
+
+        struct ToolSession;
+        impl SessionExtension for ToolSession {
+            fn tools(&self) -> Vec<Arc<dyn Tool>> {
+                vec![Arc::new(LocalTool)]
+            }
+        }
+
+        struct ToolExtension;
+        impl DaemonCodeExtension for ToolExtension {
+            fn metadata(&self) -> ExtensionMetadata {
+                let mut m = ExtensionMetadata::new(
+                    "tool-ext",
+                    "Tool Ext",
+                    "0.0.1",
+                    ExtensionSource::Builtin,
+                );
+                m.status = crate::extensions::ExtensionStatus::Active;
+                m
+            }
+            fn instantiate(&self, _ctx: SessionExtensionCtx) -> Arc<dyn SessionExtension> {
+                Arc::new(ToolSession)
+            }
+        }
+
+        let registry = ExtensionRegistry::new();
+        registry.register_daemon_extension(Arc::new(ToolExtension));
+        let mut hooks = HookRegistry::new();
+        let mut tools = ToolRegistry::new();
+
+        let (sessions, extension_tools) =
+            registry.wire_daemon_extensions_into_runtime(test_ctx(), &mut hooks, Some(&mut tools));
+
+        assert_eq!(sessions, 1);
+        assert_eq!(extension_tools, 1);
+        assert!(tools.contains("tool-ext_ping"));
+        assert!(!tools.contains("ping"));
+    }
+
+    #[test]
     fn session_extension_ctx_carries_cwd_and_session_id_to_instantiate() {
         use parking_lot::RwLock;
         use std::path::PathBuf;
@@ -297,6 +370,7 @@ mod tests {
         let ctx = SessionExtensionCtx {
             cwd: PathBuf::from("/tmp/example-session"),
             session_id: "sess-42".to_string(),
+            memory: Arc::new(SessionStore::in_memory()),
         };
         let _ = ext.instantiate(ctx);
 

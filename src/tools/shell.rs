@@ -1124,6 +1124,7 @@ fn format_command_result(exit_code: i32, success: bool, stdout: &str, stderr: &s
         output: result,
         media: Vec::new(),
         is_error: !success,
+        details: None,
         display_preview: None,
         edit_diff: None,
     }

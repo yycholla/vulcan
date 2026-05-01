@@ -21,6 +21,11 @@ pub struct ToolResult {
     pub output: String,
     pub media: Vec<String>,
     pub is_error: bool,
+    /// Extension-owned structured state carried alongside the
+    /// LLM-facing output. Session extensions can replay this from
+    /// persisted tool messages when reconstructing per-session state.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub details: Option<Value>,
     /// Optional richer body the TUI uses for the YYC-74 card preview.
     /// Lets file-edit tools render an actual diff (`+ ... / - ...`)
     /// inside the card while the LLM-facing `output` stays terse
@@ -41,6 +46,7 @@ impl ToolResult {
             output: output.into(),
             media: Vec::new(),
             is_error: false,
+            details: None,
             display_preview: None,
             edit_diff: None,
         }
@@ -51,9 +57,15 @@ impl ToolResult {
             output: output.into(),
             media: Vec::new(),
             is_error: true,
+            details: None,
             display_preview: None,
             edit_diff: None,
         }
+    }
+
+    pub fn with_details(mut self, details: Value) -> Self {
+        self.details = Some(details);
+        self
     }
 
     pub fn with_display_preview(mut self, preview: impl Into<String>) -> Self {
@@ -539,6 +551,32 @@ impl ToolRegistry {
         self.tools.insert(tool.name().to_string(), tool);
     }
 
+    pub fn contains(&self, name: &str) -> bool {
+        self.tools.contains_key(name)
+    }
+
+    pub fn register_extension_tools(
+        &mut self,
+        extension_id: &str,
+        tools: Vec<Arc<dyn Tool>>,
+    ) -> std::result::Result<usize, String> {
+        let prefix = format!("{extension_id}_");
+        let mut pending = Vec::new();
+        for tool in tools {
+            let name = format!("{prefix}{}", tool.name());
+            if self.tools.contains_key(&name) || pending.iter().any(|(n, _)| n == &name) {
+                return Err(format!("tool name collision for `{name}`"));
+            }
+            pending.push((name, tool));
+        }
+        let count = pending.len();
+        for (name, tool) in pending {
+            self.tools
+                .insert(name.clone(), Arc::new(PrefixedTool { name, inner: tool }));
+        }
+        Ok(count)
+    }
+
     /// YYC-181: apply a named tool capability profile to this
     /// registry. Drops every tool not in `profile.allowed` and
     /// records `profile.name` so callers (run records, doctor,
@@ -657,6 +695,53 @@ impl ToolRegistry {
 
         tool.call(params, cancel, progress).await
     }
+}
+
+struct PrefixedTool {
+    name: String,
+    inner: Arc<dyn Tool>,
+}
+
+#[async_trait::async_trait]
+impl Tool for PrefixedTool {
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    fn description(&self) -> &str {
+        self.inner.description()
+    }
+
+    fn schema(&self) -> Value {
+        self.inner.schema()
+    }
+
+    async fn call(
+        &self,
+        params: Value,
+        cancel: CancellationToken,
+        progress: Option<ProgressSink>,
+    ) -> Result<ToolResult> {
+        self.inner.call(params, cancel, progress).await
+    }
+
+    fn is_relevant(&self, ctx: &ToolContext) -> bool {
+        self.inner.is_relevant(ctx)
+    }
+
+    fn dynamic_description(&self, ctx: &ToolContext) -> Option<String> {
+        self.inner.dynamic_description(ctx)
+    }
+
+    fn replay_safety(&self) -> ReplaySafety {
+        self.inner.replay_safety()
+    }
+}
+
+pub fn details_from_tool_message(content: &str) -> Option<Value> {
+    serde_json::from_str::<Value>(content)
+        .ok()
+        .and_then(|v| v.get("details").cloned())
 }
 
 /// Returns a comma-separated list of `required` schema fields that are

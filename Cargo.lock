@@ -7177,6 +7177,7 @@ dependencies = [
  "vulcan-core",
  "vulcan-ext-auto-commit",
  "vulcan-ext-input-demo",
+ "vulcan-ext-todo",
 ]
 
 [[package]]
@@ -7250,6 +7251,7 @@ dependencies = [
  "tree-sitter-typescript",
  "url",
  "uuid",
+ "vulcan-ext-todo",
 ]
 
 [[package]]
@@ -7274,6 +7276,21 @@ dependencies = [
  "async-trait",
  "inventory",
  "parking_lot",
+ "tokio",
+ "tokio-util",
+ "vulcan-core",
+]
+
+[[package]]
+name = "vulcan-ext-todo"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "inventory",
+ "parking_lot",
+ "serde",
+ "serde_json",
  "tokio",
  "tokio-util",
  "vulcan-core",

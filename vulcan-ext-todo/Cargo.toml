@@ -1,0 +1,31 @@
+[package]
+name = "vulcan-ext-todo"
+version = "0.1.0"
+edition = "2024"
+description = "Todo dogfood Vulcan extension"
+authors = ["Colin Hanway"]
+license = "MIT"
+repository = "https://github.com/yycholla/vulcan"
+
+[lib]
+name = "vulcan_ext_todo"
+path = "src/lib.rs"
+
+[dependencies]
+vulcan = { package = "vulcan-core", path = ".." }
+
+inventory = "0.3.24"
+async-trait = "0.1"
+parking_lot = "0.12"
+anyhow = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio-util = { version = "0.7.18", features = ["rt"] }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt"] }
+
+[package.metadata.vulcan]
+id = "todo"
+daemon_entry = "vulcan_ext_todo::TodoExtension"
+capabilities = ["tool_provider"]

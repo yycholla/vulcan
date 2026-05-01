@@ -9,6 +9,7 @@ members = [
     "vulcan-frontend-api",
     "vulcan-extension-macros",
     "vulcan-ext-auto-commit",
+    "vulcan-ext-todo",
     "vulcan-ext-input-demo",
 ]
 resolver = "2"
@@ -290,6 +291,7 @@ insta = "1.47.2"
 # E2E binary test harness for daemon subcommand (YYC-266).
 assert_cmd = "2.2.1"
 predicates = "3.1.4"
+vulcan-ext-todo = { path = "vulcan-ext-todo" }
 
 [[bench]]
 name = "tui_render"

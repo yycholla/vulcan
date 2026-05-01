@@ -105,6 +105,7 @@ mod tests {
         SessionExtensionCtx {
             cwd: std::path::PathBuf::from("/tmp/test"),
             session_id: "test-session".to_string(),
+            memory: Arc::new(vulcan::memory::SessionStore::in_memory()),
         }
     }
 

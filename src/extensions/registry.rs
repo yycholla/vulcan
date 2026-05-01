@@ -12,6 +12,7 @@ use std::sync::Arc;
 use super::api::{DaemonCodeExtension, SessionExtensionCtx};
 use super::{ExtensionCapability, ExtensionConfigField, ExtensionMetadata, ExtensionStatus};
 use crate::hooks::{HookHandler, HookRegistry};
+use crate::tools::ToolRegistry;
 
 /// YYC-227 (YYC-165 PR-4): trait an in-process, code-backed
 /// extension implements. Implementors live alongside the
@@ -218,9 +219,24 @@ impl ExtensionRegistry {
         ctx: SessionExtensionCtx,
         hooks: &mut HookRegistry,
     ) -> usize {
+        self.wire_daemon_extensions_into_runtime(ctx, hooks, None).0
+    }
+
+    /// GH issue #550: per-**Session** runtime wire-up. Extends the
+    /// hook-only path with extension-provided tools registered under the
+    /// `<extension_id>_` namespace. Any collision marks the extension
+    /// `Broken` and skips its contributions.
+    pub fn wire_daemon_extensions_into_runtime(
+        &self,
+        ctx: SessionExtensionCtx,
+        hooks: &mut HookRegistry,
+        mut tools: Option<&mut ToolRegistry>,
+    ) -> (usize, usize) {
         let mut count = 0usize;
+        let mut tool_count = 0usize;
         let metadata_snapshot = self.inner.read().clone();
         let daemon_snapshot = self.daemon_extensions.read().clone();
+        let mut active_prefixes = std::collections::HashSet::new();
         for ext in daemon_snapshot {
             let id = ext.metadata().id;
             let active = metadata_snapshot
@@ -231,13 +247,30 @@ impl ExtensionRegistry {
             if !active {
                 continue;
             }
+            let prefix = format!("{id}_");
+            if !active_prefixes.insert(prefix.clone()) {
+                self.mark_broken(&id, format!("extension tool prefix collision: `{prefix}`"));
+                continue;
+            }
             let session_ext = ext.instantiate(ctx.clone());
+            if let Some(registry) = tools.as_deref_mut() {
+                let contributed_tools = session_ext.tools();
+                if !contributed_tools.is_empty() {
+                    match registry.register_extension_tools(&id, contributed_tools) {
+                        Ok(n) => tool_count += n,
+                        Err(reason) => {
+                            self.mark_broken(&id, reason);
+                            continue;
+                        }
+                    }
+                }
+            }
             for handler in session_ext.hook_handlers() {
                 hooks.register(handler);
             }
             count += 1;
         }
-        count
+        (count, tool_count)
     }
 
     /// YYC-232 (YYC-166 PR-4): discover installed extensions in

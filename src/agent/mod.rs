@@ -503,13 +503,15 @@ impl Agent {
             let ctx = crate::extensions::api::SessionExtensionCtx {
                 cwd: cwd.clone(),
                 session_id: session_id.clone(),
+                memory: Arc::clone(&memory),
             };
-            let registered = p
+            let (registered, extension_tools) = p
                 .extension_registry()
-                .wire_daemon_extensions(ctx, &mut hooks);
+                .wire_daemon_extensions_into_runtime(ctx, &mut hooks, Some(&mut tools));
             if registered > 0 {
                 tracing::info!(
                     daemon_extensions = registered,
+                    extension_tools,
                     "Agent: wired daemon-side cargo-crate extensions"
                 );
             }
@@ -973,6 +975,15 @@ impl Agent {
 }
 
 pub(in crate::agent) fn flatten_for_message(result: ToolResult) -> String {
+    if let Some(details) = result.details {
+        return serde_json::json!({
+            "output": result.output,
+            "details": details,
+            "media": result.media,
+            "is_error": result.is_error,
+        })
+        .to_string();
+    }
     if result.media.is_empty() {
         return result.output;
     }
