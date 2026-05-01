@@ -1,0 +1,28 @@
+[package]
+name = "vulcan-ext-compact-summary"
+version = "0.1.0"
+edition = "2024"
+description = "Sample compaction-control extension for Vulcan"
+authors = ["Colin Hanway"]
+license = "MIT"
+repository = "https://github.com/yycholla/vulcan"
+
+[lib]
+name = "vulcan_ext_compact_summary"
+path = "src/lib.rs"
+
+[dependencies]
+vulcan = { package = "vulcan-core", path = ".." }
+
+inventory = "0.3.24"
+async-trait = "0.1"
+anyhow = "1"
+tokio-util = { version = "0.7.18", features = ["rt"] }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt"] }
+
+[package.metadata.vulcan]
+id = "compact-summary"
+capabilities = ["hook_handler"]
+requires_user_approval = false

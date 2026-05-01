@@ -7,6 +7,7 @@ use anyhow::Result;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
+use crate::hooks::{CompactionDecision, validate_rewrite_history};
 use crate::provider::{ChatResponse, Message, StreamEvent, ToolCall, ToolDefinition, Usage};
 use crate::run_record::{PayloadFingerprint, RunEvent, RunOrigin, RunRecord, RunStatus};
 use crate::tools::ToolResult;
@@ -488,17 +489,72 @@ impl Agent {
         if !self.context.should_compact(messages) {
             return;
         }
-        if !self
+        let cancel = self.turn_cancel.clone();
+        match self
             .hooks
-            .on_session_before_compact(self.turn_cancel.clone())
+            .on_session_before_compact(messages, cancel.clone())
             .await
         {
-            tracing::info!("agent iteration {iteration}: compaction blocked by hook");
-            return;
+            CompactionDecision::Continue => {}
+            CompactionDecision::RewriteHistory {
+                extension_id,
+                messages: proposed,
+            } => match validate_rewrite_history(messages, &proposed) {
+                Ok(()) => {
+                    let pre_count = messages.len();
+                    *messages = proposed;
+                    if let Err(e) = self.replace_history(messages) {
+                        tracing::warn!(
+                            "failed to replace persisted history after extension compaction: {e}"
+                        );
+                    }
+                    self.context
+                        .install_summary(format!("history rewritten by {extension_id}"));
+                    self.hooks
+                        .on_session_compact("extension rewrite history", cancel.clone())
+                        .await;
+                    let earlier_messages = pre_count.saturating_sub(messages.len()).max(1);
+                    let _ = turn_tx
+                        .send(TurnEvent::Compacted { earlier_messages })
+                        .await;
+                    tracing::info!(
+                        "agent iteration {iteration}: hook {extension_id} rewrote compaction history"
+                    );
+                    return;
+                }
+                Err(rejection) => {
+                    tracing::warn!(
+                        "hook {extension_id} returned invalid RewriteHistory for compaction: {rejection:?}; falling back to built-in compaction"
+                    );
+                    self.hooks
+                        .record_compaction_validation_failed(&extension_id, rejection);
+                }
+            },
+            CompactionDecision::Block {
+                extension_id,
+                reason,
+            } => {
+                if self.context.would_overflow_next_request(messages) {
+                    tracing::warn!(
+                        "agent iteration {iteration}: compaction block by hook {extension_id} overridden because context overflow is imminent: {reason}"
+                    );
+                    self.hooks.record_compaction_forced(&extension_id, &reason);
+                    let _ = turn_tx
+                        .send(TurnEvent::CompactionForced {
+                            extension_id,
+                            reason,
+                        })
+                        .await;
+                } else {
+                    tracing::info!(
+                        "agent iteration {iteration}: compaction blocked by hook {extension_id}: {reason}"
+                    );
+                    return;
+                }
+            }
         }
 
         let pre_count = messages.len();
-        let cancel = self.turn_cancel.clone();
         let compacted = self
             .compact_buffered_messages_if_possible(messages, cancel)
             .await;

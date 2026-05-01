@@ -109,6 +109,13 @@ impl ContextManager {
             || estimated_tokens + self.reserved_tokens >= self.max_context
     }
 
+    pub fn would_overflow_next_request(&self, messages: &[Message]) -> bool {
+        if !self.enabled {
+            return false;
+        }
+        self.estimate_tokens(messages) + self.reserved_tokens >= self.max_context
+    }
+
     /// Find the index where the kept-recent window starts.
     ///
     /// The returned index `i` is positioned at a `User` message, so the

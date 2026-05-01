@@ -6,6 +6,7 @@
 //! loop. First non-Continue outcome wins for blocking-style events; injection
 //! events accumulate across all handlers.
 
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
@@ -67,6 +68,9 @@ pub enum HookOutcome {
     /// Transiently replace the outgoing message payload. Intended for
     /// `on_context`; the persistent conversation history is not mutated.
     RewriteMessages(Vec<Message>),
+    /// Durably replace Session History during `on_session_before_compact`.
+    /// This is validated by the turn runner before it can replace history.
+    RewriteHistory(Vec<Message>),
     /// Force the agent to keep working; the instruction is appended as a user
     /// turn and the loop continues (BeforeAgentEnd only).
     ForceContinue { instruction: String },
@@ -93,6 +97,75 @@ pub enum InputDecision {
     Continue,
     Block(String),
     Replace(String),
+}
+
+/// Decision returned to the turn runner by `on_session_before_compact`.
+#[derive(Debug, Clone)]
+pub enum CompactionDecision {
+    Continue,
+    Block {
+        extension_id: String,
+        reason: String,
+    },
+    RewriteHistory {
+        extension_id: String,
+        messages: Vec<Message>,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "reason")]
+pub enum RewriteRejection {
+    MissingSystem,
+    OrphanToolCallId {
+        tool_call_id: String,
+    },
+    NotShorter {
+        input_len: usize,
+        proposed_len: usize,
+    },
+}
+
+pub fn validate_rewrite_history(
+    input: &[Message],
+    proposed: &[Message],
+) -> Result<(), RewriteRejection> {
+    if proposed.len() >= input.len() {
+        return Err(RewriteRejection::NotShorter {
+            input_len: input.len(),
+            proposed_len: proposed.len(),
+        });
+    }
+    if !proposed
+        .iter()
+        .any(|msg| matches!(msg, Message::System { .. }))
+    {
+        return Err(RewriteRejection::MissingSystem);
+    }
+
+    let mut active_tool_call_ids: HashSet<&str> = HashSet::new();
+    for msg in proposed {
+        match msg {
+            Message::Assistant { tool_calls, .. } => {
+                active_tool_call_ids.clear();
+                if let Some(tool_calls) = tool_calls {
+                    active_tool_call_ids.extend(tool_calls.iter().map(|call| call.id.as_str()));
+                }
+            }
+            Message::Tool { tool_call_id, .. } => {
+                if !active_tool_call_ids.contains(tool_call_id.as_str()) {
+                    return Err(RewriteRejection::OrphanToolCallId {
+                        tool_call_id: tool_call_id.clone(),
+                    });
+                }
+            }
+            Message::System { .. } | Message::User { .. } => {
+                active_tool_call_ids.clear();
+            }
+        }
+    }
+
+    Ok(())
 }
 
 /// A handler subscribes to the events it cares about by overriding the matching
@@ -203,7 +276,11 @@ pub trait HookHandler: Send + Sync {
         Ok(HookOutcome::Continue)
     }
 
-    async fn on_session_before_compact(&self, _cancel: CancellationToken) -> Result<HookOutcome> {
+    async fn on_session_before_compact(
+        &self,
+        _messages: &[Message],
+        _cancel: CancellationToken,
+    ) -> Result<HookOutcome> {
         Ok(HookOutcome::Continue)
     }
 
@@ -559,15 +636,29 @@ impl HookRegistry {
         }
     }
 
-    pub async fn on_session_before_compact(&self, cancel: CancellationToken) -> bool {
+    pub async fn on_session_before_compact(
+        &self,
+        messages: &[Message],
+        cancel: CancellationToken,
+    ) -> CompactionDecision {
         for h in &self.handlers {
             match self
-                .run(h, h.on_session_before_compact(cancel.clone()))
+                .run(h, h.on_session_before_compact(messages, cancel.clone()))
                 .await
             {
                 Some(HookOutcome::Block { reason }) => {
                     tracing::info!("hook {} blocked compaction: {reason}", h.name());
-                    return false;
+                    return CompactionDecision::Block {
+                        extension_id: h.name().to_string(),
+                        reason,
+                    };
+                }
+                Some(HookOutcome::RewriteHistory(messages)) => {
+                    tracing::info!("hook {} rewrote compaction history", h.name());
+                    return CompactionDecision::RewriteHistory {
+                        extension_id: h.name().to_string(),
+                        messages,
+                    };
                 }
                 Some(HookOutcome::Continue) | None => {}
                 Some(other) => {
@@ -579,7 +670,7 @@ impl HookRegistry {
                 }
             }
         }
-        true
+        CompactionDecision::Continue
     }
 
     pub async fn on_session_compact(&self, summary: &str, cancel: CancellationToken) {
@@ -673,6 +764,43 @@ impl HookRegistry {
                 extension_id: extension_id.to_string(),
                 before: before.to_string(),
                 after: after.to_string(),
+                action,
+                occurred_at: chrono::Utc::now(),
+            },
+        ));
+    }
+
+    pub(crate) fn record_compaction_validation_failed(
+        &self,
+        extension_id: &str,
+        rejection: RewriteRejection,
+    ) {
+        self.record_compaction_event(
+            extension_id,
+            crate::extensions::CompactionAuditAction::ValidationFailed { rejection },
+        );
+    }
+
+    pub(crate) fn record_compaction_forced(&self, extension_id: &str, reason: &str) {
+        self.record_compaction_event(
+            extension_id,
+            crate::extensions::CompactionAuditAction::Forced {
+                reason: reason.to_string(),
+            },
+        );
+    }
+
+    fn record_compaction_event(
+        &self,
+        extension_id: &str,
+        action: crate::extensions::CompactionAuditAction,
+    ) {
+        let Some(log) = self.audit_log.as_ref() else {
+            return;
+        };
+        log.record(crate::extensions::ExtensionAuditEvent::Compaction(
+            crate::extensions::CompactionAuditEvent {
+                extension_id: extension_id.to_string(),
                 action,
                 occurred_at: chrono::Utc::now(),
             },
@@ -1144,6 +1272,117 @@ mod tests {
         assert!(matches!(decoded, HookOutcome::ReplaceInput(text) if text == "expanded"));
     }
 
+    fn assistant_with_tool_call(id: &str) -> Message {
+        Message::Assistant {
+            content: None,
+            tool_calls: Some(vec![ToolCall {
+                id: id.into(),
+                call_type: "function".into(),
+                function: crate::provider::ToolCallFunction {
+                    name: "noop".into(),
+                    arguments: "{}".into(),
+                },
+            }]),
+            reasoning_content: None,
+        }
+    }
+
+    fn tool_result_message(id: &str) -> Message {
+        Message::Tool {
+            tool_call_id: id.into(),
+            content: "ok".into(),
+        }
+    }
+
+    #[test]
+    fn rewrite_history_validator_rejects_missing_system() {
+        let input = vec![
+            Message::System {
+                content: "system".into(),
+            },
+            Message::User {
+                content: "old".into(),
+            },
+        ];
+        let proposed = vec![Message::User {
+            content: "summary".into(),
+        }];
+
+        assert!(matches!(
+            validate_rewrite_history(&input, &proposed),
+            Err(RewriteRejection::MissingSystem)
+        ));
+    }
+
+    #[test]
+    fn rewrite_history_validator_rejects_orphan_tool_call_id() {
+        let input = vec![
+            Message::System {
+                content: "system".into(),
+            },
+            Message::User {
+                content: "old".into(),
+            },
+            assistant_with_tool_call("call_1"),
+            tool_result_message("call_1"),
+        ];
+        let proposed = vec![
+            Message::System {
+                content: "system".into(),
+            },
+            tool_result_message("missing"),
+        ];
+
+        assert!(matches!(
+            validate_rewrite_history(&input, &proposed),
+            Err(RewriteRejection::OrphanToolCallId { tool_call_id }) if tool_call_id == "missing"
+        ));
+    }
+
+    #[test]
+    fn rewrite_history_validator_rejects_non_shrinking_history() {
+        let input = vec![
+            Message::System {
+                content: "system".into(),
+            },
+            Message::User {
+                content: "old".into(),
+            },
+        ];
+        let proposed = input.clone();
+
+        assert!(matches!(
+            validate_rewrite_history(&input, &proposed),
+            Err(RewriteRejection::NotShorter {
+                input_len: 2,
+                proposed_len: 2
+            })
+        ));
+    }
+
+    #[test]
+    fn rewrite_history_validator_accepts_valid_tool_history() {
+        let input = vec![
+            Message::System {
+                content: "system".into(),
+            },
+            Message::User {
+                content: "old".into(),
+            },
+            assistant_with_tool_call("call_1"),
+            tool_result_message("call_1"),
+        ];
+        let proposed = vec![
+            Message::System {
+                content: "system".into(),
+            },
+            assistant_with_tool_call("call_1"),
+            tool_result_message("call_1"),
+        ];
+
+        assert!(validate_rewrite_history(&input, &proposed).is_ok());
+    }
+
     struct ContextRewriter;
 
     #[async_trait::async_trait]
@@ -1356,6 +1595,7 @@ mod tests {
 
         async fn on_session_before_compact(
             &self,
+            _messages: &[Message],
             _cancel: CancellationToken,
         ) -> Result<HookOutcome> {
             self.push("session_before_compact");
@@ -1424,7 +1664,11 @@ mod tests {
             .await;
         reg.on_after_provider_response(&response, cancel.clone())
             .await;
-        assert!(reg.on_session_before_compact(cancel.clone()).await);
+        assert!(matches!(
+            reg.on_session_before_compact(&messages, cancel.clone())
+                .await,
+            CompactionDecision::Continue
+        ));
         reg.on_session_compact("summary", cancel.clone()).await;
         reg.on_session_before_fork(cancel.clone()).await;
         reg.on_session_shutdown(cancel).await;
@@ -1511,6 +1755,7 @@ mod tests {
 
             async fn on_session_before_compact(
                 &self,
+                _messages: &[Message],
                 _cancel: CancellationToken,
             ) -> Result<HookOutcome> {
                 Ok(HookOutcome::Block {
@@ -1531,6 +1776,7 @@ mod tests {
 
             async fn on_session_before_compact(
                 &self,
+                _messages: &[Message],
                 _cancel: CancellationToken,
             ) -> Result<HookOutcome> {
                 self.0.fetch_add(1, Ordering::SeqCst);
@@ -1543,11 +1789,55 @@ mod tests {
         reg.register(Arc::new(BlockingCompact));
         reg.register(Arc::new(LaterCompact(later_calls.clone())));
 
-        assert!(
-            !reg.on_session_before_compact(CancellationToken::new())
-                .await
-        );
+        assert!(matches!(
+            reg.on_session_before_compact(&[], CancellationToken::new())
+                .await,
+            CompactionDecision::Block {
+                extension_id,
+                reason
+            } if extension_id == "blocking-compact" && reason == "skip"
+        ));
         assert_eq!(later_calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn session_before_compact_returns_first_rewrite_history() {
+        struct Rewriter;
+
+        #[async_trait::async_trait]
+        impl HookHandler for Rewriter {
+            fn name(&self) -> &str {
+                "compact-summary"
+            }
+
+            async fn on_session_before_compact(
+                &self,
+                messages: &[Message],
+                _cancel: CancellationToken,
+            ) -> Result<HookOutcome> {
+                Ok(HookOutcome::RewriteHistory(vec![messages[0].clone()]))
+            }
+        }
+
+        let messages = vec![
+            Message::System {
+                content: "system".into(),
+            },
+            Message::User {
+                content: "old".into(),
+            },
+        ];
+        let mut reg = HookRegistry::new();
+        reg.register(Arc::new(Rewriter));
+
+        assert!(matches!(
+            reg.on_session_before_compact(&messages, CancellationToken::new())
+                .await,
+            CompactionDecision::RewriteHistory {
+                extension_id,
+                messages
+            } if extension_id == "compact-summary" && messages.len() == 1
+        ));
     }
 
     #[tokio::test]

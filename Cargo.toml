@@ -9,6 +9,7 @@ members = [
     "vulcan-frontend-api",
     "vulcan-extension-macros",
     "vulcan-ext-auto-commit",
+    "vulcan-ext-compact-summary",
     "vulcan-ext-input-demo",
 ]
 resolver = "2"
