@@ -29,6 +29,7 @@ pub struct ExtensionManifest {
     pub id: String,
     pub version: String,
     pub daemon_entry: Option<String>,
+    pub requires_user_approval: bool,
 }
 
 /// Per-**Session** instantiation context handed to a

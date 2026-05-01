@@ -140,6 +140,9 @@ pub struct ExtensionMetadata {
     /// `vulcan extension show`. Caller-provided; the registry
     /// does not interpret it.
     pub permissions_summary: Option<String>,
+    /// Whether input rewrites from this extension require explicit
+    /// user approval before the rewritten text is applied.
+    pub requires_user_approval: bool,
     /// When `status == Broken`, free-form explanation. `None` for
     /// any other status.
     pub broken_reason: Option<String>,
@@ -167,6 +170,7 @@ impl ExtensionMetadata {
             status: ExtensionStatus::Inactive,
             capabilities: Vec::new(),
             permissions_summary: None,
+            requires_user_approval: false,
             broken_reason: None,
             priority: 100,
         }

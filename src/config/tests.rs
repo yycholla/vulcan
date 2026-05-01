@@ -174,6 +174,22 @@ enabled = true
 }
 
 #[test]
+fn per_extension_auto_approve_input_disables_rewrite_approval() {
+    let cfg: Config = toml::from_str(
+        r#"
+[extensions.input-demo]
+auto_approve_input = true
+"#,
+    )
+    .expect("parses");
+    let reg = seed_registry(&["input-demo"]);
+    reg.set_requires_user_approval("input-demo", true);
+    let flips = cfg.extensions.apply_to_registry(&reg);
+    assert_eq!(flips, 0);
+    assert!(!reg.get("input-demo").unwrap().requires_user_approval);
+}
+
+#[test]
 fn empty_extensions_table_is_a_noop() {
     let cfg: Config = toml::from_str("").expect("parses");
     let reg = seed_registry(&["a", "b"]);
