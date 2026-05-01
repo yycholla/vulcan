@@ -155,6 +155,19 @@ impl ExtensionRegistry {
         }
     }
 
+    /// Override the manifest approval policy for input rewrites. Used
+    /// by `extensions.<id>.auto_approve_input = true` after inventory
+    /// registration has populated the registry.
+    pub fn set_requires_user_approval(&self, id: &str, required: bool) -> bool {
+        let mut guard = self.inner.write();
+        if let Some(slot) = guard.iter_mut().find(|m| m.id == id) {
+            slot.requires_user_approval = required;
+            true
+        } else {
+            false
+        }
+    }
+
     /// Mark an extension `Broken` with a diagnostic reason.
     pub fn mark_broken(&self, id: &str, reason: impl Into<String>) -> bool {
         let mut guard = self.inner.write();

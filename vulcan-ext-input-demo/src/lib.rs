@@ -4,9 +4,10 @@
 //! Daemon-side cargo-crate extension under GH issue #557. Self-
 //! registers via `inventory::submit!`. Manifest declares
 //! `capabilities = ["input_interceptor"]` and
-//! `requires_user_approval = false` so rewrites land without a
-//! pause prompt; flip the manifest flag to exercise the
-//! `AgentPause::InputRewriteApproval` path.
+//! `requires_user_approval = true` so rewrites exercise the
+//! `AgentPause::InputRewriteApproval` path. Set
+//! `extensions.input-demo.auto_approve_input = true` to skip the
+//! approval prompt locally.
 
 use std::sync::Arc;
 
@@ -125,7 +126,7 @@ mod tests {
             meta.capabilities
                 .contains(&ExtensionCapability::InputInterceptor)
         );
-        assert!(!meta.requires_user_approval);
+        assert!(meta.requires_user_approval);
     }
 
     #[tokio::test]

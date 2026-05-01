@@ -671,7 +671,7 @@ impl HookRegistry {
                     key: 'd',
                     label: "deny".to_string(),
                     kind: OptionKind::Destructive,
-                    resume: AgentResume::Deny,
+                    resume: AgentResume::DenyWithReason("user denied input rewrite".to_string()),
                 },
             ],
         };
@@ -1914,10 +1914,18 @@ mod tests {
         let decision_task =
             tokio::spawn(async move { reg.apply_on_input("raw", CancellationToken::new()).await });
         let pause = pause_rx.recv().await.expect("approval pause should emit");
-        pause.reply.send(AgentResume::Deny).unwrap();
+        let deny = pause
+            .options
+            .iter()
+            .find(|option| option.key == 'd')
+            .expect("deny option")
+            .resume
+            .clone();
+        assert!(matches!(deny, AgentResume::DenyWithReason(_)));
+        pause.reply.send(deny).unwrap();
 
         match decision_task.await.unwrap() {
-            InputDecision::Block(reason) => assert!(reason.contains("denied")),
+            InputDecision::Block(reason) => assert!(reason.contains("user denied input rewrite")),
             other => panic!("expected Block, got {other:?}"),
         }
     }

@@ -348,10 +348,10 @@ pub struct ExtensionsConfig {
     /// forced to `Inactive` regardless of its own preference.
     #[serde(default)]
     pub disabled: Vec<String>,
-    /// Per-extension overrides. Settings beyond `enabled` are
-    /// preserved but not interpreted at this layer — PR-5 lands
-    /// `ConfigField` integration so per-extension settings flow
-    /// through `vulcan config`.
+    /// Per-extension overrides. Settings beyond process-local
+    /// activation gates are preserved but not interpreted at this
+    /// layer — PR-5 lands `ConfigField` integration so
+    /// per-extension settings flow through `vulcan config`.
     #[serde(default, flatten)]
     pub per_extension: HashMap<String, ExtensionEntryConfig>,
 }
@@ -362,6 +362,12 @@ pub struct ExtensionEntryConfig {
     /// `None` defers to the registry's prior status.
     #[serde(default)]
     pub enabled: Option<bool>,
+    /// Skip the interactive approval prompt for input rewrites from
+    /// this extension. The extension still needs to declare
+    /// `requires_user_approval = true` in its manifest so the default
+    /// posture is explicit.
+    #[serde(default)]
+    pub auto_approve_input: bool,
 }
 
 impl ExtensionsConfig {
@@ -392,6 +398,9 @@ impl ExtensionsConfig {
                     }
                 }
                 None => {}
+            }
+            if entry.auto_approve_input {
+                registry.set_requires_user_approval(id, false);
             }
         }
         flips
