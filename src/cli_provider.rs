@@ -22,9 +22,9 @@ pub enum ProviderCommand {
     List,
     /// Print the curated preset catalog.
     Presets,
-    /// Write a new `[<name>]` block in providers.toml.
+    /// Write a new `[<name>]` block in providers.toml. No name opens the guided flow.
     Add(AddArgs),
-    /// Delete a named `[<name>]` block from providers.toml.
+    /// Delete a named `[<name>]` block from providers.toml. Use `--list` for a picker.
     Remove(RemoveArgs),
     /// YYC-240 (YYC-238 PR-2): persist `active_profile = "<name>"`
     /// in config.toml so both TUI and gateway boot against this
@@ -46,7 +46,7 @@ pub struct UseArgs {
 #[derive(Args, Debug)]
 pub struct AddArgs {
     /// Profile name (used as `[<name>]` and `/provider <name>`).
-    pub name: String,
+    pub name: Option<String>,
     /// Curated preset to base the profile on (see `vulcan provider presets`).
     #[arg(long)]
     pub preset: Option<String>,
@@ -72,11 +72,26 @@ pub struct AddArgs {
     pub force: bool,
 }
 
+impl AddArgs {
+    fn is_bare_interactive(&self) -> bool {
+        self.preset.is_none()
+            && self.base_url.is_none()
+            && self.model.is_none()
+            && self.api_key.is_none()
+            && self.max_context.is_none()
+            && !self.disable_catalog
+            && !self.force
+    }
+}
+
 #[derive(Args, Debug)]
 pub struct RemoveArgs {
     /// Profile name to delete. `default` is reserved for the legacy
     /// `[provider]` block in config.toml and rejected here.
-    pub name: String,
+    pub name: Option<String>,
+    /// Open a picker to select the profile to delete.
+    #[arg(long)]
+    pub list: bool,
 }
 
 /// One curated provider preset surfaced by `vulcan provider presets`.
@@ -174,20 +189,32 @@ pub fn lookup_preset(key: &str) -> Option<&'static Preset> {
 
 pub async fn run(cmd: Option<ProviderCommand>, dir: PathBuf) -> Result<()> {
     match cmd {
-        None => interactive_menu(&dir),
+        None => interactive_menu(&dir).await,
         Some(ProviderCommand::List) => list(&dir),
         Some(ProviderCommand::Presets) => {
             print_presets();
             Ok(())
         }
-        Some(ProviderCommand::Add(args)) => add(args, &dir),
+        Some(ProviderCommand::Add(args)) => {
+            if args.name.is_none() {
+                if args.is_bare_interactive() {
+                    interactive_add(&dir).await
+                } else {
+                    bail!(
+                        "profile name required when passing provider add options. Omit options for interactive setup."
+                    );
+                }
+            } else {
+                add(args, &dir)
+            }
+        }
         Some(ProviderCommand::Remove(args)) => remove(args, &dir),
         Some(ProviderCommand::Use(args)) => use_profile(args, &dir),
     }
 }
 
 /// Interactive menu when `vulcan provider` is called without a subcommand.
-fn interactive_menu(dir: &Path) -> Result<()> {
+async fn interactive_menu(dir: &Path) -> Result<()> {
     if !std::io::stdin().is_terminal() {
         bail!(
             "vulcan provider (interactive) requires a terminal. Use `vulcan provider list/add/remove/use <args>` for scripting."
@@ -211,69 +238,23 @@ fn interactive_menu(dir: &Path) -> Result<()> {
 
     match pick {
         0 => list(dir),
-        1 => interactive_add(dir),
+        1 => interactive_add(dir).await,
         2 => interactive_remove(dir),
         3 => interactive_use(dir),
         _ => unreachable!(),
     }
 }
 
-/// Interactive add: pick a preset, enter a name, confirm.
-fn interactive_add(dir: &Path) -> Result<()> {
-    let theme = dialoguer::theme::ColorfulTheme::default();
-    let ps = presets();
-    let labels: Vec<String> = ps
-        .iter()
-        .map(|p| format!("{} ({})", p.display, p.key))
-        .collect();
-
-    println!();
-    let pick = dialoguer::FuzzySelect::with_theme(&theme)
-        .with_prompt("Pick a preset")
-        .items(&labels)
-        .default(0)
-        .interact()
-        .context("picker cancelled")?;
-
-    let preset = &ps[pick];
-    println!();
-    println!("  {} ({})", preset.display, preset.key);
-    println!("  base_url: {}", preset.base_url);
-    println!("  model:    {}", preset.model);
-
-    let name: String = dialoguer::Input::with_theme(&theme)
-        .with_prompt("Profile name")
-        .default(preset.key.to_string())
-        .interact_text()?;
-
-    let confirmed = dialoguer::Confirm::with_theme(&theme)
-        .with_prompt(format!("Add [{}] from {} preset?", name, preset.key))
-        .default(true)
-        .interact()?;
-
-    if !confirmed {
-        println!("Aborted.");
-        return Ok(());
-    }
-
-    add(
-        AddArgs {
-            name,
-            preset: Some(preset.key.to_string()),
-            base_url: None,
-            model: None,
-            api_key: None,
-            max_context: None,
-            disable_catalog: false,
-            force: false,
+/// Interactive add: reuse the auth preset/name/key/model flow.
+async fn interactive_add(dir: &Path) -> Result<()> {
+    crate::cli_auth::run(
+        crate::cli_auth::AuthArgs {
+            preset: None,
+            custom: false,
         },
-        dir,
-    )?;
-    println!(
-        "{}",
-        "Done. Switch with `/provider <name>` in the TUI or `vulcan provider use <name>`.".dimmed()
-    );
-    Ok(())
+        dir.to_path_buf(),
+    )
+    .await
 }
 
 /// Interactive remove: pick from existing providers.
@@ -304,7 +285,13 @@ fn interactive_remove(dir: &Path) -> Result<()> {
         return Ok(());
     }
 
-    remove(RemoveArgs { name: name.clone() }, dir)
+    remove(
+        RemoveArgs {
+            name: Some(name.clone()),
+            list: false,
+        },
+        dir,
+    )
 }
 
 /// Interactive use: pick from existing providers.
@@ -337,22 +324,14 @@ fn interactive_use(dir: &Path) -> Result<()> {
 fn list(dir: &Path) -> Result<()> {
     let cfg = crate::config::Config::load_from_dir(dir).unwrap_or_default();
     println!("{}", "Provider profiles:".bold());
-    println!(
-        "  {} {}",
-        "(default)".dimmed(),
-        format!("{} · {}", cfg.provider.base_url, cfg.provider.model)
-    );
+    print_provider_table_header();
+    print_provider_row("(default)", &cfg.provider, cfg.active_profile.is_none());
     let mut names: Vec<&String> = cfg.providers.keys().collect();
     names.sort();
     for name in &names {
         let p = &cfg.providers[*name];
-        let active = match &cfg.active_profile {
-            Some(a) if a == *name => " ●".green().to_string(),
-            _ => String::new(),
-        };
-        println!("  {}{}", name.bold(), active,);
-        println!("    {} {}", "base_url:".dimmed(), p.base_url);
-        println!("    {} {}", "model:".dimmed(), p.model.cyan());
+        let active = cfg.active_profile.as_ref().is_some_and(|a| a == *name);
+        print_provider_row(name, p, active);
     }
     if cfg.providers.is_empty() {
         println!(
@@ -374,6 +353,42 @@ fn list(dir: &Path) -> Result<()> {
         }
     }
     Ok(())
+}
+
+fn print_provider_table_header() {
+    println!(
+        "  {:<18} {:<12} {:<38} {:<30} {:<10}",
+        "name".dimmed(),
+        "preset".dimmed(),
+        "base URL".dimmed(),
+        "model".dimmed(),
+        "last used".dimmed()
+    );
+}
+
+fn print_provider_row(name: &str, p: &crate::config::ProviderConfig, active: bool) {
+    let marker = if active {
+        "●".green().to_string()
+    } else {
+        " ".into()
+    };
+    println!(
+        "{} {:<18} {:<12} {:<38} {:<30} {:<10}",
+        marker,
+        name.bold(),
+        provider_preset_label(p).cyan(),
+        p.base_url,
+        p.model,
+        "never".dimmed()
+    );
+}
+
+fn provider_preset_label(p: &crate::config::ProviderConfig) -> &'static str {
+    presets()
+        .iter()
+        .find(|preset| preset.base_url == p.base_url)
+        .map(|preset| preset.key)
+        .unwrap_or("custom")
 }
 
 fn collect_extension_provider_names() -> Vec<String> {
@@ -421,7 +436,11 @@ fn print_presets() {
 }
 
 pub fn add(args: AddArgs, dir: &Path) -> Result<()> {
-    if args.name.eq_ignore_ascii_case("default") {
+    let name = args
+        .name
+        .as_deref()
+        .ok_or_else(|| anyhow!("profile name required for non-interactive provider add"))?;
+    if name.eq_ignore_ascii_case("default") {
         bail!("'default' is reserved for the legacy [provider] block in config.toml.");
     }
 
@@ -448,10 +467,10 @@ pub fn add(args: AddArgs, dir: &Path) -> Result<()> {
     let providers_path = dir.join("providers.toml");
     let mut doc = read_or_init_doc(&providers_path)?;
 
-    if doc.contains_key(&args.name) && !args.force {
+    if doc.contains_key(name) && !args.force {
         bail!(
             "Provider '{}' already exists in {}. Re-run with --force to overwrite.",
-            args.name,
+            name,
             providers_path.display()
         );
     }
@@ -470,13 +489,13 @@ pub fn add(args: AddArgs, dir: &Path) -> Result<()> {
     if disable_catalog {
         entry.insert("disable_catalog", value(true));
     }
-    doc.insert(&args.name, Item::Table(entry));
+    doc.insert(name, Item::Table(entry));
 
     write_doc(&providers_path, &doc)?;
     println!(
         "{} Wrote [{}] to {}",
         "✓".green(),
-        args.name,
+        name,
         providers_path.display()
     );
     println!(
@@ -487,7 +506,23 @@ pub fn add(args: AddArgs, dir: &Path) -> Result<()> {
 }
 
 fn remove(args: RemoveArgs, dir: &Path) -> Result<()> {
-    if args.name.eq_ignore_ascii_case("default") {
+    if args.list {
+        if args.name.is_some() {
+            bail!("--list conflicts with positional name");
+        }
+        if !std::io::stdin().is_terminal() {
+            bail!(
+                "vulcan provider remove --list requires a terminal. Use `vulcan provider remove <name>` for scripting."
+            );
+        }
+        return interactive_remove(dir);
+    }
+
+    let name = args
+        .name
+        .as_deref()
+        .ok_or_else(|| anyhow!("supply a profile name or pass --list"))?;
+    if name.eq_ignore_ascii_case("default") {
         bail!(
             "'default' refers to the legacy [provider] block in config.toml — edit that file directly."
         );
@@ -500,10 +535,10 @@ fn remove(args: RemoveArgs, dir: &Path) -> Result<()> {
         );
     }
     let mut doc = read_or_init_doc(&providers_path)?;
-    if doc.remove(&args.name).is_none() {
+    if doc.remove(name).is_none() {
         bail!(
             "no provider profile named '{}' in {}",
-            args.name,
+            name,
             providers_path.display()
         );
     }
@@ -511,7 +546,7 @@ fn remove(args: RemoveArgs, dir: &Path) -> Result<()> {
     println!(
         "{} Removed [{}] from {}",
         "✓".green(),
-        args.name,
+        name,
         providers_path.display()
     );
     Ok(())
@@ -593,7 +628,81 @@ fn write_doc(path: &Path, doc: &DocumentMut) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use clap::Parser;
     use tempfile::tempdir;
+
+    #[test]
+    fn provider_add_without_args_parses_for_interactive_flow() {
+        let cli = crate::cli::Cli::try_parse_from(["vulcan", "provider", "add"]).unwrap();
+        let crate::cli::Command::Provider {
+            cmd: Some(ProviderCommand::Add(args)),
+        } = cli.command.unwrap()
+        else {
+            panic!("expected provider add command");
+        };
+        assert!(args.name.is_none());
+        assert!(args.preset.is_none());
+    }
+
+    #[test]
+    fn provider_add_explicit_args_still_parse() {
+        let cli = crate::cli::Cli::try_parse_from([
+            "vulcan", "provider", "add", "local", "--preset", "ollama", "--model", "qwen",
+        ])
+        .unwrap();
+        let crate::cli::Command::Provider {
+            cmd: Some(ProviderCommand::Add(args)),
+        } = cli.command.unwrap()
+        else {
+            panic!("expected provider add command");
+        };
+        assert_eq!(args.name.as_deref(), Some("local"));
+        assert_eq!(args.preset.as_deref(), Some("ollama"));
+        assert_eq!(args.model.as_deref(), Some("qwen"));
+    }
+
+    #[test]
+    fn provider_add_options_without_name_are_not_bare_interactive() {
+        let cli =
+            crate::cli::Cli::try_parse_from(["vulcan", "provider", "add", "--preset", "openai"])
+                .unwrap();
+        let crate::cli::Command::Provider {
+            cmd: Some(ProviderCommand::Add(args)),
+        } = cli.command.unwrap()
+        else {
+            panic!("expected provider add command");
+        };
+        assert!(args.name.is_none());
+        assert!(!args.is_bare_interactive());
+    }
+
+    #[test]
+    fn provider_remove_list_parses_for_picker_flow() {
+        let cli =
+            crate::cli::Cli::try_parse_from(["vulcan", "provider", "remove", "--list"]).unwrap();
+        let crate::cli::Command::Provider {
+            cmd: Some(ProviderCommand::Remove(args)),
+        } = cli.command.unwrap()
+        else {
+            panic!("expected provider remove command");
+        };
+        assert!(args.name.is_none());
+        assert!(args.list);
+    }
+
+    #[test]
+    fn provider_remove_explicit_name_still_parses() {
+        let cli =
+            crate::cli::Cli::try_parse_from(["vulcan", "provider", "remove", "local"]).unwrap();
+        let crate::cli::Command::Provider {
+            cmd: Some(ProviderCommand::Remove(args)),
+        } = cli.command.unwrap()
+        else {
+            panic!("expected provider remove command");
+        };
+        assert_eq!(args.name.as_deref(), Some("local"));
+        assert!(!args.list);
+    }
 
     #[test]
     fn presets_catalog_has_expected_minimum() {
@@ -610,6 +719,18 @@ mod tests {
         }
     }
 
+    #[test]
+    fn provider_preset_label_infers_known_base_url() {
+        let mut provider = crate::config::ProviderConfig {
+            base_url: "https://openrouter.ai/api/v1".into(),
+            ..Default::default()
+        };
+        assert_eq!(provider_preset_label(&provider), "openrouter");
+
+        provider.base_url = "https://example.com/v1".into();
+        assert_eq!(provider_preset_label(&provider), "custom");
+    }
+
     // ── YYC-240 (YYC-238 PR-2): vulcan provider use/clear ────────
 
     #[test]
@@ -619,7 +740,7 @@ mod tests {
         // can find it.
         add(
             AddArgs {
-                name: "fast".into(),
+                name: Some("fast".into()),
                 preset: Some("openai".into()),
                 base_url: None,
                 model: None,
@@ -672,7 +793,7 @@ mod tests {
         let dir = tempdir().unwrap();
         add(
             AddArgs {
-                name: "fast".into(),
+                name: Some("fast".into()),
                 preset: Some("openai".into()),
                 base_url: None,
                 model: None,
@@ -724,7 +845,7 @@ mod tests {
 
         add(
             AddArgs {
-                name: "local".into(),
+                name: Some("local".into()),
                 preset: Some("ollama".into()),
                 base_url: None,
                 model: None,
@@ -752,7 +873,8 @@ mod tests {
         // Remove path.
         remove(
             RemoveArgs {
-                name: "local".into(),
+                name: Some("local".into()),
+                list: false,
             },
             dir.path(),
         )
@@ -766,7 +888,7 @@ mod tests {
         let dir = tempdir().unwrap();
         add(
             AddArgs {
-                name: "or".into(),
+                name: Some("or".into()),
                 preset: Some("openrouter".into()),
                 base_url: None,
                 model: Some("anthropic/claude-opus-4-7".into()),
@@ -788,7 +910,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let err = add(
             AddArgs {
-                name: "default".into(),
+                name: Some("default".into()),
                 preset: Some("openai".into()),
                 base_url: None,
                 model: None,
@@ -808,7 +930,7 @@ mod tests {
         let dir = tempdir().unwrap();
         add(
             AddArgs {
-                name: "x".into(),
+                name: Some("x".into()),
                 preset: Some("openrouter".into()),
                 base_url: None,
                 model: None,
@@ -822,7 +944,7 @@ mod tests {
         .unwrap();
         let err = add(
             AddArgs {
-                name: "x".into(),
+                name: Some("x".into()),
                 preset: Some("openai".into()),
                 base_url: None,
                 model: None,
@@ -843,11 +965,40 @@ mod tests {
         std::fs::write(dir.path().join("providers.toml"), "[other]\n").unwrap();
         let err = remove(
             RemoveArgs {
-                name: "nope".into(),
+                name: Some("nope".into()),
+                list: false,
             },
             dir.path(),
         )
         .unwrap_err();
         assert!(err.to_string().contains("nope"));
+    }
+
+    #[test]
+    fn remove_requires_name_or_list() {
+        let dir = tempdir().unwrap();
+        let err = remove(
+            RemoveArgs {
+                name: None,
+                list: false,
+            },
+            dir.path(),
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("supply a profile name"));
+    }
+
+    #[test]
+    fn remove_list_conflicts_with_name() {
+        let dir = tempdir().unwrap();
+        let err = remove(
+            RemoveArgs {
+                name: Some("local".into()),
+                list: true,
+            },
+            dir.path(),
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("conflicts"));
     }
 }

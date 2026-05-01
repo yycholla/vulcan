@@ -115,7 +115,7 @@ async fn run_preset(
 
     add(
         AddArgs {
-            name: name.clone(),
+            name: Some(name.clone()),
             preset: Some(preset.key.to_string()),
             base_url: None,
             model: Some(model),
@@ -198,7 +198,7 @@ async fn run_custom(theme: &dyn dialoguer::theme::Theme, dir: &Path) -> Result<(
 
     add(
         AddArgs {
-            name: name.clone(),
+            name: Some(name.clone()),
             preset: None,
             base_url: Some(base_url),
             model: Some(model),
