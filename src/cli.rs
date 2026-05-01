@@ -109,13 +109,13 @@ pub enum Command {
     /// `vulcan run show <id>` prints the full timeline.
     Run {
         #[command(subcommand)]
-        cmd: RunSubcommand,
+        cmd: Option<RunSubcommand>,
     },
     /// YYC-180: inspect typed artifacts (plans, diffs, reports,
     /// subagent summaries) persisted alongside agent turns.
     Artifact {
         #[command(subcommand)]
-        cmd: ArtifactSubcommand,
+        cmd: Option<ArtifactSubcommand>,
     },
     /// YYC-194: governance + purge controls for local knowledge
     /// indexes (code graph, embeddings, sessions, run records,
@@ -449,6 +449,31 @@ pub enum AgentSubcommand {
         #[arg(long)]
         sentiment: Option<f32>,
     },
+}
+
+#[cfg(test)]
+mod parse_tests {
+    use super::*;
+
+    #[test]
+    fn run_accepts_no_subcommand_for_interactive_picker() {
+        let cli = Cli::parse_from(["vulcan", "run"]);
+
+        match cli.command {
+            Some(Command::Run { cmd }) => assert!(cmd.is_none()),
+            other => panic!("unexpected parse: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn artifact_accepts_no_subcommand_for_interactive_picker() {
+        let cli = Cli::parse_from(["vulcan", "artifact"]);
+
+        match cli.command {
+            Some(Command::Artifact { cmd }) => assert!(cmd.is_none()),
+            other => panic!("unexpected parse: {other:?}"),
+        }
+    }
 }
 
 #[cfg(all(test, feature = "gateway"))]
