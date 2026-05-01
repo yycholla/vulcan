@@ -102,6 +102,16 @@ pub enum PauseKind {
         path: String,
         hunks: Vec<DiffScrubHunk>,
     },
+    /// GH issue #557: an extension's `on_input` hook proposed a
+    /// `ReplaceInput` rewrite and its manifest declared
+    /// `requires_user_approval = true`. The TUI shows the
+    /// before/after pair; user accepts (`Allow`), denies (`Deny`),
+    /// or denies with reason (`DenyWithReason`).
+    InputRewriteApproval {
+        extension_id: String,
+        before: String,
+        after: String,
+    },
 }
 
 /// The user's decision.

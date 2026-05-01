@@ -801,6 +801,28 @@ pub async fn run_tui(
                         }
                         // DiffScrub handled above; arm kept for exhaustiveness.
                         (PauseKind::DiffScrub { .. }, _) => unreachable!(),
+                        // GH issue #557: extension wants to rewrite raw
+                        // user input. Show before/after to the user.
+                        (
+                            PauseKind::InputRewriteApproval {
+                                extension_id,
+                                before,
+                                after,
+                            },
+                            false,
+                        ) => format!(
+                            "Extension '{extension_id}' proposes input rewrite:\n  before: {before}\n  after:  {after}"
+                        ),
+                        (
+                            PauseKind::InputRewriteApproval {
+                                extension_id,
+                                before,
+                                after,
+                            },
+                            true,
+                        ) => format!(
+                            "Extension '{extension_id}' proposes input rewrite:\n  before: {before}\n  after:  {after}\n  [a]llow once, [d]eny"
+                        ),
                     };
                     app.messages.push(ChatMessage {
                         role: ChatRole::System,

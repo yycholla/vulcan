@@ -143,6 +143,7 @@ fn parse_capability(raw: &str) -> Option<ExtensionCapability> {
         "tool_provider" => Some(ExtensionCapability::ToolProvider),
         "memory_backend" => Some(ExtensionCapability::MemoryBackend),
         "lifecycle_observer" => Some(ExtensionCapability::LifecycleObserver),
+        "input_interceptor" => Some(ExtensionCapability::InputInterceptor),
         _ => None,
     }
 }

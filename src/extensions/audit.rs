@@ -11,8 +11,11 @@ use std::collections::HashMap;
 
 use super::policy::{ExtensionPermission, PolicyDecision};
 
+/// Permission-keyed audit row. Original YYC-237 shape; covers
+/// filesystem / network / shell decisions emitted by the tool
+/// dispatch path.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ExtensionAuditEvent {
+pub struct PermissionAuditEvent {
     pub extension_id: String,
     pub permission: ExtensionPermission,
     pub decision: PolicyDecision,
@@ -21,6 +24,58 @@ pub struct ExtensionAuditEvent {
     /// requests may omit it.
     pub target: Option<String>,
     pub occurred_at: chrono::DateTime<chrono::Utc>,
+}
+
+/// GH issue #557: action an `on_input` extension hook took on user
+/// input. `Block` short-circuits with the supplied reason; `Replace`
+/// substitutes the `after` text from the parent event.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "kind")]
+pub enum InputInterceptAction {
+    Block { reason: String },
+    Replace,
+}
+
+/// GH issue #557: input-intercept audit row. Recorded whenever an
+/// extension's `on_input` hook returns a non-Continue outcome.
+/// `before` is the raw user input; `after` is what the daemon
+/// dispatched (the rewrite, or the original on Block).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InputInterceptEvent {
+    pub extension_id: String,
+    pub before: String,
+    pub after: String,
+    pub action: InputInterceptAction,
+    pub occurred_at: chrono::DateTime<chrono::Utc>,
+}
+
+/// Polymorphic audit row recorded into [`ExtensionAuditLog`]. Each
+/// variant carries the typed payload for one event class.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "kind")]
+pub enum ExtensionAuditEvent {
+    Permission(PermissionAuditEvent),
+    InputIntercept(InputInterceptEvent),
+}
+
+impl ExtensionAuditEvent {
+    /// Common accessor across variants — every audit row knows which
+    /// extension produced it.
+    pub fn extension_id(&self) -> &str {
+        match self {
+            Self::Permission(p) => &p.extension_id,
+            Self::InputIntercept(i) => &i.extension_id,
+        }
+    }
+
+    /// Common accessor across variants — every audit row carries a
+    /// timestamp.
+    pub fn occurred_at(&self) -> chrono::DateTime<chrono::Utc> {
+        match self {
+            Self::Permission(p) => p.occurred_at,
+            Self::InputIntercept(i) => i.occurred_at,
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -117,13 +172,13 @@ mod tests {
     use super::*;
 
     fn fixture_event(id: &str) -> ExtensionAuditEvent {
-        ExtensionAuditEvent {
+        ExtensionAuditEvent::Permission(PermissionAuditEvent {
             extension_id: id.to_string(),
             permission: ExtensionPermission::FilesystemRead,
             decision: PolicyDecision::Allow,
             target: Some("/etc/hosts".into()),
             occurred_at: chrono::Utc::now(),
-        }
+        })
     }
 
     #[test]
@@ -133,7 +188,7 @@ mod tests {
         log.record(fixture_event("b"));
         log.record(fixture_event("c"));
         let recent = log.recent(2);
-        let ids: Vec<&str> = recent.iter().map(|e| e.extension_id.as_str()).collect();
+        let ids: Vec<&str> = recent.iter().map(|e| e.extension_id()).collect();
         assert_eq!(ids, vec!["c", "b"]);
     }
 
@@ -145,7 +200,7 @@ mod tests {
         log.record(fixture_event("c"));
         assert_eq!(log.len(), 2);
         let recent = log.recent(10);
-        let ids: Vec<&str> = recent.iter().map(|e| e.extension_id.as_str()).collect();
+        let ids: Vec<&str> = recent.iter().map(|e| e.extension_id()).collect();
         assert_eq!(ids, vec!["c", "b"]);
     }
 
@@ -174,6 +229,45 @@ mod tests {
     #[test]
     fn audit_event_round_trips_through_serde_json() {
         let evt = fixture_event("zeta");
+        let json = serde_json::to_string(&evt).unwrap();
+        let back: ExtensionAuditEvent = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, evt);
+    }
+
+    #[test]
+    fn audit_log_records_input_intercept_event_and_returns_it() {
+        let log = ExtensionAuditLog::new(8);
+        let evt = ExtensionAuditEvent::InputIntercept(InputInterceptEvent {
+            extension_id: "input-demo".to_string(),
+            before: "hi".to_string(),
+            after: "hello".to_string(),
+            action: InputInterceptAction::Replace,
+            occurred_at: chrono::Utc::now(),
+        });
+        log.record(evt.clone());
+        let recent = log.recent(1);
+        assert_eq!(recent.len(), 1);
+        match &recent[0] {
+            ExtensionAuditEvent::InputIntercept(intercept) => {
+                assert_eq!(intercept.before, "hi");
+                assert_eq!(intercept.after, "hello");
+                assert!(matches!(intercept.action, InputInterceptAction::Replace));
+            }
+            other => panic!("expected InputIntercept, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn input_intercept_event_round_trips_through_serde_json() {
+        let evt = ExtensionAuditEvent::InputIntercept(InputInterceptEvent {
+            extension_id: "input-demo".to_string(),
+            before: "raw".to_string(),
+            after: "expanded".to_string(),
+            action: InputInterceptAction::Block {
+                reason: "policy".into(),
+            },
+            occurred_at: chrono::Utc::now(),
+        });
         let json = serde_json::to_string(&evt).unwrap();
         let back: ExtensionAuditEvent = serde_json::from_str(&json).unwrap();
         assert_eq!(back, evt);

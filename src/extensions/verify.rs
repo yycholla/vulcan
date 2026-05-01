@@ -135,6 +135,7 @@ mod tests {
             checksum: checksum.map(String::from),
             min_vulcan_version: min.map(String::from),
             description: None,
+            requires_user_approval: false,
         }
     }
 
