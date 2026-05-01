@@ -1,3 +1,9 @@
+// GH issue #549: pull every linked cargo-crate extension's
+// `inventory::submit!` site into the daemon binary so its `register`
+// fn pointer survives dead-code elimination. Bare `extern crate`
+// suffices — no symbols need importing into source.
+extern crate vulcan_ext_auto_commit as _vulcan_ext_auto_commit;
+
 use clap::{CommandFactory, Parser};
 use clap_complete::generate;
 use std::fs::File;

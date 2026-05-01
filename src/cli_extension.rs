@@ -30,6 +30,9 @@ pub async fn run(cmd: ExtensionSubcommand) -> Result<()> {
 
 fn list(home: &Path, install: &SqliteInstallStateStore) -> Result<()> {
     let registry = ExtensionRegistry::new();
+    // GH issue #549: surface cargo-crate extensions registered via
+    // `inventory::submit!` alongside manifest-discovered ones.
+    crate::extensions::api::wire_inventory_into_registry(&registry);
     let (ok, broken) = registry.load_from_store(home, install);
     let entries = registry.list();
     if entries.is_empty() {
@@ -69,6 +72,7 @@ fn list(home: &Path, install: &SqliteInstallStateStore) -> Result<()> {
 
 fn show(home: &Path, install: &SqliteInstallStateStore, id: &str) -> Result<()> {
     let registry = ExtensionRegistry::new();
+    crate::extensions::api::wire_inventory_into_registry(&registry);
     registry.load_from_store(home, install);
     let meta = registry
         .get(id)

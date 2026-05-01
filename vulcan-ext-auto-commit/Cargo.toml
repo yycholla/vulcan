@@ -7,6 +7,10 @@ authors = ["Colin Hanway"]
 license = "MIT"
 repository = "https://github.com/yycholla/vulcan"
 
+[package.metadata.vulcan]
+id = "auto-commit"
+daemon_entry = "vulcan_ext_auto_commit::AutoCommitExtension"
+
 [lib]
 name = "vulcan_ext_auto_commit"
 path = "src/lib.rs"
@@ -16,6 +20,7 @@ path = "src/lib.rs"
 # crates write `use vulcan::extensions::api::*` per the same convention
 # as the daemon binary.
 vulcan = { package = "vulcan-core", path = ".." }
+vulcan-extension-macros = { path = "../vulcan-extension-macros" }
 
 inventory = "0.3.24"
 async-trait = "0.1"

@@ -486,6 +486,29 @@ impl Agent {
         // when RTK is not installed — zero per-call overhead.
         hooks.register(Arc::new(crate::hooks::rtk::RtkHook::new()));
 
+        // GH issue #549: cargo-crate extensions registered via
+        // `inventory::submit!` and discovered into the pool's
+        // `ExtensionRegistry` at daemon startup. Each `Active`
+        // `DaemonCodeExtension` is instantiated per **Session** and its
+        // `hook_handlers` registered into this Agent's `HookRegistry`.
+        // No-op when the agent runs without a pool (CLI one-shot) or
+        // when no daemon extensions are registered.
+        if let Some(p) = pool.as_ref() {
+            let ctx = crate::extensions::api::SessionExtensionCtx {
+                cwd: cwd.clone(),
+                session_id: session_id.clone(),
+            };
+            let registered = p
+                .extension_registry()
+                .wire_daemon_extensions(ctx, &mut hooks);
+            if registered > 0 {
+                tracing::info!(
+                    daemon_extensions = registered,
+                    "Agent: wired daemon-side cargo-crate extensions"
+                );
+            }
+        }
+
         // YYC-264: embedded cortex-memory-core graph memory. When enabled,
         // registers two hooks:
         //   1. CortexRecallHook — BeforePrompt: semantically searches the graph

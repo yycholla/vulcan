@@ -1,0 +1,14 @@
+[package]
+name = "vulcan-extension-macros"
+version = "0.1.0"
+edition = "2024"
+description = "Proc macros for Vulcan extension manifests"
+authors = ["Colin Hanway"]
+license = "MIT"
+repository = "https://github.com/yycholla/vulcan"
+
+[lib]
+proc-macro = true
+
+[dependencies]
+toml = "0.9.8"

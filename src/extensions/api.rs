@@ -18,6 +18,18 @@ use std::sync::Arc;
 
 use super::ExtensionMetadata;
 use crate::hooks::HookHandler;
+use crate::provider::LLMProvider;
+use crate::provider::factory::ProviderFactory;
+use crate::tools::Tool;
+
+/// Parsed `[package.metadata.vulcan]` block for a cargo-crate
+/// extension. Produced by `vulcan_extension_macros::include_manifest!()`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExtensionManifest {
+    pub id: String,
+    pub version: String,
+    pub daemon_entry: Option<String>,
+}
 
 /// Per-**Session** instantiation context handed to a
 /// `DaemonCodeExtension::instantiate` call. Carries the bare minimum
@@ -50,11 +62,18 @@ pub trait DaemonCodeExtension: Send + Sync {
     fn instantiate(&self, ctx: SessionExtensionCtx) -> Arc<dyn SessionExtension>;
 }
 
+/// Extension-contributed command surface placeholder. Slice 1 only
+/// needs the typed registration slot; concrete daemon/frontend command
+/// routing lands in later slices.
+pub trait ExtensionCommand: Send + Sync {}
+
 /// Per-**Session** instantiation of a `DaemonCodeExtension`. Owns
-/// hooks, tools, commands, providers, and lifecycle handlers.
+/// hooks, tools, commands, providers, provider factories, and lifecycle
+/// handlers.
 ///
 /// All methods default-empty so an extension can opt into only the
 /// surfaces it needs.
+#[async_trait::async_trait]
 pub trait SessionExtension: Send + Sync {
     /// Hook handlers this **Session Extension** contributes. Wired
     /// into the session's `HookRegistry` once at session construction.
@@ -63,6 +82,32 @@ pub trait SessionExtension: Send + Sync {
     fn hook_handlers(&self) -> Vec<Arc<dyn HookHandler>> {
         Vec::new()
     }
+
+    /// Tools this session extension contributes.
+    fn tools(&self) -> Vec<Arc<dyn Tool>> {
+        Vec::new()
+    }
+
+    /// Commands this session extension contributes.
+    fn commands(&self) -> Vec<Arc<dyn ExtensionCommand>> {
+        Vec::new()
+    }
+
+    /// Concrete provider instances this session extension contributes.
+    fn providers(&self) -> Vec<Box<dyn LLMProvider>> {
+        Vec::new()
+    }
+
+    /// Provider factories this session extension contributes.
+    fn provider_factories(&self) -> Vec<Arc<dyn ProviderFactory>> {
+        Vec::new()
+    }
+
+    /// Lifecycle hook invoked when the session extension is activated.
+    async fn on_activate(&self) {}
+
+    /// Lifecycle hook invoked when the session extension is deactivated.
+    async fn on_deactivate(&self) {}
 }
 
 /// Inventory-collected registration entry. Each extension crate
@@ -295,5 +340,20 @@ mod tests {
         let handlers = session_ext.hook_handlers();
         assert_eq!(handlers.len(), 1);
         assert_eq!(handlers[0].name(), "watcher");
+    }
+
+    #[tokio::test]
+    async fn session_extension_default_surface_is_empty_and_noop() {
+        struct MinimalSession;
+        impl SessionExtension for MinimalSession {}
+
+        let session = MinimalSession;
+        assert!(session.hook_handlers().is_empty());
+        assert!(session.tools().is_empty());
+        assert!(session.commands().is_empty());
+        assert!(session.providers().is_empty());
+        assert!(session.provider_factories().is_empty());
+        session.on_activate().await;
+        session.on_deactivate().await;
     }
 }

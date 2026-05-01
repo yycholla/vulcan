@@ -18,6 +18,7 @@ use vulcan::extensions::api::{
 };
 use vulcan::extensions::{ExtensionMetadata, ExtensionSource, ExtensionStatus};
 use vulcan::hooks::HookHandler;
+use vulcan_extension_macros::include_manifest;
 
 /// Daemon-side factory. Holds no per-Session state; per-Session work
 /// happens inside `AutoCommitSession`.
@@ -31,10 +32,11 @@ impl Default for AutoCommitExtension {
 
 impl DaemonCodeExtension for AutoCommitExtension {
     fn metadata(&self) -> ExtensionMetadata {
+        let manifest = include_manifest!();
         let mut m = ExtensionMetadata::new(
-            "auto-commit",
+            manifest.id,
             "Auto-Commit",
-            env!("CARGO_PKG_VERSION"),
+            manifest.version,
             ExtensionSource::Builtin,
         );
         m.status = ExtensionStatus::Active;
@@ -237,5 +239,16 @@ mod tests {
         });
         session.hook_handlers()[0].session_end("no-git", 0).await;
         // No panic, no error — just silently no-op.
+    }
+
+    #[test]
+    fn include_manifest_reads_package_metadata() {
+        let manifest = include_manifest!();
+        assert_eq!(manifest.id, "auto-commit");
+        assert_eq!(manifest.version, env!("CARGO_PKG_VERSION"));
+        assert_eq!(
+            manifest.daemon_entry.as_deref(),
+            Some("vulcan_ext_auto_commit::AutoCommitExtension")
+        );
     }
 }

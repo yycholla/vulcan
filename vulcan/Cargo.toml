@@ -23,6 +23,12 @@ telegram = ["vulcan/telegram"]
 # `use vulcan::*` imports compiling.
 vulcan = { package = "vulcan-core", path = ".." }
 
+# GH issue #549: link the auto-commit dogfood extension so its
+# `inventory::submit!` site is visible at daemon startup. Without a
+# `use` the linker can drop unreferenced static items; the explicit
+# dep keeps the registration alive.
+vulcan-ext-auto-commit = { path = "../vulcan-ext-auto-commit" }
+
 tokio = { version = "1", features = ["full"] }
 clap = { version = "4", features = ["derive"] }
 clap_complete = "4.6"

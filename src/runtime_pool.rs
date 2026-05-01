@@ -23,6 +23,8 @@ use std::path::PathBuf;
 
 use crate::artifact::{ArtifactStore, InMemoryArtifactStore, SqliteArtifactStore};
 use crate::code::lsp::LspManager;
+use crate::extensions::ExtensionRegistry;
+use crate::extensions::api::wire_inventory_into_registry;
 use crate::memory::SessionStore;
 use crate::memory::cortex::CortexStore;
 use crate::orchestration::OrchestrationStore;
@@ -48,6 +50,11 @@ pub struct RuntimeResourcePool {
     /// would fail with `DatabaseAlreadyOpen`). `None` when cortex is
     /// disabled in config.
     cortex_store: Option<Arc<CortexStore>>,
+    /// GH issue #549: daemon-owned **`ExtensionRegistry`**. Populated
+    /// from `inventory::iter` at pool construction; sessions read
+    /// active daemon-side extensions from this registry to wire their
+    /// per-Session hook handlers, tools, commands, providers.
+    extension_registry: Arc<ExtensionRegistry>,
 }
 
 impl RuntimeResourcePool {
@@ -88,6 +95,13 @@ impl RuntimeResourcePool {
         let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
         let lsp_manager = Arc::new(LspManager::new(cwd));
 
+        let extension_registry = Arc::new(ExtensionRegistry::new());
+        let registered = wire_inventory_into_registry(&extension_registry);
+        tracing::info!(
+            registered_extensions = registered,
+            "RuntimeResourcePool: extension registry populated from inventory"
+        );
+
         Ok(Self {
             session_store,
             run_store,
@@ -95,6 +109,7 @@ impl RuntimeResourcePool {
             orchestration,
             lsp_manager,
             cortex_store: None,
+            extension_registry,
         })
     }
 
@@ -111,6 +126,8 @@ impl RuntimeResourcePool {
     #[doc(hidden)]
     pub fn for_tests() -> Self {
         let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+        let extension_registry = Arc::new(ExtensionRegistry::new());
+        wire_inventory_into_registry(&extension_registry);
         Self {
             session_store: Arc::new(SessionStore::in_memory()),
             run_store: Arc::new(InMemoryRunStore::default()),
@@ -118,6 +135,7 @@ impl RuntimeResourcePool {
             orchestration: Arc::new(OrchestrationStore::new()),
             lsp_manager: Arc::new(LspManager::new(cwd)),
             cortex_store: None,
+            extension_registry,
         }
     }
 
@@ -153,6 +171,14 @@ impl RuntimeResourcePool {
     /// configurations.
     pub fn cortex_store(&self) -> Option<Arc<CortexStore>> {
         self.cortex_store.as_ref().map(Arc::clone)
+    }
+
+    /// GH issue #549: cloneable handle to the daemon-owned
+    /// **`ExtensionRegistry`**. Populated from `inventory::iter` at
+    /// pool construction; sessions consult this when wiring their
+    /// per-Session daemon extensions.
+    pub fn extension_registry(&self) -> Arc<ExtensionRegistry> {
+        Arc::clone(&self.extension_registry)
     }
 }
 
@@ -196,5 +222,28 @@ mod tests {
         // when config.cortex.enabled.
         let pool = RuntimeResourcePool::for_tests();
         assert!(pool.cortex_store().is_none());
+    }
+
+    #[test]
+    fn pool_exposes_extension_registry_populated_from_inventory() {
+        // GH issue #549: the daemon-owned **Runtime Resource Pool**
+        // owns one **`ExtensionRegistry`**. Calling `extension_registry()`
+        // hands out the same `Arc` and the registry is pre-populated
+        // from `inventory::iter` so cargo-crate extensions self-register
+        // at pool construction.
+        let pool = RuntimeResourcePool::for_tests();
+        let r1 = pool.extension_registry();
+        let r2 = pool.extension_registry();
+        assert!(
+            Arc::ptr_eq(&r1, &r2),
+            "extension_registry() must hand out the same Arc"
+        );
+        // The cfg(test) inventory submit in `extensions::api::tests`
+        // registers a `stub-inventory` entry; pool construction calls
+        // `wire_inventory_into_registry` so it appears here too.
+        assert!(
+            r1.daemon_extension_count() >= 1,
+            "expected at least one inventory-registered extension"
+        );
     }
 }
