@@ -119,6 +119,19 @@ impl Agent {
             .await
     }
 
+    /// Like [`Self::apply_on_input`], but installs the caller's active
+    /// turn-cancel token before hooks run. Daemon prompt handlers use
+    /// this so `prompt.cancel` targets slow input interceptors for the
+    /// same in-flight turn.
+    pub async fn apply_on_input_with_cancel(
+        &mut self,
+        raw: &str,
+        cancel: CancellationToken,
+    ) -> crate::hooks::InputDecision {
+        self.turn_cancel = cancel.clone();
+        self.hooks.apply_on_input(raw, cancel).await
+    }
+
     /// Slice 7: like [`Self::run_prompt_with_cancel`] but stamps the
     /// run record's `RunOrigin` so child runs land as
     /// `RunOrigin::Subagent { parent_run_id }` and `vulcan run show`

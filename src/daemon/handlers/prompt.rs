@@ -139,7 +139,10 @@ pub async fn run(
     // dispatch + turn execution. Block short-circuits here with the
     // hook's reason; Replace swaps the input on the wire path; Continue
     // forwards as-is.
-    let effective_input: String = match agent.apply_on_input(input).await {
+    let effective_input: String = match agent
+        .apply_on_input_with_cancel(input, cancel_token.clone())
+        .await
+    {
         crate::hooks::InputDecision::Continue => input.to_string(),
         crate::hooks::InputDecision::Replace(rewrite) => rewrite,
         crate::hooks::InputDecision::Block(reason) => {
@@ -248,8 +251,11 @@ pub fn stream(
         // the streaming task. Block short-circuits with INPUT_BLOCKED;
         // Replace swaps the input forwarded to `run_prompt_stream_with_cancel`.
         let effective_input: String = {
-            let agent = agent_arc.lock().await;
-            match agent.apply_on_input(&input).await {
+            let mut agent = agent_arc.lock().await;
+            match agent
+                .apply_on_input_with_cancel(&input, cancel_token.clone())
+                .await
+            {
                 crate::hooks::InputDecision::Continue => input.clone(),
                 crate::hooks::InputDecision::Replace(rewrite) => rewrite,
                 crate::hooks::InputDecision::Block(reason) => {
@@ -384,7 +390,95 @@ pub async fn cancel(state: &DaemonState, id: String, session_id: String) -> Resp
 mod tests {
     use super::*;
     use crate::daemon::state::DaemonState;
-    use std::sync::Arc;
+    use anyhow::Result;
+    use async_trait::async_trait;
+    use std::sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    };
+    use tokio::sync::Notify;
+    use tokio::time::{Duration, timeout};
+    use tokio_util::sync::CancellationToken;
+
+    struct ProviderHandle(Arc<crate::provider::mock::MockProvider>);
+
+    #[async_trait]
+    impl crate::provider::LLMProvider for ProviderHandle {
+        async fn chat(
+            &self,
+            messages: &[crate::provider::Message],
+            tools: &[crate::provider::ToolDefinition],
+            cancel: CancellationToken,
+        ) -> Result<crate::provider::ChatResponse> {
+            self.0.chat(messages, tools, cancel).await
+        }
+
+        async fn chat_stream(
+            &self,
+            messages: &[crate::provider::Message],
+            tools: &[crate::provider::ToolDefinition],
+            tx: mpsc::Sender<crate::provider::StreamEvent>,
+            cancel: CancellationToken,
+        ) -> Result<()> {
+            self.0.chat_stream(messages, tools, tx, cancel).await
+        }
+
+        fn max_context(&self) -> usize {
+            self.0.max_context()
+        }
+    }
+
+    struct SlowInputHook {
+        started: Arc<Notify>,
+        saw_cancel: Arc<AtomicBool>,
+    }
+
+    #[async_trait]
+    impl crate::hooks::HookHandler for SlowInputHook {
+        fn name(&self) -> &str {
+            "slow-input"
+        }
+
+        async fn on_input(
+            &self,
+            _raw: &str,
+            cancel: CancellationToken,
+        ) -> Result<crate::hooks::HookOutcome> {
+            self.started.notify_one();
+            tokio::select! {
+                _ = cancel.cancelled() => {
+                    self.saw_cancel.store(true, Ordering::SeqCst);
+                    Ok(crate::hooks::HookOutcome::BlockInput {
+                        reason: "cancelled during input hook".into(),
+                    })
+                }
+                _ = tokio::time::sleep(Duration::from_secs(5)) => {
+                    Ok(crate::hooks::HookOutcome::Continue)
+                }
+            }
+        }
+    }
+
+    fn install_agent_with_slow_input_hook(
+        state: &DaemonState,
+        started: Arc<Notify>,
+        saw_cancel: Arc<AtomicBool>,
+    ) {
+        let mock = Arc::new(crate::provider::mock::MockProvider::new(128_000));
+        mock.enqueue_text("should not reach provider");
+        let mut hooks = crate::hooks::HookRegistry::new();
+        hooks.register(Arc::new(SlowInputHook {
+            started,
+            saw_cancel,
+        }));
+        let agent = crate::agent::Agent::for_test(
+            Box::new(ProviderHandle(mock)),
+            crate::tools::ToolRegistry::new(),
+            hooks,
+            Arc::new(crate::skills::SkillRegistry::empty()),
+        );
+        state.sessions().get("main").unwrap().set_agent(agent);
+    }
 
     #[tokio::test]
     async fn run_returns_session_not_found_for_bogus_session() {
@@ -440,7 +534,6 @@ mod tests {
 
     #[tokio::test]
     async fn cancel_fires_token_and_reports_in_flight_state() {
-        use tokio_util::sync::CancellationToken;
         let state = Arc::new(DaemonState::for_tests_minimal());
         let main = state.sessions().get("main").unwrap();
         let token = CancellationToken::new();
@@ -455,7 +548,6 @@ mod tests {
 
     #[tokio::test]
     async fn cancel_reports_false_when_not_in_flight() {
-        use tokio_util::sync::CancellationToken;
         let state = Arc::new(DaemonState::for_tests_minimal());
         let main = state.sessions().get("main").unwrap();
         let token = CancellationToken::new();
@@ -466,5 +558,75 @@ mod tests {
         let result = resp.result.expect("ok");
         assert_eq!(result["cancelled"], false);
         assert!(token.is_cancelled(), "token still fires even when idle");
+    }
+
+    #[tokio::test]
+    async fn prompt_run_cancel_reaches_slow_on_input_hook() {
+        let state = Arc::new(DaemonState::for_tests_minimal());
+        let started = Arc::new(Notify::new());
+        let saw_cancel = Arc::new(AtomicBool::new(false));
+        install_agent_with_slow_input_hook(&state, started.clone(), saw_cancel.clone());
+
+        let state_for_run = state.clone();
+        let run_task = tokio::spawn(async move {
+            run(
+                state_for_run,
+                "r1".into(),
+                "main".into(),
+                "hi",
+                FrontendCapability::full_set(),
+            )
+            .await
+        });
+
+        timeout(Duration::from_secs(1), started.notified())
+            .await
+            .expect("input hook started");
+        let cancel_resp = cancel(&state, "c1".into(), "main".into()).await;
+        assert_eq!(cancel_resp.result.expect("cancel ok")["cancelled"], true);
+
+        let resp = timeout(Duration::from_secs(1), run_task)
+            .await
+            .expect("prompt.run finished after cancel")
+            .expect("prompt.run task joined");
+        let err = resp.error.expect("cancelled hook blocks input");
+        assert_eq!(err.code, "INPUT_BLOCKED");
+        assert!(
+            saw_cancel.load(Ordering::SeqCst),
+            "on_input hook observed active turn cancel token"
+        );
+    }
+
+    #[tokio::test]
+    async fn prompt_stream_cancel_reaches_slow_on_input_hook() {
+        let state = Arc::new(DaemonState::for_tests_minimal());
+        let started = Arc::new(Notify::new());
+        let saw_cancel = Arc::new(AtomicBool::new(false));
+        install_agent_with_slow_input_hook(&state, started.clone(), saw_cancel.clone());
+
+        let (_frames, done_rx) = stream(
+            state.clone(),
+            "s1".into(),
+            "main".into(),
+            "hi".into(),
+            FrontendCapability::full_set(),
+        );
+
+        timeout(Duration::from_secs(1), started.notified())
+            .await
+            .expect("input hook started");
+        let cancel_resp = cancel(&state, "c1".into(), "main".into()).await;
+        assert_eq!(cancel_resp.result.expect("cancel ok")["cancelled"], true);
+
+        let resp = timeout(Duration::from_secs(1), done_rx)
+            .await
+            .expect("prompt.stream finished after cancel")
+            .expect("done response sent");
+        let err = resp.error.expect("cancelled hook blocks input");
+        assert_eq!(err.code, "INPUT_BLOCKED");
+        assert!(
+            saw_cancel.load(Ordering::SeqCst),
+            "on_input hook observed active turn cancel token"
+        );
     }
 }
