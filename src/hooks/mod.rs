@@ -1344,6 +1344,102 @@ mod tests {
         }
     }
 
+    fn message_content(message: &Message) -> &str {
+        match message {
+            Message::System { content } | Message::User { content } => content,
+            Message::Assistant { content, .. } => content.as_deref().unwrap_or(""),
+            Message::Tool { content, .. } => content,
+        }
+    }
+
+    struct ObserveUnsupported {
+        name: &'static str,
+        priority: i32,
+        calls: Arc<AtomicUsize>,
+        outcome: HookOutcome,
+        sleep_ms: u64,
+        fail: bool,
+    }
+
+    #[async_trait::async_trait]
+    impl HookHandler for ObserveUnsupported {
+        fn name(&self) -> &str {
+            self.name
+        }
+
+        fn priority(&self) -> i32 {
+            self.priority
+        }
+
+        async fn on_message_update(
+            &self,
+            _delta: &StreamEvent,
+            _cancel: CancellationToken,
+        ) -> Result<HookOutcome> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            if self.sleep_ms > 0 {
+                tokio::time::sleep(std::time::Duration::from_millis(self.sleep_ms)).await;
+            }
+            if self.fail {
+                anyhow::bail!("synthetic observe failure");
+            }
+            Ok(self.outcome.clone())
+        }
+    }
+
+    #[tokio::test]
+    async fn observe_only_events_ignore_unsupported_outcomes_and_isolate_failures() {
+        let unsupported_calls = Arc::new(AtomicUsize::new(0));
+        let error_calls = Arc::new(AtomicUsize::new(0));
+        let timeout_calls = Arc::new(AtomicUsize::new(0));
+        let fast_calls = Arc::new(AtomicUsize::new(0));
+        let mut reg = HookRegistry::new().with_timeout(std::time::Duration::from_millis(10));
+        reg.register(Arc::new(ObserveUnsupported {
+            name: "unsupported",
+            priority: 10,
+            calls: unsupported_calls.clone(),
+            outcome: HookOutcome::Block {
+                reason: "ignored".into(),
+            },
+            sleep_ms: 0,
+            fail: false,
+        }));
+        reg.register(Arc::new(ObserveUnsupported {
+            name: "error",
+            priority: 20,
+            calls: error_calls.clone(),
+            outcome: HookOutcome::Continue,
+            sleep_ms: 0,
+            fail: true,
+        }));
+        reg.register(Arc::new(ObserveUnsupported {
+            name: "timeout",
+            priority: 30,
+            calls: timeout_calls.clone(),
+            outcome: HookOutcome::Continue,
+            sleep_ms: 100,
+            fail: false,
+        }));
+        reg.register(Arc::new(ObserveUnsupported {
+            name: "fast",
+            priority: 40,
+            calls: fast_calls.clone(),
+            outcome: HookOutcome::Continue,
+            sleep_ms: 0,
+            fail: false,
+        }));
+
+        reg.on_message_update(&StreamEvent::Text("delta".into()), CancellationToken::new())
+            .await;
+
+        assert_eq!(unsupported_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(error_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(timeout_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(fast_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(reg.failure_metrics().errors, 1);
+        assert_eq!(reg.failure_metrics().timeouts, 1);
+    }
+
     struct WideRecorder {
         name: &'static str,
         priority: i32,
@@ -1969,6 +2065,263 @@ mod tests {
         let _ = reg.apply_on_input("hello", CancellationToken::new()).await;
 
         assert_eq!(later.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn before_tool_call_first_decision_wins_for_replace_args() {
+        let mut reg = HookRegistry::new();
+        reg.register(Arc::new(Probe::new(
+            "rewriter",
+            10,
+            HookOutcome::ReplaceArgs(serde_json::json!({"rewritten": true})),
+        )));
+        let later = Arc::new(Probe {
+            name: "later",
+            priority: 20,
+            before_tool_outcome: HookOutcome::Block {
+                reason: "too late".into(),
+            },
+            before_tool_calls: AtomicUsize::new(0),
+            sleep_ms: 0,
+            return_error: false,
+        });
+        reg.register(later.clone());
+
+        let decision = reg
+            .before_tool_call("probe", &Value::Null, CancellationToken::new())
+            .await;
+
+        match decision {
+            ToolCallDecision::ReplaceArgs(args) => {
+                assert_eq!(args, serde_json::json!({"rewritten": true}));
+            }
+            other => panic!("expected ReplaceArgs, got {other:?}"),
+        }
+        assert_eq!(later.before_tool_calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn after_tool_call_first_replace_result_wins() {
+        struct ResultRewriter {
+            name: &'static str,
+            priority: i32,
+            calls: Arc<AtomicUsize>,
+            output: &'static str,
+        }
+
+        #[async_trait::async_trait]
+        impl HookHandler for ResultRewriter {
+            fn name(&self) -> &str {
+                self.name
+            }
+
+            fn priority(&self) -> i32 {
+                self.priority
+            }
+
+            async fn after_tool_call(
+                &self,
+                _tool: &str,
+                _result: &ToolResult,
+                _cancel: CancellationToken,
+            ) -> Result<HookOutcome> {
+                self.calls.fetch_add(1, Ordering::SeqCst);
+                Ok(HookOutcome::ReplaceResult(ToolResult::ok(self.output)))
+            }
+        }
+
+        let first_calls = Arc::new(AtomicUsize::new(0));
+        let later_calls = Arc::new(AtomicUsize::new(0));
+        let mut reg = HookRegistry::new();
+        reg.register(Arc::new(ResultRewriter {
+            name: "first",
+            priority: 10,
+            calls: first_calls.clone(),
+            output: "first result",
+        }));
+        reg.register(Arc::new(ResultRewriter {
+            name: "later",
+            priority: 20,
+            calls: later_calls.clone(),
+            output: "later result",
+        }));
+
+        let result = reg
+            .after_tool_call(
+                "probe",
+                &ToolResult::ok("original"),
+                CancellationToken::new(),
+            )
+            .await
+            .expect("first result should win");
+
+        assert_eq!(result.output, "first result");
+        assert_eq!(first_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(later_calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn before_agent_end_first_force_continue_wins() {
+        struct EndDecision {
+            name: &'static str,
+            priority: i32,
+            calls: Arc<AtomicUsize>,
+            instruction: &'static str,
+        }
+
+        #[async_trait::async_trait]
+        impl HookHandler for EndDecision {
+            fn name(&self) -> &str {
+                self.name
+            }
+
+            fn priority(&self) -> i32 {
+                self.priority
+            }
+
+            async fn before_agent_end(
+                &self,
+                _response: &str,
+                _cancel: CancellationToken,
+            ) -> Result<HookOutcome> {
+                self.calls.fetch_add(1, Ordering::SeqCst);
+                Ok(HookOutcome::ForceContinue {
+                    instruction: self.instruction.into(),
+                })
+            }
+        }
+
+        let first_calls = Arc::new(AtomicUsize::new(0));
+        let later_calls = Arc::new(AtomicUsize::new(0));
+        let mut reg = HookRegistry::new();
+        reg.register(Arc::new(EndDecision {
+            name: "first",
+            priority: 10,
+            calls: first_calls.clone(),
+            instruction: "keep going",
+        }));
+        reg.register(Arc::new(EndDecision {
+            name: "later",
+            priority: 20,
+            calls: later_calls.clone(),
+            instruction: "too late",
+        }));
+
+        let instruction = reg
+            .before_agent_end("done", CancellationToken::new())
+            .await
+            .expect("force continue should win");
+
+        assert_eq!(instruction, "keep going");
+        assert_eq!(first_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(later_calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn context_rewrites_and_injections_are_transient_and_ordered() {
+        struct ContextPolicy {
+            name: &'static str,
+            priority: i32,
+        }
+
+        #[async_trait::async_trait]
+        impl HookHandler for ContextPolicy {
+            fn name(&self) -> &str {
+                self.name
+            }
+
+            fn priority(&self) -> i32 {
+                self.priority
+            }
+
+            async fn on_context(
+                &self,
+                _messages: &[Message],
+                _cancel: CancellationToken,
+            ) -> Result<HookOutcome> {
+                Ok(match self.name {
+                    "rewrite" => HookOutcome::RewriteMessages(vec![
+                        Message::System {
+                            content: "rewritten system".into(),
+                        },
+                        Message::User {
+                            content: "rewritten user".into(),
+                        },
+                    ]),
+                    "context-after-system" => HookOutcome::InjectMessages {
+                        messages: vec![Message::System {
+                            content: "context AS".into(),
+                        }],
+                        position: InjectPosition::AfterSystem,
+                    },
+                    _ => HookOutcome::Continue,
+                })
+            }
+
+            async fn before_prompt(
+                &self,
+                _messages: &[Message],
+                _cancel: CancellationToken,
+            ) -> Result<HookOutcome> {
+                Ok(match self.name {
+                    "prompt-after-system" => HookOutcome::InjectMessages {
+                        messages: vec![Message::System {
+                            content: "prompt AS".into(),
+                        }],
+                        position: InjectPosition::AfterSystem,
+                    },
+                    "prompt-append" => HookOutcome::InjectMessages {
+                        messages: vec![Message::System {
+                            content: "prompt tail".into(),
+                        }],
+                        position: InjectPosition::Append,
+                    },
+                    _ => HookOutcome::Continue,
+                })
+            }
+        }
+
+        let history = vec![
+            Message::System {
+                content: "original system".into(),
+            },
+            Message::User {
+                content: "original user".into(),
+            },
+        ];
+        let mut reg = HookRegistry::new();
+        reg.register(Arc::new(ContextPolicy {
+            name: "rewrite",
+            priority: 10,
+        }));
+        reg.register(Arc::new(ContextPolicy {
+            name: "context-after-system",
+            priority: 20,
+        }));
+        reg.register(Arc::new(ContextPolicy {
+            name: "prompt-after-system",
+            priority: 30,
+        }));
+        reg.register(Arc::new(ContextPolicy {
+            name: "prompt-append",
+            priority: 40,
+        }));
+
+        let outgoing = reg.apply_context(&history, CancellationToken::new()).await;
+        let contents: Vec<&str> = outgoing.iter().map(message_content).collect();
+
+        assert_eq!(
+            contents,
+            vec![
+                "rewritten system",
+                "context AS",
+                "prompt AS",
+                "rewritten user",
+                "prompt tail",
+            ]
+        );
+        assert_eq!(message_content(&history[0]), "original system");
+        assert_eq!(message_content(&history[1]), "original user");
     }
 
     #[tokio::test]
