@@ -3,6 +3,7 @@ use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
@@ -448,6 +449,33 @@ pub struct ToolRegistry {
     active_profile: Option<String>,
 }
 
+pub(crate) struct ToolRegistryAssembly<'a> {
+    pub(crate) config: &'a crate::config::Config,
+    pub(crate) active_provider: &'a crate::config::ProviderConfig,
+    pub(crate) api_key: &'a str,
+    pub(crate) cwd: PathBuf,
+    pub(crate) diff_sink: EditDiffSink,
+    pub(crate) lsp_manager: Arc<crate::code::lsp::LspManager>,
+    pub(crate) pause_tx: Option<crate::pause::PauseSender>,
+    pub(crate) pool: Option<&'a crate::runtime_pool::RuntimeResourcePool>,
+    pub(crate) hooks: &'a mut crate::hooks::HookRegistry,
+    pub(crate) memory: Arc<crate::memory::SessionStore>,
+    pub(crate) session_id: &'a str,
+    pub(crate) frontend_capabilities: Vec<crate::extensions::FrontendCapability>,
+    pub(crate) tool_profile_override: Option<String>,
+    pub(crate) orchestration: Arc<crate::orchestration::OrchestrationStore>,
+    pub(crate) artifact_store: Arc<dyn crate::artifact::ArtifactStore>,
+    pub(crate) current_run_id: Arc<parking_lot::Mutex<Option<crate::run_record::RunId>>>,
+}
+
+pub(crate) struct AssembledToolRegistry {
+    pub(crate) registry: ToolRegistry,
+    pub(crate) context: ToolContext,
+    pub(crate) trust_profile: crate::trust::TrustProfile,
+    pub(crate) daemon_extensions: usize,
+    pub(crate) extension_tools: usize,
+}
+
 impl Default for ToolRegistry {
     fn default() -> Self {
         Self::new()
@@ -545,6 +573,138 @@ impl ToolRegistry {
             registry.register(tool);
         }
         registry
+    }
+
+    pub(crate) fn assemble_for_agent(
+        assembly: ToolRegistryAssembly<'_>,
+    ) -> Result<AssembledToolRegistry> {
+        let ToolRegistryAssembly {
+            config,
+            active_provider,
+            api_key,
+            cwd,
+            diff_sink,
+            lsp_manager,
+            pause_tx,
+            pool,
+            hooks,
+            memory,
+            session_id,
+            frontend_capabilities,
+            tool_profile_override,
+            orchestration,
+            artifact_store,
+            current_run_id,
+        } = assembly;
+
+        let context = ToolContext::probe(cwd.clone());
+        let mut registry =
+            Self::new_with_diff_and_lsp(Some(diff_sink.clone()), Some(lsp_manager), cwd.clone());
+
+        if pause_tx.is_some() {
+            registry.register(Arc::new(crate::tools::ask_user::AskUserTool::new(
+                pause_tx.clone(),
+            )));
+            registry.register(Arc::new(crate::tools::file::PatchFile::with_pause(
+                Some(diff_sink),
+                pause_tx.clone(),
+            )));
+        }
+
+        if config.embeddings.enabled {
+            Self::register_embedding_tools(&mut registry, config, active_provider, api_key);
+        }
+
+        let mut daemon_extensions = 0;
+        let mut extension_tools = 0;
+        if let Some(pool) = pool {
+            let ctx = crate::extensions::api::SessionExtensionCtx {
+                cwd: cwd.clone(),
+                session_id: session_id.to_string(),
+                memory,
+                frontend_capabilities,
+                state: crate::extensions::ExtensionStateContext::new(
+                    pool.extension_state_store(),
+                    session_id.to_string(),
+                    "__pending__",
+                    Vec::new(),
+                ),
+            };
+            let wired = pool
+                .extension_registry()
+                .wire_daemon_extensions_into_runtime(ctx, hooks, Some(&mut registry));
+            daemon_extensions = wired.0;
+            extension_tools = wired.1;
+        }
+
+        let spawn_tool = crate::tools::spawn::SpawnSubagentTool::with_store(
+            Arc::new(config.clone()),
+            orchestration,
+        )
+        .with_artifact_store(artifact_store)
+        .with_parent_session_id(session_id.to_string())
+        .with_parent_run_handle(current_run_id);
+        registry.register(Arc::new(spawn_tool));
+
+        let trust_profile = config.workspace_trust.resolve_for(&context.cwd);
+        let resolved_profile_name = tool_profile_override
+            .as_deref()
+            .map(str::to_string)
+            .or_else(|| config.tools.profile.clone())
+            .or_else(|| {
+                if trust_profile.reason.contains("matched") {
+                    Some(trust_profile.capability_profile.clone())
+                } else {
+                    None
+                }
+            });
+        if let Some(name) = &resolved_profile_name {
+            let profile = config.tools.resolve_profile(name).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "unknown tool capability profile `{name}`. Built-in: readonly, coding, \
+                     reviewer, gateway-safe. User-defined go under [tools.profiles.<name>]."
+                )
+            })?;
+            registry.apply_profile(&profile);
+        }
+
+        registry.filter_for_context(&context);
+
+        Ok(AssembledToolRegistry {
+            registry,
+            context,
+            trust_profile,
+            daemon_extensions,
+            extension_tools,
+        })
+    }
+
+    fn register_embedding_tools(
+        registry: &mut ToolRegistry,
+        config: &crate::config::Config,
+        active_provider: &crate::config::ProviderConfig,
+        api_key: &str,
+    ) {
+        let parser_cache = Arc::new(crate::code::ParserCache::new());
+        let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+        match crate::code::embed::EmbeddingIndex::open(
+            cwd,
+            parser_cache,
+            config.embeddings.clone(),
+            active_provider.base_url.clone(),
+            api_key.to_string().into(),
+        ) {
+            Ok(index) => {
+                let arc = Arc::new(index);
+                registry.register(Arc::new(
+                    crate::tools::code_search::IndexEmbeddingsTool::new(arc.clone()),
+                ));
+                registry.register(Arc::new(
+                    crate::tools::code_search::CodeSearchSemanticTool::new(arc),
+                ));
+            }
+            Err(e) => tracing::warn!("embedding index unavailable: {e}"),
+        }
     }
 
     pub fn register(&mut self, tool: Arc<dyn Tool>) {

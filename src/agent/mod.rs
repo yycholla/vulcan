@@ -408,78 +408,6 @@ impl Agent {
             Some(p) => p.lsp_manager(),
             None => Arc::new(crate::code::lsp::LspManager::new(cwd.clone())),
         };
-        // YYC-107: probe the workspace once so tool registration can
-        // drop irrelevant tools (cargo_check off-Rust, etc.) and the
-        // remaining tools can render runtime-aware descriptions.
-        let tool_context = crate::tools::ToolContext::probe(cwd.clone());
-        let mut tools = ToolRegistry::new_with_diff_and_lsp(
-            Some(diff_sink.clone()),
-            Some(lsp_manager.clone()),
-            cwd.clone(),
-        );
-
-        // YYC-81: ask_user is only useful in interactive (TUI) mode.
-        // Register it whenever a pause channel is wired; it self-
-        // reports when called without one.
-        if pause_tx.is_some() {
-            tools.register(Arc::new(crate::tools::ask_user::AskUserTool::new(
-                pause_tx.clone(),
-            )));
-            // YYC-75: re-register edit_file with the pause channel so
-            // multi-site replaces route through the diff scrubber. Still
-            // shares the diff sink wired up in the registry constructor.
-            tools.register(Arc::new(crate::tools::file::PatchFile::with_pause(
-                Some(diff_sink.clone()),
-                pause_tx.clone(),
-            )));
-        }
-
-        // YYC-82: spawn_subagent tool. Holds a clone of the parent
-        // config so child agents can be built with the same provider
-        // wiring. Default tool allowlist is read-only (see
-        // `tools::spawn::default_allowed_tools`).
-        // YYC-206: shares the agent's `orchestration` store so the
-        // TUI / parent can read child-run records the tool produces.
-        // Slice 3: when a pool is wired up, draw the orchestration
-        // store from it so subagents land in the daemon-owned record
-        // instead of a fresh per-Agent in-memory copy.
-        let config_arc = Arc::new(config.clone());
-        let orchestration = match &pool {
-            Some(p) => p.orchestration(),
-            None => Arc::new(crate::orchestration::OrchestrationStore::new()),
-        };
-        tools.register(Arc::new(
-            crate::tools::spawn::SpawnSubagentTool::with_store(
-                Arc::clone(&config_arc),
-                Arc::clone(&orchestration),
-            ),
-        ));
-
-        // YYC-48: register embedding tools when [embeddings] is
-        // enabled. The index opens its own SQLite store; failure is
-        // logged but non-fatal — the agent still has every other tool.
-        if config.embeddings.enabled {
-            let parser_cache = Arc::new(crate::code::ParserCache::new());
-            let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
-            match crate::code::embed::EmbeddingIndex::open(
-                cwd,
-                parser_cache,
-                config.embeddings.clone(),
-                active_provider.base_url.clone(),
-                api_key.clone().into(),
-            ) {
-                Ok(index) => {
-                    let arc = Arc::new(index);
-                    tools.register(Arc::new(
-                        crate::tools::code_search::IndexEmbeddingsTool::new(arc.clone()),
-                    ));
-                    tools.register(Arc::new(
-                        crate::tools::code_search::CodeSearchSemanticTool::new(arc),
-                    ));
-                }
-                Err(e) => tracing::warn!("embedding index unavailable: {e}"),
-            }
-        }
         let skills = Arc::new(SkillRegistry::default_for(&config.skills_dir, Some(&cwd)));
         // Slice 3: shared session store comes from the pool when wired
         // up; fall back to opening a per-Agent connection for the
@@ -554,13 +482,6 @@ impl Agent {
         // when RTK is not installed — zero per-call overhead.
         hooks.register(Arc::new(crate::hooks::rtk::RtkHook::new()));
 
-        // GH issue #549: cargo-crate extensions registered via
-        // `inventory::submit!` and discovered into the pool's
-        // `ExtensionRegistry` at daemon startup. Each `Active`
-        // `DaemonCodeExtension` is instantiated per **Session** and its
-        // `hook_handlers` registered into this Agent's `HookRegistry`.
-        // No-op when the agent runs without a pool (CLI one-shot) or
-        // when no daemon extensions are registered.
         if let Some(p) = pool.as_ref() {
             // GH issue #557: install the daemon's shared audit log on
             // the registry before extension hook handlers register so
@@ -573,29 +494,6 @@ impl Agent {
             hooks.register(Arc::new(
                 crate::extensions::state::ExtensionStateReaperHook::new(p.extension_state_store()),
             ));
-
-            let ctx = crate::extensions::api::SessionExtensionCtx {
-                cwd: cwd.clone(),
-                session_id: session_id.clone(),
-                memory: Arc::clone(&memory),
-                frontend_capabilities,
-                state: crate::extensions::ExtensionStateContext::new(
-                    p.extension_state_store(),
-                    session_id.clone(),
-                    "__pending__",
-                    Vec::new(),
-                ),
-            };
-            let (registered, extension_tools) = p
-                .extension_registry()
-                .wire_daemon_extensions_into_runtime(ctx, &mut hooks, Some(&mut tools));
-            if registered > 0 {
-                tracing::info!(
-                    daemon_extensions = registered,
-                    extension_tools,
-                    "Agent: wired daemon-side cargo-crate extensions"
-                );
-            }
         }
 
         // YYC-264: embedded cortex-memory-core graph memory. When enabled,
@@ -633,47 +531,14 @@ impl Agent {
             }
         }
 
-        // YYC-182: resolve the workspace trust profile from config
-        // before tool-profile selection. The trust profile feeds
-        // the default capability profile when neither CLI flag nor
-        // `tools.profile` is set, so a sensitive workspace falls
-        // back to `readonly` instead of unrestricted.
-        let trust_profile = config.workspace_trust.resolve_for(&tool_context.cwd);
-
-        // YYC-181: apply the requested tool capability profile.
-        // Precedence: CLI flag > `tools.profile` in config > trust
-        // profile's default. An unknown name surfaces as a startup
-        // error so misconfiguration doesn't disguise itself as a
-        // silently missing tool later.
-        let resolved_profile_name = tool_profile_override
-            .as_deref()
-            .map(str::to_string)
-            .or_else(|| config.tools.profile.clone())
-            .or_else(|| {
-                // YYC-182: only fall back to the trust profile's
-                // capability profile when the workspace was
-                // explicitly classified. Unknown workspaces still
-                // get the unrestricted registry today — locking
-                // them down by default ships in a follow-up once
-                // the user-facing migration story is in place.
-                if trust_profile.reason.contains("matched") {
-                    Some(trust_profile.capability_profile.clone())
-                } else {
-                    None
-                }
-            });
-        if let Some(name) = &resolved_profile_name {
-            let profile = config.tools.resolve_profile(name).ok_or_else(|| {
-                anyhow::anyhow!(
-                    "unknown tool capability profile `{name}`. Built-in: readonly, coding, \
-                     reviewer, gateway-safe. User-defined go under [tools.profiles.<name>]."
-                )
-            })?;
-            tools.apply_profile(&profile);
-        }
-
-        // YYC-107: drop tools that aren't relevant to this workspace.
-        tools.filter_for_context(&tool_context);
+        // YYC-206: shares the agent's `orchestration` store so the
+        // TUI / parent can read child-run records produced by
+        // `spawn_subagent`. Daemon-managed Agents draw it from the
+        // pool; direct-mode Agents keep the legacy in-memory store.
+        let orchestration = match &pool {
+            Some(p) => p.orchestration(),
+            None => Arc::new(crate::orchestration::OrchestrationStore::new()),
+        };
 
         // YYC-179: durable run-record store.
         // Slice 3: when a pool is wired up, share its handle so every
@@ -704,25 +569,41 @@ impl Agent {
             },
         };
 
-        // YYC-180: re-register `spawn_subagent` with the parent's
-        // artifact store so child summaries land alongside the
-        // parent's run. The earlier registration sat without an
-        // artifact handle; replacing it here keeps registration
-        // ordering deterministic.
         // Slice 7: shared handle to the parent's live `current_run_id`.
         // Same Arc lives on the Agent and on the spawn tool; the
         // tool reads it at spawn time to stamp child runs with
         // `RunOrigin::Subagent { parent_run_id }`.
         let current_run_id: Arc<parking_lot::Mutex<Option<crate::run_record::RunId>>> =
             Arc::new(parking_lot::Mutex::new(None));
-        let spawn_tool = crate::tools::spawn::SpawnSubagentTool::with_store(
-            Arc::clone(&config_arc),
-            Arc::clone(&orchestration),
-        )
-        .with_artifact_store(Arc::clone(&artifact_store))
-        .with_parent_session_id(session_id.clone())
-        .with_parent_run_handle(Arc::clone(&current_run_id));
-        tools.register(Arc::new(spawn_tool));
+        let assembled_tools =
+            ToolRegistry::assemble_for_agent(crate::tools::ToolRegistryAssembly {
+                config,
+                active_provider,
+                api_key: &api_key,
+                cwd: cwd.clone(),
+                diff_sink: diff_sink.clone(),
+                lsp_manager: lsp_manager.clone(),
+                pause_tx: pause_tx.clone(),
+                pool: pool.as_deref(),
+                hooks: &mut hooks,
+                memory: Arc::clone(&memory),
+                session_id: &session_id,
+                frontend_capabilities,
+                tool_profile_override,
+                orchestration: Arc::clone(&orchestration),
+                artifact_store: Arc::clone(&artifact_store),
+                current_run_id: Arc::clone(&current_run_id),
+            })?;
+        if assembled_tools.daemon_extensions > 0 {
+            tracing::info!(
+                daemon_extensions = assembled_tools.daemon_extensions,
+                extension_tools = assembled_tools.extension_tools,
+                "Agent: wired daemon-side cargo-crate extensions"
+            );
+        }
+        let tools = assembled_tools.registry;
+        let tool_context = assembled_tools.context;
+        let trust_profile = assembled_tools.trust_profile;
 
         Ok(Self {
             provider,

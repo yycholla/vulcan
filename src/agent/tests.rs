@@ -173,11 +173,24 @@ fn agent_with_mock() -> (Agent, Arc<MockProvider>) {
     (agent, mock)
 }
 
-#[tokio::test]
-async fn builder_accepts_hooks_pause_channel_and_max_iterations() {
+fn local_builder_config() -> Config {
     let mut config = Config::default();
     config.provider.base_url = "http://127.0.0.1:11434/v1".into();
     config.provider.disable_catalog = true;
+    config
+}
+
+fn built_tool_names(agent: &Agent) -> Vec<String> {
+    agent
+        .tool_definitions()
+        .into_iter()
+        .map(|tool| tool.function.name)
+        .collect()
+}
+
+#[tokio::test]
+async fn builder_accepts_hooks_pause_channel_and_max_iterations() {
+    let mut config = local_builder_config();
     config.provider.max_iterations = 12;
     let (pause_tx, _pause_rx) = crate::pause::channel(1);
 
@@ -197,6 +210,104 @@ async fn builder_accepts_hooks_pause_channel_and_max_iterations() {
             .iter()
             .any(|tool| tool.function.name == "ask_user")
     );
+}
+
+#[tokio::test]
+async fn interactive_agent_assembly_exposes_interactive_and_core_tools() {
+    let config = local_builder_config();
+    let (pause_tx, _pause_rx) = crate::pause::channel(1);
+
+    let agent = Agent::builder(&config)
+        .with_pause_channel(pause_tx)
+        .build()
+        .await
+        .unwrap();
+    let names = built_tool_names(&agent);
+
+    for expected in [
+        "ask_user",
+        "edit_file",
+        "spawn_subagent",
+        "goto_definition",
+        "index_code_graph",
+        "code_query",
+        "git_status",
+    ] {
+        assert!(
+            names.contains(&expected.to_string()),
+            "interactive registry missing {expected:?}; got {names:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn pooled_agent_assembly_exposes_daemon_safe_core_tools() {
+    let config = local_builder_config();
+    let pool = Arc::new(crate::runtime_pool::RuntimeResourcePool::for_tests());
+
+    let agent = Agent::builder(&config)
+        .with_pool(Arc::clone(&pool))
+        .build()
+        .await
+        .unwrap();
+    let names = built_tool_names(&agent);
+
+    assert!(Arc::ptr_eq(&agent.lsp_manager, &pool.lsp_manager()));
+    for expected in [
+        "read_file",
+        "edit_file",
+        "spawn_subagent",
+        "goto_definition",
+        "find_symbol",
+        "git_status",
+    ] {
+        assert!(
+            names.contains(&expected.to_string()),
+            "pooled registry missing {expected:?}; got {names:?}"
+        );
+    }
+    assert!(
+        !names.contains(&"ask_user".to_string()),
+        "pooled non-interactive registry should not expose ask_user; got {names:?}"
+    );
+}
+
+#[tokio::test]
+async fn restricted_agent_assembly_filters_after_supplemental_tools() {
+    let config = local_builder_config();
+    let (pause_tx, _pause_rx) = crate::pause::channel(1);
+
+    let agent = Agent::builder(&config)
+        .with_pause_channel(pause_tx)
+        .with_tool_profile(Some("readonly".into()))
+        .build()
+        .await
+        .unwrap();
+    let names = built_tool_names(&agent);
+
+    for expected in [
+        "read_file",
+        "search_files",
+        "goto_definition",
+        "find_symbol",
+    ] {
+        assert!(
+            names.contains(&expected.to_string()),
+            "readonly registry missing {expected:?}; got {names:?}"
+        );
+    }
+    for forbidden in [
+        "ask_user",
+        "edit_file",
+        "write_file",
+        "spawn_subagent",
+        "bash",
+    ] {
+        assert!(
+            !names.contains(&forbidden.to_string()),
+            "readonly registry leaked {forbidden:?}; got {names:?}"
+        );
+    }
 }
 
 #[tokio::test]
