@@ -68,6 +68,8 @@ _Avoid_: per-agent database connection, module-owned connection
 A session created by an active turn to run delegated agent work under parent-session lineage.
 _Avoid_: subagent process, child agent
 
+> Extension-related terms (Daemon Extension Factory, Session Extension, Frontend Extension, Extension Manifest, Frontend Capability, Extension State) live in `src/extensions/CONTEXT.md` per CONTEXT-MAP.
+
 ## Relationships
 
 - Every **Frontend** talks to the **Daemon**; frontends do not construct an in-process agent fallback.
@@ -94,6 +96,8 @@ _Avoid_: subagent process, child agent
 - The **Daemon** keeps reading a connection while a streaming **Turn** is in flight; per-request dispatch runs independently and outbound frames are serialized by one writer queue.
 - The gateway runtime owns its shared **Daemon Client** separately from lane/session routing; `DaemonLaneRouter` maps lanes to sessions and does not own daemon connection state.
 - A gateway lane maps to one **Session**; the lane is a platform routing concept, not a daemon connection.
+
+> Extension-area relationships (factory/instance lifecycle, frontend split, capability gating) live in `src/extensions/CONTEXT.md`.
 
 ## Example Dialogue
 

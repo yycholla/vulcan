@@ -1,0 +1,43 @@
+# Extensions — Context
+
+Pi-mono–style extension system. Daemon-side and frontend-side extensions distribute as Cargo crates, register via `inventory`, instantiate per **Session** (daemon side) or per **Frontend** process (frontend side). The current registry (`src/extensions/registry.rs`) is the metadata and code-extension foundation; the daemon/frontend split, wide event bus, and lifecycle policy land via the PRD at GitHub issue #548.
+
+## Glossary
+
+**Daemon Extension Factory**:
+A daemon-global registration that knows how to instantiate per-session daemon-side extension state — hooks, tools, LLM-routed commands, providers, lifecycle observers. Lives in the **Runtime Resource Pool**; one entry per installed extension crate that ships a daemon module, registered once at daemon startup.
+_Avoid_: shared extension instance, global hook handler
+
+**Session Extension**:
+A per-**Session** instantiation of a **Daemon Extension Factory**, owning that session's hook instances, tool entries, lifecycle handlers, and daemon-side extension-local state. Render concerns belong to the **Frontend Extension**, not the **Session Extension**.
+_Avoid_: daemon-side renderer, in-session UI handler
+
+**Frontend Extension**:
+A per-**Frontend**-process registration that owns rendering, custom canvases, raw input capture, and frontend-routed slash commands. Registered at frontend binary startup; consumes daemon push frames addressed to its extension id but never owns agent state.
+_Avoid_: TUI hook, daemon renderer
+
+**Extension Manifest**:
+A package-level metadata block (`[package.metadata.vulcan]`) declaring an extension's id, version, capabilities, and optional `daemon_entry` / `frontend_entry` registration symbols. Either entry may be absent for pure-daemon (e.g. auto-commit) or pure-frontend (e.g. DOOM) extensions.
+_Avoid_: extension config, package.json
+
+**Frontend Capability**:
+A tag declared by a **Frontend** (or a gateway lane connector) at connection-open time describing what user-interaction or rendering surface that frontend supports. The **Daemon** activates an extension on a **Session** only when the connection's declared capabilities cover the **Extension Manifest**'s `requires` list.
+_Avoid_: feature flag, runtime capability
+
+**Extension State**:
+Per-**Session**, per-extension state. Lives in two places: `ToolResult.details` (pi-style, branches with **Session History** when a **Child Session** forks) and the daemon-owned **Extension State Store** (out-of-band rows keyed by session + extension + key, branched explicitly on fork unless the **Extension Manifest** opts out).
+_Avoid_: extension memory, extension cache
+
+## Relationships
+
+- Every installed extension that ships a daemon module contributes one **Daemon Extension Factory** to the **Runtime Resource Pool**; the factory is registered once at daemon startup.
+- Each new **Session** instantiates a **Session Extension** from each active **Daemon Extension Factory**; hook instances, tool entries, and daemon-side state live on the **Session Extension**, not the factory.
+- A **Frontend** owns its own **Frontend Extension** registry; daemon and frontend extensions are linked into separate binaries even when they ship from the same crate.
+- A **Frontend Extension** consumes daemon push frames addressed to its extension id; it never owns agent state and never receives hook events directly.
+- An extension activates on a **Session** only when the connected **Frontend**'s declared capabilities satisfy the **Extension Manifest**'s required surface.
+
+## ADRs
+
+- `docs/adr/0003-extension-daemon-frontend-split.md` — daemon/frontend split rationale.
+- `docs/adr/0004-extension-distribution-and-lifecycle.md` — Cargo crate distribution + mid-session enable/disable/kill policy.
+- `docs/adr/0005-extension-compaction-control.md` — extension control over compaction with validation safety net.
