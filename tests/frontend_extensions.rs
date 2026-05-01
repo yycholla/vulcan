@@ -106,7 +106,7 @@ fn tui_frontend_uses_last_renderer_and_dispatches_frontend_commands() {
         vec!["second".to_string(), "2 item(s)".to_string()]
     );
     assert!(matches!(
-        action,
+        action.action,
         FrontendCommandAction::OpenView { ref id, .. } if id == "todo"
     ));
 }

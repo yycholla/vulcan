@@ -131,8 +131,10 @@ pub enum FrontendCapability {
     TextIo,
     RichText,
     CellCanvas,
-    RawInput,
+    RawKeys,
     StatusWidgets,
+    Tick30Hz,
+    Tick60Hz,
 }
 
 impl FrontendCapability {
@@ -141,8 +143,10 @@ impl FrontendCapability {
             FrontendCapability::TextIo => "text_io",
             FrontendCapability::RichText => "rich_text",
             FrontendCapability::CellCanvas => "cell_canvas",
-            FrontendCapability::RawInput => "raw_input",
+            FrontendCapability::RawKeys => "raw_keys",
             FrontendCapability::StatusWidgets => "status_widgets",
+            FrontendCapability::Tick30Hz => "tick_30hz",
+            FrontendCapability::Tick60Hz => "tick_60hz",
         }
     }
 
@@ -151,14 +155,28 @@ impl FrontendCapability {
             "text_io" => Some(Self::TextIo),
             "rich_text" => Some(Self::RichText),
             "cell_canvas" => Some(Self::CellCanvas),
-            "raw_input" => Some(Self::RawInput),
+            "raw_input" | "raw_keys" => Some(Self::RawKeys),
             "status_widgets" => Some(Self::StatusWidgets),
+            "tick_30hz" => Some(Self::Tick30Hz),
+            "tick_60hz" => Some(Self::Tick60Hz),
             _ => None,
         }
     }
 
     pub fn text_only() -> Vec<Self> {
         vec![Self::TextIo]
+    }
+
+    pub fn full_set() -> Vec<Self> {
+        vec![
+            Self::TextIo,
+            Self::RichText,
+            Self::CellCanvas,
+            Self::RawKeys,
+            Self::StatusWidgets,
+            Self::Tick30Hz,
+            Self::Tick60Hz,
+        ]
     }
 }
 
