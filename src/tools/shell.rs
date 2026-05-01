@@ -558,7 +558,12 @@ impl Tool for BashTool {
         })
     }
 
-    async fn call(&self, params: Value, cancel: CancellationToken) -> Result<ToolResult> {
+    async fn call(
+        &self,
+        params: Value,
+        cancel: CancellationToken,
+        _progress: Option<crate::tools::ProgressSink>,
+    ) -> Result<ToolResult> {
         let p: BashParams = match parse_tool_params(params) {
             Ok(p) => p,
             Err(e) => return Ok(e),
@@ -652,7 +657,12 @@ impl Tool for PtyCreateTool {
         })
     }
 
-    async fn call(&self, params: Value, _cancel: CancellationToken) -> Result<ToolResult> {
+    async fn call(
+        &self,
+        params: Value,
+        _cancel: CancellationToken,
+        _progress: Option<crate::tools::ProgressSink>,
+    ) -> Result<ToolResult> {
         let p: PtyCreateParams = match parse_tool_params(params) {
             Ok(p) => p,
             Err(e) => return Ok(e),
@@ -699,7 +709,12 @@ impl Tool for PtyWriteTool {
         })
     }
 
-    async fn call(&self, params: Value, _cancel: CancellationToken) -> Result<ToolResult> {
+    async fn call(
+        &self,
+        params: Value,
+        _cancel: CancellationToken,
+        _progress: Option<crate::tools::ProgressSink>,
+    ) -> Result<ToolResult> {
         let p: PtyWriteParams = match parse_tool_params(params) {
             Ok(p) => p,
             Err(e) => return Ok(e),
@@ -744,7 +759,12 @@ impl Tool for PtyReadTool {
         })
     }
 
-    async fn call(&self, params: Value, _cancel: CancellationToken) -> Result<ToolResult> {
+    async fn call(
+        &self,
+        params: Value,
+        _cancel: CancellationToken,
+        _progress: Option<crate::tools::ProgressSink>,
+    ) -> Result<ToolResult> {
         let p: PtyReadParams = match parse_tool_params(params) {
             Ok(p) => p,
             Err(e) => return Ok(e),
@@ -788,7 +808,12 @@ impl Tool for PtyResizeTool {
         })
     }
 
-    async fn call(&self, params: Value, _cancel: CancellationToken) -> Result<ToolResult> {
+    async fn call(
+        &self,
+        params: Value,
+        _cancel: CancellationToken,
+        _progress: Option<crate::tools::ProgressSink>,
+    ) -> Result<ToolResult> {
         let p: PtyResizeParams = match parse_tool_params(params) {
             Ok(p) => p,
             Err(e) => return Ok(e),
@@ -833,7 +858,12 @@ impl Tool for PtyCloseTool {
         })
     }
 
-    async fn call(&self, params: Value, _cancel: CancellationToken) -> Result<ToolResult> {
+    async fn call(
+        &self,
+        params: Value,
+        _cancel: CancellationToken,
+        _progress: Option<crate::tools::ProgressSink>,
+    ) -> Result<ToolResult> {
         let p: PtyCloseParams = match parse_tool_params(params) {
             Ok(p) => p,
             Err(e) => return Ok(e),
@@ -870,7 +900,12 @@ impl Tool for PtyListTool {
         })
     }
 
-    async fn call(&self, _params: Value, _cancel: CancellationToken) -> Result<ToolResult> {
+    async fn call(
+        &self,
+        _params: Value,
+        _cancel: CancellationToken,
+        _progress: Option<crate::tools::ProgressSink>,
+    ) -> Result<ToolResult> {
         Ok(ToolResult::ok(serde_json::to_string(
             &self.registry.list()?,
         )?))
@@ -1106,7 +1141,11 @@ mod tests {
         let registry = PtyRegistry::new();
         let tool = PtyWriteTool::new(registry);
         let result = tool
-            .call(json!({ "input": "echo hi\n" }), CancellationToken::new())
+            .call(
+                json!({ "input": "echo hi\n" }),
+                CancellationToken::new(),
+                None,
+            )
             .await
             .expect("call returns Ok(ToolResult)");
         assert!(result.is_error);
@@ -1125,6 +1164,7 @@ mod tests {
             .call(
                 json!({ "session_id": "anything", "cols": 80 }),
                 CancellationToken::new(),
+                None,
             )
             .await
             .expect("call returns Ok(ToolResult)");
@@ -1135,7 +1175,7 @@ mod tests {
     #[tokio::test]
     async fn yyc263_bash_missing_command_surfaces_as_toolresult_err() {
         let result = BashTool
-            .call(json!({}), CancellationToken::new())
+            .call(json!({}), CancellationToken::new(), None)
             .await
             .expect("call returns Ok(ToolResult)");
         assert!(result.is_error);
@@ -1461,6 +1501,7 @@ mod tests {
                     "timeout": 10
                 }),
                 CancellationToken::new(),
+                None,
             )
             .await
             .unwrap();

@@ -127,7 +127,12 @@ impl Tool for ReplaceFunctionBodyTool {
             "required": ["path", "symbol", "new_body"]
         })
     }
-    async fn call(&self, params: Value, _cancel: CancellationToken) -> Result<ToolResult> {
+    async fn call(
+        &self,
+        params: Value,
+        _cancel: CancellationToken,
+        _progress: Option<crate::tools::ProgressSink>,
+    ) -> Result<ToolResult> {
         let p: ReplaceFunctionBodyParams = match parse_tool_params(params) {
             Ok(p) => p,
             Err(e) => return Ok(e),
@@ -198,7 +203,12 @@ impl Tool for RenameSymbolTool {
             "required": ["path", "line", "character", "new_name"]
         })
     }
-    async fn call(&self, params: Value, _cancel: CancellationToken) -> Result<ToolResult> {
+    async fn call(
+        &self,
+        params: Value,
+        _cancel: CancellationToken,
+        _progress: Option<crate::tools::ProgressSink>,
+    ) -> Result<ToolResult> {
         let p: RenameSymbolParams = match parse_tool_params(params) {
             Ok(p) => p,
             Err(e) => return Ok(e),
@@ -268,6 +278,7 @@ mod tests {
                     "new_body": "{\n    42\n}"
                 }),
                 CancellationToken::new(),
+                None,
             )
             .await
             .unwrap();
@@ -291,6 +302,7 @@ mod tests {
                     "new_body": "{}"
                 }),
                 CancellationToken::new(),
+                None,
             )
             .await
             .unwrap();

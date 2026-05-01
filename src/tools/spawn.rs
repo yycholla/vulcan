@@ -232,7 +232,12 @@ impl Tool for SpawnSubagentTool {
         })
     }
 
-    async fn call(&self, params: Value, cancel: CancellationToken) -> Result<ToolResult> {
+    async fn call(
+        &self,
+        params: Value,
+        cancel: CancellationToken,
+        _progress: Option<crate::tools::ProgressSink>,
+    ) -> Result<ToolResult> {
         let p: SpawnSubagentParams = match parse_tool_params(params) {
             Ok(p) => p,
             Err(e) => return Ok(e),
@@ -444,7 +449,7 @@ mod tests {
         let cfg = Arc::new(Config::default());
         let tool = SpawnSubagentTool::new(cfg);
         let result = tool
-            .call(json!({}), CancellationToken::new())
+            .call(json!({}), CancellationToken::new(), None)
             .await
             .expect("call ok");
         assert!(result.is_error);
@@ -458,7 +463,7 @@ mod tests {
         let cfg = Arc::new(Config::default());
         let tool = SpawnSubagentTool::new(cfg);
         let result = tool
-            .call(json!({"task": "   "}), CancellationToken::new())
+            .call(json!({"task": "   "}), CancellationToken::new(), None)
             .await
             .expect("call ok");
         assert!(result.is_error);
@@ -475,7 +480,7 @@ mod tests {
         let cancel = CancellationToken::new();
         cancel.cancel();
         let result = tool
-            .call(json!({"task": "hello"}), cancel)
+            .call(json!({"task": "hello"}), cancel, None)
             .await
             .expect("call ok");
         assert!(!result.is_error);
@@ -505,6 +510,7 @@ mod tests {
             .call(
                 json!({"task": "review", "profile": "imaginary"}),
                 CancellationToken::new(),
+                None,
             )
             .await
             .expect("call ok");
@@ -526,6 +532,7 @@ mod tests {
             .call(
                 json!({"task": "inspect daemon-only execution"}),
                 CancellationToken::new(),
+                None,
             )
             .await
             .expect("call ok");
@@ -587,6 +594,7 @@ mod tests {
                     "max_iterations": 3
                 }),
                 CancellationToken::new(),
+                None,
             )
             .await
             .expect("call ok");

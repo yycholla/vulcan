@@ -45,7 +45,12 @@ impl Tool for IndexCodeGraphTool {
     fn schema(&self) -> Value {
         json!({ "type": "object", "properties": {} })
     }
-    async fn call(&self, _params: Value, cancel: CancellationToken) -> Result<ToolResult> {
+    async fn call(
+        &self,
+        _params: Value,
+        cancel: CancellationToken,
+        _progress: Option<crate::tools::ProgressSink>,
+    ) -> Result<ToolResult> {
         let graph = self.graph.clone();
         let task = tokio::task::spawn_blocking(move || graph.reindex());
         let result = tokio::select! {
@@ -90,7 +95,12 @@ impl Tool for FindSymbolTool {
             "required": ["name"]
         })
     }
-    async fn call(&self, params: Value, _cancel: CancellationToken) -> Result<ToolResult> {
+    async fn call(
+        &self,
+        params: Value,
+        _cancel: CancellationToken,
+        _progress: Option<crate::tools::ProgressSink>,
+    ) -> Result<ToolResult> {
         let p: FindSymbolParams = match parse_tool_params(params) {
             Ok(p) => p,
             Err(e) => return Ok(e),

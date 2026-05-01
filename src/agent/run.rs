@@ -476,6 +476,14 @@ impl Agent {
         if !self.context.should_compact(messages) {
             return;
         }
+        if !self
+            .hooks
+            .on_session_before_compact(self.turn_cancel.clone())
+            .await
+        {
+            tracing::info!("agent iteration {iteration}: compaction blocked by hook");
+            return;
+        }
 
         let pre_count = messages.len();
         let cancel = self.turn_cancel.clone();
@@ -523,7 +531,7 @@ impl Agent {
         };
 
         let request = ContextManager::summarization_request(&messages[1..split]);
-        let response = match self.provider.chat(&request, &[], cancel).await {
+        let response = match self.provider.chat(&request, &[], cancel.clone()).await {
             Ok(r) => r,
             Err(e) => {
                 tracing::warn!("compaction summarizer call failed: {e}");
@@ -544,6 +552,9 @@ impl Agent {
         new_messages.extend(messages[split..].iter().cloned());
         *messages = new_messages;
 
+        self.hooks
+            .on_session_compact(&summary, cancel.clone())
+            .await;
         self.context.install_summary(summary);
         // YYC-138: persist the rewritten snapshot atomically so the next
         // save_messages append doesn't orphan Tool rows from the dropped
@@ -624,8 +635,26 @@ impl Agent {
         let (priv_tx, mut priv_rx) = mpsc::channel::<TurnEvent>(stream_cap);
 
         let turn_tx_clone = turn_tx.clone();
+        let hooks = self.hooks.clone();
+        let hook_cancel = cancel.clone();
         tokio::spawn(async move {
+            let mut message_started = false;
             while let Some(ev) = inner_rx.recv().await {
+                match &ev {
+                    StreamEvent::Text(_) | StreamEvent::Reasoning(_) => {
+                        if !message_started {
+                            hooks.on_message_start(&ev, hook_cancel.clone()).await;
+                            message_started = true;
+                        }
+                        hooks.on_message_update(&ev, hook_cancel.clone()).await;
+                    }
+                    StreamEvent::Done(_) => {
+                        if message_started {
+                            hooks.on_message_end(&ev, hook_cancel.clone()).await;
+                        }
+                    }
+                    _ => {}
+                }
                 let event = TurnEvent::from(ev);
                 match &event {
                     TurnEvent::ProviderDone { .. } | TurnEvent::Error { .. } => {
@@ -647,10 +676,13 @@ impl Agent {
             streaming: true,
             message_count: outgoing.len(),
         });
+        self.hooks
+            .on_before_provider_request(outgoing, cancel.clone())
+            .await;
 
         if let Err(e) = self
             .provider
-            .chat_stream(outgoing, tool_defs, inner_tx, cancel)
+            .chat_stream(outgoing, tool_defs, inner_tx, cancel.clone())
             .await
         {
             // Surface provider failures to the TUI rather than dropping
@@ -702,6 +734,9 @@ impl Agent {
 
         match final_response {
             Some(r) => {
+                self.hooks
+                    .on_after_provider_response(&r, cancel.clone())
+                    .await;
                 // YYC-179: emit ProviderResponse for the streaming
                 // path so dashboards can group buffered/streaming
                 // turns under the same event family.
@@ -800,6 +835,7 @@ impl Agent {
         }
 
         let dispatches = tool_calls.iter().map(|tc| {
+            let call = tc.clone();
             let id = tc.id.clone();
             let name = tc.function.name.clone();
             let args = tc.function.arguments.clone();
@@ -808,7 +844,32 @@ impl Agent {
             async move {
                 tracing::info!("Executing tool: {name} (call {id})");
                 let started = std::time::Instant::now();
-                let result = self.dispatch_tool(&name, &args, cancel).await;
+                self.hooks
+                    .on_tool_execution_start(&call, cancel.clone())
+                    .await;
+                let (progress_tx, mut progress_rx) =
+                    mpsc::channel::<crate::tools::ToolProgress>(16);
+                let hooks = self.hooks.clone();
+                let progress_call = call.clone();
+                let progress_cancel = cancel.clone();
+                let progress_task = tokio::spawn(async move {
+                    while let Some(progress) = progress_rx.recv().await {
+                        hooks
+                            .on_tool_execution_update(
+                                &progress_call,
+                                &progress,
+                                progress_cancel.clone(),
+                            )
+                            .await;
+                    }
+                });
+                let result = self
+                    .dispatch_tool(&name, &args, cancel.clone(), Some(progress_tx))
+                    .await;
+                let _ = progress_task.await;
+                self.hooks
+                    .on_tool_execution_end(&call, cancel.clone())
+                    .await;
                 let elapsed_ms = started.elapsed().as_millis() as u64;
                 let ok = !result.is_error;
                 // YYC-74: truncated output preview + meta line.
@@ -928,6 +989,11 @@ impl TurnRunnerMut<'_> {
                 });
             }
 
+            self.agent
+                .hooks
+                .on_turn_start(iteration as u32, cancel.clone())
+                .await;
+
             self.compact_messages_if_needed(&mut messages, events, iteration)
                 .await;
 
@@ -939,7 +1005,7 @@ impl TurnRunnerMut<'_> {
             let outgoing = self
                 .agent
                 .hooks
-                .apply_before_prompt(&messages, cancel.clone())
+                .apply_context(&messages, cancel.clone())
                 .await;
 
             let response = match mode {
@@ -949,6 +1015,10 @@ impl TurnRunnerMut<'_> {
                         streaming: false,
                         message_count: outgoing.len(),
                     });
+                    self.agent
+                        .hooks
+                        .on_before_provider_request(&outgoing, cancel.clone())
+                        .await;
                     let resp = match self
                         .agent
                         .provider
@@ -964,6 +1034,10 @@ impl TurnRunnerMut<'_> {
                             return Err(e);
                         }
                     };
+                    self.agent
+                        .hooks
+                        .on_after_provider_response(&resp, cancel.clone())
+                        .await;
                     if let Some(usage) = &resp.usage {
                         self.agent.record_run_event(RunEvent::ProviderResponse {
                             prompt_tokens: usage.prompt_tokens as u32,
@@ -984,6 +1058,19 @@ impl TurnRunnerMut<'_> {
                         // emit one TurnEvent::Text so adapters that forward
                         // events still see assistant content.
                         if !text.is_empty() {
+                            let event = StreamEvent::Text(text.clone());
+                            self.agent
+                                .hooks
+                                .on_message_start(&event, cancel.clone())
+                                .await;
+                            self.agent
+                                .hooks
+                                .on_message_update(&event, cancel.clone())
+                                .await;
+                            self.agent
+                                .hooks
+                                .on_message_end(&event, cancel.clone())
+                                .await;
                             let _ = events.send(TurnEvent::Text { text: text.clone() }).await;
                         }
                     }
@@ -1047,6 +1134,10 @@ impl TurnRunnerMut<'_> {
                     });
                 }
                 self.agent.save_messages(&messages)?;
+                self.agent
+                    .hooks
+                    .on_turn_end(iteration as u32, cancel.clone())
+                    .await;
             } else {
                 let reasoning = response.reasoning_content.clone();
 
@@ -1064,6 +1155,10 @@ impl TurnRunnerMut<'_> {
                     messages.push(Message::User {
                         content: instruction,
                     });
+                    self.agent
+                        .hooks
+                        .on_turn_end(iteration as u32, cancel.clone())
+                        .await;
                     continue;
                 }
 
@@ -1110,6 +1205,10 @@ impl TurnRunnerMut<'_> {
                     finish_reason: response.finish_reason,
                     reasoning_content: reasoning,
                 };
+                self.agent
+                    .hooks
+                    .on_turn_end(iteration as u32, cancel.clone())
+                    .await;
                 return Ok(TurnOutcome {
                     final_text: full_response,
                     final_response: Some(final_response),
@@ -1126,6 +1225,10 @@ impl TurnRunnerMut<'_> {
             finish_reason: Some("max_iterations".into()),
             reasoning_content: None,
         };
+        self.agent
+            .hooks
+            .on_turn_end(max_iter as u32, cancel.clone())
+            .await;
         Ok(TurnOutcome {
             final_text: max_text,
             final_response: Some(response),

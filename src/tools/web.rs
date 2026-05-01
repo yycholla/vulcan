@@ -42,7 +42,12 @@ impl Tool for WebSearch {
             "required": ["query"]
         })
     }
-    async fn call(&self, params: Value, cancel: CancellationToken) -> Result<ToolResult> {
+    async fn call(
+        &self,
+        params: Value,
+        cancel: CancellationToken,
+        _progress: Option<crate::tools::ProgressSink>,
+    ) -> Result<ToolResult> {
         let p: WebSearchParams = match parse_tool_params(params) {
             Ok(p) => p,
             Err(e) => return Ok(e),
@@ -268,7 +273,12 @@ impl Tool for WebFetch {
             "required": ["url"]
         })
     }
-    async fn call(&self, params: Value, cancel: CancellationToken) -> Result<ToolResult> {
+    async fn call(
+        &self,
+        params: Value,
+        cancel: CancellationToken,
+        _progress: Option<crate::tools::ProgressSink>,
+    ) -> Result<ToolResult> {
         let p: WebFetchParams = match parse_tool_params(params) {
             Ok(p) => p,
             Err(e) => return Ok(e),
@@ -396,7 +406,7 @@ mod tests {
     #[tokio::test]
     async fn yyc263_web_search_missing_query_surfaces_as_toolresult_err() {
         let result = WebSearch
-            .call(json!({}), CancellationToken::new())
+            .call(json!({}), CancellationToken::new(), None)
             .await
             .expect("call returns Ok(ToolResult)");
         assert!(result.is_error);
@@ -410,7 +420,7 @@ mod tests {
     #[tokio::test]
     async fn yyc263_web_fetch_missing_url_surfaces_as_toolresult_err() {
         let result = WebFetch
-            .call(json!({}), CancellationToken::new())
+            .call(json!({}), CancellationToken::new(), None)
             .await
             .expect("call returns Ok(ToolResult)");
         assert!(result.is_error);

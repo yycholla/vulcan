@@ -82,7 +82,12 @@ impl Tool for CargoCheckTool {
         Some(out)
     }
 
-    async fn call(&self, params: Value, cancel: CancellationToken) -> Result<ToolResult> {
+    async fn call(
+        &self,
+        params: Value,
+        cancel: CancellationToken,
+        _progress: Option<crate::tools::ProgressSink>,
+    ) -> Result<ToolResult> {
         let p: CargoCheckParams = match parse_tool_params(params) {
             Ok(p) => p,
             Err(e) => return Ok(e),
@@ -212,7 +217,11 @@ mod yyc263_tests {
     #[tokio::test]
     async fn cargo_check_bad_param_type_surfaces_as_toolresult_err() {
         let result = CargoCheckTool
-            .call(json!({ "all_targets": "yes" }), CancellationToken::new())
+            .call(
+                json!({ "all_targets": "yes" }),
+                CancellationToken::new(),
+                None,
+            )
             .await
             .expect("call returns Ok(ToolResult)");
         assert!(result.is_error);

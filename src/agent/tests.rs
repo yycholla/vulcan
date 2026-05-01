@@ -1020,6 +1020,72 @@ async fn fork_session_records_lineage_and_switches_active_session() {
     assert_eq!(child.lineage_label.as_deref(), Some("branched for UI work"));
 }
 
+#[tokio::test]
+async fn fork_session_with_hooks_emits_before_fork_event() {
+    struct ForkHook(std::sync::Arc<std::sync::atomic::AtomicUsize>);
+
+    #[async_trait::async_trait]
+    impl crate::hooks::HookHandler for ForkHook {
+        fn name(&self) -> &str {
+            "fork-hook"
+        }
+
+        async fn on_session_before_fork(
+            &self,
+            _cancel: CancellationToken,
+        ) -> Result<crate::hooks::HookOutcome> {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(crate::hooks::HookOutcome::Continue)
+        }
+    }
+
+    let mock = Arc::new(MockProvider::new(128_000));
+    struct ProviderHandle(Arc<MockProvider>);
+    #[async_trait::async_trait]
+    impl LLMProvider for ProviderHandle {
+        async fn chat(
+            &self,
+            m: &[Message],
+            t: &[crate::provider::ToolDefinition],
+            c: CancellationToken,
+        ) -> Result<crate::provider::ChatResponse> {
+            self.0.chat(m, t, c).await
+        }
+
+        async fn chat_stream(
+            &self,
+            m: &[Message],
+            t: &[crate::provider::ToolDefinition],
+            tx: tokio::sync::mpsc::Sender<crate::provider::StreamEvent>,
+            c: CancellationToken,
+        ) -> Result<()> {
+            self.0.chat_stream(m, t, tx, c).await
+        }
+
+        fn max_context(&self) -> usize {
+            self.0.max_context()
+        }
+    }
+
+    let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let mut hooks = HookRegistry::new();
+    hooks.register(Arc::new(ForkHook(calls.clone())));
+    let mut agent = Agent::for_test(
+        Box::new(ProviderHandle(mock)),
+        ToolRegistry::new(),
+        hooks,
+        empty_skills(),
+    );
+
+    let child_id = agent
+        .fork_session_with_hooks(Some("hooked fork"))
+        .await
+        .unwrap();
+
+    assert_eq!(agent.session_id(), child_id);
+    assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+}
+
 /// Tool that increments an in-flight counter, sleeps, then decrements.
 /// Records the maximum observed concurrency so the test can assert that
 /// parallel dispatch actually overlaps tool execution (YYC-34).
@@ -1043,6 +1109,7 @@ impl crate::tools::Tool for ConcurrencyProbeTool {
         &self,
         _params: Value,
         _cancel: CancellationToken,
+        _progress: Option<crate::tools::ProgressSink>,
     ) -> Result<crate::tools::ToolResult> {
         use std::sync::atomic::Ordering;
         let now = self.in_flight.fetch_add(1, Ordering::SeqCst) + 1;

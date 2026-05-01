@@ -45,7 +45,12 @@ impl Tool for IndexEmbeddingsTool {
     fn schema(&self) -> Value {
         json!({ "type": "object", "properties": {} })
     }
-    async fn call(&self, _params: Value, cancel: CancellationToken) -> Result<ToolResult> {
+    async fn call(
+        &self,
+        _params: Value,
+        cancel: CancellationToken,
+        _progress: Option<crate::tools::ProgressSink>,
+    ) -> Result<ToolResult> {
         let index = self.index.clone();
         let task = async move { index.reindex().await };
         let result = tokio::select! {
@@ -92,7 +97,12 @@ impl Tool for CodeSearchSemanticTool {
             "required": ["query"]
         })
     }
-    async fn call(&self, params: Value, _cancel: CancellationToken) -> Result<ToolResult> {
+    async fn call(
+        &self,
+        params: Value,
+        _cancel: CancellationToken,
+        _progress: Option<crate::tools::ProgressSink>,
+    ) -> Result<ToolResult> {
         let p: CodeSearchSemanticParams = match parse_tool_params(params) {
             Ok(p) => p,
             Err(e) => return Ok(e),

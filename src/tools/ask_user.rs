@@ -70,7 +70,12 @@ impl Tool for AskUserTool {
             "required": ["question", "options"]
         })
     }
-    async fn call(&self, params: Value, cancel: CancellationToken) -> Result<ToolResult> {
+    async fn call(
+        &self,
+        params: Value,
+        cancel: CancellationToken,
+        _progress: Option<crate::tools::ProgressSink>,
+    ) -> Result<ToolResult> {
         let p: AskUserParams = match parse_tool_params(params) {
             Ok(p) => p,
             Err(e) => return Ok(e),
@@ -164,6 +169,7 @@ mod yyc277_tests {
             .call(
                 json!({ "options": [{ "key": "y", "label": "Yes", "value": "yes" }] }),
                 CancellationToken::new(),
+                None,
             )
             .await
             .expect("call returns Ok(ToolResult)");
@@ -185,6 +191,7 @@ mod yyc277_tests {
             .call(
                 json!({ "question": "go?", "options": [] }),
                 CancellationToken::new(),
+                None,
             )
             .await
             .expect("call returns Ok(ToolResult)");

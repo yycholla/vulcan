@@ -68,7 +68,12 @@ impl Tool for ReadFile {
             "required": ["path"]
         })
     }
-    async fn call(&self, params: Value, _cancel: CancellationToken) -> Result<ToolResult> {
+    async fn call(
+        &self,
+        params: Value,
+        _cancel: CancellationToken,
+        _progress: Option<crate::tools::ProgressSink>,
+    ) -> Result<ToolResult> {
         use tokio::fs::File;
         use tokio::io::{AsyncBufReadExt, BufReader};
 
@@ -199,7 +204,12 @@ impl Tool for ListFiles {
             }
         })
     }
-    async fn call(&self, params: Value, _cancel: CancellationToken) -> Result<ToolResult> {
+    async fn call(
+        &self,
+        params: Value,
+        _cancel: CancellationToken,
+        _progress: Option<crate::tools::ProgressSink>,
+    ) -> Result<ToolResult> {
         let p: ListFilesParams = match parse_tool_params(params) {
             Ok(p) => p,
             Err(e) => return Ok(e),
@@ -396,7 +406,12 @@ impl Tool for WriteFile {
             "required": ["path", "content"]
         })
     }
-    async fn call(&self, params: Value, _cancel: CancellationToken) -> Result<ToolResult> {
+    async fn call(
+        &self,
+        params: Value,
+        _cancel: CancellationToken,
+        _progress: Option<crate::tools::ProgressSink>,
+    ) -> Result<ToolResult> {
         let p: WriteFileParams = match parse_tool_params(params) {
             Ok(p) => p,
             Err(e) => return Ok(e),
@@ -516,7 +531,12 @@ impl Tool for SearchFiles {
             "required": ["pattern"]
         })
     }
-    async fn call(&self, params: Value, _cancel: CancellationToken) -> Result<ToolResult> {
+    async fn call(
+        &self,
+        params: Value,
+        _cancel: CancellationToken,
+        _progress: Option<crate::tools::ProgressSink>,
+    ) -> Result<ToolResult> {
         let p: SearchFilesParams = match parse_tool_params(params) {
             Ok(p) => p,
             Err(e) => return Ok(e),
@@ -713,7 +733,12 @@ impl Tool for PatchFile {
             "required": ["path", "old_string", "new_string"]
         })
     }
-    async fn call(&self, params: Value, _cancel: CancellationToken) -> Result<ToolResult> {
+    async fn call(
+        &self,
+        params: Value,
+        _cancel: CancellationToken,
+        _progress: Option<crate::tools::ProgressSink>,
+    ) -> Result<ToolResult> {
         let p: PatchFileParams = match parse_tool_params(params) {
             Ok(p) => p,
             Err(e) => return Ok(e),
@@ -966,6 +991,7 @@ mod tests {
             .call(
                 json!({ "offset": 1, "limit": 10 }),
                 CancellationToken::new(),
+                None,
             )
             .await
             .expect("call returns Ok(ToolResult)");
@@ -983,6 +1009,7 @@ mod tests {
             .call(
                 json!({ "path": "/tmp/anything", "new_string": "x" }),
                 CancellationToken::new(),
+                None,
             )
             .await
             .expect("call returns Ok(ToolResult)");
@@ -1006,6 +1033,7 @@ mod tests {
                     "old_string": "remove_me ",
                 }),
                 CancellationToken::new(),
+                None,
             )
             .await
             .unwrap();
@@ -1017,7 +1045,7 @@ mod tests {
     #[tokio::test]
     async fn yyc263_search_files_missing_pattern_surfaces_as_toolresult_err() {
         let result = SearchFiles
-            .call(json!({ "path": "." }), CancellationToken::new())
+            .call(json!({ "path": "." }), CancellationToken::new(), None)
             .await
             .expect("call returns Ok(ToolResult)");
         assert!(result.is_error);
@@ -1039,6 +1067,7 @@ mod tests {
                     "path": dir.path().to_str().unwrap(),
                 }),
                 CancellationToken::new(),
+                None,
             )
             .await
             .unwrap();
@@ -1049,7 +1078,7 @@ mod tests {
     #[tokio::test]
     async fn yyc263_write_file_missing_path_surfaces_as_toolresult_err() {
         let result = WriteFile::new(None)
-            .call(json!({ "content": "hi" }), CancellationToken::new())
+            .call(json!({ "content": "hi" }), CancellationToken::new(), None)
             .await
             .expect("call returns Ok(ToolResult)");
         assert!(result.is_error);
@@ -1068,6 +1097,7 @@ mod tests {
             .call(
                 json!({ "path": path.to_str().unwrap() }),
                 CancellationToken::new(),
+                None,
             )
             .await
             .unwrap();
@@ -1079,7 +1109,7 @@ mod tests {
     #[tokio::test]
     async fn yyc279_list_files_bad_param_type_surfaces_as_toolresult_err() {
         let result = ListFiles
-            .call(json!({ "depth": "two" }), CancellationToken::new())
+            .call(json!({ "depth": "two" }), CancellationToken::new(), None)
             .await
             .expect("call returns Ok(ToolResult)");
         assert!(result.is_error);
@@ -1098,6 +1128,7 @@ mod tests {
             .call(
                 json!({ "path": dir.path().to_str().unwrap() }),
                 CancellationToken::new(),
+                None,
             )
             .await
             .unwrap();
@@ -1114,6 +1145,7 @@ mod tests {
             .call(
                 json!({ "path": path.to_str().unwrap() }),
                 CancellationToken::new(),
+                None,
             )
             .await
             .unwrap();
@@ -1197,6 +1229,7 @@ mod tests {
             .call(
                 json!({"path": path_str, "content": oversized}),
                 CancellationToken::new(),
+                None,
             )
             .await
             .unwrap();
@@ -1217,6 +1250,7 @@ mod tests {
             .call(
                 json!({"path": path_str, "content": payload}),
                 CancellationToken::new(),
+                None,
             )
             .await
             .unwrap();
@@ -1239,6 +1273,7 @@ mod tests {
             .call(
                 json!({"path": path_str, "old_string": "x", "new_string": "y"}),
                 CancellationToken::new(),
+                None,
             )
             .await
             .unwrap();
@@ -1303,6 +1338,7 @@ mod tests {
                 .call(
                     json!({"path": path_a, "content": pa}),
                     CancellationToken::new(),
+                    None,
                 )
                 .await
                 .unwrap()
@@ -1312,6 +1348,7 @@ mod tests {
                 .call(
                     json!({"path": path_b, "content": pb}),
                     CancellationToken::new(),
+                    None,
                 )
                 .await
                 .unwrap()
@@ -1338,6 +1375,7 @@ mod tests {
         tool.call(
             json!({"path": path_str, "content": "atomic-payload"}),
             CancellationToken::new(),
+            None,
         )
         .await
         .unwrap();
@@ -1359,6 +1397,7 @@ mod tests {
         tool.call(
             json!({"path": path_str, "content": "new contents\n"}),
             CancellationToken::new(),
+            None,
         )
         .await
         .unwrap();
@@ -1381,6 +1420,7 @@ mod tests {
             .call(
                 json!({"path": path.to_string_lossy(), "offset": 1, "limit": 10}),
                 CancellationToken::new(),
+                None,
             )
             .await
             .unwrap();
@@ -1411,6 +1451,7 @@ mod tests {
             .call(
                 json!({"path": path.to_string_lossy(), "offset": 1, "limit": 3}),
                 CancellationToken::new(),
+                None,
             )
             .await
             .unwrap();
@@ -1441,6 +1482,7 @@ mod tests {
             .call(
                 json!({"path": path.to_string_lossy(), "offset": 1, "limit": 100}),
                 CancellationToken::new(),
+                None,
             )
             .await
             .unwrap();
@@ -1460,6 +1502,7 @@ mod tests {
             .call(
                 json!({"path": path.to_string_lossy(), "offset": 100, "limit": 10}),
                 CancellationToken::new(),
+                None,
             )
             .await
             .unwrap();
@@ -1487,6 +1530,7 @@ mod tests {
             .call(
                 json!({"path": path.to_string_lossy(), "offset": 1, "limit": 10}),
                 CancellationToken::new(),
+                None,
             )
             .await
             .unwrap();
@@ -1513,6 +1557,7 @@ mod tests {
             .call(
                 json!({"path": dir.path().to_string_lossy(), "depth": 2}),
                 CancellationToken::new(),
+                None,
             )
             .await
             .unwrap();
@@ -1545,6 +1590,7 @@ mod tests {
                 "new_string": "42",
             }),
             CancellationToken::new(),
+            None,
         )
         .await
         .unwrap();
@@ -1572,6 +1618,7 @@ mod tests {
             .call(
                 json!({"path": path_str.clone(), "content": "hello"}),
                 CancellationToken::new(),
+                None,
             )
             .await
             .unwrap();
@@ -1595,6 +1642,7 @@ mod tests {
             .call(
                 json!({"path": path_str.clone(), "old_string": "1", "new_string": "42"}),
                 CancellationToken::new(),
+                None,
             )
             .await
             .unwrap();
@@ -1628,6 +1676,7 @@ mod tests {
                 tool.call(
                     json!({"path": path, "content": "AAA"}),
                     CancellationToken::new(),
+                    None,
                 )
                 .await
             })
@@ -1639,6 +1688,7 @@ mod tests {
                 tool.call(
                     json!({"path": path, "content": "BBB"}),
                     CancellationToken::new(),
+                    None,
                 )
                 .await
             })
@@ -1707,6 +1757,7 @@ mod tests {
                     "new_string": "Y",
                 }),
                 CancellationToken::new(),
+                None,
             )
             .await
             .unwrap();
@@ -1741,6 +1792,7 @@ mod tests {
                     "new_string": "Y",
                 }),
                 CancellationToken::new(),
+                None,
             )
             .await
             .unwrap();
@@ -1774,6 +1826,7 @@ mod tests {
                     "new_string": "Y",
                 }),
                 CancellationToken::new(),
+                None,
             )
             .await
             .unwrap();

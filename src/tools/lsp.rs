@@ -99,7 +99,12 @@ impl Tool for GotoDefinitionTool {
             "required": ["path", "line", "character"]
         })
     }
-    async fn call(&self, params: Value, _cancel: CancellationToken) -> Result<ToolResult> {
+    async fn call(
+        &self,
+        params: Value,
+        _cancel: CancellationToken,
+        _progress: Option<crate::tools::ProgressSink>,
+    ) -> Result<ToolResult> {
         let p: LspPositionParams = match parse_tool_params(params) {
             Ok(p) => p,
             Err(e) => return Ok(e),
@@ -163,7 +168,12 @@ impl Tool for FindReferencesTool {
             "required": ["path", "line", "character"]
         })
     }
-    async fn call(&self, params: Value, _cancel: CancellationToken) -> Result<ToolResult> {
+    async fn call(
+        &self,
+        params: Value,
+        _cancel: CancellationToken,
+        _progress: Option<crate::tools::ProgressSink>,
+    ) -> Result<ToolResult> {
         let p: LspPositionParams = match parse_tool_params(params) {
             Ok(p) => p,
             Err(e) => return Ok(e),
@@ -225,7 +235,12 @@ impl Tool for HoverTool {
             "required": ["path", "line", "character"]
         })
     }
-    async fn call(&self, params: Value, _cancel: CancellationToken) -> Result<ToolResult> {
+    async fn call(
+        &self,
+        params: Value,
+        _cancel: CancellationToken,
+        _progress: Option<crate::tools::ProgressSink>,
+    ) -> Result<ToolResult> {
         let p: LspPositionParams = match parse_tool_params(params) {
             Ok(p) => p,
             Err(e) => return Ok(e),
@@ -287,7 +302,12 @@ impl Tool for TypeDefinitionTool {
             "required": ["path", "line", "character"]
         })
     }
-    async fn call(&self, params: Value, _cancel: CancellationToken) -> Result<ToolResult> {
+    async fn call(
+        &self,
+        params: Value,
+        _cancel: CancellationToken,
+        _progress: Option<crate::tools::ProgressSink>,
+    ) -> Result<ToolResult> {
         let p: LspPositionParams = match parse_tool_params(params) {
             Ok(p) => p,
             Err(e) => return Ok(e),
@@ -349,7 +369,12 @@ impl Tool for ImplementationTool {
             "required": ["path", "line", "character"]
         })
     }
-    async fn call(&self, params: Value, _cancel: CancellationToken) -> Result<ToolResult> {
+    async fn call(
+        &self,
+        params: Value,
+        _cancel: CancellationToken,
+        _progress: Option<crate::tools::ProgressSink>,
+    ) -> Result<ToolResult> {
         let p: LspPositionParams = match parse_tool_params(params) {
             Ok(p) => p,
             Err(e) => return Ok(e),
@@ -425,7 +450,12 @@ impl Tool for CodeActionTool {
             "required": ["path", "start_line"]
         })
     }
-    async fn call(&self, params: Value, _cancel: CancellationToken) -> Result<ToolResult> {
+    async fn call(
+        &self,
+        params: Value,
+        _cancel: CancellationToken,
+        _progress: Option<crate::tools::ProgressSink>,
+    ) -> Result<ToolResult> {
         use lsp_types::Position as LspPosition;
         let p: CodeActionParams = match parse_tool_params(params) {
             Ok(p) => p,
@@ -531,7 +561,12 @@ impl Tool for CallHierarchyTool {
             "required": ["path", "line", "character", "direction"]
         })
     }
-    async fn call(&self, params: Value, _cancel: CancellationToken) -> Result<ToolResult> {
+    async fn call(
+        &self,
+        params: Value,
+        _cancel: CancellationToken,
+        _progress: Option<crate::tools::ProgressSink>,
+    ) -> Result<ToolResult> {
         let p: CallHierarchyParams = match parse_tool_params(params) {
             Ok(p) => p,
             Err(e) => return Ok(e),
@@ -655,7 +690,12 @@ impl Tool for WorkspaceSymbolTool {
             "required": ["query", "language"]
         })
     }
-    async fn call(&self, params: Value, _cancel: CancellationToken) -> Result<ToolResult> {
+    async fn call(
+        &self,
+        params: Value,
+        _cancel: CancellationToken,
+        _progress: Option<crate::tools::ProgressSink>,
+    ) -> Result<ToolResult> {
         let p: WorkspaceSymbolParams = match parse_tool_params(params) {
             Ok(p) => p,
             Err(e) => return Ok(e),
@@ -725,7 +765,7 @@ mod workspace_symbol_tests {
     async fn workspace_symbol_requires_query() {
         let t = tool();
         let result = t
-            .call(json!({"language": "rust"}), CancellationToken::new())
+            .call(json!({"language": "rust"}), CancellationToken::new(), None)
             .await
             .expect("call ok");
         assert!(result.is_error);
@@ -737,7 +777,7 @@ mod workspace_symbol_tests {
     async fn workspace_symbol_requires_language() {
         let t = tool();
         let result = t
-            .call(json!({"query": "foo"}), CancellationToken::new())
+            .call(json!({"query": "foo"}), CancellationToken::new(), None)
             .await
             .expect("call ok");
         assert!(result.is_error);
@@ -753,6 +793,7 @@ mod workspace_symbol_tests {
             .call(
                 json!({"query": "foo", "language": "klingon"}),
                 CancellationToken::new(),
+                None,
             )
             .await
             .expect("call ok");
@@ -790,7 +831,12 @@ impl Tool for DiagnosticsTool {
             "required": ["path"]
         })
     }
-    async fn call(&self, params: Value, _cancel: CancellationToken) -> Result<ToolResult> {
+    async fn call(
+        &self,
+        params: Value,
+        _cancel: CancellationToken,
+        _progress: Option<crate::tools::ProgressSink>,
+    ) -> Result<ToolResult> {
         let p: DiagnosticsParams = match parse_tool_params(params) {
             Ok(p) => p,
             Err(e) => return Ok(e),

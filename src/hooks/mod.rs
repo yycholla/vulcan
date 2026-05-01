@@ -11,12 +11,13 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use anyhow::Result;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::time::timeout;
 use tokio_util::sync::CancellationToken;
 
-use crate::provider::Message;
-use crate::tools::ToolResult;
+use crate::provider::{ChatResponse, Message, StreamEvent, ToolCall};
+use crate::tools::{ToolProgress, ToolResult};
 
 pub mod audit;
 pub mod safety;
@@ -24,7 +25,7 @@ pub mod skills;
 
 /// Where injected messages land in the outgoing prompt. Only honored by
 /// `before_prompt` injections.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum InjectPosition {
     /// Insert immediately after the leading run of System messages, before any
     /// User/Assistant/Tool turns. Right slot for "static context" hooks like
@@ -45,7 +46,7 @@ pub mod rtk;
 
 /// What a handler returns. Each event honors a subset; unsupported variants
 /// are logged and ignored.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum HookOutcome {
     /// Default — handler observed but does not change behavior.
     Continue,
@@ -63,9 +64,16 @@ pub enum HookOutcome {
         messages: Vec<Message>,
         position: InjectPosition,
     },
+    /// Transiently replace the outgoing message payload. Intended for
+    /// `on_context`; the persistent conversation history is not mutated.
+    RewriteMessages(Vec<Message>),
     /// Force the agent to keep working; the instruction is appended as a user
     /// turn and the loop continues (BeforeAgentEnd only).
     ForceContinue { instruction: String },
+    /// Refuse raw user input before a turn starts. Intended for `on_input`.
+    BlockInput { reason: String },
+    /// Replace raw user input before slash dispatch and turn execution.
+    ReplaceInput(String),
 }
 
 /// Decision returned to the agent loop by `before_tool_call`.
@@ -93,6 +101,107 @@ pub trait HookHandler: Send + Sync {
         _messages: &[Message],
         _cancel: CancellationToken,
     ) -> Result<HookOutcome> {
+        Ok(HookOutcome::Continue)
+    }
+
+    async fn on_turn_start(&self, _turn: u32, _cancel: CancellationToken) -> Result<HookOutcome> {
+        Ok(HookOutcome::Continue)
+    }
+
+    async fn on_turn_end(&self, _turn: u32, _cancel: CancellationToken) -> Result<HookOutcome> {
+        Ok(HookOutcome::Continue)
+    }
+
+    async fn on_message_start(
+        &self,
+        _delta: &StreamEvent,
+        _cancel: CancellationToken,
+    ) -> Result<HookOutcome> {
+        Ok(HookOutcome::Continue)
+    }
+
+    async fn on_message_update(
+        &self,
+        _delta: &StreamEvent,
+        _cancel: CancellationToken,
+    ) -> Result<HookOutcome> {
+        Ok(HookOutcome::Continue)
+    }
+
+    async fn on_message_end(
+        &self,
+        _delta: &StreamEvent,
+        _cancel: CancellationToken,
+    ) -> Result<HookOutcome> {
+        Ok(HookOutcome::Continue)
+    }
+
+    async fn on_tool_execution_start(
+        &self,
+        _call: &ToolCall,
+        _cancel: CancellationToken,
+    ) -> Result<HookOutcome> {
+        Ok(HookOutcome::Continue)
+    }
+
+    async fn on_tool_execution_update(
+        &self,
+        _call: &ToolCall,
+        _progress: &ToolProgress,
+        _cancel: CancellationToken,
+    ) -> Result<HookOutcome> {
+        Ok(HookOutcome::Continue)
+    }
+
+    async fn on_tool_execution_end(
+        &self,
+        _call: &ToolCall,
+        _cancel: CancellationToken,
+    ) -> Result<HookOutcome> {
+        Ok(HookOutcome::Continue)
+    }
+
+    async fn on_context(
+        &self,
+        _messages: &[Message],
+        _cancel: CancellationToken,
+    ) -> Result<HookOutcome> {
+        Ok(HookOutcome::Continue)
+    }
+
+    async fn on_before_provider_request(
+        &self,
+        _messages: &[Message],
+        _cancel: CancellationToken,
+    ) -> Result<HookOutcome> {
+        Ok(HookOutcome::Continue)
+    }
+
+    async fn on_after_provider_response(
+        &self,
+        _response: &ChatResponse,
+        _cancel: CancellationToken,
+    ) -> Result<HookOutcome> {
+        Ok(HookOutcome::Continue)
+    }
+
+    async fn on_session_before_compact(&self, _cancel: CancellationToken) -> Result<HookOutcome> {
+        Ok(HookOutcome::Continue)
+    }
+
+    async fn on_session_compact(
+        &self,
+        _summary: &str,
+        _cancel: CancellationToken,
+    ) -> Result<HookOutcome> {
+        Ok(HookOutcome::Continue)
+    }
+
+    async fn on_session_before_fork(&self, _cancel: CancellationToken) -> Result<HookOutcome> {
+        Ok(HookOutcome::Continue)
+    }
+
+    async fn on_session_shutdown(&self, _cancel: CancellationToken) -> Result<HookOutcome> {
         Ok(HookOutcome::Continue)
     }
 
@@ -202,10 +311,44 @@ impl HookRegistry {
         messages: &[Message],
         cancel: CancellationToken,
     ) -> Vec<Message> {
+        self.apply_context(messages, cancel).await
+    }
+
+    /// Emit the wide `on_context` event plus legacy `before_prompt`
+    /// compatibility hooks. `RewriteMessages` replaces the transient
+    /// outgoing payload; `InjectMessages` accumulates around the current
+    /// outgoing payload. Persistent history is never mutated.
+    pub async fn apply_context(
+        &self,
+        messages: &[Message],
+        cancel: CancellationToken,
+    ) -> Vec<Message> {
+        let mut current = messages.to_vec();
         let mut after_system: Vec<Message> = Vec::new();
         let mut appended: Vec<Message> = Vec::new();
 
         for h in &self.handlers {
+            match self.run(h, h.on_context(&current, cancel.clone())).await {
+                Some(HookOutcome::RewriteMessages(rewritten)) => {
+                    tracing::info!("hook {} rewrote context messages", h.name());
+                    current = rewritten;
+                }
+                Some(HookOutcome::InjectMessages {
+                    messages: msgs,
+                    position,
+                }) => match position {
+                    InjectPosition::AfterSystem => after_system.extend(msgs),
+                    InjectPosition::Append => appended.extend(msgs),
+                },
+                Some(HookOutcome::Continue) | None => {}
+                Some(other) => {
+                    tracing::warn!(
+                        "hook {} returned {:?} for on_context (ignored)",
+                        h.name(),
+                        other
+                    );
+                }
+            }
             match self.run(h, h.before_prompt(messages, cancel.clone())).await {
                 Some(HookOutcome::InjectMessages {
                     messages: msgs,
@@ -226,13 +369,13 @@ impl HookRegistry {
         }
 
         if after_system.is_empty() && appended.is_empty() {
-            return messages.to_vec();
+            return current;
         }
 
-        let cap = messages.len() + after_system.len() + appended.len();
+        let cap = current.len() + after_system.len() + appended.len();
         let mut out: Vec<Message> = Vec::with_capacity(cap);
         let mut injected_after_system = false;
-        for m in messages {
+        for m in &current {
             if matches!(m, Message::System { .. }) {
                 out.push(m.clone());
             } else {
@@ -250,6 +393,192 @@ impl HookRegistry {
         }
         out.append(&mut appended);
         out
+    }
+
+    pub async fn on_turn_start(&self, turn: u32, cancel: CancellationToken) {
+        for h in &self.handlers {
+            match self.run(h, h.on_turn_start(turn, cancel.clone())).await {
+                Some(HookOutcome::Continue) | None => {}
+                Some(other) => {
+                    tracing::warn!(
+                        "hook {} returned {:?} for on_turn_start (ignored)",
+                        h.name(),
+                        other
+                    );
+                }
+            }
+        }
+    }
+
+    pub async fn on_turn_end(&self, turn: u32, cancel: CancellationToken) {
+        for h in &self.handlers {
+            match self.run(h, h.on_turn_end(turn, cancel.clone())).await {
+                Some(HookOutcome::Continue) | None => {}
+                Some(other) => {
+                    tracing::warn!(
+                        "hook {} returned {:?} for on_turn_end (ignored)",
+                        h.name(),
+                        other
+                    );
+                }
+            }
+        }
+    }
+
+    pub async fn on_message_start(&self, delta: &StreamEvent, cancel: CancellationToken) {
+        for h in &self.handlers {
+            self.ignore_observe_outcome(
+                h,
+                "on_message_start",
+                self.run(h, h.on_message_start(delta, cancel.clone())).await,
+            );
+        }
+    }
+
+    pub async fn on_message_update(&self, delta: &StreamEvent, cancel: CancellationToken) {
+        for h in &self.handlers {
+            self.ignore_observe_outcome(
+                h,
+                "on_message_update",
+                self.run(h, h.on_message_update(delta, cancel.clone()))
+                    .await,
+            );
+        }
+    }
+
+    pub async fn on_message_end(&self, delta: &StreamEvent, cancel: CancellationToken) {
+        for h in &self.handlers {
+            self.ignore_observe_outcome(
+                h,
+                "on_message_end",
+                self.run(h, h.on_message_end(delta, cancel.clone())).await,
+            );
+        }
+    }
+
+    pub async fn on_tool_execution_start(&self, call: &ToolCall, cancel: CancellationToken) {
+        for h in &self.handlers {
+            self.ignore_observe_outcome(
+                h,
+                "on_tool_execution_start",
+                self.run(h, h.on_tool_execution_start(call, cancel.clone()))
+                    .await,
+            );
+        }
+    }
+
+    pub async fn on_tool_execution_update(
+        &self,
+        call: &ToolCall,
+        progress: &ToolProgress,
+        cancel: CancellationToken,
+    ) {
+        for h in &self.handlers {
+            self.ignore_observe_outcome(
+                h,
+                "on_tool_execution_update",
+                self.run(
+                    h,
+                    h.on_tool_execution_update(call, progress, cancel.clone()),
+                )
+                .await,
+            );
+        }
+    }
+
+    pub async fn on_tool_execution_end(&self, call: &ToolCall, cancel: CancellationToken) {
+        for h in &self.handlers {
+            self.ignore_observe_outcome(
+                h,
+                "on_tool_execution_end",
+                self.run(h, h.on_tool_execution_end(call, cancel.clone()))
+                    .await,
+            );
+        }
+    }
+
+    pub async fn on_before_provider_request(
+        &self,
+        messages: &[Message],
+        cancel: CancellationToken,
+    ) {
+        for h in &self.handlers {
+            self.ignore_observe_outcome(
+                h,
+                "on_before_provider_request",
+                self.run(h, h.on_before_provider_request(messages, cancel.clone()))
+                    .await,
+            );
+        }
+    }
+
+    pub async fn on_after_provider_response(
+        &self,
+        response: &ChatResponse,
+        cancel: CancellationToken,
+    ) {
+        for h in &self.handlers {
+            self.ignore_observe_outcome(
+                h,
+                "on_after_provider_response",
+                self.run(h, h.on_after_provider_response(response, cancel.clone()))
+                    .await,
+            );
+        }
+    }
+
+    pub async fn on_session_before_compact(&self, cancel: CancellationToken) -> bool {
+        for h in &self.handlers {
+            match self
+                .run(h, h.on_session_before_compact(cancel.clone()))
+                .await
+            {
+                Some(HookOutcome::Block { reason }) => {
+                    tracing::info!("hook {} blocked compaction: {reason}", h.name());
+                    return false;
+                }
+                Some(HookOutcome::Continue) | None => {}
+                Some(other) => {
+                    tracing::warn!(
+                        "hook {} returned {:?} for on_session_before_compact (ignored)",
+                        h.name(),
+                        other
+                    );
+                }
+            }
+        }
+        true
+    }
+
+    pub async fn on_session_compact(&self, summary: &str, cancel: CancellationToken) {
+        for h in &self.handlers {
+            self.ignore_observe_outcome(
+                h,
+                "on_session_compact",
+                self.run(h, h.on_session_compact(summary, cancel.clone()))
+                    .await,
+            );
+        }
+    }
+
+    pub async fn on_session_before_fork(&self, cancel: CancellationToken) {
+        for h in &self.handlers {
+            self.ignore_observe_outcome(
+                h,
+                "on_session_before_fork",
+                self.run(h, h.on_session_before_fork(cancel.clone())).await,
+            );
+        }
+    }
+
+    pub async fn on_session_shutdown(&self, cancel: CancellationToken) {
+        for h in &self.handlers {
+            self.ignore_observe_outcome(
+                h,
+                "on_session_shutdown",
+                self.run(h, h.on_session_shutdown(cancel.clone())).await,
+            );
+        }
     }
 
     /// Emit BeforeToolCall. First non-Continue outcome wins.
@@ -395,6 +724,25 @@ impl HookRegistry {
             }
         }
     }
+
+    fn ignore_observe_outcome(
+        &self,
+        h: &Arc<dyn HookHandler>,
+        event: &'static str,
+        outcome: Option<HookOutcome>,
+    ) {
+        match outcome {
+            Some(HookOutcome::Continue) | None => {}
+            Some(other) => {
+                tracing::warn!(
+                    "hook {} returned {:?} for {} (ignored)",
+                    h.name(),
+                    other,
+                    event
+                );
+            }
+        }
+    }
 }
 
 impl Default for HookRegistry {
@@ -406,6 +754,7 @@ impl Default for HookRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     /// Test handler with configurable behavior. Records how many times each
@@ -665,5 +1014,441 @@ mod tests {
             Message::System { content } => assert_eq!(content, "TAIL"),
             o => panic!("expected appended TAIL, got {o:?}"),
         }
+    }
+
+    #[test]
+    fn new_hook_outcomes_round_trip_through_serde() {
+        let rewrite = HookOutcome::RewriteMessages(vec![Message::User {
+            content: "rewritten".into(),
+        }]);
+        let encoded = serde_json::to_string(&rewrite).expect("serialize rewrite");
+        let decoded: HookOutcome = serde_json::from_str(&encoded).expect("deserialize rewrite");
+        assert!(matches!(
+            decoded,
+            HookOutcome::RewriteMessages(messages)
+                if matches!(messages.as_slice(), [Message::User { content }] if content == "rewritten")
+        ));
+
+        let blocked = HookOutcome::BlockInput {
+            reason: "policy".into(),
+        };
+        let encoded = serde_json::to_string(&blocked).expect("serialize block input");
+        let decoded: HookOutcome = serde_json::from_str(&encoded).expect("deserialize block input");
+        assert!(matches!(
+            decoded,
+            HookOutcome::BlockInput { reason } if reason == "policy"
+        ));
+
+        let replaced = HookOutcome::ReplaceInput("expanded".into());
+        let encoded = serde_json::to_string(&replaced).expect("serialize replace input");
+        let decoded: HookOutcome =
+            serde_json::from_str(&encoded).expect("deserialize replace input");
+        assert!(matches!(decoded, HookOutcome::ReplaceInput(text) if text == "expanded"));
+    }
+
+    struct ContextRewriter;
+
+    #[async_trait::async_trait]
+    impl HookHandler for ContextRewriter {
+        fn name(&self) -> &str {
+            "context-rewriter"
+        }
+
+        async fn on_context(
+            &self,
+            _messages: &[Message],
+            _cancel: CancellationToken,
+        ) -> Result<HookOutcome> {
+            Ok(HookOutcome::RewriteMessages(vec![
+                Message::System {
+                    content: "rewritten system".into(),
+                },
+                Message::User {
+                    content: "rewritten user".into(),
+                },
+            ]))
+        }
+    }
+
+    #[tokio::test]
+    async fn on_context_rewrite_messages_replaces_outgoing_prompt_transiently() {
+        let mut reg = HookRegistry::new();
+        reg.register(Arc::new(ContextRewriter));
+        let input = vec![Message::User {
+            content: "original".into(),
+        }];
+
+        let outgoing = reg.apply_context(&input, CancellationToken::new()).await;
+
+        assert_eq!(outgoing.len(), 2);
+        assert!(matches!(
+            &outgoing[0],
+            Message::System { content } if content == "rewritten system"
+        ));
+        assert!(matches!(
+            &outgoing[1],
+            Message::User { content } if content == "rewritten user"
+        ));
+        assert!(matches!(
+            &input[0],
+            Message::User { content } if content == "original"
+        ));
+    }
+
+    #[tokio::test]
+    async fn on_turn_start_timeouts_are_isolated_and_counted() {
+        struct SlowTurnStart;
+
+        #[async_trait::async_trait]
+        impl HookHandler for SlowTurnStart {
+            fn name(&self) -> &str {
+                "slow-turn-start"
+            }
+
+            async fn on_turn_start(
+                &self,
+                _turn: u32,
+                _cancel: CancellationToken,
+            ) -> Result<HookOutcome> {
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                Ok(HookOutcome::Continue)
+            }
+        }
+
+        let mut reg = HookRegistry::new().with_timeout(std::time::Duration::from_millis(10));
+        reg.register(Arc::new(SlowTurnStart));
+
+        reg.on_turn_start(1, CancellationToken::new()).await;
+
+        assert_eq!(reg.failure_metrics().timeouts, 1);
+    }
+
+    fn sample_tool_call() -> ToolCall {
+        ToolCall {
+            id: "call-1".into(),
+            call_type: "function".into(),
+            function: crate::provider::ToolCallFunction {
+                name: "probe".into(),
+                arguments: "{}".into(),
+            },
+        }
+    }
+
+    fn sample_chat_response() -> ChatResponse {
+        ChatResponse {
+            content: Some("done".into()),
+            tool_calls: None,
+            usage: None,
+            finish_reason: Some("stop".into()),
+            reasoning_content: None,
+        }
+    }
+
+    struct WideRecorder {
+        name: &'static str,
+        priority: i32,
+        events: Arc<Mutex<Vec<String>>>,
+    }
+
+    impl WideRecorder {
+        fn push(&self, event: &'static str) {
+            self.events
+                .lock()
+                .unwrap()
+                .push(format!("{}:{event}", self.name));
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl HookHandler for WideRecorder {
+        fn name(&self) -> &str {
+            self.name
+        }
+
+        fn priority(&self) -> i32 {
+            self.priority
+        }
+
+        async fn on_turn_start(
+            &self,
+            _turn: u32,
+            _cancel: CancellationToken,
+        ) -> Result<HookOutcome> {
+            self.push("turn_start");
+            Ok(HookOutcome::Continue)
+        }
+
+        async fn on_turn_end(&self, _turn: u32, _cancel: CancellationToken) -> Result<HookOutcome> {
+            self.push("turn_end");
+            Ok(HookOutcome::Continue)
+        }
+
+        async fn on_message_start(
+            &self,
+            _delta: &StreamEvent,
+            _cancel: CancellationToken,
+        ) -> Result<HookOutcome> {
+            self.push("message_start");
+            Ok(HookOutcome::Continue)
+        }
+
+        async fn on_message_update(
+            &self,
+            _delta: &StreamEvent,
+            _cancel: CancellationToken,
+        ) -> Result<HookOutcome> {
+            self.push("message_update");
+            Ok(HookOutcome::Continue)
+        }
+
+        async fn on_message_end(
+            &self,
+            _delta: &StreamEvent,
+            _cancel: CancellationToken,
+        ) -> Result<HookOutcome> {
+            self.push("message_end");
+            Ok(HookOutcome::Continue)
+        }
+
+        async fn on_tool_execution_start(
+            &self,
+            _call: &ToolCall,
+            _cancel: CancellationToken,
+        ) -> Result<HookOutcome> {
+            self.push("tool_start");
+            Ok(HookOutcome::Continue)
+        }
+
+        async fn on_tool_execution_update(
+            &self,
+            _call: &ToolCall,
+            _progress: &ToolProgress,
+            _cancel: CancellationToken,
+        ) -> Result<HookOutcome> {
+            self.push("tool_update");
+            Ok(HookOutcome::Continue)
+        }
+
+        async fn on_tool_execution_end(
+            &self,
+            _call: &ToolCall,
+            _cancel: CancellationToken,
+        ) -> Result<HookOutcome> {
+            self.push("tool_end");
+            Ok(HookOutcome::Continue)
+        }
+
+        async fn on_before_provider_request(
+            &self,
+            _messages: &[Message],
+            _cancel: CancellationToken,
+        ) -> Result<HookOutcome> {
+            self.push("provider_before");
+            Ok(HookOutcome::Continue)
+        }
+
+        async fn on_after_provider_response(
+            &self,
+            _response: &ChatResponse,
+            _cancel: CancellationToken,
+        ) -> Result<HookOutcome> {
+            self.push("provider_after");
+            Ok(HookOutcome::Continue)
+        }
+
+        async fn on_session_before_compact(
+            &self,
+            _cancel: CancellationToken,
+        ) -> Result<HookOutcome> {
+            self.push("session_before_compact");
+            Ok(HookOutcome::Continue)
+        }
+
+        async fn on_session_compact(
+            &self,
+            _summary: &str,
+            _cancel: CancellationToken,
+        ) -> Result<HookOutcome> {
+            self.push("session_compact");
+            Ok(HookOutcome::Continue)
+        }
+
+        async fn on_session_before_fork(&self, _cancel: CancellationToken) -> Result<HookOutcome> {
+            self.push("session_before_fork");
+            Ok(HookOutcome::Continue)
+        }
+
+        async fn on_session_shutdown(&self, _cancel: CancellationToken) -> Result<HookOutcome> {
+            self.push("session_shutdown");
+            Ok(HookOutcome::Continue)
+        }
+    }
+
+    #[tokio::test]
+    async fn wide_observe_events_run_in_priority_order() {
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let mut reg = HookRegistry::new();
+        reg.register(Arc::new(WideRecorder {
+            name: "second",
+            priority: 20,
+            events: events.clone(),
+        }));
+        reg.register(Arc::new(WideRecorder {
+            name: "first",
+            priority: 10,
+            events: events.clone(),
+        }));
+
+        let cancel = CancellationToken::new();
+        let message = StreamEvent::Text("chunk".into());
+        let call = sample_tool_call();
+        let response = sample_chat_response();
+        let messages = vec![Message::User {
+            content: "hello".into(),
+        }];
+
+        reg.on_turn_start(1, cancel.clone()).await;
+        reg.on_turn_end(1, cancel.clone()).await;
+        reg.on_message_start(&message, cancel.clone()).await;
+        reg.on_message_update(&message, cancel.clone()).await;
+        reg.on_message_end(&message, cancel.clone()).await;
+        reg.on_tool_execution_start(&call, cancel.clone()).await;
+        reg.on_tool_execution_update(
+            &call,
+            &ToolProgress {
+                message: "halfway".into(),
+            },
+            cancel.clone(),
+        )
+        .await;
+        reg.on_tool_execution_end(&call, cancel.clone()).await;
+        reg.on_before_provider_request(&messages, cancel.clone())
+            .await;
+        reg.on_after_provider_response(&response, cancel.clone())
+            .await;
+        assert!(reg.on_session_before_compact(cancel.clone()).await);
+        reg.on_session_compact("summary", cancel.clone()).await;
+        reg.on_session_before_fork(cancel.clone()).await;
+        reg.on_session_shutdown(cancel).await;
+
+        let events = events.lock().unwrap().clone();
+        for pair in events.chunks_exact(2) {
+            assert_eq!(pair[0].split(':').next(), Some("first"));
+            assert_eq!(pair[1].split(':').next(), Some("second"));
+            assert_eq!(pair[0].split(':').nth(1), pair[1].split(':').nth(1));
+        }
+    }
+
+    #[tokio::test]
+    async fn wide_observe_event_timeouts_are_isolated() {
+        struct SlowMessageUpdate;
+        struct FastMessageUpdate(Arc<AtomicUsize>);
+
+        #[async_trait::async_trait]
+        impl HookHandler for SlowMessageUpdate {
+            fn name(&self) -> &str {
+                "slow-message-update"
+            }
+
+            fn priority(&self) -> i32 {
+                10
+            }
+
+            async fn on_message_update(
+                &self,
+                _delta: &StreamEvent,
+                _cancel: CancellationToken,
+            ) -> Result<HookOutcome> {
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                Ok(HookOutcome::Continue)
+            }
+        }
+
+        #[async_trait::async_trait]
+        impl HookHandler for FastMessageUpdate {
+            fn name(&self) -> &str {
+                "fast-message-update"
+            }
+
+            fn priority(&self) -> i32 {
+                20
+            }
+
+            async fn on_message_update(
+                &self,
+                _delta: &StreamEvent,
+                _cancel: CancellationToken,
+            ) -> Result<HookOutcome> {
+                self.0.fetch_add(1, Ordering::SeqCst);
+                Ok(HookOutcome::Continue)
+            }
+        }
+
+        let fast_calls = Arc::new(AtomicUsize::new(0));
+        let mut reg = HookRegistry::new().with_timeout(std::time::Duration::from_millis(10));
+        reg.register(Arc::new(SlowMessageUpdate));
+        reg.register(Arc::new(FastMessageUpdate(fast_calls.clone())));
+
+        reg.on_message_update(&StreamEvent::Text("chunk".into()), CancellationToken::new())
+            .await;
+
+        assert_eq!(reg.failure_metrics().timeouts, 1);
+        assert_eq!(fast_calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn session_before_compact_block_short_circuits_later_handlers() {
+        struct BlockingCompact;
+        struct LaterCompact(Arc<AtomicUsize>);
+
+        #[async_trait::async_trait]
+        impl HookHandler for BlockingCompact {
+            fn name(&self) -> &str {
+                "blocking-compact"
+            }
+
+            fn priority(&self) -> i32 {
+                10
+            }
+
+            async fn on_session_before_compact(
+                &self,
+                _cancel: CancellationToken,
+            ) -> Result<HookOutcome> {
+                Ok(HookOutcome::Block {
+                    reason: "skip".into(),
+                })
+            }
+        }
+
+        #[async_trait::async_trait]
+        impl HookHandler for LaterCompact {
+            fn name(&self) -> &str {
+                "later-compact"
+            }
+
+            fn priority(&self) -> i32 {
+                20
+            }
+
+            async fn on_session_before_compact(
+                &self,
+                _cancel: CancellationToken,
+            ) -> Result<HookOutcome> {
+                self.0.fetch_add(1, Ordering::SeqCst);
+                Ok(HookOutcome::Continue)
+            }
+        }
+
+        let later_calls = Arc::new(AtomicUsize::new(0));
+        let mut reg = HookRegistry::new();
+        reg.register(Arc::new(BlockingCompact));
+        reg.register(Arc::new(LaterCompact(later_calls.clone())));
+
+        assert!(
+            !reg.on_session_before_compact(CancellationToken::new())
+                .await
+        );
+        assert_eq!(later_calls.load(Ordering::SeqCst), 0);
     }
 }

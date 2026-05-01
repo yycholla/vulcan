@@ -1,4 +1,4 @@
-//! YYC-243: BeforePrompt hook implementing the agentskills.io activation
+//! YYC-243: on_context hook implementing the agentskills.io activation
 //! contract. The catalog (skill name + description) is injected on every
 //! turn so the model knows what's available; full SKILL.md bodies are
 //! loaded lazily and injected only when the latest user message looks
@@ -97,7 +97,7 @@ impl HookHandler for SkillsHook {
         10
     }
 
-    async fn before_prompt(
+    async fn on_context(
         &self,
         messages: &[Message],
         _cancel: CancellationToken,

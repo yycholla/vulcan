@@ -69,7 +69,12 @@ impl Tool for CodeOutlineTool {
             "required": ["path"]
         })
     }
-    async fn call(&self, params: Value, _cancel: CancellationToken) -> Result<ToolResult> {
+    async fn call(
+        &self,
+        params: Value,
+        _cancel: CancellationToken,
+        _progress: Option<crate::tools::ProgressSink>,
+    ) -> Result<ToolResult> {
         let p: CodeOutlineParams = match parse_tool_params(params) {
             Ok(p) => p,
             Err(e) => return Ok(e),
@@ -125,7 +130,12 @@ impl Tool for CodeExtractTool {
             "required": ["path", "symbol"]
         })
     }
-    async fn call(&self, params: Value, _cancel: CancellationToken) -> Result<ToolResult> {
+    async fn call(
+        &self,
+        params: Value,
+        _cancel: CancellationToken,
+        _progress: Option<crate::tools::ProgressSink>,
+    ) -> Result<ToolResult> {
         let p: CodeExtractParams = match parse_tool_params(params) {
             Ok(p) => p,
             Err(e) => return Ok(e),
@@ -190,7 +200,12 @@ impl Tool for CodeQueryTool {
             "required": ["path", "query"]
         })
     }
-    async fn call(&self, params: Value, _cancel: CancellationToken) -> Result<ToolResult> {
+    async fn call(
+        &self,
+        params: Value,
+        _cancel: CancellationToken,
+        _progress: Option<crate::tools::ProgressSink>,
+    ) -> Result<ToolResult> {
         let p: CodeQueryParams = match parse_tool_params(params) {
             Ok(p) => p,
             Err(e) => return Ok(e),
@@ -360,6 +375,7 @@ mod tests {
             .call(
                 json!({"path": path.to_string_lossy()}),
                 CancellationToken::new(),
+                None,
             )
             .await
             .unwrap();
@@ -390,6 +406,7 @@ mod tests {
             .call(
                 json!({"path": path.to_string_lossy(), "symbol": "beta"}),
                 CancellationToken::new(),
+                None,
             )
             .await
             .unwrap();
@@ -413,6 +430,7 @@ mod tests {
                     "query": "(function_item name: (identifier) @name)"
                 }),
                 CancellationToken::new(),
+                None,
             )
             .await
             .unwrap();

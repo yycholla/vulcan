@@ -25,6 +25,9 @@ impl Agent {
     /// reaps any LSP servers spawned during the session (YYC-46).
     pub async fn end_session(&self) {
         self.hooks.session_end(&self.session_id, self.turns).await;
+        self.hooks
+            .on_session_shutdown(self.turn_cancel.clone())
+            .await;
         self.lsp_manager.shutdown_all().await;
     }
     pub fn resume_session(&mut self, session_id: &str) -> Result<()> {
@@ -63,6 +66,14 @@ impl Agent {
             child_session_id
         );
         Ok(child_session_id)
+    }
+
+    /// Emit `on_session_before_fork`, then create a child session.
+    pub async fn fork_session_with_hooks(&mut self, lineage_label: Option<&str>) -> Result<String> {
+        self.hooks
+            .on_session_before_fork(self.turn_cancel.clone())
+            .await;
+        self.fork_session(lineage_label)
     }
 
     /// Borrow the underlying `SessionStore`. Used by the TUI's `/search`

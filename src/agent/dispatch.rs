@@ -8,7 +8,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::hooks::ToolCallDecision;
 use crate::run_record::{PayloadFingerprint, RunEvent};
-use crate::tools::ToolResult;
+use crate::tools::{ProgressSink, ToolResult};
 
 use super::Agent;
 
@@ -25,6 +25,7 @@ impl Agent {
         name: &str,
         raw_args: &str,
         cancel: CancellationToken,
+        progress: Option<ProgressSink>,
     ) -> ToolResult {
         let parsed_args: Value = match serde_json::from_str(raw_args) {
             Ok(v) => v,
@@ -79,7 +80,7 @@ impl Agent {
         } else {
             match self
                 .tools
-                .execute(name, &effective_args_str, cancel.clone())
+                .execute_with_progress(name, &effective_args_str, cancel.clone(), progress)
                 .await
             {
                 Ok(r) => r,

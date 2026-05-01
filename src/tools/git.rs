@@ -149,7 +149,12 @@ impl Tool for GitStatusTool {
     fn schema(&self) -> Value {
         json!({ "type": "object", "properties": {} })
     }
-    async fn call(&self, _params: Value, cancel: CancellationToken) -> Result<ToolResult> {
+    async fn call(
+        &self,
+        _params: Value,
+        cancel: CancellationToken,
+        _progress: Option<crate::tools::ProgressSink>,
+    ) -> Result<ToolResult> {
         run_git(&["status", "--short", "--branch"], cancel).await
     }
 }
@@ -182,7 +187,12 @@ impl Tool for GitDiffTool {
             }
         })
     }
-    async fn call(&self, params: Value, cancel: CancellationToken) -> Result<ToolResult> {
+    async fn call(
+        &self,
+        params: Value,
+        cancel: CancellationToken,
+        _progress: Option<crate::tools::ProgressSink>,
+    ) -> Result<ToolResult> {
         let p: GitDiffParams = match parse_tool_params(params) {
             Ok(p) => p,
             Err(e) => return Ok(e),
@@ -227,7 +237,12 @@ impl Tool for GitCommitTool {
             "required": ["message"]
         })
     }
-    async fn call(&self, params: Value, cancel: CancellationToken) -> Result<ToolResult> {
+    async fn call(
+        &self,
+        params: Value,
+        cancel: CancellationToken,
+        _progress: Option<crate::tools::ProgressSink>,
+    ) -> Result<ToolResult> {
         let p: GitCommitParams = match parse_tool_params(params) {
             Ok(p) => p,
             Err(e) => return Ok(e),
@@ -269,7 +284,12 @@ impl Tool for GitPushTool {
             }
         })
     }
-    async fn call(&self, params: Value, cancel: CancellationToken) -> Result<ToolResult> {
+    async fn call(
+        &self,
+        params: Value,
+        cancel: CancellationToken,
+        _progress: Option<crate::tools::ProgressSink>,
+    ) -> Result<ToolResult> {
         let p: GitPushParams = match parse_tool_params(params) {
             Ok(p) => p,
             Err(e) => return Ok(e),
@@ -316,7 +336,12 @@ impl Tool for GitBranchTool {
             }
         })
     }
-    async fn call(&self, params: Value, cancel: CancellationToken) -> Result<ToolResult> {
+    async fn call(
+        &self,
+        params: Value,
+        cancel: CancellationToken,
+        _progress: Option<crate::tools::ProgressSink>,
+    ) -> Result<ToolResult> {
         let p: GitBranchParams = match parse_tool_params(params) {
             Ok(p) => p,
             Err(e) => return Ok(e),
@@ -370,7 +395,12 @@ impl Tool for GitLogTool {
             }
         })
     }
-    async fn call(&self, params: Value, cancel: CancellationToken) -> Result<ToolResult> {
+    async fn call(
+        &self,
+        params: Value,
+        cancel: CancellationToken,
+        _progress: Option<crate::tools::ProgressSink>,
+    ) -> Result<ToolResult> {
         let p: GitLogParams = match parse_tool_params(params) {
             Ok(p) => p,
             Err(e) => return Ok(e),
@@ -397,7 +427,7 @@ mod tests {
     #[tokio::test]
     async fn yyc263_git_commit_missing_message_surfaces_as_toolresult_err() {
         let result = GitCommitTool
-            .call(json!({}), CancellationToken::new())
+            .call(json!({}), CancellationToken::new(), None)
             .await
             .expect("call returns Ok(ToolResult)");
         assert!(result.is_error);
@@ -411,7 +441,7 @@ mod tests {
     #[tokio::test]
     async fn yyc263_git_diff_bad_param_type_surfaces_as_toolresult_err() {
         let result = GitDiffTool
-            .call(json!({ "staged": "yes" }), CancellationToken::new())
+            .call(json!({ "staged": "yes" }), CancellationToken::new(), None)
             .await
             .expect("call returns Ok(ToolResult)");
         assert!(result.is_error);
@@ -447,7 +477,7 @@ mod tests {
         let prev = std::env::current_dir().unwrap();
         std::env::set_current_dir(cwd).unwrap();
         let result = GitStatusTool
-            .call(json!({}), CancellationToken::new())
+            .call(json!({}), CancellationToken::new(), None)
             .await
             .unwrap();
         std::env::set_current_dir(prev).unwrap();
@@ -466,7 +496,7 @@ mod tests {
         let prev = std::env::current_dir().unwrap();
         std::env::set_current_dir(dir.path()).unwrap();
         let result = GitStatusTool
-            .call(json!({}), CancellationToken::new())
+            .call(json!({}), CancellationToken::new(), None)
             .await
             .unwrap();
         std::env::set_current_dir(prev).unwrap();

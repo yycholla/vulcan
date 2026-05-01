@@ -1,8 +1,10 @@
 use crate::provider::ToolDefinition;
 use anyhow::Result;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::Arc;
+use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 /// Canonical tool return type — the wire format between `Tool::call`, the
@@ -14,7 +16,7 @@ use tokio_util::sync::CancellationToken;
 /// payload, but hooks and the TUI see them as a separate field. `is_error`
 /// is the structured signal that something went wrong (preferred over
 /// string-prefix sniffing like `output.starts_with("Error:")`).
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ToolResult {
     pub output: String,
     pub media: Vec<String>,
@@ -80,6 +82,13 @@ impl From<&str> for ToolResult {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ToolProgress {
+    pub message: String,
+}
+
+pub type ProgressSink = mpsc::Sender<ToolProgress>;
+
 /// YYC-263: typed-parameter helper for tool implementations. Wraps
 /// `serde_json::from_value` so a tool can declare its params as a
 /// `#[derive(Deserialize)]` struct and avoid the manual
@@ -96,7 +105,7 @@ impl From<&str> for ToolResult {
 ///     offset: i64,
 /// }
 ///
-/// async fn call(&self, params: Value, _: CancellationToken) -> Result<ToolResult> {
+/// async fn call(&self, params: Value, _: CancellationToken, _progress: Option<crate::tools::ProgressSink>) -> Result<ToolResult> {
 ///     let p: ReadFileParams = match parse_tool_params(params) {
 ///         Ok(p) => p,
 ///         Err(e) => return Ok(e),
@@ -160,7 +169,12 @@ pub trait Tool: Send + Sync {
     /// cancellation; impls should race their work against `cancel.cancelled()`
     /// (or rely on `kill_on_drop` for child processes) and return
     /// `ToolResult::err("Cancelled")` on cancel.
-    async fn call(&self, params: Value, cancel: CancellationToken) -> Result<ToolResult>;
+    async fn call(
+        &self,
+        params: Value,
+        cancel: CancellationToken,
+        progress: Option<ProgressSink>,
+    ) -> Result<ToolResult>;
 
     /// YYC-107: per-session availability check. Default = always
     /// register. Tools that only make sense in certain workspaces
@@ -320,7 +334,7 @@ pub use profile::{ToolProfile, builtin_profile, builtin_profiles};
 /// Compact record of the most recent file-edit operation (YYC-66).
 /// Captured by `WriteFile`/`PatchFile` after a successful write so the
 /// TUI's diff pane can render real activity instead of demo data.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EditDiff {
     pub path: String,
     /// Tool that produced the edit ("write_file" / "edit_file").
@@ -612,6 +626,17 @@ impl ToolRegistry {
         arguments: &str,
         cancel: CancellationToken,
     ) -> Result<ToolResult> {
+        self.execute_with_progress(name, arguments, cancel, None)
+            .await
+    }
+
+    pub async fn execute_with_progress(
+        &self,
+        name: &str,
+        arguments: &str,
+        cancel: CancellationToken,
+        progress: Option<ProgressSink>,
+    ) -> Result<ToolResult> {
         let tool = self
             .tools
             .get(name)
@@ -630,7 +655,7 @@ impl ToolRegistry {
         let schema = tool.schema();
         validate_tool_params(name, &schema, &params, arguments)?;
 
-        tool.call(params, cancel).await
+        tool.call(params, cancel, progress).await
     }
 }
 
@@ -938,7 +963,7 @@ path = "src/primary.rs"
         .to_string();
 
         let err = registry
-            .execute("edit_file", &bogus_args, CancellationToken::new())
+            .execute_with_progress("edit_file", &bogus_args, CancellationToken::new(), None)
             .await
             .unwrap_err();
         let msg = err.to_string();
@@ -952,7 +977,12 @@ path = "src/primary.rs"
     async fn malformed_json_yields_clear_error() {
         let registry = ToolRegistry::new();
         let err = registry
-            .execute("read_file", "{not valid json", CancellationToken::new())
+            .execute_with_progress(
+                "read_file",
+                "{not valid json",
+                CancellationToken::new(),
+                None,
+            )
             .await
             .unwrap_err();
         let msg = err.to_string();
@@ -1097,7 +1127,7 @@ path = "src/primary.rs"
         let profile = builtin_profile("readonly").unwrap();
         registry.apply_profile(&profile);
         let err = registry
-            .execute("write_file", "{}", CancellationToken::new())
+            .execute_with_progress("write_file", "{}", CancellationToken::new(), None)
             .await
             .expect_err("write_file must be denied under readonly");
         let msg = err.to_string();
@@ -1111,7 +1141,7 @@ path = "src/primary.rs"
     async fn non_object_arguments_fail_before_tool_dispatch() {
         let registry = ToolRegistry::new();
         let err = registry
-            .execute("read_file", "[]", CancellationToken::new())
+            .execute_with_progress("read_file", "[]", CancellationToken::new(), None)
             .await
             .unwrap_err();
         let msg = err.to_string();
