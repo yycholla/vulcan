@@ -35,6 +35,7 @@ pub mod server;
 pub mod stream_render;
 #[cfg(feature = "telegram")]
 pub mod telegram;
+pub(crate) mod turn_delivery;
 pub mod worker;
 
 pub async fn run(config: &Config, bind_override: Option<String>) -> Result<()> {
