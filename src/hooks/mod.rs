@@ -7,6 +7,8 @@
 //! events accumulate across all handlers.
 
 use std::collections::HashSet;
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
@@ -20,6 +22,8 @@ use tokio_util::sync::CancellationToken;
 use crate::pause::{AgentPause, AgentResume, OptionKind, PauseKind, PauseOption, PauseSender};
 use crate::provider::{ChatResponse, Message, StreamEvent, ToolCall};
 use crate::tools::{ToolProgress, ToolResult};
+
+type HookFuture<'a> = Pin<Box<dyn Future<Output = Result<HookOutcome>> + Send + 'a>>;
 
 pub mod audit;
 pub mod safety;
@@ -453,75 +457,45 @@ impl HookRegistry {
     }
 
     pub async fn on_turn_start(&self, turn: u32, cancel: CancellationToken) {
-        for h in &self.handlers {
-            match self.run(h, h.on_turn_start(turn, cancel.clone())).await {
-                Some(HookOutcome::Continue) | None => {}
-                Some(other) => {
-                    tracing::warn!(
-                        "hook {} returned {:?} for on_turn_start (ignored)",
-                        h.name(),
-                        other
-                    );
-                }
-            }
-        }
+        self.dispatch_observe("on_turn_start", cancel, |h, cancel| {
+            h.on_turn_start(turn, cancel)
+        })
+        .await;
     }
 
     pub async fn on_turn_end(&self, turn: u32, cancel: CancellationToken) {
-        for h in &self.handlers {
-            match self.run(h, h.on_turn_end(turn, cancel.clone())).await {
-                Some(HookOutcome::Continue) | None => {}
-                Some(other) => {
-                    tracing::warn!(
-                        "hook {} returned {:?} for on_turn_end (ignored)",
-                        h.name(),
-                        other
-                    );
-                }
-            }
-        }
+        self.dispatch_observe("on_turn_end", cancel, |h, cancel| {
+            h.on_turn_end(turn, cancel)
+        })
+        .await;
     }
 
     pub async fn on_message_start(&self, delta: &StreamEvent, cancel: CancellationToken) {
-        for h in &self.handlers {
-            self.ignore_observe_outcome(
-                h,
-                "on_message_start",
-                self.run(h, h.on_message_start(delta, cancel.clone())).await,
-            );
-        }
+        self.dispatch_observe("on_message_start", cancel, |h, cancel| {
+            h.on_message_start(delta, cancel)
+        })
+        .await;
     }
 
     pub async fn on_message_update(&self, delta: &StreamEvent, cancel: CancellationToken) {
-        for h in &self.handlers {
-            self.ignore_observe_outcome(
-                h,
-                "on_message_update",
-                self.run(h, h.on_message_update(delta, cancel.clone()))
-                    .await,
-            );
-        }
+        self.dispatch_observe("on_message_update", cancel, |h, cancel| {
+            h.on_message_update(delta, cancel)
+        })
+        .await;
     }
 
     pub async fn on_message_end(&self, delta: &StreamEvent, cancel: CancellationToken) {
-        for h in &self.handlers {
-            self.ignore_observe_outcome(
-                h,
-                "on_message_end",
-                self.run(h, h.on_message_end(delta, cancel.clone())).await,
-            );
-        }
+        self.dispatch_observe("on_message_end", cancel, |h, cancel| {
+            h.on_message_end(delta, cancel)
+        })
+        .await;
     }
 
     pub async fn on_tool_execution_start(&self, call: &ToolCall, cancel: CancellationToken) {
-        for h in &self.handlers {
-            self.ignore_observe_outcome(
-                h,
-                "on_tool_execution_start",
-                self.run(h, h.on_tool_execution_start(call, cancel.clone()))
-                    .await,
-            );
-        }
+        self.dispatch_observe("on_tool_execution_start", cancel, |h, cancel| {
+            h.on_tool_execution_start(call, cancel)
+        })
+        .await;
     }
 
     pub async fn on_tool_execution_update(
@@ -530,28 +504,17 @@ impl HookRegistry {
         progress: &ToolProgress,
         cancel: CancellationToken,
     ) {
-        for h in &self.handlers {
-            self.ignore_observe_outcome(
-                h,
-                "on_tool_execution_update",
-                self.run(
-                    h,
-                    h.on_tool_execution_update(call, progress, cancel.clone()),
-                )
-                .await,
-            );
-        }
+        self.dispatch_observe("on_tool_execution_update", cancel, |h, cancel| {
+            h.on_tool_execution_update(call, progress, cancel)
+        })
+        .await;
     }
 
     pub async fn on_tool_execution_end(&self, call: &ToolCall, cancel: CancellationToken) {
-        for h in &self.handlers {
-            self.ignore_observe_outcome(
-                h,
-                "on_tool_execution_end",
-                self.run(h, h.on_tool_execution_end(call, cancel.clone()))
-                    .await,
-            );
-        }
+        self.dispatch_observe("on_tool_execution_end", cancel, |h, cancel| {
+            h.on_tool_execution_end(call, cancel)
+        })
+        .await;
     }
 
     pub async fn on_before_provider_request(
@@ -559,14 +522,10 @@ impl HookRegistry {
         messages: &[Message],
         cancel: CancellationToken,
     ) {
-        for h in &self.handlers {
-            self.ignore_observe_outcome(
-                h,
-                "on_before_provider_request",
-                self.run(h, h.on_before_provider_request(messages, cancel.clone()))
-                    .await,
-            );
-        }
+        self.dispatch_observe("on_before_provider_request", cancel, |h, cancel| {
+            h.on_before_provider_request(messages, cancel)
+        })
+        .await;
     }
 
     pub async fn on_after_provider_response(
@@ -574,68 +533,50 @@ impl HookRegistry {
         response: &ChatResponse,
         cancel: CancellationToken,
     ) {
-        for h in &self.handlers {
-            self.ignore_observe_outcome(
-                h,
-                "on_after_provider_response",
-                self.run(h, h.on_after_provider_response(response, cancel.clone()))
-                    .await,
-            );
-        }
+        self.dispatch_observe("on_after_provider_response", cancel, |h, cancel| {
+            h.on_after_provider_response(response, cancel)
+        })
+        .await;
     }
 
     pub async fn on_session_before_compact(&self, cancel: CancellationToken) -> bool {
-        for h in &self.handlers {
-            match self
-                .run(h, h.on_session_before_compact(cancel.clone()))
-                .await
-            {
-                Some(HookOutcome::Block { reason }) => {
+        self.dispatch_first_decision(
+            cancel,
+            |h, cancel| h.on_session_before_compact(cancel),
+            |h, outcome| match outcome {
+                HookOutcome::Block { reason } => {
                     tracing::info!("hook {} blocked compaction: {reason}", h.name());
-                    return false;
+                    Some(false)
                 }
-                Some(HookOutcome::Continue) | None => {}
-                Some(other) => {
-                    tracing::warn!(
-                        "hook {} returned {:?} for on_session_before_compact (ignored)",
-                        h.name(),
-                        other
-                    );
+                other => {
+                    warn_unsupported(h, "on_session_before_compact", other);
+                    None
                 }
-            }
-        }
-        true
+            },
+        )
+        .await
+        .unwrap_or(true)
     }
 
     pub async fn on_session_compact(&self, summary: &str, cancel: CancellationToken) {
-        for h in &self.handlers {
-            self.ignore_observe_outcome(
-                h,
-                "on_session_compact",
-                self.run(h, h.on_session_compact(summary, cancel.clone()))
-                    .await,
-            );
-        }
+        self.dispatch_observe("on_session_compact", cancel, |h, cancel| {
+            h.on_session_compact(summary, cancel)
+        })
+        .await;
     }
 
     pub async fn on_session_before_fork(&self, cancel: CancellationToken) {
-        for h in &self.handlers {
-            self.ignore_observe_outcome(
-                h,
-                "on_session_before_fork",
-                self.run(h, h.on_session_before_fork(cancel.clone())).await,
-            );
-        }
+        self.dispatch_observe("on_session_before_fork", cancel, |h, cancel| {
+            h.on_session_before_fork(cancel)
+        })
+        .await;
     }
 
     pub async fn on_session_shutdown(&self, cancel: CancellationToken) {
-        for h in &self.handlers {
-            self.ignore_observe_outcome(
-                h,
-                "on_session_shutdown",
-                self.run(h, h.on_session_shutdown(cancel.clone())).await,
-            );
-        }
+        self.dispatch_observe("on_session_shutdown", cancel, |h, cancel| {
+            h.on_session_shutdown(cancel)
+        })
+        .await;
     }
 
     /// GH issue #557: emit `on_input` to every handler. First
@@ -690,11 +631,7 @@ impl HookRegistry {
                 }
                 Some(HookOutcome::Continue) | None => {}
                 Some(other) => {
-                    tracing::warn!(
-                        "hook {} returned {:?} for on_input (ignored)",
-                        h.name(),
-                        other
-                    );
+                    warn_unsupported(h, "on_input", other);
                 }
             }
         }
@@ -788,30 +725,26 @@ impl HookRegistry {
         args: &Value,
         cancel: CancellationToken,
     ) -> ToolCallDecision {
-        for h in &self.handlers {
-            match self
-                .run(h, h.before_tool_call(tool, args, cancel.clone()))
-                .await
-            {
-                Some(HookOutcome::Block { reason }) => {
+        self.dispatch_first_decision(
+            cancel,
+            |h, cancel| h.before_tool_call(tool, args, cancel),
+            |h, outcome| match outcome {
+                HookOutcome::Block { reason } => {
                     tracing::info!("hook {} blocked tool {tool}: {reason}", h.name());
-                    return ToolCallDecision::Block(reason);
+                    Some(ToolCallDecision::Block(reason))
                 }
-                Some(HookOutcome::ReplaceArgs(new_args)) => {
+                HookOutcome::ReplaceArgs(new_args) => {
                     tracing::info!("hook {} replaced args for {tool}", h.name());
-                    return ToolCallDecision::ReplaceArgs(new_args);
+                    Some(ToolCallDecision::ReplaceArgs(new_args))
                 }
-                Some(HookOutcome::Continue) | None => {}
-                Some(other) => {
-                    tracing::warn!(
-                        "hook {} returned {:?} for before_tool_call (ignored)",
-                        h.name(),
-                        other
-                    );
+                other => {
+                    warn_unsupported(h, "before_tool_call", other);
+                    None
                 }
-            }
-        }
-        ToolCallDecision::Continue
+            },
+        )
+        .await
+        .unwrap_or(ToolCallDecision::Continue)
     }
 
     /// Emit AfterToolCall. First ReplaceResult wins; otherwise None.
@@ -821,26 +754,21 @@ impl HookRegistry {
         result: &ToolResult,
         cancel: CancellationToken,
     ) -> Option<ToolResult> {
-        for h in &self.handlers {
-            match self
-                .run(h, h.after_tool_call(tool, result, cancel.clone()))
-                .await
-            {
-                Some(HookOutcome::ReplaceResult(new)) => {
+        self.dispatch_first_decision(
+            cancel,
+            |h, cancel| h.after_tool_call(tool, result, cancel),
+            |h, outcome| match outcome {
+                HookOutcome::ReplaceResult(new) => {
                     tracing::info!("hook {} replaced result for {tool}", h.name());
-                    return Some(new);
+                    Some(new)
                 }
-                Some(HookOutcome::Continue) | None => {}
-                Some(other) => {
-                    tracing::warn!(
-                        "hook {} returned {:?} for after_tool_call (ignored)",
-                        h.name(),
-                        other
-                    );
+                other => {
+                    warn_unsupported(h, "after_tool_call", other);
+                    None
                 }
-            }
-        }
-        None
+            },
+        )
+        .await
     }
 
     /// Emit BeforeAgentEnd. First ForceContinue wins; returned instruction is
@@ -850,26 +778,21 @@ impl HookRegistry {
         response: &str,
         cancel: CancellationToken,
     ) -> Option<String> {
-        for h in &self.handlers {
-            match self
-                .run(h, h.before_agent_end(response, cancel.clone()))
-                .await
-            {
-                Some(HookOutcome::ForceContinue { instruction }) => {
+        self.dispatch_first_decision(
+            cancel,
+            |h, cancel| h.before_agent_end(response, cancel),
+            |h, outcome| match outcome {
+                HookOutcome::ForceContinue { instruction } => {
                     tracing::info!("hook {} forced continue", h.name());
-                    return Some(instruction);
+                    Some(instruction)
                 }
-                Some(HookOutcome::Continue) | None => {}
-                Some(other) => {
-                    tracing::warn!(
-                        "hook {} returned {:?} for before_agent_end (ignored)",
-                        h.name(),
-                        other
-                    );
+                other => {
+                    warn_unsupported(h, "before_agent_end", other);
+                    None
                 }
-            }
-        }
-        None
+            },
+        )
+        .await
     }
 
     pub async fn session_start(&self, session_id: &str) {
@@ -925,24 +848,54 @@ impl HookRegistry {
         }
     }
 
-    fn ignore_observe_outcome(
-        &self,
-        h: &Arc<dyn HookHandler>,
+    async fn dispatch_observe<'a, F>(
+        &'a self,
         event: &'static str,
-        outcome: Option<HookOutcome>,
-    ) {
-        match outcome {
-            Some(HookOutcome::Continue) | None => {}
-            Some(other) => {
-                tracing::warn!(
-                    "hook {} returned {:?} for {} (ignored)",
-                    h.name(),
-                    other,
-                    event
-                );
+        cancel: CancellationToken,
+        mut f: F,
+    ) where
+        F: FnMut(&'a Arc<dyn HookHandler>, CancellationToken) -> HookFuture<'a>,
+    {
+        for h in &self.handlers {
+            let outcome = self.run(h, f(h, cancel.clone())).await;
+            match outcome {
+                Some(HookOutcome::Continue) | None => {}
+                Some(other) => warn_unsupported(h, event, other),
             }
         }
     }
+
+    async fn dispatch_first_decision<'a, D, F, M>(
+        &'a self,
+        cancel: CancellationToken,
+        mut f: F,
+        mut map: M,
+    ) -> Option<D>
+    where
+        F: FnMut(&'a Arc<dyn HookHandler>, CancellationToken) -> HookFuture<'a>,
+        M: FnMut(&Arc<dyn HookHandler>, HookOutcome) -> Option<D>,
+    {
+        for h in &self.handlers {
+            match self.run(h, f(h, cancel.clone())).await {
+                Some(HookOutcome::Continue) | None => {}
+                Some(outcome) => {
+                    if let Some(decision) = map(h, outcome) {
+                        return Some(decision);
+                    }
+                }
+            }
+        }
+        None
+    }
+}
+
+fn warn_unsupported(h: &Arc<dyn HookHandler>, event: &'static str, outcome: HookOutcome) {
+    tracing::warn!(
+        "hook {} returned {:?} for {} (ignored)",
+        h.name(),
+        outcome,
+        event
+    );
 }
 
 impl Default for HookRegistry {
