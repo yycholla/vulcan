@@ -17,6 +17,8 @@ use std::time::Instant;
 use parking_lot::{Mutex, RwLock};
 use tokio_util::sync::CancellationToken;
 
+use crate::extensions::FrontendCapability;
+
 /// Shared, async-locked handle to a per-session Agent. `Arc` so a
 /// single session can be locked from concurrent tasks (e.g. a
 /// streaming `prompt.stream` background task and an inbound
@@ -149,7 +151,17 @@ impl SessionState {
         config: &crate::config::Config,
         pool: Option<Arc<crate::runtime_pool::RuntimeResourcePool>>,
     ) -> anyhow::Result<AgentHandle> {
-        self.ensure_agent_with_options(config, pool, None, None, None)
+        self.ensure_agent_with_frontend_capabilities(config, pool, FrontendCapability::full_set())
+            .await
+    }
+
+    pub async fn ensure_agent_with_frontend_capabilities(
+        self: &Arc<Self>,
+        config: &crate::config::Config,
+        pool: Option<Arc<crate::runtime_pool::RuntimeResourcePool>>,
+        frontend_capabilities: Vec<FrontendCapability>,
+    ) -> anyhow::Result<AgentHandle> {
+        self.ensure_agent_with_options(config, pool, None, None, None, frontend_capabilities)
             .await
     }
 
@@ -163,6 +175,7 @@ impl SessionState {
         max_iterations: Option<u32>,
         tool_profile: Option<String>,
         allowed_tools: Option<&[String]>,
+        frontend_capabilities: Vec<FrontendCapability>,
     ) -> anyhow::Result<AgentHandle> {
         // Fast path: already installed.
         if let Some(handle) = self.agent_arc() {
@@ -182,6 +195,7 @@ impl SessionState {
         if let Some(pool) = pool {
             builder = builder.with_pool(pool);
         }
+        builder = builder.with_frontend_capabilities(frontend_capabilities);
         if let Some(max_iterations) = max_iterations {
             builder = builder.with_max_iterations(max_iterations);
         }

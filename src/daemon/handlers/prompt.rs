@@ -16,6 +16,7 @@ use tokio::sync::{mpsc, oneshot};
 use crate::daemon::protocol::{ProtocolError, Response, StreamFrame};
 use crate::daemon::session::SessionState;
 use crate::daemon::state::DaemonState;
+use crate::extensions::FrontendCapability;
 use crate::provider::StreamEvent;
 
 /// Map a daemon-internal `StreamEvent` to a wire `StreamFrame`.
@@ -95,13 +96,23 @@ fn resolve_session(
 
 // -- prompt.run --
 
-pub async fn run(state: Arc<DaemonState>, id: String, session_id: String, input: &str) -> Response {
+pub async fn run(
+    state: Arc<DaemonState>,
+    id: String,
+    session_id: String,
+    input: &str,
+    frontend_capabilities: Vec<FrontendCapability>,
+) -> Response {
     let sess = match resolve_session(&state, &session_id) {
         Ok(s) => s,
         Err(e) => return Response::error(id, e),
     };
     let agent_arc = match sess
-        .ensure_agent_with_pool(state.config(), state.pool().cloned())
+        .ensure_agent_with_frontend_capabilities(
+            state.config(),
+            state.pool().cloned(),
+            frontend_capabilities,
+        )
         .await
     {
         Ok(a) => a,
@@ -174,6 +185,7 @@ pub fn stream(
     req_id: String,
     session_id: String,
     input: String,
+    frontend_capabilities: Vec<FrontendCapability>,
 ) -> (mpsc::Receiver<StreamFrame>, oneshot::Receiver<Response>) {
     let (frame_tx, frame_rx) = mpsc::channel(32);
     let (done_tx, done_rx) = oneshot::channel();
@@ -206,7 +218,7 @@ pub fn stream(
         // done channel as AGENT_BUILD_FAILED; in_flight is cleared
         // before returning so daemon.status doesn't get stuck.
         let agent_arc = match sess_for_task
-            .ensure_agent_with_pool(&config, pool_for_task)
+            .ensure_agent_with_frontend_capabilities(&config, pool_for_task, frontend_capabilities)
             .await
         {
             Ok(a) => a,
@@ -377,7 +389,14 @@ mod tests {
     #[tokio::test]
     async fn run_returns_session_not_found_for_bogus_session() {
         let state = Arc::new(DaemonState::for_tests_minimal());
-        let resp = run(state, "r1".into(), "ghost".into(), "hi").await;
+        let resp = run(
+            state,
+            "r1".into(),
+            "ghost".into(),
+            "hi",
+            FrontendCapability::full_set(),
+        )
+        .await;
         let err = resp.error.expect("err");
         assert_eq!(err.code, "SESSION_NOT_FOUND");
     }
@@ -390,7 +409,14 @@ mod tests {
         // error path now surfaces AGENT_BUILD_FAILED instead of the
         // pre-Task-3.3 AGENT_NOT_AVAILABLE.
         let state = Arc::new(DaemonState::for_tests_minimal());
-        let resp = run(state, "r1".into(), "main".into(), "hi").await;
+        let resp = run(
+            state,
+            "r1".into(),
+            "main".into(),
+            "hi",
+            FrontendCapability::full_set(),
+        )
+        .await;
         let err = resp.error.expect("err");
         assert_eq!(err.code, "AGENT_BUILD_FAILED");
     }

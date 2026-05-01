@@ -76,6 +76,7 @@ impl Server {
 
 async fn handle_connection(stream: UnixStream, dispatcher: Arc<Dispatcher>) {
     let (mut read_half, mut write_half) = stream.into_split();
+    let mut connection_capabilities = Vec::new();
     let (write_tx, mut write_rx) = mpsc::channel::<Vec<u8>>(32);
     let writer = tokio::spawn(async move {
         while let Some(body) = write_rx.recv().await {
@@ -97,7 +98,12 @@ async fn handle_connection(stream: UnixStream, dispatcher: Arc<Dispatcher>) {
         };
 
         let response = match parse_request_strict(&body) {
-            Ok(req) => {
+            Ok(mut req) => {
+                if !req.frontend_capabilities.is_empty() {
+                    connection_capabilities = req.frontend_capabilities.clone();
+                } else {
+                    req.frontend_capabilities = connection_capabilities.clone();
+                }
                 let dispatcher = Arc::clone(&dispatcher);
                 let write_tx = write_tx.clone();
                 tokio::spawn(async move {
@@ -172,6 +178,7 @@ mod tests {
             session: "main".into(),
             method: "daemon.ping".into(),
             params: serde_json::json!({}),
+            frontend_capabilities: crate::extensions::FrontendCapability::full_set(),
         };
         write_request(stream, &req).await.unwrap();
         let body = read_frame_bytes(stream).await.unwrap();
@@ -217,6 +224,7 @@ mod tests {
                     session: "main".into(),
                     method: "daemon.ping".into(),
                     params: serde_json::json!({}),
+                    frontend_capabilities: crate::extensions::FrontendCapability::full_set(),
                 };
                 write_request(&mut s, &req).await.unwrap();
                 let body = read_frame_bytes(&mut s).await.unwrap();
@@ -267,6 +275,7 @@ mod tests {
             session: "main".into(),
             method: "test.slow_stream".into(),
             params: serde_json::json!({}),
+            frontend_capabilities: crate::extensions::FrontendCapability::full_set(),
         };
         let ping_req = Request {
             version: 1,
@@ -274,6 +283,7 @@ mod tests {
             session: "main".into(),
             method: "daemon.ping".into(),
             params: serde_json::json!({}),
+            frontend_capabilities: crate::extensions::FrontendCapability::full_set(),
         };
 
         write_request(&mut client, &stream_req).await.unwrap();
@@ -337,6 +347,7 @@ mod tests {
             session: "main".into(),
             method: "method.does.not.exist".into(),
             params: serde_json::json!({}),
+            frontend_capabilities: crate::extensions::FrontendCapability::full_set(),
         };
         write_request(&mut client, &req).await.unwrap();
         let body = read_frame_bytes(&mut client).await.unwrap();

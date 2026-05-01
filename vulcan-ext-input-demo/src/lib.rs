@@ -106,6 +106,7 @@ mod tests {
             cwd: std::path::PathBuf::from("/tmp/test"),
             session_id: "test-session".to_string(),
             memory: Arc::new(vulcan::memory::SessionStore::in_memory()),
+            frontend_capabilities: vulcan::extensions::FrontendCapability::full_set(),
         }
     }
 

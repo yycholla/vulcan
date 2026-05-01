@@ -131,6 +131,7 @@ mod tests {
             version: "0.1.0".into(),
             entry: EntryKind::Builtin,
             capabilities: Vec::new(),
+            requires: Vec::new(),
             permissions: None,
             checksum: checksum.map(String::from),
             min_vulcan_version: min.map(String::from),

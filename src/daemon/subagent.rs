@@ -49,6 +49,7 @@ impl SubagentRunner for DaemonSubagentRunner {
                 Some(request.max_iterations),
                 request.profile_name.clone(),
                 Some(&request.allowed_tools),
+                crate::extensions::FrontendCapability::full_set(),
             )
             .await?;
 

@@ -42,6 +42,7 @@ pub use store::{DiscoveredExtension, discover};
 pub use verify::{VerificationError, verify_checksum_optional, verify_compatible};
 
 use serde::{Deserialize, Serialize};
+use std::str::FromStr;
 
 /// Lifecycle / activation state of an extension. Drives the
 /// `vulcan extension list` view + tells the registry whether to
@@ -119,6 +120,59 @@ impl ExtensionCapability {
     }
 }
 
+/// Frontend or platform surfaces an extension may require before its
+/// daemon-side session state is activated.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FrontendCapability {
+    TextIo,
+    RichText,
+    CellCanvas,
+    RawInput,
+    StatusWidgets,
+}
+
+impl FrontendCapability {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            FrontendCapability::TextIo => "text_io",
+            FrontendCapability::RichText => "rich_text",
+            FrontendCapability::CellCanvas => "cell_canvas",
+            FrontendCapability::RawInput => "raw_input",
+            FrontendCapability::StatusWidgets => "status_widgets",
+        }
+    }
+
+    pub fn text_only() -> Vec<Self> {
+        vec![Self::TextIo]
+    }
+
+    pub fn full_set() -> Vec<Self> {
+        vec![
+            Self::TextIo,
+            Self::RichText,
+            Self::CellCanvas,
+            Self::RawInput,
+            Self::StatusWidgets,
+        ]
+    }
+}
+
+impl FromStr for FrontendCapability {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "text_io" => Ok(Self::TextIo),
+            "rich_text" => Ok(Self::RichText),
+            "cell_canvas" => Ok(Self::CellCanvas),
+            "raw_input" => Ok(Self::RawInput),
+            "status_widgets" => Ok(Self::StatusWidgets),
+            other => Err(format!("unknown frontend capability `{other}`")),
+        }
+    }
+}
+
 /// Static description of an extension. Carries everything needed
 /// to render `vulcan extension list/show` and to decide whether
 /// to activate, without touching code execution paths.
@@ -136,6 +190,10 @@ pub struct ExtensionMetadata {
     /// when active. Display-only today; PR-4 enforces against the
     /// active hook/tool wiring.
     pub capabilities: Vec<ExtensionCapability>,
+    /// Frontend/platform surfaces required before this extension may
+    /// activate for a Session.
+    #[serde(default)]
+    pub requires: Vec<FrontendCapability>,
     /// Optional human-readable permissions summary surfaced in
     /// `vulcan extension show`. Caller-provided; the registry
     /// does not interpret it.
@@ -166,6 +224,7 @@ impl ExtensionMetadata {
             source,
             status: ExtensionStatus::Inactive,
             capabilities: Vec::new(),
+            requires: Vec::new(),
             permissions_summary: None,
             broken_reason: None,
             priority: 100,

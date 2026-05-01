@@ -12,12 +12,17 @@ use serde_json::json;
 use crate::daemon::protocol::{ProtocolError, Response};
 use crate::daemon::session::AgentHandle;
 use crate::daemon::state::DaemonState;
+use crate::extensions::FrontendCapability;
 
 /// Resolve the per-session AgentHandle, lazy-building if absent.
 /// Returns `SESSION_NOT_FOUND` when the session doesn't exist and
 /// `AGENT_BUILD_FAILED` when the inline build errors. Pre-Task-3.3
 /// this returned `AGENT_NOT_AVAILABLE` for the no-agent case.
-async fn resolve(state: &DaemonState, session_id: &str) -> Result<AgentHandle, ProtocolError> {
+async fn resolve(
+    state: &DaemonState,
+    session_id: &str,
+    frontend_capabilities: Vec<FrontendCapability>,
+) -> Result<AgentHandle, ProtocolError> {
     let Some(sess) = state.sessions().get(session_id) else {
         return Err(ProtocolError {
             code: "SESSION_NOT_FOUND".into(),
@@ -26,19 +31,28 @@ async fn resolve(state: &DaemonState, session_id: &str) -> Result<AgentHandle, P
         });
     };
     sess.touch();
-    sess.ensure_agent_with_pool(state.config(), state.pool().cloned())
-        .await
-        .map_err(|e| ProtocolError {
-            code: "AGENT_BUILD_FAILED".into(),
-            message: format!("agent build for session '{session_id}' failed: {e}"),
-            retryable: true,
-        })
+    sess.ensure_agent_with_frontend_capabilities(
+        state.config(),
+        state.pool().cloned(),
+        frontend_capabilities,
+    )
+    .await
+    .map_err(|e| ProtocolError {
+        code: "AGENT_BUILD_FAILED".into(),
+        message: format!("agent build for session '{session_id}' failed: {e}"),
+        retryable: true,
+    })
 }
 
 // -- agent.status --
 
-pub async fn status(state: &DaemonState, id: String, session_id: String) -> Response {
-    let agent_arc = match resolve(state, &session_id).await {
+pub async fn status(
+    state: &DaemonState,
+    id: String,
+    session_id: String,
+    frontend_capabilities: Vec<FrontendCapability>,
+) -> Response {
+    let agent_arc = match resolve(state, &session_id, frontend_capabilities).await {
         Ok(a) => a,
         Err(e) => return Response::error(id, e),
     };
@@ -62,8 +76,9 @@ pub async fn switch_model(
     id: String,
     session_id: String,
     model: &str,
+    frontend_capabilities: Vec<FrontendCapability>,
 ) -> Response {
-    let agent_arc = match resolve(state, &session_id).await {
+    let agent_arc = match resolve(state, &session_id, frontend_capabilities).await {
         Ok(a) => a,
         Err(e) => return Response::error(id, e),
     };
@@ -91,8 +106,13 @@ pub async fn switch_model(
 
 // -- agent.list_models --
 
-pub async fn list_models(state: &DaemonState, id: String, session_id: String) -> Response {
-    let agent_arc = match resolve(state, &session_id).await {
+pub async fn list_models(
+    state: &DaemonState,
+    id: String,
+    session_id: String,
+    frontend_capabilities: Vec<FrontendCapability>,
+) -> Response {
+    let agent_arc = match resolve(state, &session_id, frontend_capabilities).await {
         Ok(a) => a,
         Err(e) => return Response::error(id, e),
     };

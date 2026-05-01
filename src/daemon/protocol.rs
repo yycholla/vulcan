@@ -29,6 +29,8 @@
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
+use crate::extensions::FrontendCapability;
+
 /// Wire protocol version. Bumped on any breaking change to the envelope
 /// shapes or top-level method dispatch contract.
 pub const PROTOCOL_VERSION: u32 = 1;
@@ -51,6 +53,11 @@ pub struct Request {
     /// per method; the protocol layer keeps it opaque.
     #[serde(default)]
     pub params: serde_json::Value,
+    /// Frontend/platform surfaces available on this connection. Clients
+    /// send these during `daemon.handshake`; the server also accepts
+    /// them per request for older connection paths and tests.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub frontend_capabilities: Vec<FrontendCapability>,
 }
 
 fn default_session() -> String {

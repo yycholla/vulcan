@@ -56,6 +56,13 @@ impl Dispatcher {
 
             // -- Daemon --
             "daemon.ping" => DispatchResult::Response(daemon_ops::ping(&self.state, req.id).await),
+            "daemon.handshake" => DispatchResult::Response(Response::ok(
+                req.id,
+                serde_json::json!({
+                    "ok": true,
+                    "frontend_capabilities": req.frontend_capabilities,
+                }),
+            )),
             "daemon.shutdown" => {
                 let force = req
                     .params
@@ -74,7 +81,9 @@ impl Dispatcher {
             // -- Agent --
             "agent.status" => {
                 let session = req.session.clone();
-                DispatchResult::Response(agent::status(&self.state, req.id, session).await)
+                DispatchResult::Response(
+                    agent::status(&self.state, req.id, session, req.frontend_capabilities).await,
+                )
             }
             "agent.switch_model" => {
                 let session = req.session.clone();
@@ -84,12 +93,22 @@ impl Dispatcher {
                     .and_then(|v| v.as_str())
                     .unwrap_or("");
                 DispatchResult::Response(
-                    agent::switch_model(&self.state, req.id, session, model).await,
+                    agent::switch_model(
+                        &self.state,
+                        req.id,
+                        session,
+                        model,
+                        req.frontend_capabilities,
+                    )
+                    .await,
                 )
             }
             "agent.list_models" => {
                 let session = req.session.clone();
-                DispatchResult::Response(agent::list_models(&self.state, req.id, session).await)
+                DispatchResult::Response(
+                    agent::list_models(&self.state, req.id, session, req.frontend_capabilities)
+                        .await,
+                )
             }
 
             // -- Prompt --
@@ -101,7 +120,14 @@ impl Dispatcher {
                     .and_then(|v| v.as_str())
                     .unwrap_or("");
                 DispatchResult::Response(
-                    prompt::run(Arc::clone(&self.state), req.id, session, input).await,
+                    prompt::run(
+                        Arc::clone(&self.state),
+                        req.id,
+                        session,
+                        input,
+                        req.frontend_capabilities,
+                    )
+                    .await,
                 )
             }
             "prompt.stream" => {
@@ -112,8 +138,13 @@ impl Dispatcher {
                     .and_then(|v| v.as_str())
                     .unwrap_or("")
                     .to_string();
-                let (frames, done) =
-                    prompt::stream(Arc::clone(&self.state), req.id, session, input);
+                let (frames, done) = prompt::stream(
+                    Arc::clone(&self.state),
+                    req.id,
+                    session,
+                    input,
+                    req.frontend_capabilities,
+                );
                 DispatchResult::Stream { frames, done }
             }
             "prompt.cancel" => {
@@ -372,6 +403,7 @@ mod tests {
             session: "main".into(),
             method: method.into(),
             params: serde_json::json!({}),
+            frontend_capabilities: crate::extensions::FrontendCapability::full_set(),
         }
     }
 
@@ -382,6 +414,7 @@ mod tests {
             session: "main".into(),
             method: method.into(),
             params,
+            frontend_capabilities: crate::extensions::FrontendCapability::full_set(),
         }
     }
 

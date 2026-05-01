@@ -45,6 +45,10 @@ pub struct ExtensionManifest {
     /// when the extension activates.
     #[serde(default)]
     pub capabilities: Vec<String>,
+    /// Frontend surfaces required before the daemon activates this
+    /// extension for a Session.
+    #[serde(default)]
+    pub requires: Vec<String>,
     /// Human-readable permissions summary surfaced in
     /// `vulcan extension list/show`.
     #[serde(default)]
@@ -165,6 +169,7 @@ path = "./run.sh"
 "#;
         let m = ExtensionManifest::from_toml_str(raw).unwrap();
         assert_eq!(m.capabilities, vec!["prompt_injection", "tool_provider"]);
+        assert!(m.requires.is_empty());
         assert_eq!(m.permissions.as_deref(), Some("read-only"));
         assert_eq!(m.checksum.as_deref(), Some("sha256:abc123"));
         assert_eq!(m.min_vulcan_version.as_deref(), Some("0.5.0"));
@@ -172,6 +177,21 @@ path = "./run.sh"
             EntryKind::LocalScript { path } => assert_eq!(path, "./run.sh"),
             other => panic!("expected LocalScript, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn parses_required_frontend_capabilities() {
+        let raw = r#"
+id = "canvas-helper"
+name = "Canvas Helper"
+version = "0.1.0"
+requires = ["text_io", "cell_canvas"]
+
+[entry]
+kind = "builtin"
+"#;
+        let m = ExtensionManifest::from_toml_str(raw).unwrap();
+        assert_eq!(m.requires, vec!["text_io", "cell_canvas"]);
     }
 
     #[test]

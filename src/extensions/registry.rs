@@ -10,7 +10,10 @@ use parking_lot::RwLock;
 use std::sync::Arc;
 
 use super::api::{DaemonCodeExtension, SessionExtensionCtx};
-use super::{ExtensionCapability, ExtensionConfigField, ExtensionMetadata, ExtensionStatus};
+use super::{
+    ExtensionCapability, ExtensionConfigField, ExtensionMetadata, ExtensionStatus,
+    FrontendCapability,
+};
 use crate::hooks::{HookHandler, HookRegistry};
 use crate::tools::ToolRegistry;
 
@@ -95,6 +98,30 @@ impl ExtensionRegistry {
     /// order: priority asc, then id asc.
     pub fn list(&self) -> Vec<ExtensionMetadata> {
         self.inner.read().clone()
+    }
+
+    /// Snapshot metadata as it would appear for one frontend
+    /// connection. Active extensions missing a required frontend
+    /// capability are shown as Inactive with a diagnostic reason, but
+    /// the registry's global metadata is not mutated.
+    pub fn list_for_frontend_capabilities(
+        &self,
+        frontend_capabilities: &[FrontendCapability],
+    ) -> Vec<ExtensionMetadata> {
+        let mut items = self.inner.read().clone();
+        for meta in &mut items {
+            if meta.status == ExtensionStatus::Active {
+                if let Some(reason) = missing_frontend_capability_reason(
+                    &meta.requires,
+                    frontend_capabilities,
+                    &meta.id,
+                ) {
+                    meta.status = ExtensionStatus::Inactive;
+                    meta.broken_reason = Some(reason);
+                }
+            }
+        }
+        items
     }
 
     pub fn get(&self, id: &str) -> Option<ExtensionMetadata> {
@@ -247,6 +274,19 @@ impl ExtensionRegistry {
             if !active {
                 continue;
             }
+            let Some(meta) = metadata_snapshot.iter().find(|m| m.id == id) else {
+                continue;
+            };
+            if let Some(reason) =
+                missing_frontend_capability_reason(&meta.requires, &ctx.frontend_capabilities, &id)
+            {
+                tracing::info!(
+                    extension_id = %id,
+                    reason = %reason,
+                    "skipping extension activation for frontend capability mismatch"
+                );
+                continue;
+            }
             let prefix = format!("{id}_");
             if !active_prefixes.insert(prefix.clone()) {
                 self.mark_broken(&id, format!("extension tool prefix collision: `{prefix}`"));
@@ -334,6 +374,22 @@ impl ExtensionRegistry {
                     if let Some(desc) = manifest.description.clone() {
                         meta.description = desc;
                     }
+                    meta.requires = manifest
+                        .requires
+                        .iter()
+                        .filter_map(|value| match value.parse::<FrontendCapability>() {
+                            Ok(cap) => Some(cap),
+                            Err(reason) => {
+                                tracing::warn!(
+                                    extension_id = %manifest.id,
+                                    capability = %value,
+                                    reason = %reason,
+                                    "ignoring unknown frontend capability in extension manifest"
+                                );
+                                None
+                            }
+                        })
+                        .collect();
                     if let Some(perm) = manifest.permissions.clone() {
                         meta.permissions_summary = Some(perm);
                     }
@@ -400,6 +456,20 @@ impl ExtensionRegistry {
         }
         out
     }
+}
+
+fn missing_frontend_capability_reason(
+    requires: &[FrontendCapability],
+    frontend_capabilities: &[FrontendCapability],
+    extension_id: &str,
+) -> Option<String> {
+    let missing = requires
+        .iter()
+        .find(|required| !frontend_capabilities.contains(required))?;
+    Some(format!(
+        "extension `{extension_id}` requires frontend capability `{}`",
+        missing.as_str()
+    ))
 }
 
 #[cfg(test)]
@@ -632,6 +702,73 @@ mod tests {
         assert_eq!(fields.len(), 1);
         assert_eq!(fields[0].0, "active-fielded");
         assert_eq!(fields[0].1.path, "enabled");
+    }
+
+    #[test]
+    fn daemon_extension_requires_frontend_capability_before_activation() {
+        use crate::extensions::api::{DaemonCodeExtension, SessionExtension, SessionExtensionCtx};
+        use crate::hooks::HookRegistry;
+        use crate::memory::SessionStore;
+
+        struct CanvasSession;
+        impl SessionExtension for CanvasSession {}
+
+        struct CanvasExtension;
+        impl DaemonCodeExtension for CanvasExtension {
+            fn metadata(&self) -> ExtensionMetadata {
+                let mut m = ExtensionMetadata::new(
+                    "canvas-ext",
+                    "Canvas Ext",
+                    "0.1.0",
+                    ExtensionSource::Builtin,
+                );
+                m.status = ExtensionStatus::Active;
+                m.requires = vec![FrontendCapability::CellCanvas];
+                m
+            }
+
+            fn instantiate(&self, _ctx: SessionExtensionCtx) -> Arc<dyn SessionExtension> {
+                Arc::new(CanvasSession)
+            }
+        }
+
+        fn ctx(frontend_capabilities: Vec<FrontendCapability>) -> SessionExtensionCtx {
+            SessionExtensionCtx {
+                cwd: std::path::PathBuf::from("/tmp/test-session"),
+                session_id: "test-session".into(),
+                memory: Arc::new(SessionStore::in_memory()),
+                frontend_capabilities,
+            }
+        }
+
+        let reg = ExtensionRegistry::new();
+        reg.register_daemon_extension(Arc::new(CanvasExtension));
+
+        let mut hooks = HookRegistry::new();
+        let (sessions, tools) = reg.wire_daemon_extensions_into_runtime(
+            ctx(FrontendCapability::text_only()),
+            &mut hooks,
+            None,
+        );
+        assert_eq!((sessions, tools), (0, 0));
+        let listed = reg.list_for_frontend_capabilities(&FrontendCapability::text_only());
+        let listed = listed.iter().find(|m| m.id == "canvas-ext").unwrap();
+        assert_eq!(listed.status, ExtensionStatus::Inactive);
+        assert!(
+            listed
+                .broken_reason
+                .as_deref()
+                .unwrap()
+                .contains("cell_canvas")
+        );
+
+        let mut hooks = HookRegistry::new();
+        let (sessions, tools) = reg.wire_daemon_extensions_into_runtime(
+            ctx(FrontendCapability::full_set()),
+            &mut hooks,
+            None,
+        );
+        assert_eq!((sessions, tools), (1, 0));
     }
 
     // ── YYC-232 (YYC-166 PR-4): store + install_state bridge ────────

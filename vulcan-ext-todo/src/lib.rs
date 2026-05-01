@@ -266,6 +266,7 @@ mod tests {
             cwd: std::path::PathBuf::from("/tmp/test"),
             session_id: "todo-test".to_string(),
             memory,
+            frontend_capabilities: vulcan::extensions::FrontendCapability::full_set(),
         }
     }
 

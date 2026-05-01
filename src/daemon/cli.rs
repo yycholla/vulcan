@@ -240,6 +240,7 @@ async fn call(method: &str, params: serde_json::Value) -> anyhow::Result<serde_j
         session: "main".into(),
         method: method.into(),
         params,
+        frontend_capabilities: crate::extensions::FrontendCapability::text_only(),
     };
     write_request(&mut stream, &req)
         .await

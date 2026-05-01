@@ -10,8 +10,8 @@ use std::path::Path;
 
 use crate::cli::ExtensionSubcommand;
 use crate::config::vulcan_home;
-use crate::extensions::ExtensionRegistry;
 use crate::extensions::install_state::{InstallState, InstallStateStore, SqliteInstallStateStore};
+use crate::extensions::{ExtensionRegistry, FrontendCapability};
 
 pub async fn run(cmd: ExtensionSubcommand) -> Result<()> {
     let home = vulcan_home();
@@ -34,7 +34,7 @@ fn list(home: &Path, install: &SqliteInstallStateStore) -> Result<()> {
     // `inventory::submit!` alongside manifest-discovered ones.
     crate::extensions::api::wire_inventory_into_registry(&registry);
     let (ok, broken) = registry.load_from_store(home, install);
-    let entries = registry.list();
+    let entries = registry.list_for_frontend_capabilities(&FrontendCapability::text_only());
     if entries.is_empty() {
         println!("(no extensions installed)");
         println!("Drop manifests under {}/extensions/<id>/", home.display());
@@ -75,7 +75,9 @@ fn show(home: &Path, install: &SqliteInstallStateStore, id: &str) -> Result<()> 
     crate::extensions::api::wire_inventory_into_registry(&registry);
     registry.load_from_store(home, install);
     let meta = registry
-        .get(id)
+        .list_for_frontend_capabilities(&FrontendCapability::text_only())
+        .into_iter()
+        .find(|meta| meta.id == id)
         .ok_or_else(|| anyhow!("extension `{id}` not installed"))?;
     println!("Extension {}", meta.id);
     println!("  name:        {}", meta.name);
@@ -95,11 +97,15 @@ fn show(home: &Path, install: &SqliteInstallStateStore, id: &str) -> Result<()> 
         println!("  permissions: {perms}");
     }
     if let Some(reason) = &meta.broken_reason {
-        println!("  broken_reason: {reason}");
+        println!("  reason:       {reason}");
     }
     if !meta.capabilities.is_empty() {
         let caps: Vec<&'static str> = meta.capabilities.iter().map(|c| c.as_str()).collect();
         println!("  capabilities: [{}]", caps.join(", "));
+    }
+    if !meta.requires.is_empty() {
+        let reqs: Vec<&'static str> = meta.requires.iter().map(|c| c.as_str()).collect();
+        println!("  requires:     [{}]", reqs.join(", "));
     }
     if let Some(state) = install.get(id)? {
         println!("\n  install_state.enabled:        {}", state.enabled);

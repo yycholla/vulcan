@@ -139,6 +139,7 @@ pub async fn run_tui(
             .with_hooks(hook_reg)
             .with_pause_channel(pause_tx_for_agent)
             .with_tool_profile(tool_profile)
+            .with_frontend_capabilities(crate::extensions::FrontendCapability::full_set())
             .build()
             .await?,
     ));

@@ -9,6 +9,7 @@ use std::sync::Arc;
 use tokio::sync::Mutex as AsyncMutex;
 
 use crate::client::{Client, ClientError};
+use crate::extensions::FrontendCapability;
 
 type ClientFactory = Box<
     dyn Fn() -> futures_util::future::BoxFuture<'static, Result<Client, ClientError>> + Send + Sync,
@@ -22,7 +23,11 @@ pub struct GatewayDaemonClient {
 impl GatewayDaemonClient {
     pub fn new() -> Self {
         Self {
-            client_factory: Box::new(|| Box::pin(Client::connect_or_autostart())),
+            client_factory: Box::new(|| {
+                Box::pin(Client::connect_or_autostart_with_capabilities(
+                    FrontendCapability::text_only(),
+                ))
+            }),
             shared: AsyncMutex::new(None),
         }
     }

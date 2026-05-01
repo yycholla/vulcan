@@ -42,6 +42,23 @@ pub fn include_manifest(_input: TokenStream) -> TokenStream {
         .and_then(toml::Value::as_str)
         .unwrap_or(package_version);
     let daemon_entry = vulcan.get("daemon_entry").and_then(toml::Value::as_str);
+    let requires = vulcan
+        .get("requires")
+        .and_then(toml::Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .map(|v| {
+                    v.as_str().unwrap_or_else(|| {
+                        panic!(
+                            "{} package.metadata.vulcan.requires must contain strings",
+                            manifest_path.display()
+                        )
+                    })
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
 
     let id_lit = rust_string_literal(id);
     let version_lit = rust_string_literal(version);
@@ -49,9 +66,14 @@ pub fn include_manifest(_input: TokenStream) -> TokenStream {
         Some(entry) => format!("Some({}.to_string())", rust_string_literal(entry)),
         None => "None".to_string(),
     };
+    let requires_tokens = requires
+        .iter()
+        .map(|value| format!("{}.to_string()", rust_string_literal(value)))
+        .collect::<Vec<_>>()
+        .join(", ");
 
     format!(
-        "::vulcan::extensions::api::ExtensionManifest {{ id: {id_lit}.to_string(), version: {version_lit}.to_string(), daemon_entry: {daemon_entry_tokens} }}"
+        "::vulcan::extensions::api::ExtensionManifest {{ id: {id_lit}.to_string(), version: {version_lit}.to_string(), daemon_entry: {daemon_entry_tokens}, requires: vec![{requires_tokens}] }}"
     )
     .parse()
     .expect("include_manifest! generated invalid tokens")

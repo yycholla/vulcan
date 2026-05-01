@@ -20,11 +20,13 @@ pub use transport::StreamFrames;
 
 use crate::config::vulcan_home;
 use crate::daemon::protocol::{Request, StreamFrame};
+use crate::extensions::FrontendCapability;
 
 use transport::Transport;
 
 pub struct Client {
     transport: Transport,
+    frontend_capabilities: Vec<FrontendCapability>,
 }
 
 impl Client {
@@ -32,10 +34,21 @@ impl Client {
     /// The socket path is derived from [`vulcan_home`] (i.e. `$VULCAN_HOME`
     /// or `$HOME/.vulcan`).
     pub async fn connect_or_autostart() -> ClientResult<Self> {
+        Self::connect_or_autostart_with_capabilities(FrontendCapability::text_only()).await
+    }
+
+    pub async fn connect_or_autostart_with_capabilities(
+        frontend_capabilities: Vec<FrontendCapability>,
+    ) -> ClientResult<Self> {
         let sock = vulcan_home().join("vulcan.sock");
         auto_start::ensure_daemon(&sock).await?;
         let transport = Transport::connect(&sock).await?;
-        Ok(Self { transport })
+        let client = Self {
+            transport,
+            frontend_capabilities,
+        };
+        client.handshake().await?;
+        Ok(client)
     }
 
     /// Connect to an existing daemon at `sock`. Does NOT auto-start —
@@ -43,8 +56,40 @@ impl Client {
     /// (tests, recovery paths) and want a hard error if no daemon is
     /// listening.
     pub async fn connect_at(sock: &std::path::Path) -> ClientResult<Self> {
+        Self::connect_at_with_capabilities(sock, FrontendCapability::text_only()).await
+    }
+
+    pub async fn connect_at_with_capabilities(
+        sock: &std::path::Path,
+        frontend_capabilities: Vec<FrontendCapability>,
+    ) -> ClientResult<Self> {
         let transport = Transport::connect(sock).await?;
-        Ok(Self { transport })
+        let client = Self {
+            transport,
+            frontend_capabilities,
+        };
+        client.handshake().await?;
+        Ok(client)
+    }
+
+    async fn handshake(&self) -> ClientResult<()> {
+        let req = self.request("main", "daemon.handshake", serde_json::json!({}));
+        let resp = self.transport.call(req).await?;
+        if let Some(err) = resp.error {
+            return Err(err.into());
+        }
+        Ok(())
+    }
+
+    fn request(&self, session: &str, method: &str, params: serde_json::Value) -> Request {
+        Request {
+            version: 1,
+            id: uuid::Uuid::new_v4().to_string(),
+            session: session.into(),
+            method: method.into(),
+            params,
+            frontend_capabilities: self.frontend_capabilities.clone(),
+        }
     }
 
     /// Make a single RPC call. The session defaults to `"main"`. The
@@ -72,13 +117,7 @@ impl Client {
         method: &str,
         params: serde_json::Value,
     ) -> ClientResult<serde_json::Value> {
-        let req = Request {
-            version: 1,
-            id: uuid::Uuid::new_v4().to_string(),
-            session: session.into(),
-            method: method.into(),
-            params,
-        };
+        let req = self.request(session, method, params);
         let resp = self.transport.call(req).await?;
         if let Some(err) = resp.error {
             return Err(err.into());
@@ -107,13 +146,7 @@ impl Client {
         method: &str,
         params: serde_json::Value,
     ) -> ClientResult<StreamFrames> {
-        let req = Request {
-            version: 1,
-            id: uuid::Uuid::new_v4().to_string(),
-            session: session.into(),
-            method: method.into(),
-            params,
-        };
+        let req = self.request(session, method, params);
         self.transport.call_stream(req).await
     }
 
@@ -146,6 +179,16 @@ mod tests {
         tokio::spawn(async move {
             let (stream, _) = listener.accept().await.expect("accept");
             let (mut read, mut write) = stream.into_split();
+            let handshake_body = read_frame_bytes(&mut read).await.expect("handshake");
+            let handshake: Request =
+                serde_json::from_slice(&handshake_body).expect("decode handshake");
+            assert_eq!(handshake.method, "daemon.handshake");
+            write_response(
+                &mut write,
+                &Response::ok(handshake.id, serde_json::json!({"ok": true})),
+            )
+            .await
+            .expect("write handshake");
             // Read two requests, then answer them in reversed order.
             let body1 = read_frame_bytes(&mut read).await.expect("frame1");
             let body2 = read_frame_bytes(&mut read).await.expect("frame2");
@@ -204,6 +247,16 @@ mod tests {
         tokio::spawn(async move {
             let (stream, _) = listener.accept().await.expect("accept");
             let (mut read, mut write) = stream.into_split();
+            let handshake_body = read_frame_bytes(&mut read).await.expect("handshake");
+            let handshake: Request =
+                serde_json::from_slice(&handshake_body).expect("decode handshake");
+            assert_eq!(handshake.method, "daemon.handshake");
+            write_response(
+                &mut write,
+                &Response::ok(handshake.id, serde_json::json!({"ok": true})),
+            )
+            .await
+            .expect("write handshake");
             let body1 = read_frame_bytes(&mut read).await.expect("frame1");
             let body2 = read_frame_bytes(&mut read).await.expect("frame2");
             let req1: Request = serde_json::from_slice(&body1).expect("decode req1");

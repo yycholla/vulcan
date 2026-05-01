@@ -212,6 +212,7 @@ pub struct AgentBuilder<'a> {
     /// non-daemon CLI/test paths still pass `None` and fall back to
     /// the legacy build-everything path.
     pool: Option<Arc<RuntimeResourcePool>>,
+    frontend_capabilities: Vec<crate::extensions::FrontendCapability>,
 }
 
 impl<'a> AgentBuilder<'a> {
@@ -246,6 +247,14 @@ impl<'a> AgentBuilder<'a> {
         self
     }
 
+    pub fn with_frontend_capabilities(
+        mut self,
+        frontend_capabilities: Vec<crate::extensions::FrontendCapability>,
+    ) -> Self {
+        self.frontend_capabilities = frontend_capabilities;
+        self
+    }
+
     pub async fn build(self) -> Result<Agent> {
         Agent::build_from_parts(
             self.config,
@@ -254,6 +263,7 @@ impl<'a> AgentBuilder<'a> {
             self.max_iterations,
             self.tool_profile,
             self.pool,
+            self.frontend_capabilities,
         )
         .await
     }
@@ -268,6 +278,7 @@ impl Agent {
             max_iterations: None,
             tool_profile: None,
             pool: None,
+            frontend_capabilities: crate::extensions::FrontendCapability::full_set(),
         }
     }
 
@@ -286,6 +297,7 @@ impl Agent {
         max_iterations: Option<u32>,
         tool_profile_override: Option<String>,
         pool: Option<Arc<RuntimeResourcePool>>,
+        frontend_capabilities: Vec<crate::extensions::FrontendCapability>,
     ) -> Result<Self> {
         // YYC-239: TUI + gateway resolve their starting provider
         // through the same `active_provider_config` indirection.
@@ -504,6 +516,7 @@ impl Agent {
                 cwd: cwd.clone(),
                 session_id: session_id.clone(),
                 memory: Arc::clone(&memory),
+                frontend_capabilities,
             };
             let (registered, extension_tools) = p
                 .extension_registry()
