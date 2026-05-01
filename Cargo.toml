@@ -267,10 +267,21 @@ ptr_arg = "allow"
 large_enum_variant = "allow"
 
 [profile.release]
+opt-level = 1
+codegen-units = 256
+incremental = true
+
+[profile.release-dist]
+inherits = "release"
 opt-level = "z"    # optimize for size
 lto = true
 codegen-units = 1
+incremental = false
 strip = true
+
+[profile.selfdev]
+inherits = "release"
+opt-level = 0
 
 # Trim debuginfo on the test profile. `line-tables-only` keeps panic/
 # backtrace `file:line` resolution intact while dropping the heavyweight

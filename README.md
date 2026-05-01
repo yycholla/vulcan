@@ -105,11 +105,11 @@ Vulcan learns. Skills are markdown files with YAML frontmatter that get injected
 git clone https://github.com/yycholla/vulcan.git
 cd vulcan
 
-# Build release binary (size-optimized: LTO, strip)
-cargo build --release
+# Build distribution binary (size-optimized: LTO, strip)
+cargo build --profile release-dist
 
-# The binary is at ./target/release/vulcan — copy it somewhere on your PATH
-cp ./target/release/vulcan ~/.local/bin/
+# The binary is at ./target/release-dist/vulcan — copy it somewhere on your PATH
+cp ./target/release-dist/vulcan ~/.local/bin/
 ```
 
 ### Prerequisites
@@ -281,7 +281,9 @@ Vulcan is built on a **hook-driven architecture** — every lifecycle point (pro
 
 ```bash
 cargo build               # Debug build
-cargo build --release     # Optimized release (size-optimized)
+cargo build --release     # Fast optimized build for daily iteration
+cargo build --profile release-dist  # Distribution build (size-optimized)
+cargo build --profile selfdev       # Fastest optimized build for self-mod loops
 cargo test                # Run all tests
 cargo test <name>         # Run a single test by name
 ```

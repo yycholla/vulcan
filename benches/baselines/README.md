@@ -9,13 +9,13 @@ would churn this directory every time someone benched on a new machine.
 1. On `main` (or whichever branch you trust as the baseline), generate one:
    ```
    oo cargo bench
-   oo cargo run --release --bin vulcan-soak --features bench-soak -- --turns 100
+   oo cargo run --profile release-dist --bin vulcan-soak --features bench-soak -- --turns 100
    cp target/bench-results.json /tmp/vulcan-baseline.json
    ```
 2. On your branch, regenerate and diff:
    ```
    oo cargo bench
-   oo cargo run --release --bin vulcan-soak --features bench-soak -- --turns 100
+   oo cargo run --profile release-dist --bin vulcan-soak --features bench-soak -- --turns 100
    python3 scripts/bench-diff.py target/bench-results.json /tmp/vulcan-baseline.json
    ```
 3. Exit code 0 means no metric exceeded the configured threshold (default

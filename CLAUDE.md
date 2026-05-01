@@ -22,7 +22,9 @@ cargo run                         # launch TUI (default subcommand: chat)
 cargo run -- prompt "your text"   # one-shot mode (no TUI)
 cargo run -- session <id>         # resume a saved session
 cargo run --features gateway -- gateway  # run gateway daemon mode
-cargo build --release             # size-optimized binary (opt-level=z, lto, strip)
+cargo build --release             # fast optimized build for daily iteration
+cargo build --profile release-dist # size-optimized binary (opt-level=z, lto, strip)
+cargo build --profile selfdev      # fastest optimized build for self-mod loops
 cargo test                        # run tests
 cargo test --features gateway gateway::  # gateway feature tests
 cargo test <name_substring>       # single test by name

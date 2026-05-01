@@ -53,7 +53,7 @@ jobs:
           for run in 1 2 3; do
             rm -f target/bench-results.json
             cargo bench
-            cargo run --release --bin vulcan-soak --features bench-soak -- --turns "${BENCH_TURNS}"
+            cargo run --profile release-dist --bin vulcan-soak --features bench-soak -- --turns "${BENCH_TURNS}"
             cp target/bench-results.json "target/bench-results-${run}.json"
           done
           python3 scripts/median-of-3.py \
