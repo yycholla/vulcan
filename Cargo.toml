@@ -80,6 +80,13 @@ chrono-tz = "0.10"
 # Async trait support (needed for dyn-compatible tool/provider traits)
 async-trait = "0.1"
 
+# Distributed plugin registration for the cargo-crate extension system
+# (GH issue #549, ADR 0003/0004). Each extension crate calls
+# `inventory::submit!` from its own compilation unit; the daemon
+# iterates `inventory::iter` at startup. Pure compile-time / link-time;
+# no dynamic loading.
+inventory = "0.3.24"
+
 # Stream processing for SSE responses
 futures-util = "0.3"
 

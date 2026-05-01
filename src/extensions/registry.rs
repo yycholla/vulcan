@@ -9,6 +9,7 @@
 use parking_lot::RwLock;
 use std::sync::Arc;
 
+use super::api::DaemonCodeExtension;
 use super::{ExtensionCapability, ExtensionConfigField, ExtensionMetadata, ExtensionStatus};
 use crate::hooks::{HookHandler, HookRegistry};
 
@@ -45,6 +46,10 @@ pub struct ExtensionRegistry {
     /// registry does not own metadata for these separately —
     /// `metadata()` on the trait is the source of truth.
     code_backed: RwLock<Vec<Arc<dyn CodeExtension>>>,
+    /// GH issue #549: cargo-crate extensions registered via the
+    /// `inventory::submit!` site in `super::api`. Parallel storage
+    /// to `code_backed` while migration is in flight.
+    daemon_extensions: RwLock<Vec<Arc<dyn DaemonCodeExtension>>>,
 }
 
 impl std::fmt::Debug for ExtensionRegistry {
@@ -179,6 +184,56 @@ impl ExtensionRegistry {
     /// YYC-227: count of code-backed extensions registered.
     pub fn code_extension_count(&self) -> usize {
         self.code_backed.read().len()
+    }
+
+    /// GH issue #549: register a cargo-crate `DaemonCodeExtension`.
+    /// Upserts metadata and stores the trait object so daemon startup
+    /// can later instantiate it per-**Session**.
+    pub fn register_daemon_extension(&self, extension: Arc<dyn DaemonCodeExtension>) {
+        let metadata = extension.metadata();
+        self.upsert(metadata.clone());
+        let mut guard = self.daemon_extensions.write();
+        if let Some(slot) = guard.iter_mut().find(|e| e.metadata().id == metadata.id) {
+            *slot = extension;
+        } else {
+            guard.push(extension);
+        }
+    }
+
+    /// GH issue #549: count of cargo-crate extensions registered via
+    /// the new `DaemonCodeExtension` path.
+    pub fn daemon_extension_count(&self) -> usize {
+        self.daemon_extensions.read().len()
+    }
+
+    /// GH issue #549: per-**Session** wire-up. For each `Active`
+    /// daemon-side extension registered via `register_daemon_extension`,
+    /// calls `instantiate` to get a fresh `SessionExtension`, then
+    /// registers each of that session extension's `hook_handlers` into
+    /// the supplied `HookRegistry`. Returns the number of session
+    /// extensions instantiated. Inactive / Draft / Broken extensions
+    /// are skipped.
+    pub fn wire_daemon_extensions(&self, hooks: &mut HookRegistry) -> usize {
+        let mut count = 0usize;
+        let metadata_snapshot = self.inner.read().clone();
+        let daemon_snapshot = self.daemon_extensions.read().clone();
+        for ext in daemon_snapshot {
+            let id = ext.metadata().id;
+            let active = metadata_snapshot
+                .iter()
+                .find(|m| m.id == id)
+                .map(|m| m.status == ExtensionStatus::Active)
+                .unwrap_or(false);
+            if !active {
+                continue;
+            }
+            let session_ext = ext.instantiate();
+            for handler in session_ext.hook_handlers() {
+                hooks.register(handler);
+            }
+            count += 1;
+        }
+        count
     }
 
     /// YYC-232 (YYC-166 PR-4): discover installed extensions in
