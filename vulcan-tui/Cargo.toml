@@ -13,3 +13,4 @@ vulcan = { package = "vulcan-core", path = ".." }
 vulcan-frontend-api = { path = "../vulcan-frontend-api" }
 vulcan-ext-todo = { path = "../vulcan-ext-todo", features = ["tui"] }
 vulcan-ext-spinner-demo = { path = "../vulcan-ext-spinner-demo", features = ["tui"] }
+vulcan-ext-snake = { path = "../vulcan-ext-snake" }

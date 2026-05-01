@@ -29,6 +29,7 @@
 
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, VecDeque};
+use std::time::{Duration, Instant};
 
 use super::keybinds::Keybinds;
 
@@ -148,6 +149,32 @@ pub enum ToolStatus {
     Done(bool),
 }
 
+pub struct ActiveCanvas {
+    pub handle: vulcan_frontend_api::CanvasHandle,
+    canvas: Box<dyn vulcan_frontend_api::Canvas>,
+}
+
+pub struct ActiveTick {
+    pub rate: vulcan_frontend_api::TickRate,
+    pub handle: vulcan_frontend_api::TickHandle,
+    callback: std::sync::Arc<dyn Fn(&vulcan_frontend_api::TickHandle) + Send + Sync>,
+    next_fire: Instant,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CancelScope {
+    Turn,
+    Dialog,
+    Canvas,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CancelPop {
+    Popped(CancelScope),
+    CancelTurn,
+    None,
+}
+
 pub struct AppState {
     pub view: View,
     pub messages: Vec<ChatMessage>,
@@ -247,6 +274,8 @@ pub struct AppState {
     pub chat_render_store: RefCell<super::chat_render::ChatRenderStore>,
     pub frontend: super::frontend::TuiFrontend,
     pub status_widgets: BTreeMap<String, vulcan_frontend_api::WidgetContent>,
+    pub active_canvas: Option<ActiveCanvas>,
+    pub active_ticks: Vec<ActiveTick>,
 
     /// When true, overlays a session picker on top of the normal view.
     /// Set by `ResumeTarget::Pick` at startup; cleared when the user
@@ -390,6 +419,8 @@ impl AppState {
             chat_render_store: RefCell::new(super::chat_render::ChatRenderStore::default()),
             frontend: super::frontend::TuiFrontend::default(),
             status_widgets: BTreeMap::new(),
+            active_canvas: None,
+            active_ticks: Vec::new(),
 
             show_session_picker: false,
             session_picker_selection: 0,
@@ -567,6 +598,99 @@ impl AppState {
                 }
             })
             .collect()
+    }
+
+    pub fn install_canvas_request(&mut self, request: vulcan_frontend_api::CanvasRequest) {
+        let canvas = request.factory.create(request.handle.clone());
+        self.active_canvas = Some(ActiveCanvas {
+            handle: request.handle,
+            canvas,
+        });
+    }
+
+    pub fn install_tick_request(&mut self, request: vulcan_frontend_api::TickRequest) {
+        self.active_ticks.push(ActiveTick {
+            rate: request.rate,
+            handle: request.handle,
+            callback: request.callback,
+            next_fire: Instant::now() + Duration::from_millis(request.rate.millis()),
+        });
+    }
+
+    pub fn active_canvas_frame(&self) -> Option<vulcan_frontend_api::CanvasFrame> {
+        self.active_canvas
+            .as_ref()
+            .map(|active| active.canvas.render())
+    }
+
+    pub fn handle_canvas_key(&mut self, key: vulcan_frontend_api::CanvasKey) -> bool {
+        let Some(active) = self.active_canvas.as_ref() else {
+            return false;
+        };
+        let control = active.canvas.on_key(key, &active.handle);
+        if active.handle.has_exited() || matches!(control, vulcan_frontend_api::CanvasControl::Exit)
+        {
+            self.active_canvas = None;
+        }
+        true
+    }
+
+    pub fn pump_frontend_ticks(&mut self) {
+        let now = Instant::now();
+        for tick in &mut self.active_ticks {
+            if tick.handle.is_stopped() {
+                continue;
+            }
+            if now >= tick.next_fire {
+                (tick.callback)(&tick.handle);
+                tick.next_fire = now + Duration::from_millis(tick.rate.millis());
+            }
+        }
+        self.active_ticks.retain(|tick| !tick.handle.is_stopped());
+        if let Some(active) = self.active_canvas.as_ref() {
+            active.canvas.on_tick(&active.handle);
+            if active.handle.has_exited() {
+                self.active_canvas = None;
+            }
+        }
+    }
+
+    pub fn cancel_stack(&self) -> Vec<CancelScope> {
+        let mut stack = Vec::new();
+        if self.thinking {
+            stack.push(CancelScope::Turn);
+        }
+        if self.pending_pause.is_some() || self.show_diff_scrubber {
+            stack.push(CancelScope::Dialog);
+        }
+        if self.active_canvas.is_some() {
+            stack.push(CancelScope::Canvas);
+        }
+        stack
+    }
+
+    pub fn pop_cancel_scope(&mut self) -> CancelPop {
+        match self.cancel_stack().pop() {
+            Some(CancelScope::Canvas) => {
+                if let Some(active) = &self.active_canvas {
+                    active.handle.exit();
+                }
+                self.active_canvas = None;
+                CancelPop::Popped(CancelScope::Canvas)
+            }
+            Some(CancelScope::Dialog) => {
+                if let Some(pause) = self.pending_pause.take() {
+                    let _ = pause.reply.send(crate::pause::AgentResume::Deny);
+                }
+                if let Some(pause) = self.scrubber_pause.take() {
+                    let _ = pause.reply.send(crate::pause::AgentResume::Deny);
+                }
+                self.show_diff_scrubber = false;
+                CancelPop::Popped(CancelScope::Dialog)
+            }
+            Some(CancelScope::Turn) => CancelPop::CancelTurn,
+            None => CancelPop::None,
+        }
     }
 
     /// Estimated session cost in USD, computed from cumulative token

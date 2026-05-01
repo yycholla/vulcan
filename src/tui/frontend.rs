@@ -3,8 +3,8 @@ use std::sync::Arc;
 
 use serde_json::Value;
 use vulcan_frontend_api::{
-    FrontendCodeExtension, FrontendCommand, FrontendCommandAction, FrontendCtx, MessageRenderer,
-    ToolResultView, WidgetUpdate,
+    CanvasRequest, FrontendCodeExtension, FrontendCommand, FrontendCommandAction, FrontendCtx,
+    MessageRenderer, TickRequest, ToolResultView, WidgetUpdate,
 };
 
 #[derive(Default)]
@@ -90,12 +90,18 @@ impl TuiFrontend {
             .map(|rendered| rendered.lines)
     }
 
-    pub fn dispatch_slash(&self, input: &str) -> Option<FrontendCommandAction> {
+    pub fn dispatch_slash(&self, input: &str) -> Option<FrontendCommandDispatch> {
         let body = input.strip_prefix('/')?.trim();
         let name = body.split_whitespace().next().unwrap_or("");
         let command = self.commands.get(name)?;
         let mut ctx = FrontendCtx::default();
-        Some(command.run(&mut ctx))
+        let action = command.run(&mut ctx);
+        Some(FrontendCommandDispatch {
+            action,
+            canvas_requests: ctx.ui.drain_canvas_requests(),
+            tick_requests: ctx.ui.drain_tick_requests(),
+            widget_updates: ctx.ui.drain_widget_updates(),
+        })
     }
 
     pub fn command_specs(&self) -> Vec<FrontendCommandSpec> {
@@ -150,13 +156,23 @@ pub struct FrontendCommandSpec {
     pub mid_turn_safe: bool,
 }
 
+#[derive(Debug)]
+pub struct FrontendCommandDispatch {
+    pub action: FrontendCommandAction,
+    pub canvas_requests: Vec<CanvasRequest>,
+    pub tick_requests: Vec<TickRequest>,
+    pub widget_updates: Vec<WidgetUpdate>,
+}
+
 fn map_frontend_capability(capability: &str) -> Option<crate::extensions::FrontendCapability> {
     match capability {
         "text_io" => Some(crate::extensions::FrontendCapability::TextIo),
         "rich_text" => Some(crate::extensions::FrontendCapability::RichText),
         "cell_canvas" => Some(crate::extensions::FrontendCapability::CellCanvas),
-        "raw_input" => Some(crate::extensions::FrontendCapability::RawInput),
+        "raw_input" | "raw_keys" => Some(crate::extensions::FrontendCapability::RawKeys),
         "status_widgets" => Some(crate::extensions::FrontendCapability::StatusWidgets),
+        "tick_30hz" => Some(crate::extensions::FrontendCapability::Tick30Hz),
+        "tick_60hz" => Some(crate::extensions::FrontendCapability::Tick60Hz),
         other => {
             tracing::warn!(capability = other, "ignoring unknown frontend capability");
             None
@@ -277,10 +293,10 @@ mod tests {
             renderer: "todo",
         })]);
 
-        let action = frontend.dispatch_slash("/todos").expect("local command");
+        let dispatch = frontend.dispatch_slash("/todos").expect("local command");
 
         assert!(matches!(
-            action,
+            dispatch.action,
             FrontendCommandAction::OpenView { ref id, .. } if id == "todo"
         ));
     }

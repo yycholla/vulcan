@@ -1,0 +1,22 @@
+[package]
+name = "vulcan-ext-snake"
+version = "0.1.0"
+edition = "2024"
+description = "Snake canvas demo Vulcan frontend extension"
+authors = ["Colin Hanway"]
+license = "MIT"
+repository = "https://github.com/yycholla/vulcan"
+
+[lib]
+name = "vulcan_ext_snake"
+path = "src/lib.rs"
+
+[dependencies]
+vulcan-frontend-api = { path = "../vulcan-frontend-api" }
+inventory = "0.3.24"
+
+[package.metadata.vulcan]
+id = "snake"
+daemon_entry = "vulcan_ext_snake::SnakeExtension"
+capabilities = ["frontend"]
+requires = ["cell_canvas", "raw_keys", "tick_30hz"]
