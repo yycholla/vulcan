@@ -25,6 +25,7 @@ pub mod install_state;
 pub mod manifest;
 pub mod policy;
 pub mod registry;
+pub mod state;
 pub mod store;
 pub mod verify;
 
@@ -38,6 +39,10 @@ pub use install_state::{InstallState, InstallStateStore, SqliteInstallStateStore
 pub use manifest::{EntryKind, ExtensionManifest, ManifestError};
 pub use policy::{ExtensionPermission, ExtensionPolicyEngine, PolicyDecision};
 pub use registry::{CodeExtension, ExtensionRegistry};
+pub use state::{
+    BranchPolicy, ExtensionStateContext, ExtensionStateEntry, ExtensionStateError,
+    ExtensionStateStore, SqliteExtensionStateStore,
+};
 pub use store::{DiscoveredExtension, discover};
 pub use verify::{VerificationError, verify_checksum_optional, verify_compatible};
 
@@ -105,6 +110,9 @@ pub enum ExtensionCapability {
     /// extensions that contribute an `on_input` hook without
     /// declaring this capability.
     InputInterceptor,
+    /// Extension may write state rows into another Session's
+    /// namespace through `ExtensionStateContext::write_to_session`.
+    CrossSessionState,
 }
 
 impl ExtensionCapability {
@@ -116,6 +124,7 @@ impl ExtensionCapability {
             ExtensionCapability::MemoryBackend => "memory_backend",
             ExtensionCapability::LifecycleObserver => "lifecycle_observer",
             ExtensionCapability::InputInterceptor => "input_interceptor",
+            ExtensionCapability::CrossSessionState => "cross_session_state",
         }
     }
 }
@@ -194,6 +203,9 @@ pub struct ExtensionMetadata {
     /// activate for a Session.
     #[serde(default)]
     pub requires: Vec<FrontendCapability>,
+    /// Default state branch behavior declared by the manifest.
+    #[serde(default)]
+    pub branch_policy: BranchPolicy,
     /// Optional human-readable permissions summary surfaced in
     /// `vulcan extension show`. Caller-provided; the registry
     /// does not interpret it.
@@ -225,6 +237,7 @@ impl ExtensionMetadata {
             status: ExtensionStatus::Inactive,
             capabilities: Vec::new(),
             requires: Vec::new(),
+            branch_policy: BranchPolicy::Fork,
             permissions_summary: None,
             broken_reason: None,
             priority: 100,

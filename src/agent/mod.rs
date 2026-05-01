@@ -511,12 +511,21 @@ impl Agent {
             // any `on_input` outcome they emit lands on the same ring
             // the CLI / `vulcan extension audit` reads from.
             hooks = hooks.with_audit_log(p.extension_audit_log());
+            hooks.register(Arc::new(
+                crate::extensions::state::ExtensionStateReaperHook::new(p.extension_state_store()),
+            ));
 
             let ctx = crate::extensions::api::SessionExtensionCtx {
                 cwd: cwd.clone(),
                 session_id: session_id.clone(),
                 memory: Arc::clone(&memory),
                 frontend_capabilities,
+                state: crate::extensions::ExtensionStateContext::new(
+                    p.extension_state_store(),
+                    session_id.clone(),
+                    "__pending__",
+                    Vec::new(),
+                ),
             };
             let (registered, extension_tools) = p
                 .extension_registry()

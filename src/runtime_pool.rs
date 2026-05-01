@@ -24,7 +24,9 @@ use std::path::PathBuf;
 use crate::artifact::{ArtifactStore, InMemoryArtifactStore, SqliteArtifactStore};
 use crate::code::lsp::LspManager;
 use crate::extensions::api::wire_inventory_into_registry;
-use crate::extensions::{ExtensionAuditLog, ExtensionRegistry};
+use crate::extensions::{
+    ExtensionAuditLog, ExtensionRegistry, ExtensionStateStore, SqliteExtensionStateStore,
+};
 use crate::memory::SessionStore;
 use crate::memory::cortex::CortexStore;
 use crate::orchestration::OrchestrationStore;
@@ -55,6 +57,9 @@ pub struct RuntimeResourcePool {
     /// active daemon-side extensions from this registry to wire their
     /// per-Session hook handlers, tools, commands, providers.
     extension_registry: Arc<ExtensionRegistry>,
+    /// GH issue #552: daemon-owned extension state table, shared by
+    /// every per-Session extension context.
+    extension_state_store: Arc<dyn ExtensionStateStore>,
     /// GH issue #557: daemon-owned **`ExtensionAuditLog`**. Shared
     /// across sessions — every per-Session `HookRegistry` records
     /// `InputIntercept` outcomes here. `vulcan extension audit`
@@ -108,6 +113,8 @@ impl RuntimeResourcePool {
         );
 
         let extension_audit_log = Arc::new(ExtensionAuditLog::default());
+        let extension_state_store: Arc<dyn ExtensionStateStore> =
+            Arc::new(SqliteExtensionStateStore::try_new()?);
 
         Ok(Self {
             session_store,
@@ -117,6 +124,7 @@ impl RuntimeResourcePool {
             lsp_manager,
             cortex_store: None,
             extension_registry,
+            extension_state_store,
             extension_audit_log,
         })
     }
@@ -144,6 +152,10 @@ impl RuntimeResourcePool {
             lsp_manager: Arc::new(LspManager::new(cwd)),
             cortex_store: None,
             extension_registry,
+            extension_state_store: Arc::new(
+                SqliteExtensionStateStore::try_open_in_memory()
+                    .expect("in-memory extension state store"),
+            ),
             extension_audit_log: Arc::new(ExtensionAuditLog::default()),
         }
     }
@@ -188,6 +200,10 @@ impl RuntimeResourcePool {
     /// per-Session daemon extensions.
     pub fn extension_registry(&self) -> Arc<ExtensionRegistry> {
         Arc::clone(&self.extension_registry)
+    }
+
+    pub fn extension_state_store(&self) -> Arc<dyn ExtensionStateStore> {
+        Arc::clone(&self.extension_state_store)
     }
 
     /// GH issue #557: cloneable handle to the daemon-owned
@@ -262,5 +278,14 @@ mod tests {
             r1.daemon_extension_count() >= 1,
             "expected at least one inventory-registered extension"
         );
+    }
+
+    #[test]
+    fn for_tests_shares_extension_state_store() {
+        let pool = RuntimeResourcePool::for_tests();
+        assert!(Arc::ptr_eq(
+            &pool.extension_state_store(),
+            &pool.extension_state_store()
+        ));
     }
 }

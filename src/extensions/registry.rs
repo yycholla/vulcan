@@ -292,7 +292,8 @@ impl ExtensionRegistry {
                 self.mark_broken(&id, format!("extension tool prefix collision: `{prefix}`"));
                 continue;
             }
-            let session_ext = ext.instantiate(ctx.clone());
+            let session_ext =
+                ext.instantiate(ctx.clone().with_extension(&id, meta.capabilities.clone()));
             if let Some(registry) = tools.as_deref_mut() {
                 let contributed_tools = session_ext.tools();
                 if !contributed_tools.is_empty() {
@@ -390,6 +391,17 @@ impl ExtensionRegistry {
                             }
                         })
                         .collect();
+                    if let Some(policy) = manifest.branch_policy.as_deref() {
+                        match policy.parse::<crate::extensions::BranchPolicy>() {
+                            Ok(policy) => meta.branch_policy = policy,
+                            Err(reason) => tracing::warn!(
+                                extension_id = %manifest.id,
+                                policy,
+                                reason = %reason,
+                                "ignoring unknown extension branch policy"
+                            ),
+                        }
+                    }
                     if let Some(perm) = manifest.permissions.clone() {
                         meta.permissions_summary = Some(perm);
                     }
@@ -738,6 +750,10 @@ mod tests {
                 session_id: "test-session".into(),
                 memory: Arc::new(SessionStore::in_memory()),
                 frontend_capabilities,
+                state: crate::extensions::ExtensionStateContext::in_memory_for_tests(
+                    "test-session",
+                    "canvas-ext",
+                ),
             }
         }
 

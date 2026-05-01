@@ -16,7 +16,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use super::{ExtensionMetadata, FrontendCapability};
+use super::{ExtensionMetadata, ExtensionStateContext, FrontendCapability};
 use crate::hooks::HookHandler;
 use crate::memory::SessionStore;
 use crate::provider::LLMProvider;
@@ -53,6 +53,20 @@ pub struct SessionExtensionCtx {
     /// Capabilities declared by the connected frontend or gateway lane
     /// for this Session.
     pub frontend_capabilities: Vec<FrontendCapability>,
+    /// Extension-local state handle scoped to this Session and
+    /// extension id.
+    pub state: ExtensionStateContext,
+}
+
+impl SessionExtensionCtx {
+    pub fn with_extension(
+        mut self,
+        extension_id: &str,
+        capabilities: Vec<super::ExtensionCapability>,
+    ) -> Self {
+        self.state = self.state.for_extension(extension_id, capabilities);
+        self
+    }
 }
 
 /// Daemon-global registration for an extension. One implementation per
@@ -183,6 +197,7 @@ mod tests {
             session_id: "test-session-id".to_string(),
             memory: Arc::new(SessionStore::in_memory()),
             frontend_capabilities: FrontendCapability::full_set(),
+            state: ExtensionStateContext::in_memory_for_tests("test-session-id", "test"),
         }
     }
 
@@ -377,6 +392,7 @@ mod tests {
             session_id: "sess-42".to_string(),
             memory: Arc::new(SessionStore::in_memory()),
             frontend_capabilities: FrontendCapability::full_set(),
+            state: ExtensionStateContext::in_memory_for_tests("sess-42", "capturing"),
         };
         let _ = ext.instantiate(ctx);
 

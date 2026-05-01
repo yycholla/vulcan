@@ -49,6 +49,10 @@ pub struct ExtensionManifest {
     /// extension for a Session.
     #[serde(default)]
     pub requires: Vec<String>,
+    /// Default branch behavior for extension state rows when the
+    /// extension does not choose a policy at write time.
+    #[serde(default)]
+    pub branch_policy: Option<String>,
     /// Human-readable permissions summary surfaced in
     /// `vulcan extension list/show`.
     #[serde(default)]
@@ -192,6 +196,21 @@ kind = "builtin"
 "#;
         let m = ExtensionManifest::from_toml_str(raw).unwrap();
         assert_eq!(m.requires, vec!["text_io", "cell_canvas"]);
+    }
+
+    #[test]
+    fn parses_default_branch_policy() {
+        let raw = r#"
+id = "stateful"
+name = "Stateful"
+version = "0.1.0"
+branch_policy = "inherit_ref"
+
+[entry]
+kind = "builtin"
+"#;
+        let m = ExtensionManifest::from_toml_str(raw).unwrap();
+        assert_eq!(m.branch_policy.as_deref(), Some("inherit_ref"));
     }
 
     #[test]

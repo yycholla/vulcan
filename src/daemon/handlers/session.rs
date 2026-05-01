@@ -47,7 +47,21 @@ pub async fn create(
         parent_session_id.clone(),
         lineage_label.clone(),
     ) {
-        Ok(_) => Response::ok(id, json!({ "session_id": new_id })),
+        Ok(_) => {
+            if let Some(parent) = parent_session_id.as_deref() {
+                if let Err(e) = branch_extension_state(state, parent, &new_id) {
+                    return Response::error(
+                        id,
+                        ProtocolError {
+                            code: "EXTENSION_STATE_BRANCH_FAILED".into(),
+                            message: format!("extension state branch failed: {e}"),
+                            retryable: true,
+                        },
+                    );
+                }
+            }
+            Response::ok(id, json!({ "session_id": new_id }))
+        }
         Err(_) => Response::error(
             id,
             ProtocolError {
@@ -103,9 +117,40 @@ pub async fn destroy(state: &DaemonState, id: String, session_id: String) -> Res
     if let Some(token) = sess.agent_cancel() {
         token.cancel();
     }
+    if let Some(pool) = state.pool() {
+        if let Err(e) = pool.extension_state_store().reap_session(&session_id) {
+            tracing::warn!(
+                session_id = %session_id,
+                error = %e,
+                "failed to reap extension state for destroyed session"
+            );
+        }
+    }
     state.sessions().destroy(&session_id);
 
     Response::ok(id, json!({ "ok": true }))
+}
+
+fn branch_extension_state(
+    state: &DaemonState,
+    parent_session_id: &str,
+    child_session_id: &str,
+) -> anyhow::Result<usize> {
+    let Some(pool) = state.pool() else {
+        return Ok(0);
+    };
+    let active_extension_ids = pool
+        .extension_registry()
+        .list()
+        .into_iter()
+        .filter(|m| m.status == crate::extensions::ExtensionStatus::Active)
+        .map(|m| m.id)
+        .collect::<Vec<_>>();
+    pool.extension_state_store().branch_session(
+        parent_session_id,
+        child_session_id,
+        &active_extension_ids,
+    )
 }
 
 // -- session.list --
@@ -274,6 +319,79 @@ mod tests {
             .expect("child descriptor");
         assert_eq!(child["parent_session_id"], "main");
         assert_eq!(child["lineage_label"], "spawn_subagent: review worker");
+    }
+
+    #[tokio::test]
+    async fn create_child_session_branches_active_extension_state() {
+        let pool = Arc::new(crate::runtime_pool::RuntimeResourcePool::for_tests());
+        let mut meta = crate::extensions::ExtensionMetadata::new(
+            "stateful",
+            "Stateful",
+            "0.1.0",
+            crate::extensions::ExtensionSource::Builtin,
+        );
+        meta.status = crate::extensions::ExtensionStatus::Active;
+        pool.extension_registry().upsert(meta);
+        pool.extension_state_store()
+            .append_entry(
+                "main",
+                "stateful",
+                "k",
+                serde_json::json!("parent"),
+                crate::extensions::BranchPolicy::Fork,
+            )
+            .unwrap();
+        let state = Arc::new(DaemonState::for_tests_minimal().with_pool(Arc::clone(&pool)));
+
+        let resp = create(
+            &state,
+            "r1".into(),
+            Some("child-state".into()),
+            None,
+            Some("main".into()),
+            None,
+        )
+        .await;
+        assert!(resp.error.is_none(), "create failed: {:?}", resp.error);
+
+        let rows = pool
+            .extension_state_store()
+            .get_entries("child-state", "stateful", "k")
+            .unwrap();
+        assert_eq!(rows[0].value, serde_json::json!("parent"));
+    }
+
+    #[tokio::test]
+    async fn destroy_reaps_extension_state_for_session() {
+        let pool = Arc::new(crate::runtime_pool::RuntimeResourcePool::for_tests());
+        pool.extension_state_store()
+            .append_entry(
+                "child-state",
+                "stateful",
+                "k",
+                serde_json::json!("child"),
+                crate::extensions::BranchPolicy::Fork,
+            )
+            .unwrap();
+        let state = Arc::new(DaemonState::for_tests_minimal().with_pool(Arc::clone(&pool)));
+        create(
+            &state,
+            "r1".into(),
+            Some("child-state".into()),
+            None,
+            None,
+            None,
+        )
+        .await;
+
+        let resp = destroy(&state, "r2".into(), "child-state".into()).await;
+        assert!(resp.error.is_none(), "destroy failed: {:?}", resp.error);
+        assert!(
+            pool.extension_state_store()
+                .get_entries("child-state", "stateful", "")
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[tokio::test]

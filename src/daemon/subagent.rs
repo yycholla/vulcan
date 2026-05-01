@@ -36,6 +36,22 @@ impl SubagentRunner for DaemonSubagentRunner {
             request.parent_session_id.clone(),
             lineage_label,
         )?;
+        if let (Some(pool), Some(parent_session_id)) =
+            (self.state.pool(), request.parent_session_id.as_deref())
+        {
+            let active_extension_ids = pool
+                .extension_registry()
+                .list()
+                .into_iter()
+                .filter(|m| m.status == crate::extensions::ExtensionStatus::Active)
+                .map(|m| m.id)
+                .collect::<Vec<_>>();
+            pool.extension_state_store().branch_session(
+                parent_session_id,
+                &child_session_id,
+                &active_extension_ids,
+            )?;
+        }
 
         let sess = self
             .state
@@ -85,6 +101,10 @@ impl SubagentRunner for DaemonSubagentRunner {
         *sess.in_flight.lock() = false;
         sess.touch();
 
+        if let Some(pool) = self.state.pool() {
+            pool.extension_state_store()
+                .reap_session(&child_session_id)?;
+        }
         let final_text = run_result?;
         Ok(SubagentRunOutput {
             final_text,
