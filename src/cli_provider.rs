@@ -400,10 +400,12 @@ fn collect_extension_provider_names() -> Vec<String> {
         session_id: "__provider_list__".into(),
         memory: std::sync::Arc::new(crate::memory::SessionStore::in_memory()),
         frontend_capabilities: crate::extensions::FrontendCapability::full_set(),
+        frontend_extensions: Vec::new(),
         state: crate::extensions::ExtensionStateContext::in_memory_for_tests(
             "__provider_list__",
             "__pending__",
         ),
+        frontend_events: crate::extensions::api::FrontendEventSink::noop(),
     };
     registry.wire_daemon_extension_providers(ctx, &catalog);
     catalog.names()

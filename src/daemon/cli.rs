@@ -241,6 +241,7 @@ async fn call(method: &str, params: serde_json::Value) -> anyhow::Result<serde_j
         method: method.into(),
         params,
         frontend_capabilities: crate::extensions::FrontendCapability::text_only(),
+        frontend_extensions: Vec::new(),
     };
     write_request(&mut stream, &req)
         .await

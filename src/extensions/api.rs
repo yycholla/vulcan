@@ -22,6 +22,37 @@ use crate::memory::SessionStore;
 use crate::provider::LLMProvider;
 use crate::provider::factory::ProviderFactory;
 use crate::tools::Tool;
+use serde_json::Value;
+use tokio::sync::broadcast;
+
+#[derive(Clone, Debug)]
+pub struct FrontendEvent {
+    pub session_id: String,
+    pub extension_id: String,
+    pub payload: Value,
+}
+
+#[derive(Clone)]
+pub struct FrontendEventSink {
+    tx: Option<broadcast::Sender<FrontendEvent>>,
+}
+
+impl FrontendEventSink {
+    pub fn new(tx: broadcast::Sender<FrontendEvent>) -> Self {
+        Self { tx: Some(tx) }
+    }
+
+    pub fn noop() -> Self {
+        Self { tx: None }
+    }
+
+    pub fn emit(&self, event: FrontendEvent) -> anyhow::Result<()> {
+        if let Some(tx) = &self.tx {
+            let _ = tx.send(event);
+        }
+        Ok(())
+    }
+}
 
 /// Parsed `[package.metadata.vulcan]` block for a cargo-crate
 /// extension. Produced by `vulcan_extension_macros::include_manifest!()`.
@@ -62,9 +93,15 @@ pub struct SessionExtensionCtx {
     /// Capabilities declared by the connected frontend or gateway lane
     /// for this Session.
     pub frontend_capabilities: Vec<FrontendCapability>,
+    /// Frontend modules declared by the connected client. Daemon
+    /// activation compares matching ids against daemon module metadata
+    /// to detect split-crate version skew.
+    pub frontend_extensions: Vec<vulcan_frontend_api::FrontendExtensionDescriptor>,
     /// Extension-local state handle scoped to this Session and
     /// extension id.
     pub state: ExtensionStateContext,
+    /// Cross-side daemon-to-frontend event channel.
+    pub frontend_events: FrontendEventSink,
 }
 
 impl SessionExtensionCtx {
@@ -76,7 +113,17 @@ impl SessionExtensionCtx {
         self.state = self.state.for_extension(extension_id, capabilities);
         self
     }
+
+    pub fn emit_frontend_event(&self, payload: Value) -> anyhow::Result<()> {
+        self.frontend_events.emit(FrontendEvent {
+            session_id: self.session_id.clone(),
+            extension_id: self.state.extension_id().to_string(),
+            payload,
+        })
+    }
 }
+
+pub type ExtensionContext = SessionExtensionCtx;
 
 /// Daemon-global registration for an extension. One implementation per
 /// installed extension crate that ships a daemon module; registered
@@ -206,7 +253,9 @@ mod tests {
             session_id: "test-session-id".to_string(),
             memory: Arc::new(SessionStore::in_memory()),
             frontend_capabilities: FrontendCapability::full_set(),
+            frontend_extensions: Vec::new(),
             state: ExtensionStateContext::in_memory_for_tests("test-session-id", "test"),
+            frontend_events: FrontendEventSink::noop(),
         }
     }
 
@@ -461,13 +510,32 @@ mod tests {
             session_id: "sess-42".to_string(),
             memory: Arc::new(SessionStore::in_memory()),
             frontend_capabilities: FrontendCapability::full_set(),
+            frontend_extensions: Vec::new(),
             state: ExtensionStateContext::in_memory_for_tests("sess-42", "capturing"),
+            frontend_events: FrontendEventSink::noop(),
         };
         let _ = ext.instantiate(ctx);
 
         let captured = seen.read().clone().expect("instantiate ran");
         assert_eq!(captured.0, PathBuf::from("/tmp/example-session"));
         assert_eq!(captured.1, "sess-42");
+    }
+
+    #[test]
+    fn extension_context_emits_frontend_event_envelope() {
+        let (tx, mut rx) = tokio::sync::broadcast::channel(4);
+        let ctx = SessionExtensionCtx {
+            frontend_events: FrontendEventSink::new(tx),
+            ..test_ctx().with_extension("stub-inventory", Vec::new())
+        };
+
+        ctx.emit_frontend_event(serde_json::json!({ "hello": "frontend" }))
+            .expect("emit succeeds");
+
+        let event = rx.try_recv().expect("frontend event");
+        assert_eq!(event.session_id, "test-session-id");
+        assert_eq!(event.extension_id, "stub-inventory");
+        assert_eq!(event.payload["hello"], "frontend");
     }
 
     #[test]

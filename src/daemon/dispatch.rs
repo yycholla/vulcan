@@ -29,6 +29,10 @@ impl Dispatcher {
         Self { state }
     }
 
+    pub(crate) fn state(&self) -> &Arc<DaemonState> {
+        &self.state
+    }
+
     pub async fn dispatch(&self, req: Request) -> DispatchResult {
         match req.method.as_str() {
             #[cfg(test)]
@@ -82,7 +86,14 @@ impl Dispatcher {
             "agent.status" => {
                 let session = req.session.clone();
                 DispatchResult::Response(
-                    agent::status(&self.state, req.id, session, req.frontend_capabilities).await,
+                    agent::status(
+                        &self.state,
+                        req.id,
+                        session,
+                        req.frontend_capabilities,
+                        req.frontend_extensions,
+                    )
+                    .await,
                 )
             }
             "agent.switch_model" => {
@@ -99,6 +110,7 @@ impl Dispatcher {
                         session,
                         model,
                         req.frontend_capabilities,
+                        req.frontend_extensions,
                     )
                     .await,
                 )
@@ -106,8 +118,14 @@ impl Dispatcher {
             "agent.list_models" => {
                 let session = req.session.clone();
                 DispatchResult::Response(
-                    agent::list_models(&self.state, req.id, session, req.frontend_capabilities)
-                        .await,
+                    agent::list_models(
+                        &self.state,
+                        req.id,
+                        session,
+                        req.frontend_capabilities,
+                        req.frontend_extensions,
+                    )
+                    .await,
                 )
             }
 
@@ -126,6 +144,7 @@ impl Dispatcher {
                         session,
                         input,
                         req.frontend_capabilities,
+                        req.frontend_extensions,
                     )
                     .await,
                 )
@@ -144,6 +163,7 @@ impl Dispatcher {
                     session,
                     input,
                     req.frontend_capabilities,
+                    req.frontend_extensions,
                 );
                 DispatchResult::Stream { frames, done }
             }
@@ -404,6 +424,7 @@ mod tests {
             method: method.into(),
             params: serde_json::json!({}),
             frontend_capabilities: crate::extensions::FrontendCapability::full_set(),
+            frontend_extensions: Vec::new(),
         }
     }
 
@@ -415,6 +436,7 @@ mod tests {
             method: method.into(),
             params,
             frontend_capabilities: crate::extensions::FrontendCapability::full_set(),
+            frontend_extensions: Vec::new(),
         }
     }
 

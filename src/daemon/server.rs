@@ -14,7 +14,7 @@ use tokio::sync::mpsc;
 use crate::daemon::dispatch::{DispatchResult, Dispatcher};
 use crate::daemon::lifecycle::SocketBinder;
 use crate::daemon::protocol::{
-    Response, parse_request_strict, read_frame_bytes, write_frame_bytes,
+    Response, StreamFrame, parse_request_strict, read_frame_bytes, write_frame_bytes,
 };
 use crate::daemon::state::DaemonState;
 
@@ -77,7 +77,40 @@ impl Server {
 async fn handle_connection(stream: UnixStream, dispatcher: Arc<Dispatcher>) {
     let (mut read_half, mut write_half) = stream.into_split();
     let mut connection_capabilities = Vec::new();
+    let mut connection_extensions = Vec::new();
     let (write_tx, mut write_rx) = mpsc::channel::<Vec<u8>>(32);
+    let event_task = if let Some(pool) = dispatcher.state().pool().cloned() {
+        let mut events = pool.subscribe_frontend_events();
+        let write_tx = write_tx.clone();
+        Some(tokio::spawn(async move {
+            loop {
+                match events.recv().await {
+                    Ok(event) => {
+                        let frame = StreamFrame {
+                            version: 1,
+                            id: None,
+                            stream: "extension_event".into(),
+                            data: serde_json::json!({
+                                "kind": "extension_event",
+                                "session_id": event.session_id,
+                                "extension_id": event.extension_id,
+                                "payload": event.payload,
+                            }),
+                        };
+                        if !send_body(&write_tx, &frame, "extension event").await {
+                            break;
+                        }
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
+                        tracing::warn!(skipped, "daemon: frontend event receiver lagged");
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                }
+            }
+        }))
+    } else {
+        None
+    };
     let writer = tokio::spawn(async move {
         while let Some(body) = write_rx.recv().await {
             if let Err(e) = write_frame_bytes(&mut write_half, &body).await {
@@ -104,6 +137,11 @@ async fn handle_connection(stream: UnixStream, dispatcher: Arc<Dispatcher>) {
                 } else {
                     req.frontend_capabilities = connection_capabilities.clone();
                 }
+                if !req.frontend_extensions.is_empty() {
+                    connection_extensions = req.frontend_extensions.clone();
+                } else {
+                    req.frontend_extensions = connection_extensions.clone();
+                }
                 let dispatcher = Arc::clone(&dispatcher);
                 let write_tx = write_tx.clone();
                 tokio::spawn(async move {
@@ -121,6 +159,9 @@ async fn handle_connection(stream: UnixStream, dispatcher: Arc<Dispatcher>) {
     }
 
     drop(write_tx);
+    if let Some(event_task) = event_task {
+        event_task.abort();
+    }
     writer.abort();
 }
 
@@ -179,6 +220,7 @@ mod tests {
             method: "daemon.ping".into(),
             params: serde_json::json!({}),
             frontend_capabilities: crate::extensions::FrontendCapability::full_set(),
+            frontend_extensions: Vec::new(),
         };
         write_request(stream, &req).await.unwrap();
         let body = read_frame_bytes(stream).await.unwrap();
@@ -225,6 +267,7 @@ mod tests {
                     method: "daemon.ping".into(),
                     params: serde_json::json!({}),
                     frontend_capabilities: crate::extensions::FrontendCapability::full_set(),
+                    frontend_extensions: Vec::new(),
                 };
                 write_request(&mut s, &req).await.unwrap();
                 let body = read_frame_bytes(&mut s).await.unwrap();
@@ -261,6 +304,59 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn server_pushes_extension_events_without_request_id() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("vulcan.sock");
+        let pool = Arc::new(crate::runtime_pool::RuntimeResourcePool::for_tests());
+        let state = Arc::new(DaemonState::for_tests_minimal().with_pool(Arc::clone(&pool)));
+        let server = Server::bind(&path, state.clone()).await.unwrap();
+        let handle = tokio::spawn(server.run());
+
+        let mut client = UnixStream::connect(&path).await.unwrap();
+        let req = Request {
+            version: 1,
+            id: "hello".into(),
+            session: "main".into(),
+            method: "daemon.handshake".into(),
+            params: serde_json::json!({}),
+            frontend_capabilities: crate::extensions::FrontendCapability::full_set(),
+            frontend_extensions: vec![vulcan_frontend_api::FrontendExtensionDescriptor {
+                id: "spinner-demo".into(),
+                version: "0.1.0".into(),
+            }],
+        };
+        write_request(&mut client, &req).await.unwrap();
+        let body = read_frame_bytes(&mut client).await.unwrap();
+        let resp: Response = serde_json::from_slice(&body).unwrap();
+        assert_eq!(resp.id, "hello");
+
+        pool.frontend_event_sink()
+            .emit(crate::extensions::api::FrontendEvent {
+                session_id: "main".into(),
+                extension_id: "spinner-demo".into(),
+                payload: serde_json::json!({"widget": "spin"}),
+            })
+            .unwrap();
+
+        let body = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            read_frame_bytes(&mut client),
+        )
+        .await
+        .expect("extension event pushed")
+        .unwrap();
+        let frame: StreamFrame = serde_json::from_slice(&body).unwrap();
+        assert_eq!(frame.id, None);
+        assert_eq!(frame.stream, "extension_event");
+        assert_eq!(frame.data["kind"], "extension_event");
+        assert_eq!(frame.data["extension_id"], "spinner-demo");
+        assert_eq!(frame.data["payload"]["widget"], "spin");
+
+        state.signal_shutdown();
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(2), handle).await;
+    }
+
+    #[tokio::test]
     async fn server_reads_next_request_while_stream_is_in_flight() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("vulcan.sock");
@@ -276,6 +372,7 @@ mod tests {
             method: "test.slow_stream".into(),
             params: serde_json::json!({}),
             frontend_capabilities: crate::extensions::FrontendCapability::full_set(),
+            frontend_extensions: Vec::new(),
         };
         let ping_req = Request {
             version: 1,
@@ -284,6 +381,7 @@ mod tests {
             method: "daemon.ping".into(),
             params: serde_json::json!({}),
             frontend_capabilities: crate::extensions::FrontendCapability::full_set(),
+            frontend_extensions: Vec::new(),
         };
 
         write_request(&mut client, &stream_req).await.unwrap();
@@ -348,6 +446,7 @@ mod tests {
             method: "method.does.not.exist".into(),
             params: serde_json::json!({}),
             frontend_capabilities: crate::extensions::FrontendCapability::full_set(),
+            frontend_extensions: Vec::new(),
         };
         write_request(&mut client, &req).await.unwrap();
         let body = read_frame_bytes(&mut client).await.unwrap();

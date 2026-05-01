@@ -161,8 +161,27 @@ impl SessionState {
         pool: Option<Arc<crate::runtime_pool::RuntimeResourcePool>>,
         frontend_capabilities: Vec<FrontendCapability>,
     ) -> anyhow::Result<AgentHandle> {
-        self.ensure_agent_with_options(config, pool, None, None, None, frontend_capabilities)
+        self.ensure_agent_with_frontend(config, pool, frontend_capabilities, Vec::new())
             .await
+    }
+
+    pub async fn ensure_agent_with_frontend(
+        self: &Arc<Self>,
+        config: &crate::config::Config,
+        pool: Option<Arc<crate::runtime_pool::RuntimeResourcePool>>,
+        frontend_capabilities: Vec<FrontendCapability>,
+        frontend_extensions: Vec<vulcan_frontend_api::FrontendExtensionDescriptor>,
+    ) -> anyhow::Result<AgentHandle> {
+        self.ensure_agent_with_options(
+            config,
+            pool,
+            None,
+            None,
+            None,
+            frontend_capabilities,
+            frontend_extensions,
+        )
+        .await
     }
 
     /// Slice 7: daemon child sessions can carry spawn-time tool
@@ -176,6 +195,7 @@ impl SessionState {
         tool_profile: Option<String>,
         allowed_tools: Option<&[String]>,
         frontend_capabilities: Vec<FrontendCapability>,
+        frontend_extensions: Vec<vulcan_frontend_api::FrontendExtensionDescriptor>,
     ) -> anyhow::Result<AgentHandle> {
         // Fast path: already installed.
         if let Some(handle) = self.agent_arc() {
@@ -196,6 +216,7 @@ impl SessionState {
             builder = builder.with_pool(pool);
         }
         builder = builder.with_frontend_capabilities(frontend_capabilities);
+        builder = builder.with_frontend_extensions(frontend_extensions);
         if let Some(max_iterations) = max_iterations {
             builder = builder.with_max_iterations(max_iterations);
         }

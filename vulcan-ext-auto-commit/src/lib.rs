@@ -201,10 +201,12 @@ mod tests {
             session_id: "test-session".to_string(),
             memory: Arc::new(vulcan::memory::SessionStore::in_memory()),
             frontend_capabilities: vulcan::extensions::FrontendCapability::full_set(),
+            frontend_extensions: Vec::new(),
             state: vulcan::extensions::ExtensionStateContext::in_memory_for_tests(
                 "test-session",
                 "auto-commit",
             ),
+            frontend_events: vulcan::extensions::api::FrontendEventSink::noop(),
         });
         let handlers = session.hook_handlers();
         assert_eq!(handlers.len(), 1);
@@ -226,10 +228,12 @@ mod tests {
             session_id: "clean-session".to_string(),
             memory: Arc::new(vulcan::memory::SessionStore::in_memory()),
             frontend_capabilities: vulcan::extensions::FrontendCapability::full_set(),
+            frontend_extensions: Vec::new(),
             state: vulcan::extensions::ExtensionStateContext::in_memory_for_tests(
                 "clean-session",
                 "auto-commit",
             ),
+            frontend_events: vulcan::extensions::api::FrontendEventSink::noop(),
         });
         session.hook_handlers()[0]
             .session_end("clean-session", 0)
@@ -251,10 +255,12 @@ mod tests {
             session_id: "no-git".to_string(),
             memory: Arc::new(vulcan::memory::SessionStore::in_memory()),
             frontend_capabilities: vulcan::extensions::FrontendCapability::full_set(),
+            frontend_extensions: Vec::new(),
             state: vulcan::extensions::ExtensionStateContext::in_memory_for_tests(
                 "no-git",
                 "auto-commit",
             ),
+            frontend_events: vulcan::extensions::api::FrontendEventSink::noop(),
         });
         session.hook_handlers()[0].session_end("no-git", 0).await;
         // No panic, no error — just silently no-op.

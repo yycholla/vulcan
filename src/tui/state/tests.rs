@@ -158,6 +158,48 @@ fn model_status_prefixes_active_provider_label() {
 }
 
 #[test]
+fn status_widgets_render_text_spinner_and_progress_in_footer_status() {
+    let mut app = AppState::new("deepseek/v4".into(), 100);
+    app.apply_widget_update(vulcan_frontend_api::WidgetUpdate {
+        id: "note".into(),
+        content: Some(vulcan_frontend_api::WidgetContent::Text("ready".into())),
+    });
+    app.apply_widget_update(vulcan_frontend_api::WidgetUpdate {
+        id: "spin".into(),
+        content: Some(vulcan_frontend_api::WidgetContent::Spinner {
+            label: "working".into(),
+        }),
+    });
+    app.apply_widget_update(vulcan_frontend_api::WidgetUpdate {
+        id: "copy".into(),
+        content: Some(vulcan_frontend_api::WidgetContent::progress(
+            "copying", 0.42,
+        )),
+    });
+
+    let status = app.model_status_with_widgets();
+
+    assert!(status.contains("note: ready"));
+    assert!(status.contains("spin: / working"));
+    assert!(status.contains("copy:  42% copying"));
+}
+
+#[test]
+fn status_widget_none_removes_widget() {
+    let mut app = AppState::new("deepseek/v4".into(), 100);
+    app.apply_widget_update(vulcan_frontend_api::WidgetUpdate {
+        id: "job".into(),
+        content: Some(vulcan_frontend_api::WidgetContent::Text("ready".into())),
+    });
+    app.apply_widget_update(vulcan_frontend_api::WidgetUpdate {
+        id: "job".into(),
+        content: None,
+    });
+
+    assert!(app.status_widget_labels().is_empty());
+}
+
+#[test]
 fn chat_message_new_starts_at_zero_render_version() {
     let m = ChatMessage::new(ChatRole::User, "hello");
     assert_eq!(m.render_version(), 0);

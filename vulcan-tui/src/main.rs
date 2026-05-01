@@ -2,12 +2,15 @@
 // #555 (Slice 4: Frontend extension binary + tool-result renderer).
 // Until then, the working TUI continues to ship as the `vulcan` daemon
 // binary's `chat` subcommand.
+use vulcan_ext_spinner_demo as _;
 use vulcan_ext_todo as _;
 
 fn main() -> anyhow::Result<()> {
     let caps = frontend_capabilities_for_daemon();
+    let extensions = vulcan_frontend_api::collect_frontend_descriptors();
     eprintln!("vulcan-tui: full TUI extraction is GH issue #555.");
     eprintln!("frontend capabilities: {}", caps.len());
+    eprintln!("frontend extensions: {}", extensions.len());
     eprintln!("Use `vulcan` (or `vulcan chat`) for now.");
     Ok(())
 }
@@ -42,5 +45,11 @@ mod tests {
         let caps = super::frontend_capabilities_for_daemon();
         assert!(caps.contains(&vulcan::extensions::FrontendCapability::TextIo));
         assert!(caps.contains(&vulcan::extensions::FrontendCapability::RichText));
+    }
+
+    #[test]
+    fn collects_frontend_extension_descriptors_for_handshake() {
+        let descriptors = vulcan_frontend_api::collect_frontend_descriptors();
+        assert!(descriptors.iter().any(|descriptor| descriptor.id == "todo"));
     }
 }

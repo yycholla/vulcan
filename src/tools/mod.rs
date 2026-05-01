@@ -462,6 +462,7 @@ pub(crate) struct ToolRegistryAssembly<'a> {
     pub(crate) memory: Arc<crate::memory::SessionStore>,
     pub(crate) session_id: &'a str,
     pub(crate) frontend_capabilities: Vec<crate::extensions::FrontendCapability>,
+    pub(crate) frontend_extensions: Vec<vulcan_frontend_api::FrontendExtensionDescriptor>,
     pub(crate) tool_profile_override: Option<String>,
     pub(crate) orchestration: Arc<crate::orchestration::OrchestrationStore>,
     pub(crate) artifact_store: Arc<dyn crate::artifact::ArtifactStore>,
@@ -591,6 +592,7 @@ impl ToolRegistry {
             memory,
             session_id,
             frontend_capabilities,
+            frontend_extensions,
             tool_profile_override,
             orchestration,
             artifact_store,
@@ -623,12 +625,14 @@ impl ToolRegistry {
                 session_id: session_id.to_string(),
                 memory,
                 frontend_capabilities,
+                frontend_extensions,
                 state: crate::extensions::ExtensionStateContext::new(
                     pool.extension_state_store(),
                     session_id.to_string(),
                     "__pending__",
                     Vec::new(),
                 ),
+                frontend_events: pool.frontend_event_sink(),
             };
             let wired = pool
                 .extension_registry()

@@ -4,14 +4,16 @@ use std::sync::Arc;
 use serde_json::Value;
 use vulcan_frontend_api::{
     FrontendCodeExtension, FrontendCommand, FrontendCommandAction, FrontendCtx, MessageRenderer,
-    ToolResultView,
+    ToolResultView, WidgetUpdate,
 };
 
 #[derive(Default)]
 pub struct TuiFrontend {
+    extensions: HashMap<&'static str, Arc<dyn FrontendCodeExtension>>,
     renderers: HashMap<&'static str, Arc<dyn MessageRenderer>>,
     commands: HashMap<&'static str, Arc<dyn FrontendCommand>>,
     capabilities: Vec<crate::extensions::FrontendCapability>,
+    descriptors: Vec<vulcan_frontend_api::FrontendExtensionDescriptor>,
 }
 
 impl TuiFrontend {
@@ -22,6 +24,12 @@ impl TuiFrontend {
     pub fn from_extensions(extensions: Vec<Arc<dyn FrontendCodeExtension>>) -> Self {
         let mut this = Self::default();
         for extension in extensions {
+            let extension_id = extension.id();
+            this.descriptors
+                .push(vulcan_frontend_api::FrontendExtensionDescriptor {
+                    id: extension_id.to_string(),
+                    version: extension.version().to_string(),
+                });
             for cap in extension.frontend_capabilities() {
                 if let Some(cap) = map_frontend_capability(cap)
                     && !this.capabilities.contains(&cap)
@@ -42,6 +50,7 @@ impl TuiFrontend {
             for command in extension.commands() {
                 this.commands.insert(command.name(), command);
             }
+            this.extensions.insert(extension_id, extension);
         }
         if !this
             .capabilities
@@ -55,6 +64,10 @@ impl TuiFrontend {
 
     pub fn frontend_capabilities(&self) -> Vec<crate::extensions::FrontendCapability> {
         self.capabilities.clone()
+    }
+
+    pub fn frontend_extensions(&self) -> Vec<vulcan_frontend_api::FrontendExtensionDescriptor> {
+        self.descriptors.clone()
     }
 
     pub fn render_tool_result(
@@ -104,6 +117,30 @@ impl TuiFrontend {
             .get(name)
             .map(|command| command.mid_turn_safe())
     }
+
+    pub fn handle_extension_event(&self, data: &Value) -> Vec<WidgetUpdate> {
+        if data.get("kind").and_then(Value::as_str) != Some("extension_event") {
+            return Vec::new();
+        }
+        let Some(extension_id) = data.get("extension_id").and_then(Value::as_str) else {
+            tracing::warn!(?data, "frontend extension event missing extension_id");
+            return Vec::new();
+        };
+        let Some(extension) = self.extensions.get(extension_id) else {
+            tracing::warn!(
+                extension_id,
+                "dropping frontend event for unknown extension"
+            );
+            return Vec::new();
+        };
+        let payload = data.get("payload").unwrap_or(&Value::Null);
+        let mut ctx = FrontendCtx::default().with_extension(extension_id);
+        if let Some(session_id) = data.get("session_id").and_then(Value::as_str) {
+            ctx.session_id = Some(session_id.to_string());
+        }
+        extension.on_event(payload, &mut ctx);
+        ctx.ui.drain_widget_updates()
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -136,7 +173,7 @@ mod tests {
     use serde_json::json;
     use vulcan_frontend_api::{
         FrontendCodeExtension, FrontendCommand, FrontendCommandAction, FrontendCtx,
-        MessageRenderer, RenderedMessage, ToolResultView,
+        MessageRenderer, RenderedMessage, ToolResultView, WidgetContent,
     };
 
     struct Renderer(&'static str);
@@ -185,6 +222,10 @@ mod tests {
             self.id
         }
 
+        fn version(&self) -> &'static str {
+            "0.1.0"
+        }
+
         fn frontend_capabilities(&self) -> Vec<&'static str> {
             vec!["text_io", "rich_text"]
         }
@@ -195,6 +236,17 @@ mod tests {
 
         fn commands(&self) -> Vec<Arc<dyn FrontendCommand>> {
             vec![Arc::new(Command)]
+        }
+
+        fn on_event(&self, payload: &Value, ctx: &mut FrontendCtx) {
+            if let Some(label) = payload.get("spinner").and_then(Value::as_str) {
+                ctx.ui.set_widget(
+                    "job",
+                    Some(WidgetContent::Spinner {
+                        label: label.to_string(),
+                    }),
+                );
+            }
         }
     }
 
@@ -250,5 +302,40 @@ mod tests {
 
         assert!(caps.contains(&crate::extensions::FrontendCapability::TextIo));
         assert!(caps.contains(&crate::extensions::FrontendCapability::RichText));
+    }
+
+    #[test]
+    fn frontend_event_dispatches_to_matching_extension_widget_updates() {
+        let frontend = TuiFrontend::from_extensions(vec![Arc::new(Extension {
+            id: "spinner",
+            renderer: "todo",
+        })]);
+
+        let updates = frontend.handle_extension_event(&json!({
+            "kind": "extension_event",
+            "session_id": "main",
+            "extension_id": "spinner",
+            "payload": { "spinner": "working" }
+        }));
+
+        assert_eq!(updates.len(), 1);
+        assert_eq!(updates[0].id, "job");
+        assert_eq!(
+            updates[0].content,
+            Some(WidgetContent::Spinner {
+                label: "working".into()
+            })
+        );
+    }
+
+    #[test]
+    fn frontend_event_for_unknown_extension_is_dropped() {
+        let frontend = TuiFrontend::default();
+        let updates = frontend.handle_extension_event(&json!({
+            "kind": "extension_event",
+            "extension_id": "missing",
+            "payload": { "spinner": "working" }
+        }));
+        assert!(updates.is_empty());
     }
 }

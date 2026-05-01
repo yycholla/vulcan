@@ -106,16 +106,18 @@ pub async fn run(
     session_id: String,
     input: &str,
     frontend_capabilities: Vec<FrontendCapability>,
+    frontend_extensions: Vec<vulcan_frontend_api::FrontendExtensionDescriptor>,
 ) -> Response {
     let sess = match resolve_session(&state, &session_id) {
         Ok(s) => s,
         Err(e) => return Response::error(id, e),
     };
     let agent_arc = match sess
-        .ensure_agent_with_frontend_capabilities(
+        .ensure_agent_with_frontend(
             state.config(),
             state.pool().cloned(),
             frontend_capabilities,
+            frontend_extensions,
         )
         .await
     {
@@ -193,6 +195,7 @@ pub fn stream(
     session_id: String,
     input: String,
     frontend_capabilities: Vec<FrontendCapability>,
+    frontend_extensions: Vec<vulcan_frontend_api::FrontendExtensionDescriptor>,
 ) -> (mpsc::Receiver<StreamFrame>, oneshot::Receiver<Response>) {
     let (frame_tx, frame_rx) = mpsc::channel(32);
     let (done_tx, done_rx) = oneshot::channel();
@@ -225,7 +228,12 @@ pub fn stream(
         // done channel as AGENT_BUILD_FAILED; in_flight is cleared
         // before returning so daemon.status doesn't get stuck.
         let agent_arc = match sess_for_task
-            .ensure_agent_with_frontend_capabilities(&config, pool_for_task, frontend_capabilities)
+            .ensure_agent_with_frontend(
+                &config,
+                pool_for_task,
+                frontend_capabilities,
+                frontend_extensions,
+            )
             .await
         {
             Ok(a) => a,
@@ -493,6 +501,7 @@ mod tests {
             "ghost".into(),
             "hi",
             FrontendCapability::full_set(),
+            Vec::new(),
         )
         .await;
         let err = resp.error.expect("err");
@@ -513,6 +522,7 @@ mod tests {
             "main".into(),
             "hi",
             FrontendCapability::full_set(),
+            Vec::new(),
         )
         .await;
         let err = resp.error.expect("err");
@@ -579,6 +589,7 @@ mod tests {
                 "main".into(),
                 "hi",
                 FrontendCapability::full_set(),
+                Vec::new(),
             )
             .await
         });
@@ -614,6 +625,7 @@ mod tests {
             "main".into(),
             "hi".into(),
             FrontendCapability::full_set(),
+            Vec::new(),
         );
 
         timeout(Duration::from_secs(1), started.notified())

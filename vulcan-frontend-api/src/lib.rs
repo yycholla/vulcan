@@ -8,12 +8,53 @@ use serde_json::Value;
 pub struct FrontendCtx {
     pub session_id: Option<String>,
     pub extension_id: Option<String>,
+    pub ui: ExtensionUi,
 }
 
 impl FrontendCtx {
     pub fn with_extension(mut self, extension_id: impl Into<String>) -> Self {
         self.extension_id = Some(extension_id.into());
         self
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum WidgetContent {
+    Text(String),
+    Spinner { label: String },
+    Progress { label: String, ratio: f32 },
+}
+
+impl WidgetContent {
+    pub fn progress(label: impl Into<String>, ratio: f32) -> Self {
+        Self::Progress {
+            label: label.into(),
+            ratio: ratio.clamp(0.0, 1.0),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct WidgetUpdate {
+    pub id: String,
+    pub content: Option<WidgetContent>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ExtensionUi {
+    updates: Vec<WidgetUpdate>,
+}
+
+impl ExtensionUi {
+    pub fn set_widget(&mut self, id: impl Into<String>, content: Option<WidgetContent>) {
+        self.updates.push(WidgetUpdate {
+            id: id.into(),
+            content,
+        });
+    }
+
+    pub fn drain_widget_updates(&mut self) -> Vec<WidgetUpdate> {
+        std::mem::take(&mut self.updates)
     }
 }
 
@@ -69,6 +110,9 @@ pub trait FrontendCommand: Send + Sync {
 
 pub trait FrontendCodeExtension: Send + Sync {
     fn id(&self) -> &'static str;
+    fn version(&self) -> &'static str {
+        "0.0.0"
+    }
     fn frontend_capabilities(&self) -> Vec<&'static str> {
         Vec::new()
     }
@@ -78,6 +122,7 @@ pub trait FrontendCodeExtension: Send + Sync {
     fn commands(&self) -> Vec<Arc<dyn FrontendCommand>> {
         Vec::new()
     }
+    fn on_event(&self, _payload: &Value, _ctx: &mut FrontendCtx) {}
 }
 
 pub struct FrontendExtensionRegistration {
@@ -103,6 +148,22 @@ pub fn collect_frontend_capabilities() -> Vec<&'static str> {
         }
     }
     caps
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct FrontendExtensionDescriptor {
+    pub id: String,
+    pub version: String,
+}
+
+pub fn collect_frontend_descriptors() -> Vec<FrontendExtensionDescriptor> {
+    collect_registrations()
+        .into_iter()
+        .map(|extension| FrontendExtensionDescriptor {
+            id: extension.id().to_string(),
+            version: extension.version().to_string(),
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -157,6 +218,10 @@ mod tests {
             "test"
         }
 
+        fn version(&self) -> &'static str {
+            "1.2.3"
+        }
+
         fn frontend_capabilities(&self) -> Vec<&'static str> {
             vec!["text_io", "rich_text"]
         }
@@ -167,6 +232,17 @@ mod tests {
 
         fn commands(&self) -> Vec<Arc<dyn FrontendCommand>> {
             vec![Arc::new(TestCommand)]
+        }
+
+        fn on_event(&self, payload: &Value, ctx: &mut FrontendCtx) {
+            if payload.get("spin").and_then(Value::as_bool) == Some(true) {
+                ctx.ui.set_widget(
+                    "test",
+                    Some(WidgetContent::Spinner {
+                        label: "working".into(),
+                    }),
+                );
+            }
         }
     }
 
@@ -206,5 +282,37 @@ mod tests {
             action,
             FrontendCommandAction::OpenView { ref id, .. } if id == "todo"
         ));
+    }
+
+    #[test]
+    fn extension_ui_records_widget_updates() {
+        let mut ui = ExtensionUi::default();
+        ui.set_widget("job", Some(WidgetContent::Text("ready".into())));
+        ui.set_widget("job", None);
+
+        let updates = ui.drain_widget_updates();
+        assert_eq!(updates.len(), 2);
+        assert_eq!(updates[0].id, "job");
+        assert_eq!(
+            updates[0].content,
+            Some(WidgetContent::Text("ready".into()))
+        );
+        assert_eq!(updates[1].content, None);
+        assert!(ui.drain_widget_updates().is_empty());
+    }
+
+    #[test]
+    fn frontend_extension_handles_events_via_ctx_ui() {
+        let ext = TestExtension;
+        let mut ctx = FrontendCtx::default().with_extension(ext.id());
+        ext.on_event(&json!({ "spin": true }), &mut ctx);
+
+        let updates = ctx.ui.drain_widget_updates();
+        assert_eq!(
+            updates[0].content,
+            Some(WidgetContent::Spinner {
+                label: "working".into()
+            })
+        );
     }
 }

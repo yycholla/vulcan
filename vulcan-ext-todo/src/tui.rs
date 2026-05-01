@@ -12,6 +12,10 @@ impl FrontendCodeExtension for TodoFrontendExtension {
         "todo"
     }
 
+    fn version(&self) -> &'static str {
+        env!("CARGO_PKG_VERSION")
+    }
+
     fn frontend_capabilities(&self) -> Vec<&'static str> {
         vec!["text_io", "rich_text"]
     }

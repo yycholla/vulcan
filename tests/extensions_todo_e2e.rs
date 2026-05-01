@@ -24,7 +24,9 @@ async fn todo_details_survive_session_end_then_session_start_replay() {
         session_id: session_id.to_string(),
         memory: Arc::clone(&memory),
         frontend_capabilities: vulcan::extensions::FrontendCapability::full_set(),
+        frontend_extensions: Vec::new(),
         state: vulcan::extensions::ExtensionStateContext::in_memory_for_tests(session_id, "todo"),
+        frontend_events: vulcan::extensions::api::FrontendEventSink::noop(),
     };
     let (sessions, extension_tools) =
         registry.wire_daemon_extensions_into_runtime(ctx, &mut hooks, Some(&mut tools));
@@ -83,7 +85,9 @@ async fn todo_details_survive_session_end_then_session_start_replay() {
         session_id: session_id.to_string(),
         memory: Arc::clone(&memory),
         frontend_capabilities: vulcan::extensions::FrontendCapability::full_set(),
+        frontend_extensions: Vec::new(),
         state: vulcan::extensions::ExtensionStateContext::in_memory_for_tests(session_id, "todo"),
+        frontend_events: vulcan::extensions::api::FrontendEventSink::noop(),
     };
     registry.wire_daemon_extensions_into_runtime(
         ctx,

@@ -140,6 +140,10 @@ impl ExtensionStateContext {
         Arc::clone(&self.store)
     }
 
+    pub fn extension_id(&self) -> &str {
+        &self.extension_id
+    }
+
     pub fn append_entry(
         &self,
         key: &str,

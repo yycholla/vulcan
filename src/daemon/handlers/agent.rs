@@ -22,6 +22,7 @@ async fn resolve(
     state: &DaemonState,
     session_id: &str,
     frontend_capabilities: Vec<FrontendCapability>,
+    frontend_extensions: Vec<vulcan_frontend_api::FrontendExtensionDescriptor>,
 ) -> Result<AgentHandle, ProtocolError> {
     let Some(sess) = state.sessions().get(session_id) else {
         return Err(ProtocolError {
@@ -31,10 +32,11 @@ async fn resolve(
         });
     };
     sess.touch();
-    sess.ensure_agent_with_frontend_capabilities(
+    sess.ensure_agent_with_frontend(
         state.config(),
         state.pool().cloned(),
         frontend_capabilities,
+        frontend_extensions,
     )
     .await
     .map_err(|e| ProtocolError {
@@ -51,8 +53,16 @@ pub async fn status(
     id: String,
     session_id: String,
     frontend_capabilities: Vec<FrontendCapability>,
+    frontend_extensions: Vec<vulcan_frontend_api::FrontendExtensionDescriptor>,
 ) -> Response {
-    let agent_arc = match resolve(state, &session_id, frontend_capabilities).await {
+    let agent_arc = match resolve(
+        state,
+        &session_id,
+        frontend_capabilities,
+        frontend_extensions,
+    )
+    .await
+    {
         Ok(a) => a,
         Err(e) => return Response::error(id, e),
     };
@@ -77,8 +87,16 @@ pub async fn switch_model(
     session_id: String,
     model: &str,
     frontend_capabilities: Vec<FrontendCapability>,
+    frontend_extensions: Vec<vulcan_frontend_api::FrontendExtensionDescriptor>,
 ) -> Response {
-    let agent_arc = match resolve(state, &session_id, frontend_capabilities).await {
+    let agent_arc = match resolve(
+        state,
+        &session_id,
+        frontend_capabilities,
+        frontend_extensions,
+    )
+    .await
+    {
         Ok(a) => a,
         Err(e) => return Response::error(id, e),
     };
@@ -111,8 +129,16 @@ pub async fn list_models(
     id: String,
     session_id: String,
     frontend_capabilities: Vec<FrontendCapability>,
+    frontend_extensions: Vec<vulcan_frontend_api::FrontendExtensionDescriptor>,
 ) -> Response {
-    let agent_arc = match resolve(state, &session_id, frontend_capabilities).await {
+    let agent_arc = match resolve(
+        state,
+        &session_id,
+        frontend_capabilities,
+        frontend_extensions,
+    )
+    .await
+    {
         Ok(a) => a,
         Err(e) => return Response::error(id, e),
     };

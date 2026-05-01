@@ -214,6 +214,7 @@ pub struct AgentBuilder<'a> {
     /// the legacy build-everything path.
     pool: Option<Arc<RuntimeResourcePool>>,
     frontend_capabilities: Vec<crate::extensions::FrontendCapability>,
+    frontend_extensions: Vec<vulcan_frontend_api::FrontendExtensionDescriptor>,
 }
 
 impl<'a> AgentBuilder<'a> {
@@ -256,6 +257,14 @@ impl<'a> AgentBuilder<'a> {
         self
     }
 
+    pub fn with_frontend_extensions(
+        mut self,
+        frontend_extensions: Vec<vulcan_frontend_api::FrontendExtensionDescriptor>,
+    ) -> Self {
+        self.frontend_extensions = frontend_extensions;
+        self
+    }
+
     pub async fn build(self) -> Result<Agent> {
         Agent::build_from_parts(
             self.config,
@@ -265,6 +274,7 @@ impl<'a> AgentBuilder<'a> {
             self.tool_profile,
             self.pool,
             self.frontend_capabilities,
+            self.frontend_extensions,
         )
         .await
     }
@@ -280,6 +290,7 @@ impl Agent {
             tool_profile: None,
             pool: None,
             frontend_capabilities: crate::extensions::FrontendCapability::full_set(),
+            frontend_extensions: Vec::new(),
         }
     }
 
@@ -299,6 +310,7 @@ impl Agent {
         tool_profile_override: Option<String>,
         pool: Option<Arc<RuntimeResourcePool>>,
         frontend_capabilities: Vec<crate::extensions::FrontendCapability>,
+        frontend_extensions: Vec<vulcan_frontend_api::FrontendExtensionDescriptor>,
     ) -> Result<Self> {
         let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
         let memory: Arc<SessionStore> = match &pool {
@@ -314,12 +326,14 @@ impl Agent {
                 session_id: session_id.clone(),
                 memory: Arc::clone(&memory),
                 frontend_capabilities: frontend_capabilities.clone(),
+                frontend_extensions: frontend_extensions.clone(),
                 state: crate::extensions::ExtensionStateContext::new(
                     p.extension_state_store(),
                     session_id.clone(),
                     "__pending__",
                     Vec::new(),
                 ),
+                frontend_events: p.frontend_event_sink(),
             };
             let registered = p
                 .extension_registry()
@@ -589,6 +603,7 @@ impl Agent {
                 memory: Arc::clone(&memory),
                 session_id: &session_id,
                 frontend_capabilities,
+                frontend_extensions,
                 tool_profile_override,
                 orchestration: Arc::clone(&orchestration),
                 artifact_store: Arc::clone(&artifact_store),

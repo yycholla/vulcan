@@ -286,6 +286,10 @@ impl ExtensionRegistry {
             let Some(meta) = metadata_snapshot.iter().find(|m| m.id == id) else {
                 continue;
             };
+            if let Some(reason) = frontend_version_mismatch_reason(meta, &ctx.frontend_extensions) {
+                self.mark_broken(&id, reason);
+                continue;
+            }
             if meta.requires_user_approval {
                 hooks.mark_input_rewrite_approval_required(&id);
             }
@@ -351,6 +355,10 @@ impl ExtensionRegistry {
             let Some(meta) = metadata_snapshot.iter().find(|m| m.id == id) else {
                 continue;
             };
+            if let Some(reason) = frontend_version_mismatch_reason(meta, &ctx.frontend_extensions) {
+                self.mark_broken(&id, reason);
+                continue;
+            }
             if let Some(reason) =
                 missing_frontend_capability_reason(&meta.requires, &ctx.frontend_capabilities, &id)
             {
@@ -620,6 +628,16 @@ fn missing_frontend_capability_reason(
     ))
 }
 
+fn frontend_version_mismatch_reason(
+    meta: &ExtensionMetadata,
+    frontend_extensions: &[vulcan_frontend_api::FrontendExtensionDescriptor],
+) -> Option<String> {
+    let frontend = frontend_extensions
+        .iter()
+        .find(|extension| extension.id == meta.id)?;
+    (frontend.version != meta.version).then(|| "extension version mismatch".to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -886,10 +904,12 @@ mod tests {
                 session_id: "test-session".into(),
                 memory: Arc::new(SessionStore::in_memory()),
                 frontend_capabilities,
+                frontend_extensions: Vec::new(),
                 state: crate::extensions::ExtensionStateContext::in_memory_for_tests(
                     "test-session",
                     "canvas-ext",
                 ),
+                frontend_events: crate::extensions::api::FrontendEventSink::noop(),
             }
         }
 
@@ -921,6 +941,63 @@ mod tests {
             None,
         );
         assert_eq!((sessions, tools), (1, 0));
+    }
+
+    #[test]
+    fn daemon_frontend_version_mismatch_marks_extension_broken() {
+        use crate::extensions::api::{DaemonCodeExtension, SessionExtension, SessionExtensionCtx};
+        use crate::hooks::HookRegistry;
+        use crate::memory::SessionStore;
+
+        struct MismatchSession;
+        impl SessionExtension for MismatchSession {}
+
+        struct MismatchExtension;
+        impl DaemonCodeExtension for MismatchExtension {
+            fn metadata(&self) -> ExtensionMetadata {
+                let mut m = ExtensionMetadata::new(
+                    "split-ext",
+                    "Split Ext",
+                    "0.1.0",
+                    ExtensionSource::Builtin,
+                );
+                m.status = ExtensionStatus::Active;
+                m
+            }
+
+            fn instantiate(&self, _ctx: SessionExtensionCtx) -> Arc<dyn SessionExtension> {
+                Arc::new(MismatchSession)
+            }
+        }
+
+        let reg = ExtensionRegistry::new();
+        reg.register_daemon_extension(Arc::new(MismatchExtension));
+        let mut hooks = HookRegistry::new();
+        let ctx = SessionExtensionCtx {
+            cwd: std::path::PathBuf::from("/tmp/test-session"),
+            session_id: "test-session".into(),
+            memory: Arc::new(SessionStore::in_memory()),
+            frontend_capabilities: FrontendCapability::full_set(),
+            frontend_extensions: vec![vulcan_frontend_api::FrontendExtensionDescriptor {
+                id: "split-ext".into(),
+                version: "0.2.0".into(),
+            }],
+            state: crate::extensions::ExtensionStateContext::in_memory_for_tests(
+                "test-session",
+                "split-ext",
+            ),
+            frontend_events: crate::extensions::api::FrontendEventSink::noop(),
+        };
+
+        let (sessions, tools) = reg.wire_daemon_extensions_into_runtime(ctx, &mut hooks, None);
+
+        assert_eq!((sessions, tools), (0, 0));
+        let meta = reg.get("split-ext").expect("registered");
+        assert_eq!(meta.status, ExtensionStatus::Broken);
+        assert_eq!(
+            meta.broken_reason.as_deref(),
+            Some("extension version mismatch")
+        );
     }
 
     // ── YYC-232 (YYC-166 PR-4): store + install_state bridge ────────

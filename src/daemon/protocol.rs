@@ -58,6 +58,10 @@ pub struct Request {
     /// them per request for older connection paths and tests.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub frontend_capabilities: Vec<FrontendCapability>,
+    /// Frontend extension modules present on the client side of this
+    /// connection. Sent during handshake and replayed per request.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub frontend_extensions: Vec<vulcan_frontend_api::FrontendExtensionDescriptor>,
 }
 
 fn default_session() -> String {

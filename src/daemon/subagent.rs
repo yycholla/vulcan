@@ -66,6 +66,7 @@ impl SubagentRunner for DaemonSubagentRunner {
                 request.profile_name.clone(),
                 Some(&request.allowed_tools),
                 crate::extensions::FrontendCapability::full_set(),
+                Vec::new(),
             )
             .await?;
 

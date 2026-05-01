@@ -4,6 +4,7 @@
 // suffices — no symbols need importing into source.
 extern crate vulcan_ext_auto_commit as _vulcan_ext_auto_commit;
 extern crate vulcan_ext_input_demo as _vulcan_ext_input_demo;
+extern crate vulcan_ext_spinner_demo as _vulcan_ext_spinner_demo;
 extern crate vulcan_ext_todo as _vulcan_ext_todo;
 
 use clap::{CommandFactory, Parser};

@@ -10,6 +10,7 @@ members = [
     "vulcan-extension-macros",
     "vulcan-ext-auto-commit",
     "vulcan-ext-todo",
+    "vulcan-ext-spinner-demo",
     "vulcan-ext-input-demo",
     "vulcan-ext-provider-demo",
 ]

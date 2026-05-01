@@ -142,6 +142,7 @@ pub async fn run_tui(
         mpsc::channel::<StreamEvent>(config.provider.effective_stream_channel_capacity());
     let frontend = frontend::TuiFrontend::collect();
     let frontend_capabilities = frontend.frontend_capabilities();
+    let frontend_extensions = frontend.frontend_extensions();
 
     // ── Hook registry: audit-log + (room for safety-gate, etc.). Built-in
     // hooks (skills) are registered by AgentBuilder.
@@ -163,6 +164,7 @@ pub async fn run_tui(
             .with_pause_channel(pause_tx_for_agent)
             .with_tool_profile(tool_profile)
             .with_frontend_capabilities(frontend_capabilities)
+            .with_frontend_extensions(frontend_extensions)
             .build()
             .await?,
     ));

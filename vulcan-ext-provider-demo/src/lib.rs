@@ -177,7 +177,9 @@ mod tests {
             session_id: "sess".into(),
             memory: Arc::new(SessionStore::in_memory()),
             frontend_capabilities: Vec::new(),
+            frontend_extensions: Vec::new(),
             state: ExtensionStateContext::in_memory_for_tests("sess", "demo"),
+            frontend_events: vulcan::extensions::api::FrontendEventSink::noop(),
         });
         let provider = session.providers().remove(0).1;
         let response = provider

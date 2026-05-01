@@ -23,7 +23,7 @@ use std::path::PathBuf;
 
 use crate::artifact::{ArtifactStore, InMemoryArtifactStore, SqliteArtifactStore};
 use crate::code::lsp::LspManager;
-use crate::extensions::api::wire_inventory_into_registry;
+use crate::extensions::api::{FrontendEvent, FrontendEventSink, wire_inventory_into_registry};
 use crate::extensions::{
     ExtensionAuditLog, ExtensionRegistry, ExtensionStateStore, SqliteExtensionStateStore,
 };
@@ -70,6 +70,7 @@ pub struct RuntimeResourcePool {
     /// `InputIntercept` outcomes here. `vulcan extension audit`
     /// reads from this same handle.
     extension_audit_log: Arc<ExtensionAuditLog>,
+    frontend_events: tokio::sync::broadcast::Sender<FrontendEvent>,
 }
 
 impl RuntimeResourcePool {
@@ -118,6 +119,7 @@ impl RuntimeResourcePool {
         );
 
         let extension_audit_log = Arc::new(ExtensionAuditLog::default());
+        let (frontend_events, _) = tokio::sync::broadcast::channel(128);
         let extension_state_store: Arc<dyn ExtensionStateStore> =
             Arc::new(SqliteExtensionStateStore::try_new()?);
         let extension_provider_catalog = Arc::new(ExtensionProviderCatalog::new());
@@ -133,6 +135,7 @@ impl RuntimeResourcePool {
             extension_state_store,
             extension_provider_catalog,
             extension_audit_log,
+            frontend_events,
         })
     }
 
@@ -151,6 +154,7 @@ impl RuntimeResourcePool {
         let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
         let extension_registry = Arc::new(ExtensionRegistry::new());
         wire_inventory_into_registry(&extension_registry);
+        let (frontend_events, _) = tokio::sync::broadcast::channel(128);
         Self {
             session_store: Arc::new(SessionStore::in_memory()),
             run_store: Arc::new(InMemoryRunStore::default()),
@@ -165,6 +169,7 @@ impl RuntimeResourcePool {
             ),
             extension_provider_catalog: Arc::new(ExtensionProviderCatalog::new()),
             extension_audit_log: Arc::new(ExtensionAuditLog::default()),
+            frontend_events,
         }
     }
 
@@ -224,6 +229,14 @@ impl RuntimeResourcePool {
     /// can surface them across sessions.
     pub fn extension_audit_log(&self) -> Arc<ExtensionAuditLog> {
         Arc::clone(&self.extension_audit_log)
+    }
+
+    pub fn frontend_event_sink(&self) -> FrontendEventSink {
+        FrontendEventSink::new(self.frontend_events.clone())
+    }
+
+    pub fn subscribe_frontend_events(&self) -> tokio::sync::broadcast::Receiver<FrontendEvent> {
+        self.frontend_events.subscribe()
     }
 }
 

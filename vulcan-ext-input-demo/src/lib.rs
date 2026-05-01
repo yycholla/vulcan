@@ -110,10 +110,12 @@ mod tests {
             session_id: "test-session".to_string(),
             memory: Arc::new(vulcan::memory::SessionStore::in_memory()),
             frontend_capabilities: vulcan::extensions::FrontendCapability::full_set(),
+            frontend_extensions: Vec::new(),
             state: vulcan::extensions::ExtensionStateContext::in_memory_for_tests(
                 "test-session",
                 "input-demo",
             ),
+            frontend_events: vulcan::extensions::api::FrontendEventSink::noop(),
         }
     }
 

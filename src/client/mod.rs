@@ -27,6 +27,7 @@ use transport::Transport;
 pub struct Client {
     transport: Transport,
     frontend_capabilities: Vec<FrontendCapability>,
+    frontend_extensions: Vec<vulcan_frontend_api::FrontendExtensionDescriptor>,
 }
 
 impl Client {
@@ -40,12 +41,20 @@ impl Client {
     pub async fn connect_or_autostart_with_capabilities(
         frontend_capabilities: Vec<FrontendCapability>,
     ) -> ClientResult<Self> {
+        Self::connect_or_autostart_with_frontend(frontend_capabilities, Vec::new()).await
+    }
+
+    pub async fn connect_or_autostart_with_frontend(
+        frontend_capabilities: Vec<FrontendCapability>,
+        frontend_extensions: Vec<vulcan_frontend_api::FrontendExtensionDescriptor>,
+    ) -> ClientResult<Self> {
         let sock = vulcan_home().join("vulcan.sock");
         auto_start::ensure_daemon(&sock).await?;
         let transport = Transport::connect(&sock).await?;
         let client = Self {
             transport,
             frontend_capabilities,
+            frontend_extensions,
         };
         client.handshake().await?;
         Ok(client)
@@ -63,10 +72,19 @@ impl Client {
         sock: &std::path::Path,
         frontend_capabilities: Vec<FrontendCapability>,
     ) -> ClientResult<Self> {
+        Self::connect_at_with_frontend(sock, frontend_capabilities, Vec::new()).await
+    }
+
+    pub async fn connect_at_with_frontend(
+        sock: &std::path::Path,
+        frontend_capabilities: Vec<FrontendCapability>,
+        frontend_extensions: Vec<vulcan_frontend_api::FrontendExtensionDescriptor>,
+    ) -> ClientResult<Self> {
         let transport = Transport::connect(sock).await?;
         let client = Self {
             transport,
             frontend_capabilities,
+            frontend_extensions,
         };
         client.handshake().await?;
         Ok(client)
@@ -89,6 +107,7 @@ impl Client {
             method: method.into(),
             params,
             frontend_capabilities: self.frontend_capabilities.clone(),
+            frontend_extensions: self.frontend_extensions.clone(),
         }
     }
 

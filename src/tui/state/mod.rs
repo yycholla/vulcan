@@ -28,7 +28,7 @@
 //! documentation below for which ones cross threads on purpose.
 
 use std::cell::{Cell, RefCell};
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, VecDeque};
 
 use super::keybinds::Keybinds;
 
@@ -246,6 +246,7 @@ pub struct AppState {
     pub token_max: u32,
     pub chat_render_store: RefCell<super::chat_render::ChatRenderStore>,
     pub frontend: super::frontend::TuiFrontend,
+    pub status_widgets: BTreeMap<String, vulcan_frontend_api::WidgetContent>,
 
     /// When true, overlays a session picker on top of the normal view.
     /// Set by `ResumeTarget::Pick` at startup; cleared when the user
@@ -388,6 +389,7 @@ impl AppState {
             token_max,
             chat_render_store: RefCell::new(super::chat_render::ChatRenderStore::default()),
             frontend: super::frontend::TuiFrontend::default(),
+            status_widgets: BTreeMap::new(),
 
             show_session_picker: false,
             session_picker_selection: 0,
@@ -529,6 +531,42 @@ impl AppState {
                 format_thousands(self.token_max),
             ),
         }
+    }
+
+    pub fn model_status_with_widgets(&self) -> String {
+        let mut status = self.model_status();
+        let widgets = self.status_widget_labels();
+        if !widgets.is_empty() {
+            status.push_str(" · ");
+            status.push_str(&widgets.join(" · "));
+        }
+        status
+    }
+
+    pub fn apply_widget_update(&mut self, update: vulcan_frontend_api::WidgetUpdate) {
+        match update.content {
+            Some(content) => {
+                self.status_widgets.insert(update.id, content);
+            }
+            None => {
+                self.status_widgets.remove(&update.id);
+            }
+        }
+    }
+
+    pub fn status_widget_labels(&self) -> Vec<String> {
+        self.status_widgets
+            .iter()
+            .map(|(id, content)| match content {
+                vulcan_frontend_api::WidgetContent::Text(text) => format!("{id}: {text}"),
+                vulcan_frontend_api::WidgetContent::Spinner { label } => {
+                    format!("{id}: / {label}")
+                }
+                vulcan_frontend_api::WidgetContent::Progress { label, ratio } => {
+                    format!("{id}: {:>3}% {label}", (ratio * 100.0).round() as u8)
+                }
+            })
+            .collect()
     }
 
     /// Estimated session cost in USD, computed from cumulative token

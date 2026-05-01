@@ -270,10 +270,12 @@ mod tests {
             session_id: "todo-test".to_string(),
             memory,
             frontend_capabilities: vulcan::extensions::FrontendCapability::full_set(),
+            frontend_extensions: Vec::new(),
             state: vulcan::extensions::ExtensionStateContext::in_memory_for_tests(
                 "todo-test",
                 "todo",
             ),
+            frontend_events: vulcan::extensions::api::FrontendEventSink::noop(),
         }
     }
 

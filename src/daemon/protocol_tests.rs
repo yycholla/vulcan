@@ -24,6 +24,7 @@ fn request_round_trips_through_json() {
         method: "ping".into(),
         params: json!({"hello": "world"}),
         frontend_capabilities: vec![],
+        frontend_extensions: Vec::new(),
     };
 
     let bytes = serde_json::to_vec(&req).expect("serialize");
@@ -177,6 +178,7 @@ async fn frame_round_trip_request() {
         method: "daemon.ping".into(),
         params: serde_json::json!({}),
         frontend_capabilities: vec![],
+        frontend_extensions: Vec::new(),
     };
     write_request(&mut a, &req).await.unwrap();
     drop(a); // signal EOF to reader after the frame
