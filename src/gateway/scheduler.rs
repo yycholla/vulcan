@@ -50,14 +50,6 @@ struct RunningJob {
     config: SchedulerJobConfig,
     schedule: cron::Schedule,
     tz: chrono_tz::Tz,
-    /// YYC-17 PR-3: in-process flag the overlap-policy gate
-    /// consults. Spawning the agent for a firing flips this to
-    /// true; the worker pipeline doesn't currently report
-    /// completion back, so for now the flag is cleared
-    /// immediately after enqueue. PR-C-4 will replace this with
-    /// a query against the inbound row's state so `Skip` /
-    /// `Replace` get teeth.
-    running: Arc<std::sync::atomic::AtomicBool>,
 }
 
 pub struct SchedulerHandle {
@@ -99,7 +91,6 @@ impl Scheduler {
                 config: job.clone(),
                 schedule,
                 tz,
-                running: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             });
         }
         Ok(Self {
@@ -166,15 +157,40 @@ impl Scheduler {
     }
 
     async fn fire(&mut self, idx: usize) {
-        use std::sync::atomic::Ordering;
         let job = &self.jobs[idx];
         let now = Utc::now().timestamp();
 
-        // YYC-17 PR-3: overlap policy. Skip suppresses the firing
-        // when the job's running flag is set; Enqueue and Replace
-        // both proceed (Replace becomes meaningful in PR-C-4 once
-        // the scheduler can drop pending rows).
-        if job.config.overlap_policy == OverlapPolicy::Skip && job.running.load(Ordering::Acquire) {
+        if let Err(e) = self
+            .inbound
+            .recover_stale_scheduled_processing(&job.config.id)
+            .await
+        {
+            tracing::warn!(
+                target: "gateway::scheduler",
+                job_id = %job.config.id,
+                error = %e,
+                "could not recover stale scheduled firings before overlap check",
+            );
+        }
+
+        let has_active_firing = match self
+            .inbound
+            .has_active_scheduled_firing(&job.config.id)
+            .await
+        {
+            Ok(active) => active,
+            Err(e) => {
+                tracing::warn!(
+                    target: "gateway::scheduler",
+                    job_id = %job.config.id,
+                    error = %e,
+                    "could not check scheduled firing overlap; proceeding",
+                );
+                false
+            }
+        };
+
+        if job.config.overlap_policy == OverlapPolicy::Skip && has_active_firing {
             tracing::warn!(
                 target: "gateway::scheduler",
                 job_id = %job.config.id,
@@ -194,15 +210,29 @@ impl Scheduler {
             return;
         }
 
-        job.running.store(true, Ordering::Release);
+        let replaced_firings = if job.config.overlap_policy == OverlapPolicy::Replace {
+            match self
+                .inbound
+                .delete_pending_scheduled_firings(&job.config.id)
+                .await
+            {
+                Ok(count) => count,
+                Err(e) => {
+                    tracing::warn!(
+                        target: "gateway::scheduler",
+                        job_id = %job.config.id,
+                        error = %e,
+                        "could not coalesce pending scheduled firings before replace",
+                    );
+                    0
+                }
+            }
+        } else {
+            0
+        };
+
         let msg = build_inbound_message_for_job(&job.config);
         let result = self.inbound.enqueue(msg).await;
-        // The inbound row is queued; the worker pipeline owns the
-        // run from here. Without a completion signal we clear the
-        // running flag immediately so subsequent fires aren't
-        // permanently suppressed. A real durable in-flight check
-        // ships in PR-C-4.
-        job.running.store(false, Ordering::Release);
 
         match result {
             Ok(row_id) => {
@@ -216,7 +246,12 @@ impl Scheduler {
                     "scheduler firing enqueued",
                 );
                 if let Some(store) = &self.store
-                    && let Err(e) = store.record_enqueued(&job.config.id, now, row_id)
+                    && let Err(e) = store.record_enqueued_replacing(
+                        &job.config.id,
+                        now,
+                        row_id,
+                        replaced_firings,
+                    )
                 {
                     tracing::warn!(
                         target: "gateway::scheduler",
@@ -258,6 +293,7 @@ pub fn build_inbound_message_for_job(job: &SchedulerJobConfig) -> InboundMessage
         chat_id: job.lane.clone(),
         user_id: SCHEDULER_USER_ID.into(),
         text: job.prompt.clone(),
+        scheduler_job_id: Some(job.id.clone()),
         message_id: None,
         reply_to: None,
         attachments: vec![],
@@ -294,6 +330,7 @@ mod tests {
         assert_eq!(inbound.chat_id, "c1");
         assert_eq!(inbound.user_id, SCHEDULER_USER_ID);
         assert_eq!(inbound.text, "do thing");
+        assert_eq!(inbound.scheduler_job_id.as_deref(), Some("daily"));
         assert!(inbound.attachments.is_empty());
         assert!(inbound.message_id.is_none());
     }
@@ -344,28 +381,191 @@ mod tests {
         assert!(row.last_inbound_id.is_some());
     }
 
-    // YYC-17 PR-3: with overlap_policy = Skip, a second fire while
-    // the first is still flagged as running records as skipped.
     #[tokio::test]
-    async fn fire_skip_policy_records_skipped() {
-        use std::sync::atomic::Ordering;
+    async fn skip_policy_skips_when_previous_firing_is_pending() {
         let pool = crate::memory::in_memory_gateway_pool().expect("pool");
         let inbound = Arc::new(InboundQueue::new(pool.clone()));
         let store = SchedulerStore::new(pool);
         let mut config = SchedulerConfig::default();
-        let mut j = job("skip-test", "0 8 * * * *");
+        let mut j = job("skip-pending", "0 8 * * * *");
         j.overlap_policy = OverlapPolicy::Skip;
         config.jobs.push(j);
         let mut scheduler =
             Scheduler::from_config_with_store(&config, Arc::clone(&inbound), Some(store.clone()))
                 .expect("ok");
-        // Manually flip the running flag to simulate an in-flight run.
-        scheduler.jobs[0].running.store(true, Ordering::Release);
+
         scheduler.fire(0).await;
-        let row = store.get("skip-test").unwrap().expect("row");
+        scheduler.fire(0).await;
+
+        let first = inbound.claim_next().await.unwrap().expect("first row");
+        assert_eq!(first.scheduler_job_id.as_deref(), Some("skip-pending"));
+        assert!(
+            inbound.claim_next().await.unwrap().is_none(),
+            "skip policy must not enqueue a second active row"
+        );
+        let row = store.get("skip-pending").unwrap().expect("run row");
         assert_eq!(row.last_status.as_deref(), Some("skipped"));
         assert_eq!(row.skipped_fires, 1);
-        assert_eq!(row.total_fires, 1);
+        assert_eq!(row.total_fires, 2);
+    }
+
+    #[tokio::test]
+    async fn skip_policy_skips_when_previous_firing_is_processing() {
+        let pool = crate::memory::in_memory_gateway_pool().expect("pool");
+        let inbound = Arc::new(InboundQueue::new(pool.clone()));
+        let store = SchedulerStore::new(pool);
+        let mut config = SchedulerConfig::default();
+        let mut j = job("skip-processing", "0 8 * * * *");
+        j.overlap_policy = OverlapPolicy::Skip;
+        config.jobs.push(j);
+        let mut scheduler =
+            Scheduler::from_config_with_store(&config, Arc::clone(&inbound), Some(store.clone()))
+                .expect("ok");
+
+        scheduler.fire(0).await;
+        let processing = inbound.claim_next().await.unwrap().expect("processing row");
+        assert_eq!(
+            processing.scheduler_job_id.as_deref(),
+            Some("skip-processing")
+        );
+        scheduler.fire(0).await;
+
+        assert!(
+            inbound.claim_next().await.unwrap().is_none(),
+            "fresh processing firing should make skip suppress the new firing"
+        );
+        let row = store.get("skip-processing").unwrap().expect("run row");
+        assert_eq!(row.last_status.as_deref(), Some("skipped"));
+        assert_eq!(row.skipped_fires, 1);
+        assert_eq!(row.total_fires, 2);
+    }
+
+    #[tokio::test]
+    async fn enqueue_policy_appends_when_previous_firing_is_pending() {
+        let pool = crate::memory::in_memory_gateway_pool().expect("pool");
+        let inbound = Arc::new(InboundQueue::new(pool.clone()));
+        let store = SchedulerStore::new(pool);
+        let mut config = SchedulerConfig::default();
+        let mut j = job("enqueue-pending", "0 8 * * * *");
+        j.overlap_policy = OverlapPolicy::Enqueue;
+        config.jobs.push(j);
+        let mut scheduler =
+            Scheduler::from_config_with_store(&config, Arc::clone(&inbound), Some(store.clone()))
+                .expect("ok");
+
+        scheduler.fire(0).await;
+        scheduler.fire(0).await;
+
+        assert!(inbound.claim_next().await.unwrap().is_some());
+        assert!(inbound.claim_next().await.unwrap().is_some());
+        let row = store.get("enqueue-pending").unwrap().expect("run row");
+        assert_eq!(row.last_status.as_deref(), Some("enqueued"));
+        assert_eq!(row.total_fires, 2);
+        assert_eq!(row.skipped_fires, 0);
+    }
+
+    #[tokio::test]
+    async fn enqueue_policy_appends_when_previous_firing_is_processing() {
+        let pool = crate::memory::in_memory_gateway_pool().expect("pool");
+        let inbound = Arc::new(InboundQueue::new(pool.clone()));
+        let store = SchedulerStore::new(pool);
+        let mut config = SchedulerConfig::default();
+        let mut j = job("enqueue-processing", "0 8 * * * *");
+        j.overlap_policy = OverlapPolicy::Enqueue;
+        config.jobs.push(j);
+        let mut scheduler =
+            Scheduler::from_config_with_store(&config, Arc::clone(&inbound), Some(store.clone()))
+                .expect("ok");
+
+        scheduler.fire(0).await;
+        assert!(inbound.claim_next().await.unwrap().is_some());
+        scheduler.fire(0).await;
+
+        let queued = inbound
+            .claim_next()
+            .await
+            .unwrap()
+            .expect("new pending row");
+        assert_eq!(
+            queued.scheduler_job_id.as_deref(),
+            Some("enqueue-processing")
+        );
+        let row = store.get("enqueue-processing").unwrap().expect("run row");
+        assert_eq!(row.last_status.as_deref(), Some("enqueued"));
+        assert_eq!(row.total_fires, 2);
+        assert_eq!(row.skipped_fires, 0);
+    }
+
+    #[tokio::test]
+    async fn replace_policy_coalesces_pending_firings_to_newest() {
+        let pool = crate::memory::in_memory_gateway_pool().expect("pool");
+        let inbound = Arc::new(InboundQueue::new(pool.clone()));
+        let store = SchedulerStore::new(pool);
+        let mut config = SchedulerConfig::default();
+        let mut j = job("replace-pending", "0 8 * * * *");
+        j.overlap_policy = OverlapPolicy::Replace;
+        config.jobs.push(j);
+        let mut scheduler =
+            Scheduler::from_config_with_store(&config, Arc::clone(&inbound), Some(store.clone()))
+                .expect("ok");
+
+        scheduler.fire(0).await;
+        scheduler.fire(0).await;
+        scheduler.fire(0).await;
+
+        let queued = inbound.claim_next().await.unwrap().expect("newest row");
+        assert_eq!(queued.scheduler_job_id.as_deref(), Some("replace-pending"));
+        assert!(
+            inbound.claim_next().await.unwrap().is_none(),
+            "replace policy should keep only one pending firing"
+        );
+        let row = store.get("replace-pending").unwrap().expect("run row");
+        assert_eq!(row.last_status.as_deref(), Some("enqueued"));
+        assert_eq!(row.total_fires, 3);
+        assert_eq!(row.replaced_fires, 2);
+        assert_eq!(row.skipped_fires, 0);
+    }
+
+    #[tokio::test]
+    async fn replace_policy_keeps_newest_pending_behind_processing() {
+        let pool = crate::memory::in_memory_gateway_pool().expect("pool");
+        let inbound = Arc::new(InboundQueue::new(pool.clone()));
+        let store = SchedulerStore::new(pool);
+        let mut config = SchedulerConfig::default();
+        let mut j = job("replace-processing", "0 8 * * * *");
+        j.overlap_policy = OverlapPolicy::Replace;
+        config.jobs.push(j);
+        let mut scheduler =
+            Scheduler::from_config_with_store(&config, Arc::clone(&inbound), Some(store.clone()))
+                .expect("ok");
+
+        scheduler.fire(0).await;
+        let processing = inbound.claim_next().await.unwrap().expect("processing row");
+        assert_eq!(
+            processing.scheduler_job_id.as_deref(),
+            Some("replace-processing")
+        );
+        scheduler.fire(0).await;
+        scheduler.fire(0).await;
+
+        let queued = inbound
+            .claim_next()
+            .await
+            .unwrap()
+            .expect("newest pending row");
+        assert_eq!(
+            queued.scheduler_job_id.as_deref(),
+            Some("replace-processing")
+        );
+        assert!(
+            inbound.claim_next().await.unwrap().is_none(),
+            "replace policy should leave only one pending row behind processing"
+        );
+        let row = store.get("replace-processing").unwrap().expect("run row");
+        assert_eq!(row.last_status.as_deref(), Some("enqueued"));
+        assert_eq!(row.total_fires, 3);
+        assert_eq!(row.replaced_fires, 1);
+        assert_eq!(row.skipped_fires, 0);
     }
 
     // YYC-17 PR-2: a configured + enabled job round-trips through

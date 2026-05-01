@@ -141,6 +141,7 @@ impl Platform for LoopbackPlatform {
             chat_id: parsed["chat_id"].as_str().unwrap_or_default().to_string(),
             user_id: parsed["user_id"].as_str().unwrap_or_default().to_string(),
             text: parsed["text"].as_str().unwrap_or_default().to_string(),
+            scheduler_job_id: None,
             message_id: None,
             reply_to: None,
             attachments: vec![],

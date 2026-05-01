@@ -33,6 +33,7 @@ pub async fn handle(
         chat_id: body.chat_id,
         user_id: body.user_id,
         text: body.text,
+        scheduler_job_id: None,
         message_id: None,
         reply_to: None,
         attachments: vec![],

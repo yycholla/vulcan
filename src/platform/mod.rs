@@ -12,6 +12,9 @@ pub struct InboundMessage {
     pub chat_id: String,
     pub user_id: String,
     pub text: String,
+    /// Scheduled Job id for synthetic scheduler messages. `None` for
+    /// user/platform-originated messages.
+    pub scheduler_job_id: Option<String>,
     /// Platform's id for this received message. Populated when the
     /// platform connector knows it (Discord/Telegram); `None` for
     /// loopback/CLI which don't have a wire concept of a message id.

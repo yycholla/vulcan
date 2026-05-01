@@ -53,6 +53,7 @@ impl DiscordPlatform {
             chat_id: channel_id.to_string(),
             user_id: user_id.to_string(),
             text: text.to_string(),
+            scheduler_job_id: None,
             message_id: Some(message_id.to_string()),
             reply_to: reply_to.map(|r| r.to_string()),
             attachments,

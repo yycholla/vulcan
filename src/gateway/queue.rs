@@ -54,6 +54,7 @@ pub struct InboundRow {
     pub chat_id: String,
     pub user_id: String,
     pub text: String,
+    pub scheduler_job_id: Option<String>,
     pub received_at: i64,
     pub attempts: i64,
 }
@@ -98,9 +99,17 @@ impl InboundQueue {
         db_blocking(self.conn.clone(), move |conn| {
             let now = chrono::Utc::now().timestamp();
             conn.execute(
-                "INSERT INTO inbound_queue (platform, chat_id, user_id, text, received_at, state) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, 'pending')",
-                params![msg.platform, msg.chat_id, msg.user_id, msg.text, now],
+                "INSERT INTO inbound_queue \
+                     (platform, chat_id, user_id, text, scheduler_job_id, received_at, state) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'pending')",
+                params![
+                    msg.platform,
+                    msg.chat_id,
+                    msg.user_id,
+                    msg.text,
+                    msg.scheduler_job_id,
+                    now
+                ],
             )?;
             Ok(conn.last_insert_rowid())
         })
@@ -118,7 +127,7 @@ impl InboundQueue {
                  SET state='processing', attempts = attempts + 1, last_heartbeat_at = ?1 \
                  WHERE id = (SELECT id FROM inbound_queue WHERE state='pending' \
                              ORDER BY received_at ASC LIMIT 1) \
-                 RETURNING id, platform, chat_id, user_id, text, received_at, attempts",
+                 RETURNING id, platform, chat_id, user_id, text, scheduler_job_id, received_at, attempts",
             )?;
             let mut rows = stmt.query(params![now])?;
             if let Some(row) = rows.next()? {
@@ -128,8 +137,9 @@ impl InboundQueue {
                     chat_id: row.get(2)?,
                     user_id: row.get(3)?,
                     text: row.get(4)?,
-                    received_at: row.get(5)?,
-                    attempts: row.get(6)?,
+                    scheduler_job_id: row.get(5)?,
+                    received_at: row.get(6)?,
+                    attempts: row.get(7)?,
                 }))
             } else {
                 Ok(None)
@@ -247,6 +257,66 @@ impl InboundQueue {
                  WHERE state='processing' \
                    AND (last_heartbeat_at IS NULL OR last_heartbeat_at < ?1)",
                 params![cutoff],
+            )?;
+            Ok(n)
+        })
+        .await
+    }
+
+    /// Recover stale processing rows for one Scheduled Job before an
+    /// overlap-policy decision. Fresh processing rows remain active;
+    /// stale rows become pending so normal retry/replace policy can see them.
+    pub async fn recover_stale_scheduled_processing(
+        &self,
+        scheduler_job_id: &str,
+    ) -> Result<usize> {
+        let stale_secs = self.heartbeat_stale_secs;
+        let scheduler_job_id = scheduler_job_id.to_string();
+        db_blocking(self.conn.clone(), move |conn| {
+            let now = chrono::Utc::now().timestamp();
+            let cutoff = now - stale_secs;
+            let n = conn.execute(
+                "UPDATE inbound_queue SET state='pending' \
+                 WHERE scheduler_job_id = ?1 \
+                   AND state='processing' \
+                   AND (last_heartbeat_at IS NULL OR last_heartbeat_at < ?2)",
+                params![scheduler_job_id, cutoff],
+            )?;
+            Ok(n)
+        })
+        .await
+    }
+
+    /// Return whether a Scheduled Job has an active firing: a pending row or
+    /// a processing row whose heartbeat is still fresh.
+    pub async fn has_active_scheduled_firing(&self, scheduler_job_id: &str) -> Result<bool> {
+        let stale_secs = self.heartbeat_stale_secs;
+        let scheduler_job_id = scheduler_job_id.to_string();
+        db_blocking(self.conn.clone(), move |conn| {
+            let now = chrono::Utc::now().timestamp();
+            let cutoff = now - stale_secs;
+            let count: i64 = conn.query_row(
+                "SELECT count(*) FROM inbound_queue \
+                 WHERE scheduler_job_id = ?1 \
+                   AND (state='pending' \
+                        OR (state='processing' AND last_heartbeat_at IS NOT NULL AND last_heartbeat_at >= ?2))",
+                params![scheduler_job_id, cutoff],
+                |row| row.get(0),
+            )?;
+            Ok(count > 0)
+        })
+        .await
+    }
+
+    /// Delete pending firings for a Scheduled Job and return how many were
+    /// coalesced. Processing rows are never cancelled by scheduler overlap.
+    pub async fn delete_pending_scheduled_firings(&self, scheduler_job_id: &str) -> Result<usize> {
+        let scheduler_job_id = scheduler_job_id.to_string();
+        db_blocking(self.conn.clone(), move |conn| {
+            let n = conn.execute(
+                "DELETE FROM inbound_queue \
+                 WHERE scheduler_job_id = ?1 AND state = 'pending'",
+                params![scheduler_job_id],
             )?;
             Ok(n)
         })
@@ -573,6 +643,7 @@ mod tests {
                     chat_id: format!("c{i}"),
                     user_id: "u1".into(),
                     text: format!("msg-{i}"),
+                    scheduler_job_id: None,
                     message_id: None,
                     reply_to: None,
                     attachments: vec![],
@@ -612,6 +683,7 @@ mod tests {
             chat_id: "c1".into(),
             user_id: "u1".into(),
             text: "hi".into(),
+            scheduler_job_id: None,
             message_id: None,
             reply_to: None,
             attachments: vec![],
@@ -875,6 +947,18 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn scheduler_job_id_round_trips_through_inbound_queue() {
+        let q = InboundQueue::new(test_conn());
+        let mut msg = sample_msg();
+        msg.scheduler_job_id = Some("daily-summary".into());
+
+        q.enqueue(msg).await.unwrap();
+        let claimed = q.claim_next().await.unwrap().expect("claim returns row");
+
+        assert_eq!(claimed.scheduler_job_id.as_deref(), Some("daily-summary"));
+    }
+
+    #[tokio::test]
     async fn claim_marks_processing_so_second_claim_returns_none() {
         let q = InboundQueue::new(test_conn());
         let id = q.enqueue(sample_msg()).await.unwrap();
@@ -984,6 +1068,33 @@ mod tests {
         assert!(
             stale.claim_next().await.unwrap().is_some(),
             "stale row should be re-claimable after recovery",
+        );
+    }
+
+    #[tokio::test]
+    async fn scheduled_overlap_recovery_resets_only_matching_stale_processing_rows() {
+        let q = InboundQueue::with_policy(test_conn(), 3, -1);
+        let mut target = sample_msg();
+        target.scheduler_job_id = Some("target-job".into());
+        let mut other = sample_msg();
+        other.scheduler_job_id = Some("other-job".into());
+
+        q.enqueue(target).await.unwrap();
+        q.enqueue(other).await.unwrap();
+        let _ = q.claim_next().await.unwrap().expect("target processing");
+        let _ = q.claim_next().await.unwrap().expect("other processing");
+
+        let recovered = q
+            .recover_stale_scheduled_processing("target-job")
+            .await
+            .unwrap();
+
+        assert_eq!(recovered, 1);
+        let row = q.claim_next().await.unwrap().expect("target recovered");
+        assert_eq!(row.scheduler_job_id.as_deref(), Some("target-job"));
+        assert!(
+            q.claim_next().await.unwrap().is_none(),
+            "other job should stay processing"
         );
     }
 

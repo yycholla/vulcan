@@ -89,6 +89,9 @@ CREATE TABLE IF NOT EXISTS inbound_queue (
   -- recover_processing only resets rows whose heartbeat is stale relative
   -- to the configured threshold (YYC-137).
   last_heartbeat_at INTEGER,
+  -- Scheduled Job id for synthetic scheduler firings. NULL for real
+  -- platform-originated user messages.
+  scheduler_job_id TEXT,
   -- YYC-18 PR-2a: typed attachments serialized as JSON (Vec<Attachment>).
   attachments_json TEXT NOT NULL DEFAULT '[]',
   -- Platform's id for the received message (Discord/Telegram); NULL for
@@ -135,6 +138,7 @@ CREATE TABLE IF NOT EXISTS scheduler_runs (
     last_inbound_id  INTEGER,
     total_fires      INTEGER NOT NULL DEFAULT 0,
     skipped_fires    INTEGER NOT NULL DEFAULT 0,
+    replaced_fires   INTEGER NOT NULL DEFAULT 0,
     failed_fires     INTEGER NOT NULL DEFAULT 0
 );
 "#;
@@ -161,6 +165,18 @@ pub(in crate::memory) fn initialize_conn(conn: &Connection) -> Result<()> {
     let _ = conn.execute("ALTER TABLE inbound_queue ADD COLUMN last_error TEXT", []);
     let _ = conn.execute(
         "ALTER TABLE inbound_queue ADD COLUMN last_heartbeat_at INTEGER",
+        [],
+    );
+    let _ = conn.execute(
+        "ALTER TABLE inbound_queue ADD COLUMN scheduler_job_id TEXT",
+        [],
+    );
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_inbound_scheduler_job ON inbound_queue(scheduler_job_id, state, received_at)",
+        [],
+    )?;
+    let _ = conn.execute(
+        "ALTER TABLE scheduler_runs ADD COLUMN replaced_fires INTEGER NOT NULL DEFAULT 0",
         [],
     );
     // YYC-18 PR-2a: payload extensions for outbound + inbound queues.

@@ -4,8 +4,8 @@
 //! re-deploy with updated cron text or prompt body takes effect on
 //! restart. This module is for the *mutable* counterpart: per-job
 //! run history (last fire timestamp, last status, total / skipped /
-//! failed fire counts) plus the running-flag the overlap-policy
-//! gate consults.
+//! failed fire counts) plus replacement counters used by the
+//! overlap-policy gate.
 //!
 //! Storage is the same SQLite file the gateway queues use. The
 //! scheduler holds a `SchedulerStore` that hands out short-lived
@@ -58,6 +58,7 @@ pub struct ScheduledRun {
     pub last_inbound_id: Option<i64>,
     pub total_fires: u64,
     pub skipped_fires: u64,
+    pub replaced_fires: u64,
     pub failed_fires: u64,
 }
 
@@ -84,18 +85,31 @@ impl SchedulerStore {
     /// `last_status = 'enqueued'`, and stamps the row with the
     /// inbound queue id so observability can join the two tables.
     pub fn record_enqueued(&self, job_id: &str, fired_at: i64, inbound_id: i64) -> Result<()> {
+        self.record_enqueued_replacing(job_id, fired_at, inbound_id, 0)
+    }
+
+    /// Record an enqueued firing after coalescing older pending firings for the
+    /// same Scheduled Job. `replaced_count` counts rows removed before enqueue.
+    pub fn record_enqueued_replacing(
+        &self,
+        job_id: &str,
+        fired_at: i64,
+        inbound_id: i64,
+        replaced_count: usize,
+    ) -> Result<()> {
         let conn = self.conn()?;
         conn.execute(
             "INSERT INTO scheduler_runs \
-                 (job_id, last_fired_at, last_status, last_error, last_inbound_id, total_fires, skipped_fires, failed_fires) \
-             VALUES (?1, ?2, 'enqueued', NULL, ?3, 1, 0, 0) \
+                 (job_id, last_fired_at, last_status, last_error, last_inbound_id, total_fires, skipped_fires, replaced_fires, failed_fires) \
+             VALUES (?1, ?2, 'enqueued', NULL, ?3, 1, 0, ?4, 0) \
              ON CONFLICT(job_id) DO UPDATE SET \
                  last_fired_at = excluded.last_fired_at, \
                  last_status = excluded.last_status, \
                  last_error = NULL, \
                  last_inbound_id = excluded.last_inbound_id, \
-                 total_fires = scheduler_runs.total_fires + 1",
-            params![job_id, fired_at, inbound_id],
+                 total_fires = scheduler_runs.total_fires + 1, \
+                 replaced_fires = scheduler_runs.replaced_fires + excluded.replaced_fires",
+            params![job_id, fired_at, inbound_id, replaced_count as i64],
         )?;
         Ok(())
     }
@@ -107,8 +121,8 @@ impl SchedulerStore {
         let conn = self.conn()?;
         conn.execute(
             "INSERT INTO scheduler_runs \
-                 (job_id, last_fired_at, last_status, total_fires, skipped_fires, failed_fires) \
-             VALUES (?1, ?2, 'skipped', 1, 1, 0) \
+                 (job_id, last_fired_at, last_status, total_fires, skipped_fires, replaced_fires, failed_fires) \
+             VALUES (?1, ?2, 'skipped', 1, 1, 0, 0) \
              ON CONFLICT(job_id) DO UPDATE SET \
                  last_fired_at = excluded.last_fired_at, \
                  last_status = excluded.last_status, \
@@ -126,8 +140,8 @@ impl SchedulerStore {
         let conn = self.conn()?;
         conn.execute(
             "INSERT INTO scheduler_runs \
-                 (job_id, last_fired_at, last_status, last_error, total_fires, skipped_fires, failed_fires) \
-             VALUES (?1, ?2, 'enqueue_failed', ?3, 1, 0, 1) \
+                 (job_id, last_fired_at, last_status, last_error, total_fires, skipped_fires, replaced_fires, failed_fires) \
+             VALUES (?1, ?2, 'enqueue_failed', ?3, 1, 0, 0, 1) \
              ON CONFLICT(job_id) DO UPDATE SET \
                  last_fired_at = excluded.last_fired_at, \
                  last_status = excluded.last_status, \
@@ -146,7 +160,7 @@ impl SchedulerStore {
         let row = conn
             .query_row(
                 "SELECT job_id, last_fired_at, last_status, last_error, last_inbound_id, \
-                        total_fires, skipped_fires, failed_fires \
+                        total_fires, skipped_fires, replaced_fires, failed_fires \
                  FROM scheduler_runs WHERE job_id = ?1",
                 params![job_id],
                 |row| {
@@ -158,7 +172,8 @@ impl SchedulerStore {
                         last_inbound_id: row.get(4)?,
                         total_fires: row.get::<_, i64>(5)?.max(0) as u64,
                         skipped_fires: row.get::<_, i64>(6)?.max(0) as u64,
-                        failed_fires: row.get::<_, i64>(7)?.max(0) as u64,
+                        replaced_fires: row.get::<_, i64>(7)?.max(0) as u64,
+                        failed_fires: row.get::<_, i64>(8)?.max(0) as u64,
                     })
                 },
             )
@@ -173,7 +188,7 @@ impl SchedulerStore {
         let conn = self.conn()?;
         let mut stmt = conn.prepare(
             "SELECT job_id, last_fired_at, last_status, last_error, last_inbound_id, \
-                    total_fires, skipped_fires, failed_fires \
+                    total_fires, skipped_fires, replaced_fires, failed_fires \
              FROM scheduler_runs ORDER BY job_id ASC",
         )?;
         let rows = stmt
@@ -186,7 +201,8 @@ impl SchedulerStore {
                     last_inbound_id: row.get(4)?,
                     total_fires: row.get::<_, i64>(5)?.max(0) as u64,
                     skipped_fires: row.get::<_, i64>(6)?.max(0) as u64,
-                    failed_fires: row.get::<_, i64>(7)?.max(0) as u64,
+                    replaced_fires: row.get::<_, i64>(7)?.max(0) as u64,
+                    failed_fires: row.get::<_, i64>(8)?.max(0) as u64,
                 })
             })?
             .collect::<rusqlite::Result<Vec<_>>>()

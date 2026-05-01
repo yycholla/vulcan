@@ -169,6 +169,7 @@ impl TelegramPlatform {
             chat_id: chat_id.to_string(),
             user_id: user_id.to_string(),
             text: trimmed.to_string(),
+            scheduler_job_id: None,
             message_id: Some(message_id.to_string()),
             reply_to: reply_to.map(|r| r.to_string()),
             attachments,

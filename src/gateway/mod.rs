@@ -579,6 +579,7 @@ mod tests {
                 chat_id: "c".into(),
                 user_id: "u".into(),
                 text: "recover me".into(),
+                scheduler_job_id: None,
                 message_id: None,
                 reply_to: None,
                 attachments: vec![],
