@@ -270,7 +270,6 @@ fn install_daemon_subagent_runner(
     ));
     agent.install_subagent_runner(
         Arc::new(state.config().clone()),
-        state.pool().cloned(),
         parent_session_id.to_string(),
         runner,
     );

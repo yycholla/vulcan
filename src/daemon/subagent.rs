@@ -59,7 +59,6 @@ impl SubagentRunner for DaemonSubagentRunner {
         let nested_runner = Arc::new(DaemonSubagentRunner::new(Arc::clone(&self.state)));
         child.install_subagent_runner(
             Arc::new(self.state.config().clone()),
-            self.state.pool().cloned(),
             child_session_id.clone(),
             nested_runner,
         );

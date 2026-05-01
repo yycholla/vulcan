@@ -1,16 +1,15 @@
 //! YYC-82: spawn_subagent tool — scoped child agent with budget.
 //!
 //! The parent agent dispatches a focused task to a child agent.
-//! Daemon-managed parents delegate execution to daemon child sessions;
-//! direct-mode parents keep the legacy in-process path. The child
-//! receives a restricted tool registry filtered to an explicit
-//! allowlist, and the parent receives a bounded summary plus budget
-//! usage stats, not a live transcript dump.
+//! Execution requires a daemon runner, which delegates to daemon child
+//! sessions. The child receives a restricted tool registry filtered to
+//! an explicit allowlist, and the parent receives a bounded summary
+//! plus budget usage stats, not a live transcript dump.
 //!
 //! ## Scope of this PR
 //!
 //! - Run child work behind the `SubagentRunner` seam when installed.
-//! - Keep a direct `Agent::builder` fallback for non-daemon callers.
+//! - Require daemon-backed child sessions for execution.
 //! - Hard cap on loop iterations (`max_iterations`).
 //! - Conservative default tool allowlist (read-only).
 //! - Daemon child-session lineage when running under the daemon.
@@ -35,9 +34,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use tokio_util::sync::CancellationToken;
 
-use crate::agent::Agent;
 use crate::config::Config;
-use crate::hooks::HookRegistry;
 use crate::orchestration::{ChildAgentId, OrchestrationStore};
 use crate::tools::{Tool, ToolResult, parse_tool_params};
 
@@ -131,12 +128,6 @@ pub struct SpawnSubagentTool {
     /// completes, the tool writes a `SubagentSummary` artifact here
     /// so the parent's `vulcan run show` view can link to it.
     artifact_store: Option<Arc<dyn crate::artifact::ArtifactStore>>,
-    /// Slice 7 (partial): when present, child Agents assemble from
-    /// the daemon's shared [`RuntimeResourcePool`] instead of opening
-    /// their own SQLite connections / orchestration store. Full
-    /// daemon-routed child sessions (parent calls `session.create`
-    /// over the in-process seam) remain follow-up work.
-    pool: Option<Arc<crate::runtime_pool::RuntimeResourcePool>>,
     /// Slice 7 lineage: parent agent's session id, captured at
     /// build time. Stamped onto the orchestration record so the
     /// TUI / run viewer can link a child run back to the
@@ -166,7 +157,6 @@ impl SpawnSubagentTool {
             config,
             orchestration,
             artifact_store: None,
-            pool: None,
             parent_session_id: None,
             parent_run_handle: None,
             subagent_runner: None,
@@ -197,14 +187,6 @@ impl SpawnSubagentTool {
     /// child-summary artifacts land alongside the parent's run.
     pub fn with_artifact_store(mut self, store: Arc<dyn crate::artifact::ArtifactStore>) -> Self {
         self.artifact_store = Some(store);
-        self
-    }
-
-    /// Slice 7: hand the tool the daemon's [`RuntimeResourcePool`]
-    /// so child agents share the parent's storage adapters and
-    /// orchestration store rather than rebuilding them.
-    pub fn with_pool(mut self, pool: Arc<crate::runtime_pool::RuntimeResourcePool>) -> Self {
-        self.pool = Some(pool);
         self
     }
 
@@ -346,72 +328,10 @@ impl Tool for SpawnSubagentTool {
                 .await;
         }
 
-        // Slice 7 fallback: direct-mode callers that don't install a
-        // daemon runner still use the legacy child Agent path.
-        // YYC-181: when a named profile was requested, build the
-        // child under it so the child's registry records the
-        // `active_profile` for run-record / doctor visibility. When
-        // the parent passed an explicit `allowed_tools` list instead,
-        // fall back to `restrict_tools` so the child still narrows
-        // correctly.
-        let mut builder = Agent::builder(self.config.as_ref())
-            .with_hooks(HookRegistry::new())
-            .with_max_iterations(max_iter)
-            .with_tool_profile(profile_name.clone());
-        if let Some(pool) = &self.pool {
-            builder = builder.with_pool(Arc::clone(pool));
-        }
-        let child = builder.build().await;
-        let mut child = match child {
-            Ok(c) => c,
-            Err(e) => {
-                self.orchestration.mark_failed(
-                    child_id,
-                    format!("child agent build failed: {e}"),
-                    0,
-                );
-                return Ok(ToolResult::err(format!("child agent build failed: {e}")));
-            }
-        };
-        if profile_name.is_none() {
-            child.restrict_tools(&allowed);
-        }
-        let run_result = match parent_run_id {
-            Some(prid) => {
-                child
-                    .run_prompt_with_cancel_origin(
-                        &task,
-                        child_cancel.clone(),
-                        crate::run_record::RunOrigin::Subagent {
-                            parent_run_id: prid,
-                        },
-                    )
-                    .await
-            }
-            None => {
-                child
-                    .run_prompt_with_cancel(&task, child_cancel.clone())
-                    .await
-            }
-        };
-        // YYC-209: child run finished one way or another; drop the
-        // handle so the store's cancel map only carries live
-        // children. Done before the cancellation check below so
-        // even the cancelled-by-parent path forgets the handle.
         self.orchestration.forget_cancel_handle(child_id);
-        // YYC-211: snapshot the child's cumulative token total
-        // for the orchestration record + tool payload. Read once
-        // because subsequent calls would observe the same fresh
-        // child agent's lifetime tally.
-        let tokens_consumed = child.tokens_consumed();
-        let iterations = child.iterations();
-        let run_result = run_result.map(|final_text| SubagentRunOutput {
-            final_text,
-            iterations,
-            tokens_consumed,
-        });
-        self.finish_child_result(child_id, task, allowed.len(), max_iter, run_result, cancel)
-            .await
+        let message = "SUBAGENT_REQUIRES_DAEMON: spawn_subagent requires daemon session wiring";
+        self.orchestration.mark_failed(child_id, message, 0);
+        Ok(ToolResult::err(message.to_string()))
     }
 }
 
@@ -593,6 +513,33 @@ mod tests {
             result.output.contains("unknown tool capability profile"),
             "expected typed denial, got {:?}",
             result.output
+        );
+    }
+
+    #[tokio::test]
+    async fn missing_runner_requires_daemon() {
+        let cfg = Arc::new(Config::default());
+        let store = Arc::new(OrchestrationStore::new());
+        let tool = SpawnSubagentTool::with_store(cfg, Arc::clone(&store));
+
+        let result = tool
+            .call(
+                json!({"task": "inspect daemon-only execution"}),
+                CancellationToken::new(),
+            )
+            .await
+            .expect("call ok");
+
+        assert!(result.is_error);
+        assert!(result.output.contains("SUBAGENT_REQUIRES_DAEMON"));
+        let recent = store.recent(1);
+        assert_eq!(recent[0].status, crate::orchestration::ChildStatus::Failed);
+        assert!(
+            recent[0]
+                .error
+                .as_deref()
+                .unwrap_or_default()
+                .contains("spawn_subagent requires daemon session")
         );
     }
 

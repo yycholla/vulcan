@@ -28,11 +28,12 @@ Implemented and verified in the codebase:
 - Cortex admin/storage fix from the runtime-resource-pool plan is implemented: stats, edge operations, delete, decay, search, traverse, and prompt management route through daemon-owned cortex storage.
 - Slice 5 client transport multiplexing is implemented: the client transport has one read task keyed by request id, supports stream frames and `id: null` push frames, and the daemon server keeps reading the same socket while a stream is in flight by running per-request dispatch behind one serialized writer queue.
 - Slice 6 gateway shared daemon client is implemented: gateway runtime owns one reusable daemon client, workers and slash-command handlers share it, and `DaemonLaneRouter` owns only lane/session mapping.
-- Slice 7 child sessions for subagents is implemented for daemon-managed turns: live daemon session metadata records parent session id and lineage label, and daemon-managed `spawn_subagent` delegates to daemon child sessions instead of building direct child agents.
+- Slice 7 child sessions for subagents is implemented for daemon-managed turns: live daemon session metadata records parent session id and lineage label, and `spawn_subagent` delegates to daemon child sessions instead of building direct child agents.
+- Direct child-agent fallback has been removed; missing daemon session wiring now surfaces as `SUBAGENT_REQUIRES_DAEMON`.
 
 Known remaining work:
 
-- Slice 7 hardening: add a provider-backed daemon integration test for a real prompt-triggered `spawn_subagent`; direct child-agent fallback remains only for non-daemon callers.
+- Slice 7 hardening: add a provider-backed daemon integration test for a real prompt-triggered `spawn_subagent`.
 - Daemon config reload is still mostly a validated stub for full runtime reconfiguration; restarting the daemon is required for some resource shape changes.
 - Some old plan bullets below are historical and have been superseded by the runtime-resource-pool plan and follow-up commits.
 

@@ -597,25 +597,19 @@ impl Agent {
         // parent's run. The earlier registration sat without an
         // artifact handle; replacing it here keeps registration
         // ordering deterministic.
-        // Slice 7 (partial): when the parent assembled from a pool,
-        // hand the same pool to the spawn tool so its child Agents
-        // also reuse the daemon-owned storage adapters.
         // Slice 7: shared handle to the parent's live `current_run_id`.
         // Same Arc lives on the Agent and on the spawn tool; the
         // tool reads it at spawn time to stamp child runs with
         // `RunOrigin::Subagent { parent_run_id }`.
         let current_run_id: Arc<parking_lot::Mutex<Option<crate::run_record::RunId>>> =
             Arc::new(parking_lot::Mutex::new(None));
-        let mut spawn_tool = crate::tools::spawn::SpawnSubagentTool::with_store(
+        let spawn_tool = crate::tools::spawn::SpawnSubagentTool::with_store(
             Arc::clone(&config_arc),
             Arc::clone(&orchestration),
         )
         .with_artifact_store(Arc::clone(&artifact_store))
         .with_parent_session_id(session_id.clone())
         .with_parent_run_handle(Arc::clone(&current_run_id));
-        if let Some(pool) = &pool {
-            spawn_tool = spawn_tool.with_pool(Arc::clone(pool));
-        }
         tools.register(Arc::new(spawn_tool));
 
         Ok(Self {
@@ -771,11 +765,10 @@ impl Agent {
     pub(crate) fn install_subagent_runner(
         &mut self,
         config: Arc<Config>,
-        pool: Option<Arc<RuntimeResourcePool>>,
         parent_session_id: impl Into<String>,
         runner: Arc<dyn crate::tools::spawn::SubagentRunner>,
     ) {
-        let mut spawn_tool = crate::tools::spawn::SpawnSubagentTool::with_store(
+        let spawn_tool = crate::tools::spawn::SpawnSubagentTool::with_store(
             config,
             Arc::clone(&self.orchestration),
         )
@@ -783,9 +776,6 @@ impl Agent {
         .with_parent_session_id(parent_session_id)
         .with_parent_run_handle(Arc::clone(&self.current_run_id))
         .with_subagent_runner(runner);
-        if let Some(pool) = pool {
-            spawn_tool = spawn_tool.with_pool(pool);
-        }
         self.tools.register(Arc::new(spawn_tool));
     }
 

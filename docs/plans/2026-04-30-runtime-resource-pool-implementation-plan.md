@@ -17,8 +17,9 @@ The goal is to remove direct-mode assumptions from agent execution, make session
 - Slice 4 was deepened after testing: cortex prompt management now routes through daemon-owned cortex storage, and daemon cortex startup failures report the real open error instead of only `CORTEX_DISABLED`.
 - Slice 5 is implemented: client-side request-id routing exists for normal responses, stream frames, and `id: null` push frames; daemon server handling continues reading the socket while stream requests are in flight and serializes outbound frames through one writer queue.
 - Slice 6 is implemented: gateway runtime owns one reusable daemon client, workers and gateway slash commands share it, and `DaemonLaneRouter` is back to lane/session mapping only.
-- Slice 7 is implemented for daemon-managed turns: `session.create` accepts child-session lineage metadata, `session.list` exposes parent session and lineage labels, and daemon-managed `spawn_subagent` now runs through daemon child sessions via a `SubagentRunner` seam.
-- Remaining Slice 7 hardening: exercise a full daemon prompt that calls `spawn_subagent` once provider-backed integration fixtures are available; direct in-process fallback remains only for non-daemon callers.
+- Slice 7 is implemented for daemon-managed turns: `session.create` accepts child-session lineage metadata, `session.list` exposes parent session and lineage labels, and `spawn_subagent` now runs through daemon child sessions via a `SubagentRunner` seam.
+- Direct child-agent construction fallback has been removed. If `spawn_subagent` is called before daemon session wiring installs a runner, it returns `SUBAGENT_REQUIRES_DAEMON`; launch paths are expected to auto-start/connect to the daemon before prompts run.
+- Remaining Slice 7 hardening: exercise a full daemon prompt that calls `spawn_subagent` once provider-backed integration fixtures are available.
 
 ## Slice 1: Turn Runner Seam
 
@@ -125,7 +126,7 @@ Move delegated agent work from direct child `Agent` construction to daemon child
 
 Acceptance:
 
-- Daemon-managed `spawn_subagent` does not build a direct in-process child agent.
+- `spawn_subagent` does not build a direct in-process child agent.
 - Child work uses the same daemon/session/turn semantics as frontend work.
 - Parent-child lineage is visible through run records and session metadata.
 
