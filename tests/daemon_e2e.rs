@@ -7,15 +7,25 @@
 
 use assert_cmd::Command;
 use predicates::prelude::*;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 use tempfile::tempdir;
 
 fn vulcan_with_home(home: &Path) -> Command {
-    let mut c = Command::cargo_bin("vulcan").unwrap();
+    let mut c = match std::env::var_os("CARGO_BIN_EXE_vulcan") {
+        Some(path) => Command::new(path),
+        None => Command::new(vulcan_bin_path()),
+    };
     c.env("VULCAN_HOME", home);
     c.env("RUST_LOG", "warn");
     c
+}
+
+fn vulcan_bin_path() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("target")
+        .join("debug")
+        .join("vulcan")
 }
 
 fn wait_for_socket(home: &Path, timeout: Duration) -> bool {

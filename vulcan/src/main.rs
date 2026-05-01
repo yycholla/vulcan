@@ -248,7 +248,7 @@ async fn main() -> anyhow::Result<()> {
         #[cfg(feature = "daemon")]
         Some(Command::HiddenPing) => {
             init_cli_logging();
-            let mut client = vulcan::client::Client::connect_or_autostart().await?;
+            let client = vulcan::client::Client::connect_or_autostart().await?;
             let result = client.call("daemon.ping", serde_json::json!({})).await?;
             println!("{}", serde_json::to_string_pretty(&result)?);
         }
@@ -381,7 +381,7 @@ async fn run_search_direct(query: &str, limit: usize) -> anyhow::Result<()> {
 
 #[cfg(feature = "daemon")]
 async fn prompt_via_daemon(text: String, _profile: Option<String>) -> anyhow::Result<()> {
-    let mut client = vulcan::client::Client::connect_or_autostart().await?;
+    let client = vulcan::client::Client::connect_or_autostart().await?;
     // For CLI: use prompt.run (buffered, simpler) — the streaming
     // TUI uses prompt.stream.
     let result = client
@@ -393,7 +393,7 @@ async fn prompt_via_daemon(text: String, _profile: Option<String>) -> anyhow::Re
 
 #[cfg(feature = "daemon")]
 async fn search_via_daemon(query: String, limit: usize) -> anyhow::Result<()> {
-    let mut client = vulcan::client::Client::connect_or_autostart().await?;
+    let client = vulcan::client::Client::connect_or_autostart().await?;
     let result = client
         .call(
             "session.search",
