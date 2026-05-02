@@ -40,11 +40,13 @@ pub(in crate::agent) struct TurnOutcome {
 /// Slice 1 keeps existing `Agent` methods as adapters, but new turn execution
 /// behavior should move behind this seam instead of growing parallel buffered
 /// and streaming paths.
+#[allow(dead_code)]
 pub(in crate::agent) struct TurnRunner<'a> {
     pub(in crate::agent) agent: &'a Agent,
 }
 
 impl<'a> TurnRunner<'a> {
+    #[allow(dead_code)]
     pub(in crate::agent) fn new(agent: &'a Agent) -> Self {
         Self { agent }
     }
@@ -82,6 +84,7 @@ pub(in crate::agent) enum TurnEvent {
         name: String,
         ok: bool,
         output_preview: Option<String>,
+        details: Option<serde_json::Value>,
         result_meta: Option<String>,
         elided_lines: usize,
         elapsed_ms: u64,
@@ -120,6 +123,7 @@ impl From<StreamEvent> for TurnEvent {
                 name,
                 ok,
                 output_preview,
+                details,
                 result_meta,
                 elided_lines,
                 elapsed_ms,
@@ -128,6 +132,7 @@ impl From<StreamEvent> for TurnEvent {
                 name,
                 ok,
                 output_preview,
+                details,
                 result_meta,
                 elided_lines,
                 elapsed_ms,
@@ -157,6 +162,7 @@ impl From<TurnEvent> for StreamEvent {
                 name,
                 ok,
                 output_preview,
+                details,
                 result_meta,
                 elided_lines,
                 elapsed_ms,
@@ -165,6 +171,7 @@ impl From<TurnEvent> for StreamEvent {
                 name,
                 ok,
                 output_preview,
+                details,
                 result_meta,
                 elided_lines,
                 elapsed_ms,

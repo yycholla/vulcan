@@ -505,13 +505,20 @@ impl Agent {
             let ctx = crate::extensions::api::SessionExtensionCtx {
                 cwd: cwd.clone(),
                 session_id: session_id.clone(),
+                memory: Arc::clone(&memory),
             };
-            session_extensions = p
-                .extension_registry()
-                .wire_daemon_extensions_runtime(ctx, &hooks);
+            let registry = p.extension_registry();
+            session_extensions = registry.wire_daemon_extensions_runtime(ctx, &hooks);
             for ext in &session_extensions {
                 for tool in ext.wrapped_tools() {
-                    tools.register(tool);
+                    if let Err(err) = tools.register_extension_tool(ext.id(), tool) {
+                        registry.mark_broken(ext.id(), err.to_string());
+                        tracing::warn!(
+                            extension_id = ext.id(),
+                            %err,
+                            "Agent: failed to register extension tool"
+                        );
+                    }
                 }
                 ext.activate().await;
             }
@@ -962,13 +969,14 @@ impl Agent {
         let ctx = crate::extensions::api::SessionExtensionCtx {
             cwd: self.tool_context.cwd.clone(),
             session_id: self.session_id.clone(),
+            memory: Arc::clone(&self.memory),
         };
         let Some(runtime) = registry.instantiate_daemon_extension_runtime(id, ctx, &self.hooks)
         else {
             return Ok(false);
         };
         for tool in runtime.wrapped_tools() {
-            self.tools.register(tool);
+            self.tools.register_extension_tool(runtime.id(), tool)?;
         }
         runtime.activate().await;
         self.session_extensions.push(runtime);

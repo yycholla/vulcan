@@ -28,16 +28,28 @@ _Avoid_: feature flag, runtime capability
 Per-**Session**, per-extension state. Lives in two places: `ToolResult.details` (pi-style, branches with **Session History** when a **Child Session** forks) and the daemon-owned **Extension State Store** (out-of-band rows keyed by session + extension + key, branched explicitly on fork unless the **Extension Manifest** opts out).
 _Avoid_: extension memory, extension cache
 
+**Frontend Renderer**:
+A **Frontend Extension** handler that maps a known tool result shape into frontend-native lines or widgets. In the TUI today, renderers consume `ToolResult.details` from the streamed `ToolCallEnd` event and project it into the existing tool-card preview; the durable chat message stores the rendered preview, not the raw details.
+_Avoid_: daemon renderer, persistent UI schema
+
+**Frontend Command**:
+A slash command handled entirely by the **Frontend** before the prompt reaches the daemon. Frontend commands produce local UI actions such as opening a view; commands that need the LLM or daemon state remain daemon/session commands.
+_Avoid_: hidden tool call, daemon-routed UI command
+
 ## Relationships
 
 - Every installed extension that ships a daemon module contributes one **Daemon Extension Factory** to the **Runtime Resource Pool**; the factory is registered once at daemon startup.
 - Each new **Session** instantiates a **Session Extension** from each active **Daemon Extension Factory**; hook instances, tool entries, and daemon-side state live on the **Session Extension**, not the factory.
+- Session extension tools are registered through the runtime bridge with the canonical `<extension_id>_<tool_name>` prefix. Built-in tools remain unprefixed; extension tool collisions mark the extension `Broken`.
+- `ToolResult.details` is the replay contract for session-local extension state. A **Session Extension** may rebuild in-memory state by scanning saved `Message::Tool` history for its own latest details snapshot.
 - A **Frontend** owns its own **Frontend Extension** registry; daemon and frontend extensions are linked into separate binaries even when they ship from the same crate.
 - A **Frontend Extension** consumes daemon push frames addressed to its extension id; it never owns agent state and never receives hook events directly.
 - An extension activates on a **Session** only when the connected **Frontend**'s declared capabilities satisfy the **Extension Manifest**'s required surface.
+- Renderer collisions are resolved in frontend registry order with last-active wins plus a warning; this mirrors extension load order and avoids daemon-side renderer arbitration.
 
 ## ADRs
 
 - `docs/adr/0003-extension-daemon-frontend-split.md` — daemon/frontend split rationale.
 - `docs/adr/0004-extension-distribution-and-lifecycle.md` — Cargo crate distribution + mid-session enable/disable/kill policy.
 - `docs/adr/0005-extension-compaction-control.md` — extension control over compaction with validation safety net.
+- `docs/adr/0006-extension-details-replay-and-frontend-rendering.md` — `ToolResult.details` as replay state plus frontend projection boundary.

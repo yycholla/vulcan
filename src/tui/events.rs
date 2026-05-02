@@ -195,6 +195,7 @@ pub(super) async fn handle_stream_event(
             name,
             ok,
             output_preview,
+            details,
             result_meta,
             elided_lines,
             elapsed_ms,
@@ -203,13 +204,17 @@ pub(super) async fn handle_stream_event(
             if let Some(last) = app.messages.last_mut()
                 && matches!(last.role, ChatRole::Agent)
             {
+                let rendered_preview = app
+                    .frontend
+                    .render_tool_result(&name, ok, output_preview.as_deref(), details.as_ref())
+                    .map(|lines| lines.join("\n"));
                 // YYC-74: stamp preview + meta + timing onto the matching
                 // segment for the card. YYC-78: stash elided count for the
                 // collapse footer.
                 last.finish_tool_with(
                     &name,
                     ok,
-                    output_preview,
+                    rendered_preview.or(output_preview),
                     result_meta,
                     elided_lines,
                     Some(elapsed_ms),

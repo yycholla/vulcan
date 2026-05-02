@@ -46,6 +46,7 @@ use crate::provider::StreamEvent;
 pub mod chat_message;
 pub mod chat_render;
 mod events;
+pub mod frontend;
 mod init;
 pub mod keybinds;
 mod keymap;
@@ -63,6 +64,7 @@ pub mod widgets;
 use state::{AppState, ChatMessage, ChatRole};
 use theme::{Theme, body};
 use views::{View, render_view};
+use vulcan_frontend_api::FrontendCommandAction;
 
 /// What session, if any, the TUI should load on startup.
 #[derive(Debug, Clone)]
@@ -86,6 +88,25 @@ enum KeyEv {
 
 fn short_id(id: &str) -> String {
     id.chars().take(8).collect()
+}
+
+fn apply_frontend_command_action(app: &mut AppState, action: FrontendCommandAction) {
+    match action {
+        FrontendCommandAction::Noop => {}
+        FrontendCommandAction::SystemMessage(content) => {
+            app.messages
+                .push(ChatMessage::new(ChatRole::System, content));
+        }
+        FrontendCommandAction::OpenView { title, body, .. } => {
+            let content = if body.is_empty() {
+                title
+            } else {
+                format!("{title}\n{}", body.join("\n"))
+            };
+            app.messages
+                .push(ChatMessage::new(ChatRole::System, content));
+        }
+    }
 }
 
 pub async fn run_tui(
@@ -119,6 +140,7 @@ pub async fn run_tui(
     // memory-constrained hosts (lower).
     let (stream_tx, mut stream_rx) =
         mpsc::channel::<StreamEvent>(config.provider.effective_stream_channel_capacity());
+    let frontend = frontend::TuiFrontend::collect();
 
     // ── Hook registry: audit-log + (room for safety-gate, etc.). Built-in
     // hooks (skills) are registered by AgentBuilder.
@@ -186,6 +208,7 @@ pub async fn run_tui(
     .with_theme(Theme::from_name(&config.tui.theme))
     .with_keybinds(keybinds::Keybinds::from_config(&config.keybinds));
     app.audit_log = Some(audit_buf);
+    app.frontend = frontend;
     // YYC-66: clone the agent's diff sink so the TUI can render real edits.
     // YYC-67: pull catalog pricing for the cost estimate.
     // YYC-95: if resume restored a provider profile the active model/context
@@ -1059,6 +1082,10 @@ pub async fn run_tui(
                                                 .iter()
                                                 .find(|c| c.name == head)
                                                 .map(|c| c.mid_turn_safe)
+                                                .or_else(|| {
+                                                    app.frontend
+                                                        .is_frontend_command_mid_turn_safe(head)
+                                                })
                                                 .unwrap_or(false)
                                         } else {
                                             false
@@ -1112,11 +1139,18 @@ pub async fn run_tui(
 
                                             // slash commands
                                             if let Some(body) = msg.strip_prefix('/') {
+                                                if let Some(action) = app.frontend.dispatch_slash(&msg) {
+                                                    apply_frontend_command_action(&mut app, action);
+                                                    continue;
+                                                }
                                                 match body {
                                                     "exit" | "quit" => { exit = true; continue; }
                                                     "help" => {
                                                         let mut help = String::from("Commands:");
                                                         for cmd in keymap::SLASH_COMMANDS {
+                                                            help.push_str(&format!("\n  /{:<10}  {}", cmd.name, cmd.description));
+                                                        }
+                                                        for cmd in app.frontend.command_specs() {
                                                             help.push_str(&format!("\n  /{:<10}  {}", cmd.name, cmd.description));
                                                         }
                                                         help.push_str("\n\nKeys:\n  Ctrl+1..5  switch view (1=stack 2=split 3=tiled 4=tree 5=floor)\n  Ctrl+R     toggle reasoning trace\n  Tab        complete slash command");

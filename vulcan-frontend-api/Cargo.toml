@@ -8,3 +8,5 @@ license = "MIT"
 repository = "https://github.com/yycholla/vulcan"
 
 [dependencies]
+inventory = "0.3.24"
+serde_json = "1"

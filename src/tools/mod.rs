@@ -21,6 +21,10 @@ pub struct ToolResult {
     pub output: String,
     pub media: Vec<String>,
     pub is_error: bool,
+    /// Optional structured payload for frontend renderers and extension
+    /// state replay. The LLM-facing `output` remains the canonical text
+    /// content; `details` is for local UI and hooks that know the schema.
+    pub details: Option<Value>,
     /// Optional richer body the TUI uses for the YYC-74 card preview.
     /// Lets file-edit tools render an actual diff (`+ ... / - ...`)
     /// inside the card while the LLM-facing `output` stays terse
@@ -41,6 +45,7 @@ impl ToolResult {
             output: output.into(),
             media: Vec::new(),
             is_error: false,
+            details: None,
             display_preview: None,
             edit_diff: None,
         }
@@ -51,9 +56,15 @@ impl ToolResult {
             output: output.into(),
             media: Vec::new(),
             is_error: true,
+            details: None,
             display_preview: None,
             edit_diff: None,
         }
+    }
+
+    pub fn with_details(mut self, details: Value) -> Self {
+        self.details = Some(details);
+        self
     }
 
     pub fn with_display_preview(mut self, preview: impl Into<String>) -> Self {
@@ -539,6 +550,25 @@ impl ToolRegistry {
         self.tools.insert(tool.name().to_string(), tool);
     }
 
+    pub fn contains(&self, name: &str) -> bool {
+        self.tools.contains_key(name)
+    }
+
+    pub fn register_extension_tool(
+        &mut self,
+        extension_id: &str,
+        tool: Arc<dyn Tool>,
+    ) -> Result<()> {
+        let expected_prefix = format!("{extension_id}_");
+        let wrapped = Arc::new(PrefixedExtensionTool::new(expected_prefix, tool)?) as Arc<dyn Tool>;
+        let name = wrapped.name().to_string();
+        if self.tools.contains_key(&name) {
+            anyhow::bail!("extension tool `{name}` conflicts with an existing tool");
+        }
+        self.tools.insert(name, wrapped);
+        Ok(())
+    }
+
     /// YYC-181: apply a named tool capability profile to this
     /// registry. Drops every tool not in `profile.allowed` and
     /// records `profile.name` so callers (run records, doctor,
@@ -656,6 +686,68 @@ impl ToolRegistry {
         validate_tool_params(name, &schema, &params, arguments)?;
 
         tool.call(params, cancel, progress).await
+    }
+}
+
+pub fn details_from_tool_message(content: &str) -> Option<Value> {
+    serde_json::from_str::<Value>(content)
+        .ok()
+        .and_then(|v| v.get("details").cloned())
+}
+
+struct PrefixedExtensionTool {
+    name: String,
+    inner: Arc<dyn Tool>,
+}
+
+impl PrefixedExtensionTool {
+    fn new(prefix: String, inner: Arc<dyn Tool>) -> Result<Self> {
+        let inner_name = inner.name();
+        if inner_name.is_empty() {
+            anyhow::bail!("extension tool name cannot be empty");
+        }
+        let name = if inner_name.starts_with(&prefix) {
+            inner_name.to_string()
+        } else {
+            format!("{prefix}{inner_name}")
+        };
+        Ok(Self { name, inner })
+    }
+}
+
+#[async_trait::async_trait]
+impl Tool for PrefixedExtensionTool {
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    fn description(&self) -> &str {
+        self.inner.description()
+    }
+
+    fn schema(&self) -> Value {
+        self.inner.schema()
+    }
+
+    async fn call(
+        &self,
+        params: Value,
+        cancel: CancellationToken,
+        progress: Option<ProgressSink>,
+    ) -> Result<ToolResult> {
+        self.inner.call(params, cancel, progress).await
+    }
+
+    fn is_relevant(&self, ctx: &ToolContext) -> bool {
+        self.inner.is_relevant(ctx)
+    }
+
+    fn dynamic_description(&self, ctx: &ToolContext) -> Option<String> {
+        self.inner.dynamic_description(ctx)
+    }
+
+    fn replay_safety(&self) -> ReplaySafety {
+        self.inner.replay_safety()
     }
 }
 

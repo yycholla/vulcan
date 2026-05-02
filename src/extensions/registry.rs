@@ -14,6 +14,7 @@ use super::{
     ExtensionCapability, ExtensionConfigField, ExtensionMetadata, ExtensionSource, ExtensionStatus,
 };
 use crate::hooks::{HookHandler, HookRegistry};
+use crate::tools::ToolRegistry;
 
 /// YYC-227 (YYC-165 PR-4): trait an in-process, code-backed
 /// extension implements. Implementors live alongside the
@@ -258,6 +259,35 @@ impl ExtensionRegistry {
             runtimes.push(runtime);
         }
         runtimes
+    }
+
+    /// Instantiate every active daemon extension for a Session, wire
+    /// hook handlers, and register its contributed tools using the
+    /// `<extension_id>_<tool_name>` namespace.
+    ///
+    /// Returns `(session_extensions, tools_registered)`.
+    pub fn wire_daemon_extensions_into_runtime(
+        &self,
+        ctx: SessionExtensionCtx,
+        hooks: &HookRegistry,
+        mut tools: Option<&mut ToolRegistry>,
+    ) -> (usize, usize) {
+        let runtimes = self.wire_daemon_extensions_runtime(ctx, hooks);
+        let mut tool_count = 0usize;
+        if let Some(tools) = tools.as_deref_mut() {
+            for runtime in &runtimes {
+                for tool in runtime.wrapped_tools() {
+                    match tools.register_extension_tool(runtime.id(), tool) {
+                        Ok(()) => tool_count += 1,
+                        Err(err) => {
+                            self.mark_broken(runtime.id(), err.to_string());
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+        (runtimes.len(), tool_count)
     }
 
     pub fn instantiate_daemon_extension_runtime(

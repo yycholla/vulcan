@@ -216,6 +216,7 @@ pub struct AppState {
     /// present, the trading-floor tool-log pane renders from it; otherwise it
     /// falls back to demo data so the design still looks alive on first launch.
     pub audit_log: Option<AuditBuffer>,
+    pub frontend: super::frontend::TuiFrontend,
 
     /// When the agent emits an `AgentPause`, the TUI parks it here. Render
     /// shows an overlay; key handler intercepts Y/A/N keys and consumes the
@@ -375,6 +376,7 @@ impl AppState {
             orchestration_store: None,
 
             audit_log: None,
+            frontend: super::frontend::TuiFrontend::default(),
             pending_pause: None,
 
             cursor: Cell::new((0, 0)),

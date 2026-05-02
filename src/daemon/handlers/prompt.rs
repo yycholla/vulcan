@@ -50,6 +50,7 @@ fn stream_event_to_frame(req_id: &str, ev: StreamEvent) -> Option<StreamFrame> {
             id: tool_id,
             name,
             ok,
+            details,
             result_meta,
             elapsed_ms,
             ..
@@ -61,6 +62,7 @@ fn stream_event_to_frame(req_id: &str, ev: StreamEvent) -> Option<StreamFrame> {
                 "tool_id": tool_id,
                 "name": name,
                 "ok": ok,
+                "details": details,
                 "result_meta": result_meta,
                 "elapsed_ms": elapsed_ms,
             }),

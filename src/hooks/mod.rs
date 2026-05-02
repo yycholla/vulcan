@@ -1938,7 +1938,7 @@ mod tests {
                 content: "old".into(),
             },
         ];
-        let mut reg = HookRegistry::new();
+        let reg = HookRegistry::new();
         reg.register(Arc::new(Rewriter));
 
         assert!(matches!(
@@ -2107,7 +2107,7 @@ mod tests {
         }
 
         let (pause_tx, mut pause_rx) = crate::pause::channel(4);
-        let mut reg = HookRegistry::new()
+        let reg = HookRegistry::new()
             .with_input_rewrite_pause_channel(pause_tx)
             .require_input_rewrite_approval("approval-rewriter");
         reg.register(Arc::new(Rewriter));
@@ -2156,7 +2156,7 @@ mod tests {
         }
 
         let (pause_tx, mut pause_rx) = crate::pause::channel(4);
-        let mut reg = HookRegistry::new()
+        let reg = HookRegistry::new()
             .with_input_rewrite_pause_channel(pause_tx)
             .require_input_rewrite_approval("approval-rewriter");
         reg.register(Arc::new(Rewriter));
@@ -2198,7 +2198,7 @@ mod tests {
             }
         }
 
-        let mut reg = HookRegistry::new().require_input_rewrite_approval("approval-rewriter");
+        let reg = HookRegistry::new().require_input_rewrite_approval("approval-rewriter");
         reg.register(Arc::new(Rewriter));
 
         match reg.apply_on_input("raw", CancellationToken::new()).await {
