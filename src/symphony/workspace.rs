@@ -301,10 +301,15 @@ mod tests {
             identifier: identifier.into(),
             title: "Implement the thing".into(),
             body: "Body".into(),
+            priority: None,
             state: "ready-for-agent".into(),
+            branch: None,
             labels: Vec::new(),
             blockers: Vec::new(),
             url: None,
+            path: None,
+            created_at: None,
+            updated_at: None,
             source: Default::default(),
         }
     }

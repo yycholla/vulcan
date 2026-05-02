@@ -22,13 +22,23 @@ pub struct NormalizedTask {
     pub identifier: String,
     pub title: String,
     pub body: String,
+    #[serde(default)]
+    pub priority: Option<String>,
     pub state: String,
+    #[serde(default)]
+    pub branch: Option<String>,
     #[serde(default)]
     pub labels: Vec<String>,
     #[serde(default)]
     pub blockers: Vec<String>,
     #[serde(default)]
     pub url: Option<String>,
+    #[serde(default)]
+    pub path: Option<String>,
+    #[serde(default)]
+    pub created_at: Option<String>,
+    #[serde(default)]
+    pub updated_at: Option<String>,
     #[serde(default)]
     pub source: BTreeMap<String, JsonValue>,
 }
@@ -317,10 +327,15 @@ mod tests {
             identifier: "GH-595".to_string(),
             title: "Workflow loader".to_string(),
             body: "Build the workflow contract.".to_string(),
+            priority: None,
             state: "ready-for-agent".to_string(),
+            branch: None,
             labels: vec!["Feature".to_string(), "ready-for-agent".to_string()],
             blockers: vec!["GH-594".to_string()],
             url: Some("https://github.com/yycholla/vulcan/issues/595".to_string()),
+            path: None,
+            created_at: None,
+            updated_at: None,
             source,
         }
     }
