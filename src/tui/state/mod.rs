@@ -52,6 +52,7 @@ pub fn format_thousands(n: u32) -> String {
 
 use chrono::Local;
 use ratatui::style::Color;
+use throbber_widgets_tui::ThrobberState;
 
 use crate::hooks::audit::{AuditBuffer, AuditKind};
 use crate::memory::SessionSummary;
@@ -247,6 +248,7 @@ pub struct AppState {
     status_widgets: BTreeMap<String, vulcan_frontend_api::WidgetContent>,
     surfaces: SurfaceStack,
     pub active_ticks: Vec<ActiveTick>,
+    pub activity_throbber: ThrobberState,
 
     /// When the agent emits an `AgentPause`, the TUI parks it here. Render
     /// shows an overlay; key handler intercepts Y/A/N keys and consumes the
@@ -404,6 +406,7 @@ impl AppState {
             status_widgets: BTreeMap::new(),
             surfaces: SurfaceStack::default(),
             active_ticks: Vec::new(),
+            activity_throbber: ThrobberState::default(),
             pending_pause: None,
 
             cursor: Cell::new((0, 0)),
@@ -692,6 +695,33 @@ impl AppState {
         }
         self.active_ticks.retain(|tick| !tick.handle.is_stopped());
         self.surfaces.handle_tick();
+    }
+
+    pub fn activity_motion_active(&self) -> bool {
+        self.thinking
+            || !self.queue.is_empty()
+            || !self.deferred_queue.is_empty()
+            || self
+                .status_widgets
+                .values()
+                .any(|content| !matches!(content, vulcan_frontend_api::WidgetContent::Text(_)))
+            || self.messages.iter().any(|message| {
+                message.segments.iter().any(|segment| {
+                    matches!(
+                        segment,
+                        MessageSegment::ToolCall {
+                            status: ToolStatus::InProgress,
+                            ..
+                        }
+                    )
+                })
+            })
+    }
+
+    pub fn advance_activity_motion(&mut self) {
+        if self.activity_motion_active() {
+            self.activity_throbber.calc_next();
+        }
     }
 
     pub fn cancel_stack(&self) -> Vec<CancelScope> {

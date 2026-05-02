@@ -252,6 +252,7 @@ notify = { version = "8.2.0", optional = true }
 # detection, signal handling. fs feature pulls in flock() if we end up
 # needing it for advisory locking beyond what redb already does.
 nix = { version = "0.31.2", optional = true, features = ["fs", "process", "signal"] }
+throbber-widgets-tui = "0.11.0"
 
 # Workspace lint baseline (YYC-121). Conservative defaults that bias
 # toward forward-leaning warnings without forcing a sprawling cleanup
