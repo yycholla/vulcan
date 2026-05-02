@@ -71,8 +71,12 @@ jobs:
       # default-features-only break independently of the gateway path.
       - name: Build (default features)
         run: cargo build --all-targets
+      - name: Build CLI binary (default features)
+        run: cargo build -p vulcan --all-targets
       - name: Build (gateway feature)
         run: cargo build --all-targets --features gateway
+      - name: Build CLI binary (gateway feature)
+        run: cargo build -p vulcan --all-targets --features gateway
       # Test target set excludes `--benches` deliberately. The divan
       # benches (`tui_render`, `agent_core`) are measurement loops, not
       # tests — under nextest they hit the 120s per-test timeout, retry

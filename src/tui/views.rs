@@ -16,6 +16,10 @@ use super::widgets::{fill, frame, message_header, section_header, ticker};
 /// its desired cursor position into `app` via `cursor_set`.
 pub fn render_view(f: &mut TuiFrame, area: Rect, app: &AppState) {
     fill(f, area, body());
+    if let Some(frame_data) = app.active_canvas_frame() {
+        render_canvas(f, area, app, frame_data);
+        return;
+    }
     match app.view {
         View::TradingFloor => trading_floor(f, area, app),
         View::SingleStack => single_stack(f, area, app),
@@ -23,6 +27,32 @@ pub fn render_view(f: &mut TuiFrame, area: Rect, app: &AppState) {
         View::TiledMesh => tiled_mesh(f, area, app),
         View::TreeOfThought => tree_of_thought(f, area, app),
     }
+}
+
+fn render_canvas(
+    f: &mut TuiFrame,
+    area: Rect,
+    app: &AppState,
+    frame_data: vulcan_frontend_api::CanvasFrame,
+) {
+    let title = if frame_data.title.is_empty() {
+        "extension canvas"
+    } else {
+        frame_data.title.as_str()
+    };
+    let inner = frame(f, area, title, Some("Esc/Ctrl+C exits"), None, &app.theme);
+    let lines = frame_data
+        .lines
+        .into_iter()
+        .map(Line::from)
+        .collect::<Vec<_>>();
+    f.render_widget(
+        Paragraph::new(lines)
+            .style(body())
+            .wrap(Wrap { trim: false }),
+        inner,
+    );
+    app.cursor_set(inner.x, inner.y);
 }
 
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]

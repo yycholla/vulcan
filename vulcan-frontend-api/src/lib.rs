@@ -1,6 +1,8 @@
 //! Frontend extension registration API.
 
+use std::fmt;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use serde_json::Value;
 
@@ -40,12 +42,198 @@ pub struct WidgetUpdate {
     pub content: Option<WidgetContent>,
 }
 
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum UiError {
+    NoUi,
+    Cancelled,
+}
+
+pub type UiResult<T> = Result<T, UiError>;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TickRate {
+    Tick30Hz,
+    Tick60Hz,
+}
+
+impl TickRate {
+    pub fn capability(self) -> &'static str {
+        match self {
+            Self::Tick30Hz => "tick_30hz",
+            Self::Tick60Hz => "tick_60hz",
+        }
+    }
+
+    pub fn millis(self) -> u64 {
+        match self {
+            Self::Tick30Hz => 33,
+            Self::Tick60Hz => 16,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct TickHandle {
+    stopped: Arc<AtomicBool>,
+}
+
+impl TickHandle {
+    pub fn stop(&self) {
+        self.stopped.store(true, Ordering::SeqCst);
+    }
+
+    pub fn is_stopped(&self) -> bool {
+        self.stopped.load(Ordering::SeqCst)
+    }
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct CanvasHandle {
+    exited: Arc<AtomicBool>,
+}
+
+impl CanvasHandle {
+    pub fn exit(&self) {
+        self.exited.store(true, Ordering::SeqCst);
+    }
+
+    pub fn has_exited(&self) -> bool {
+        self.exited.load(Ordering::SeqCst)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum CanvasKey {
+    Up,
+    Down,
+    Left,
+    Right,
+    Esc,
+    CtrlC,
+    Enter,
+    Backspace,
+    Char(char),
+    Other(String),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum CanvasControl {
+    Continue,
+    Exit,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct CanvasFrame {
+    pub title: String,
+    pub lines: Vec<String>,
+}
+
+pub trait Canvas: Send + Sync {
+    fn render(&self) -> CanvasFrame;
+
+    fn on_key(&self, key: CanvasKey, handle: &CanvasHandle) -> CanvasControl {
+        match key {
+            CanvasKey::Esc | CanvasKey::CtrlC => {
+                handle.exit();
+                CanvasControl::Exit
+            }
+            _ => CanvasControl::Continue,
+        }
+    }
+
+    fn on_tick(&self, _handle: &CanvasHandle) {}
+}
+
+#[derive(Clone)]
+pub struct CanvasFactory {
+    factory: Arc<dyn Fn(CanvasHandle) -> Box<dyn Canvas> + Send + Sync>,
+}
+
+impl CanvasFactory {
+    pub fn new<F>(factory: F) -> Self
+    where
+        F: Fn(CanvasHandle) -> Box<dyn Canvas> + Send + Sync + 'static,
+    {
+        Self {
+            factory: Arc::new(factory),
+        }
+    }
+
+    pub fn create(&self, handle: CanvasHandle) -> Box<dyn Canvas> {
+        (self.factory)(handle)
+    }
+}
+
+impl fmt::Debug for CanvasFactory {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("CanvasFactory").finish_non_exhaustive()
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct CanvasRequest {
+    pub handle: CanvasHandle,
+    pub factory: CanvasFactory,
+}
+
+#[derive(Clone)]
+pub struct TickRequest {
+    pub rate: TickRate,
+    pub handle: TickHandle,
+    pub callback: Arc<dyn Fn(&TickHandle) + Send + Sync>,
+}
+
+impl fmt::Debug for TickRequest {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("TickRequest")
+            .field("rate", &self.rate)
+            .field("handle", &self.handle)
+            .finish_non_exhaustive()
+    }
+}
+
+#[derive(Clone, Debug, Default)]
 pub struct ExtensionUi {
     updates: Vec<WidgetUpdate>,
+    canvas_requests: Vec<CanvasRequest>,
+    tick_requests: Vec<TickRequest>,
 }
 
 impl ExtensionUi {
+    pub fn select(&mut self, _title: impl Into<String>, _options: &[String]) -> UiResult<usize> {
+        Err(UiError::NoUi)
+    }
+
+    pub fn input(
+        &mut self,
+        _title: impl Into<String>,
+        _placeholder: Option<&str>,
+    ) -> UiResult<String> {
+        Err(UiError::NoUi)
+    }
+
+    pub fn custom(&mut self, canvas_factory: CanvasFactory) -> UiResult<CanvasHandle> {
+        let handle = CanvasHandle::default();
+        self.canvas_requests.push(CanvasRequest {
+            handle: handle.clone(),
+            factory: canvas_factory,
+        });
+        Ok(handle)
+    }
+
+    pub fn set_tick<F>(&mut self, rate: TickRate, callback: F) -> UiResult<TickHandle>
+    where
+        F: Fn(&TickHandle) + Send + Sync + 'static,
+    {
+        let handle = TickHandle::default();
+        self.tick_requests.push(TickRequest {
+            rate,
+            handle: handle.clone(),
+            callback: Arc::new(callback),
+        });
+        Ok(handle)
+    }
+
     pub fn set_widget(&mut self, id: impl Into<String>, content: Option<WidgetContent>) {
         self.updates.push(WidgetUpdate {
             id: id.into(),
@@ -55,6 +243,38 @@ impl ExtensionUi {
 
     pub fn drain_widget_updates(&mut self) -> Vec<WidgetUpdate> {
         std::mem::take(&mut self.updates)
+    }
+
+    pub fn drain_canvas_requests(&mut self) -> Vec<CanvasRequest> {
+        std::mem::take(&mut self.canvas_requests)
+    }
+
+    pub fn drain_tick_requests(&mut self) -> Vec<TickRequest> {
+        std::mem::take(&mut self.tick_requests)
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub struct HeadlessUi;
+
+impl HeadlessUi {
+    pub fn select(&self, _title: impl Into<String>, _options: &[String]) -> UiResult<usize> {
+        Err(UiError::NoUi)
+    }
+
+    pub fn input(&self, _title: impl Into<String>, _placeholder: Option<&str>) -> UiResult<String> {
+        Err(UiError::NoUi)
+    }
+
+    pub fn custom(&self, _canvas_factory: CanvasFactory) -> UiResult<CanvasHandle> {
+        Err(UiError::NoUi)
+    }
+
+    pub fn set_tick<F>(&self, _rate: TickRate, _callback: F) -> UiResult<TickHandle>
+    where
+        F: Fn(&TickHandle) + Send + Sync + 'static,
+    {
+        Err(UiError::NoUi)
     }
 }
 
@@ -246,6 +466,17 @@ mod tests {
         }
     }
 
+    struct TestCanvas;
+
+    impl Canvas for TestCanvas {
+        fn render(&self) -> CanvasFrame {
+            CanvasFrame {
+                title: "Test".into(),
+                lines: vec!["ok".into()],
+            }
+        }
+    }
+
     inventory::submit! {
         FrontendExtensionRegistration {
             register: || Arc::new(TestExtension) as Arc<dyn FrontendCodeExtension>,
@@ -299,6 +530,41 @@ mod tests {
         );
         assert_eq!(updates[1].content, None);
         assert!(ui.drain_widget_updates().is_empty());
+    }
+
+    #[test]
+    fn extension_ui_records_canvas_and_tick_requests() {
+        let mut ui = ExtensionUi::default();
+
+        let canvas = ui
+            .custom(CanvasFactory::new(|_handle| Box::new(TestCanvas)))
+            .expect("canvas handle");
+        let tick = ui
+            .set_tick(TickRate::Tick30Hz, |_| {})
+            .expect("tick handle");
+
+        assert!(!canvas.has_exited());
+        assert!(!tick.is_stopped());
+        assert_eq!(ui.drain_canvas_requests().len(), 1);
+        assert_eq!(ui.drain_tick_requests().len(), 1);
+    }
+
+    #[test]
+    fn headless_ui_rejects_interactive_surfaces() {
+        let ui = HeadlessUi;
+        let options = vec!["one".to_string()];
+
+        assert_eq!(ui.select("Pick", &options), Err(UiError::NoUi));
+        assert_eq!(ui.input("Name", Some("Ada")), Err(UiError::NoUi));
+        assert_eq!(
+            ui.custom(CanvasFactory::new(|_handle| Box::new(TestCanvas)))
+                .map(|_| ()),
+            Err(UiError::NoUi)
+        );
+        assert_eq!(
+            ui.set_tick(TickRate::Tick60Hz, |_| {}).map(|_| ()),
+            Err(UiError::NoUi)
+        );
     }
 
     #[test]

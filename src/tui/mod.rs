@@ -61,10 +61,10 @@ pub mod theme;
 pub mod views;
 pub mod widgets;
 
-use state::{AppState, ChatMessage, ChatRole};
+use state::{AppState, CancelPop, ChatMessage, ChatRole};
 use theme::{Theme, body};
 use views::{View, render_view};
-use vulcan_frontend_api::FrontendCommandAction;
+use vulcan_frontend_api::{CanvasKey, FrontendCommandAction};
 
 /// What session, if any, the TUI should load on startup.
 #[derive(Debug, Clone)]
@@ -106,6 +106,36 @@ fn apply_frontend_command_action(app: &mut AppState, action: FrontendCommandActi
             app.messages
                 .push(ChatMessage::new(ChatRole::System, content));
         }
+    }
+}
+
+fn apply_frontend_dispatch(app: &mut AppState, dispatch: frontend::FrontendCommandDispatch) {
+    apply_frontend_command_action(app, dispatch.action);
+    for update in dispatch.widget_updates {
+        app.apply_widget_update(update);
+    }
+    for request in dispatch.tick_requests {
+        app.install_tick_request(request);
+    }
+    for request in dispatch.canvas_requests {
+        app.install_canvas_request(request);
+    }
+}
+
+fn canvas_key_from_event(key: ratatui::crossterm::event::KeyEvent) -> CanvasKey {
+    if key.modifiers.contains(KeyModifiers::CONTROL) && matches!(key.code, KeyCode::Char('c')) {
+        return CanvasKey::CtrlC;
+    }
+    match key.code {
+        KeyCode::Up => CanvasKey::Up,
+        KeyCode::Down => CanvasKey::Down,
+        KeyCode::Left => CanvasKey::Left,
+        KeyCode::Right => CanvasKey::Right,
+        KeyCode::Esc => CanvasKey::Esc,
+        KeyCode::Enter => CanvasKey::Enter,
+        KeyCode::Backspace => CanvasKey::Backspace,
+        KeyCode::Char(c) => CanvasKey::Char(c),
+        other => CanvasKey::Other(format!("{other:?}")),
     }
 }
 
@@ -295,6 +325,7 @@ pub async fn run_tui(
 
         // YYC-58: derive prompt mode from current state once per tick.
         app.refresh_prompt_mode();
+        app.pump_frontend_ticks();
 
         // YYC-69: keep the chat viewport pinned to the latest content while
         // the user hasn't scrolled away. `chat_max_scroll` is published by
@@ -905,6 +936,12 @@ pub async fn run_tui(
                         }
                         if let Event::Key(key) = event
                             && key.kind == KeyEventKind::Press {
+                                if app.active_canvas.is_some() {
+                                    app.handle_canvas_key(canvas_key_from_event(key));
+                                    pending_quit = false;
+                                    continue;
+                                }
+
                                 // ── If a pause is active, intercept the keys that
                                 // dispatch a response. Anything else falls through
                                 // to normal handling so the user can still scroll, etc.
@@ -1025,34 +1062,43 @@ pub async fn run_tui(
                                             }
                                         }
                                         KeyCode::Char('c') => {
-                                            if pending_quit {
-                                                exit = true;
-                                            } else if app.thinking {
-                                                // YYC-105: fire the externally-held token directly
-                                                // rather than queueing a lock acquisition that
-                                                // would block on the in-flight prompt task. The
-                                                // agent mirror updates next iteration.
-                                                if let Some(c) = app.current_turn_cancel.as_ref() {
-                                                    c.cancel();
+                                            match app.pop_cancel_scope() {
+                                                CancelPop::Popped(_) => {
+                                                    pending_quit = false;
+                                                    continue;
                                                 }
-                                                app.messages.push(ChatMessage {
-                                                    role: ChatRole::System,
-                                                    content: "Cancelling current turn… (Ctrl+C again to quit)".into(),
-                                                    reasoning: String::new(),
-                            segments: Vec::new(),
-                                                    render_version: 0,
-                                                });
-                                                pending_quit = true;
-                                            } else {
-                                                pending_quit = true;
-                                                app.messages.push(ChatMessage {
-                                                    role: ChatRole::System,
-                                                    content: "Press Ctrl+C again to quit, or any key to cancel.".into(),
-                                                    reasoning: String::new(),
-                            segments: Vec::new(),
-                                                    render_version: 0,
-                                                });
-                                                continue;
+                                                CancelPop::CancelTurn => {
+                                                    // YYC-105: fire the externally-held token directly
+                                                    // rather than queueing a lock acquisition that
+                                                    // would block on the in-flight prompt task. The
+                                                    // agent mirror updates next iteration.
+                                                    if let Some(c) = app.current_turn_cancel.as_ref() {
+                                                        c.cancel();
+                                                    }
+                                                    app.messages.push(ChatMessage {
+                                                        role: ChatRole::System,
+                                                        content: "Cancelling current turn… (Ctrl+C again to quit)".into(),
+                                                        reasoning: String::new(),
+                                                        segments: Vec::new(),
+                                                        render_version: 0,
+                                                    });
+                                                    pending_quit = true;
+                                                    continue;
+                                                }
+                                                CancelPop::None if pending_quit => {
+                                                    exit = true;
+                                                }
+                                                CancelPop::None => {
+                                                    pending_quit = true;
+                                                    app.messages.push(ChatMessage {
+                                                        role: ChatRole::System,
+                                                        content: "Press Ctrl+C again to quit, or any key to cancel.".into(),
+                                                        reasoning: String::new(),
+                                                        segments: Vec::new(),
+                                                        render_version: 0,
+                                                    });
+                                                    continue;
+                                                }
                                             }
                                         }
                                         _ => {}
@@ -1140,8 +1186,8 @@ pub async fn run_tui(
 
                                             // slash commands
                                             if let Some(body) = msg.strip_prefix('/') {
-                                                if let Some(action) = app.frontend.dispatch_slash(&msg) {
-                                                    apply_frontend_command_action(&mut app, action);
+                                                if let Some(dispatch) = app.frontend.dispatch_slash(&msg) {
+                                                    apply_frontend_dispatch(&mut app, dispatch);
                                                     continue;
                                                 }
                                                 match body {

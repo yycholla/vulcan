@@ -2,6 +2,7 @@
 // #555 (Slice 4: Frontend extension binary + tool-result renderer).
 // Until then, the working TUI continues to ship as the `vulcan` daemon
 // binary's `chat` subcommand.
+use vulcan_ext_snake as _;
 use vulcan_ext_spinner_demo as _;
 use vulcan_ext_todo as _;
 
@@ -22,8 +23,10 @@ fn frontend_capabilities_for_daemon() -> Vec<vulcan::extensions::FrontendCapabil
             "text_io" => Some(vulcan::extensions::FrontendCapability::TextIo),
             "rich_text" => Some(vulcan::extensions::FrontendCapability::RichText),
             "cell_canvas" => Some(vulcan::extensions::FrontendCapability::CellCanvas),
-            "raw_input" => Some(vulcan::extensions::FrontendCapability::RawInput),
+            "raw_input" | "raw_keys" => Some(vulcan::extensions::FrontendCapability::RawKeys),
             "status_widgets" => Some(vulcan::extensions::FrontendCapability::StatusWidgets),
+            "tick_30hz" => Some(vulcan::extensions::FrontendCapability::Tick30Hz),
+            "tick_60hz" => Some(vulcan::extensions::FrontendCapability::Tick60Hz),
             _ => None,
         };
         if let Some(mapped) = mapped
