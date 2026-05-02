@@ -9,6 +9,8 @@ use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
+use crate::hooks::RewriteRejection;
+
 use super::policy::{ExtensionPermission, PolicyDecision};
 
 /// Permission-keyed audit row. Original YYC-237 shape; covers
@@ -49,6 +51,20 @@ pub struct InputInterceptEvent {
     pub occurred_at: chrono::DateTime<chrono::Utc>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "action")]
+pub enum CompactionAuditAction {
+    ValidationFailed { rejection: RewriteRejection },
+    Forced { reason: String },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CompactionAuditEvent {
+    pub extension_id: String,
+    pub action: CompactionAuditAction,
+    pub occurred_at: chrono::DateTime<chrono::Utc>,
+}
+
 /// Polymorphic audit row recorded into [`ExtensionAuditLog`]. Each
 /// variant carries the typed payload for one event class.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -56,6 +72,7 @@ pub struct InputInterceptEvent {
 pub enum ExtensionAuditEvent {
     Permission(PermissionAuditEvent),
     InputIntercept(InputInterceptEvent),
+    Compaction(CompactionAuditEvent),
 }
 
 impl ExtensionAuditEvent {
@@ -65,6 +82,7 @@ impl ExtensionAuditEvent {
         match self {
             Self::Permission(p) => &p.extension_id,
             Self::InputIntercept(i) => &i.extension_id,
+            Self::Compaction(c) => &c.extension_id,
         }
     }
 
@@ -74,6 +92,7 @@ impl ExtensionAuditEvent {
         match self {
             Self::Permission(p) => p.occurred_at,
             Self::InputIntercept(i) => i.occurred_at,
+            Self::Compaction(c) => c.occurred_at,
         }
     }
 }
@@ -269,6 +288,38 @@ mod tests {
             occurred_at: chrono::Utc::now(),
         });
         let json = serde_json::to_string(&evt).unwrap();
+        let back: ExtensionAuditEvent = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, evt);
+    }
+
+    #[test]
+    fn audit_log_records_compaction_validation_failed_event() {
+        let log = ExtensionAuditLog::new(8);
+        let evt = ExtensionAuditEvent::Compaction(CompactionAuditEvent {
+            extension_id: "compact-summary".to_string(),
+            action: CompactionAuditAction::ValidationFailed {
+                rejection: RewriteRejection::MissingSystem,
+            },
+            occurred_at: chrono::Utc::now(),
+        });
+        log.record(evt.clone());
+
+        assert_eq!(log.recent(1), vec![evt]);
+    }
+
+    #[test]
+    fn compaction_forced_event_round_trips_through_serde_json() {
+        let evt = ExtensionAuditEvent::Compaction(CompactionAuditEvent {
+            extension_id: "compact-summary".to_string(),
+            action: CompactionAuditAction::Forced {
+                reason: "overflow".to_string(),
+            },
+            occurred_at: chrono::Utc::now(),
+        });
+
+        let json = serde_json::to_string(&evt).unwrap();
+        assert!(json.contains("compaction"));
+        assert!(json.contains("forced"));
         let back: ExtensionAuditEvent = serde_json::from_str(&json).unwrap();
         assert_eq!(back, evt);
     }

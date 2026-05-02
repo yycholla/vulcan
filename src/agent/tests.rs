@@ -173,6 +173,41 @@ fn agent_with_mock() -> (Agent, Arc<MockProvider>) {
     (agent, mock)
 }
 
+fn agent_with_mock_and_hooks(hooks: HookRegistry) -> (Agent, Arc<MockProvider>) {
+    let mock = Arc::new(MockProvider::new(128_000));
+    struct ProviderHandle(Arc<MockProvider>);
+    #[async_trait::async_trait]
+    impl LLMProvider for ProviderHandle {
+        async fn chat(
+            &self,
+            m: &[Message],
+            t: &[crate::provider::ToolDefinition],
+            c: CancellationToken,
+        ) -> Result<crate::provider::ChatResponse> {
+            self.0.chat(m, t, c).await
+        }
+        async fn chat_stream(
+            &self,
+            m: &[Message],
+            t: &[crate::provider::ToolDefinition],
+            tx: tokio::sync::mpsc::Sender<crate::provider::StreamEvent>,
+            c: CancellationToken,
+        ) -> Result<()> {
+            self.0.chat_stream(m, t, tx, c).await
+        }
+        fn max_context(&self) -> usize {
+            self.0.max_context()
+        }
+    }
+    let agent = Agent::for_test(
+        Box::new(ProviderHandle(mock.clone())),
+        ToolRegistry::new(),
+        hooks,
+        empty_skills(),
+    );
+    (agent, mock)
+}
+
 #[tokio::test]
 async fn builder_accepts_hooks_pause_channel_and_max_iterations() {
     let mut config = Config::default();
@@ -428,6 +463,250 @@ async fn compact_turn_messages_if_needed_emits_domain_event() {
         rx.try_recv(),
         Ok(TurnEvent::Compacted { earlier_messages }) if earlier_messages > 0
     ));
+}
+
+#[tokio::test]
+async fn rewrite_history_from_before_compact_replaces_durable_history() {
+    struct RewriteHook;
+
+    #[async_trait::async_trait]
+    impl crate::hooks::HookHandler for RewriteHook {
+        fn name(&self) -> &str {
+            "compact-summary"
+        }
+
+        async fn on_session_before_compact(
+            &self,
+            _messages: &[Message],
+            _cancel: CancellationToken,
+        ) -> Result<crate::hooks::HookOutcome> {
+            Ok(crate::hooks::HookOutcome::RewriteHistory(vec![
+                Message::System {
+                    content: "extension summary".into(),
+                },
+            ]))
+        }
+    }
+
+    let mut hooks = HookRegistry::new();
+    hooks.register(Arc::new(RewriteHook));
+    let (mut agent, mock) = agent_with_mock_and_hooks(hooks);
+    agent.context = ContextManager::new(10);
+
+    let (tx, mut rx) = tokio::sync::mpsc::channel(crate::provider::STREAM_CHANNEL_CAPACITY);
+    let mut messages = vec![
+        Message::System {
+            content: "system".into(),
+        },
+        Message::User {
+            content: "old ".repeat(200),
+        },
+    ];
+
+    agent
+        .compact_turn_messages_if_needed(&mut messages, &tx, 0)
+        .await;
+
+    assert_eq!(messages.len(), 1);
+    assert!(matches!(&messages[0], Message::System { content } if content == "extension summary"));
+    assert!(
+        mock.captured_calls().is_empty(),
+        "valid rewrite must bypass built-in summarizer"
+    );
+    assert!(matches!(
+        rx.try_recv(),
+        Ok(TurnEvent::Compacted { earlier_messages }) if earlier_messages > 0
+    ));
+}
+
+#[tokio::test]
+async fn invalid_rewrite_history_falls_back_to_builtin_and_audits_rejection() {
+    use crate::extensions::{CompactionAuditAction, ExtensionAuditEvent, ExtensionAuditLog};
+
+    struct BadRewriteHook;
+
+    #[async_trait::async_trait]
+    impl crate::hooks::HookHandler for BadRewriteHook {
+        fn name(&self) -> &str {
+            "bad-compact"
+        }
+
+        async fn on_session_before_compact(
+            &self,
+            _messages: &[Message],
+            _cancel: CancellationToken,
+        ) -> Result<crate::hooks::HookOutcome> {
+            Ok(crate::hooks::HookOutcome::RewriteHistory(vec![
+                Message::User {
+                    content: "missing system".into(),
+                },
+            ]))
+        }
+    }
+
+    let audit = Arc::new(ExtensionAuditLog::new(8));
+    let mut hooks = HookRegistry::new().with_audit_log(audit.clone());
+    hooks.register(Arc::new(BadRewriteHook));
+    let (mut agent, mock) = agent_with_mock_and_hooks(hooks);
+    agent.context = ContextManager::new(10);
+    mock.enqueue_text("built in summary");
+
+    let (tx, _rx) = tokio::sync::mpsc::channel(crate::provider::STREAM_CHANNEL_CAPACITY);
+    let mut messages = vec![Message::System {
+        content: "system".into(),
+    }];
+    for i in 0..8 {
+        messages.push(Message::User {
+            content: format!("old {i} {}", "x ".repeat(40)),
+        });
+        messages.push(Message::Assistant {
+            content: Some(format!("answer {i}")),
+            tool_calls: None,
+            reasoning_content: None,
+        });
+    }
+    messages.push(Message::User {
+        content: "fresh".into(),
+    });
+
+    agent
+        .compact_turn_messages_if_needed(&mut messages, &tx, 0)
+        .await;
+
+    assert!(
+        messages.iter().any(
+            |m| matches!(m, Message::System { content } if content.contains("built in summary"))
+        )
+    );
+    assert!(audit.recent(8).iter().any(|event| matches!(
+        event,
+        ExtensionAuditEvent::Compaction(compaction)
+            if compaction.extension_id == "bad-compact"
+                && matches!(compaction.action, CompactionAuditAction::ValidationFailed { .. })
+    )));
+}
+
+#[tokio::test]
+async fn block_skips_compaction_until_context_overflow_is_imminent() {
+    struct BlockHook;
+
+    #[async_trait::async_trait]
+    impl crate::hooks::HookHandler for BlockHook {
+        fn name(&self) -> &str {
+            "block-compact"
+        }
+
+        async fn on_session_before_compact(
+            &self,
+            _messages: &[Message],
+            _cancel: CancellationToken,
+        ) -> Result<crate::hooks::HookOutcome> {
+            Ok(crate::hooks::HookOutcome::Block {
+                reason: "not now".into(),
+            })
+        }
+    }
+
+    let mut hooks = HookRegistry::new();
+    hooks.register(Arc::new(BlockHook));
+    let (mut agent, mock) = agent_with_mock_and_hooks(hooks);
+    agent.context = ContextManager::with_config(
+        10_000,
+        crate::config::CompactionConfig {
+            enabled: true,
+            trigger_ratio: 0.01,
+            reserved_tokens: 0,
+        },
+    );
+
+    let (tx, mut rx) = tokio::sync::mpsc::channel(crate::provider::STREAM_CHANNEL_CAPACITY);
+    let original = vec![
+        Message::System {
+            content: "system".into(),
+        },
+        Message::User {
+            content: "old ".repeat(200),
+        },
+    ];
+    let mut messages = original.clone();
+
+    agent
+        .compact_turn_messages_if_needed(&mut messages, &tx, 0)
+        .await;
+
+    assert_eq!(messages.len(), original.len());
+    assert!(mock.captured_calls().is_empty());
+    assert!(rx.try_recv().is_err());
+}
+
+#[tokio::test]
+async fn block_is_overridden_on_context_overflow_and_audited() {
+    use crate::extensions::{CompactionAuditAction, ExtensionAuditEvent, ExtensionAuditLog};
+
+    struct BlockHook;
+
+    #[async_trait::async_trait]
+    impl crate::hooks::HookHandler for BlockHook {
+        fn name(&self) -> &str {
+            "block-compact"
+        }
+
+        async fn on_session_before_compact(
+            &self,
+            _messages: &[Message],
+            _cancel: CancellationToken,
+        ) -> Result<crate::hooks::HookOutcome> {
+            Ok(crate::hooks::HookOutcome::Block {
+                reason: "not now".into(),
+            })
+        }
+    }
+
+    let audit = Arc::new(ExtensionAuditLog::new(8));
+    let mut hooks = HookRegistry::new().with_audit_log(audit.clone());
+    hooks.register(Arc::new(BlockHook));
+    let (mut agent, mock) = agent_with_mock_and_hooks(hooks);
+    agent.context = ContextManager::new(10);
+    mock.enqueue_text("forced summary");
+
+    let (tx, mut rx) = tokio::sync::mpsc::channel(crate::provider::STREAM_CHANNEL_CAPACITY);
+    let mut messages = vec![Message::System {
+        content: "system".into(),
+    }];
+    for i in 0..8 {
+        messages.push(Message::User {
+            content: format!("old {i} {}", "x ".repeat(40)),
+        });
+        messages.push(Message::Assistant {
+            content: Some(format!("answer {i}")),
+            tool_calls: None,
+            reasoning_content: None,
+        });
+    }
+    messages.push(Message::User {
+        content: "fresh".into(),
+    });
+
+    agent
+        .compact_turn_messages_if_needed(&mut messages, &tx, 0)
+        .await;
+
+    assert!(matches!(
+        rx.try_recv(),
+        Ok(TurnEvent::CompactionForced { extension_id, reason })
+            if extension_id == "block-compact" && reason == "not now"
+    ));
+    assert!(
+        messages.iter().any(
+            |m| matches!(m, Message::System { content } if content.contains("forced summary"))
+        )
+    );
+    assert!(audit.recent(8).iter().any(|event| matches!(
+        event,
+        ExtensionAuditEvent::Compaction(compaction)
+            if compaction.extension_id == "block-compact"
+                && matches!(compaction.action, CompactionAuditAction::Forced { .. })
+    )));
 }
 
 #[tokio::test]

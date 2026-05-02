@@ -89,6 +89,10 @@ pub(in crate::agent) enum TurnEvent {
     Compacted {
         earlier_messages: usize,
     },
+    CompactionForced {
+        extension_id: String,
+        reason: String,
+    },
     ProviderDone {
         response: ChatResponse,
     },
@@ -167,6 +171,12 @@ impl From<TurnEvent> for StreamEvent {
             },
             TurnEvent::Compacted { earlier_messages } => Self::Text(format!(
                 "_(compacted {earlier_messages} earlier messages into a summary to fit context)_\n"
+            )),
+            TurnEvent::CompactionForced {
+                extension_id,
+                reason,
+            } => Self::Text(format!(
+                "_(compaction forced despite {extension_id} veto: {reason})_\n"
             )),
             TurnEvent::ProviderDone { response } => Self::Done(response),
             TurnEvent::Error { message } => Self::Error(message),

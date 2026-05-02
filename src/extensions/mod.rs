@@ -29,8 +29,8 @@ pub mod store;
 pub mod verify;
 
 pub use audit::{
-    ExtensionAuditEvent, ExtensionAuditLog, InputInterceptAction, InputInterceptEvent,
-    PermissionAuditEvent, QuotaTracker,
+    CompactionAuditAction, CompactionAuditEvent, ExtensionAuditEvent, ExtensionAuditLog,
+    InputInterceptAction, InputInterceptEvent, PermissionAuditEvent, QuotaTracker,
 };
 pub use config_field::{ExtensionConfigField, ExtensionFieldKind};
 pub use draft::parse_skill_extension;

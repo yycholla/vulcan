@@ -7267,6 +7267,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "vulcan-ext-compact-summary"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "inventory",
+ "tokio",
+ "tokio-util",
+ "vulcan-core",
+]
+
+[[package]]
 name = "vulcan-ext-input-demo"
 version = "0.1.0"
 dependencies = [
