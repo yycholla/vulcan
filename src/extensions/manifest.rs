@@ -45,6 +45,10 @@ pub struct ExtensionManifest {
     /// when the extension activates.
     #[serde(default)]
     pub capabilities: Vec<String>,
+    /// Frontend capability tags required before this extension can
+    /// activate for a frontend-backed session.
+    #[serde(default)]
+    pub requires_frontend: Vec<String>,
     /// Human-readable permissions summary surfaced in
     /// `vulcan extension list/show`.
     #[serde(default)]

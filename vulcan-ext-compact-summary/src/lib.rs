@@ -166,11 +166,11 @@ mod tests {
     use vulcan::hooks::{RewriteRejection, validate_rewrite_history};
 
     fn ctx() -> SessionExtensionCtx {
-        SessionExtensionCtx {
-            cwd: std::path::PathBuf::from("/tmp/test"),
-            session_id: "test-session".to_string(),
-            memory: Arc::new(vulcan::memory::SessionStore::in_memory()),
-        }
+        SessionExtensionCtx::new(
+            std::path::PathBuf::from("/tmp/test"),
+            "test-session".to_string(),
+            Arc::new(vulcan::memory::SessionStore::in_memory()),
+        )
     }
 
     fn long_history() -> Vec<Message> {

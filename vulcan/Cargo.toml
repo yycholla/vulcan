@@ -31,6 +31,8 @@ vulcan-ext-auto-commit = { path = "../vulcan-ext-auto-commit" }
 # GH issue #557: input-intercept dogfood extension; same `extern crate`
 # anchoring rationale as auto-commit.
 vulcan-ext-input-demo = { path = "../vulcan-ext-input-demo" }
+# GH issue #559: status-widget/event-channel dogfood extension.
+vulcan-ext-spinner-demo = { path = "../vulcan-ext-spinner-demo", features = ["tui"] }
 # GH issue #550: todo dogfood extension for daemon tool wiring and
 # ToolResult.details replay.
 vulcan-ext-todo = { path = "../vulcan-ext-todo", features = ["tui"] }

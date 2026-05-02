@@ -1,5 +1,6 @@
 use super::*;
 use crate::memory::SessionSummary;
+use vulcan_frontend_api::{WidgetContent, WidgetUpdate};
 
 #[test]
 fn orchestration_state_tracks_prompt_and_tool_flow() {
@@ -155,6 +156,46 @@ fn model_status_prefixes_active_provider_label() {
     app.prompt_tokens_last = 18_402;
     let status = app.model_status();
     assert_eq!(status, "local · deepseek/v4 · 18,402 / 128,000");
+}
+
+#[test]
+fn app_state_applies_status_widget_updates() {
+    let mut app = AppState::new("deepseek/v4".into(), 128_000);
+
+    app.apply_widget_updates(vec![
+        WidgetUpdate {
+            id: "job".into(),
+            content: Some(WidgetContent::Spinner("working".into())),
+        },
+        WidgetUpdate {
+            id: "progress".into(),
+            content: Some(WidgetContent::progress("sync", 0.5)),
+        },
+    ]);
+
+    assert_eq!(
+        app.status_widgets(),
+        vec![
+            ("job".to_string(), WidgetContent::Spinner("working".into())),
+            (
+                "progress".to_string(),
+                WidgetContent::Progress {
+                    label: "sync".into(),
+                    ratio: 0.5
+                }
+            ),
+        ]
+    );
+    assert!(app.model_status().contains("working"));
+    assert!(app.model_status().contains("sync 50%"));
+
+    app.apply_widget_updates(vec![WidgetUpdate {
+        id: "job".into(),
+        content: None,
+    }]);
+
+    assert_eq!(app.status_widgets().len(), 1);
+    assert!(!app.model_status().contains("working"));
 }
 
 #[test]

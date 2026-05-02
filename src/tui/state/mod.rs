@@ -28,7 +28,7 @@
 //! documentation below for which ones cross threads on purpose.
 
 use std::cell::{Cell, RefCell};
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, VecDeque};
 
 use super::keybinds::Keybinds;
 
@@ -217,6 +217,7 @@ pub struct AppState {
     /// falls back to demo data so the design still looks alive on first launch.
     pub audit_log: Option<AuditBuffer>,
     pub frontend: super::frontend::TuiFrontend,
+    status_widgets: BTreeMap<String, vulcan_frontend_api::WidgetContent>,
 
     /// When the agent emits an `AgentPause`, the TUI parks it here. Render
     /// shows an overlay; key handler intercepts Y/A/N keys and consumes the
@@ -377,6 +378,7 @@ impl AppState {
 
             audit_log: None,
             frontend: super::frontend::TuiFrontend::default(),
+            status_widgets: BTreeMap::new(),
             pending_pause: None,
 
             cursor: Cell::new((0, 0)),
@@ -514,7 +516,7 @@ impl AppState {
         // YYC-96: when running on a named provider profile, prefix the
         // string with `{profile} · ` so the user can tell which provider
         // any given turn will hit.
-        match &self.provider_label {
+        let base = match &self.provider_label {
             Some(profile) => format!(
                 "{} · {} · {} / {}",
                 profile,
@@ -528,7 +530,47 @@ impl AppState {
                 format_thousands(self.prompt_tokens_last),
                 format_thousands(self.token_max),
             ),
+        };
+        let widget_status = self.status_widget_summary();
+        if widget_status.is_empty() {
+            base
+        } else {
+            format!("{base} · {widget_status}")
         }
+    }
+
+    pub fn apply_widget_updates(&mut self, updates: Vec<vulcan_frontend_api::WidgetUpdate>) {
+        for update in updates {
+            match update.content {
+                Some(content) => {
+                    self.status_widgets.insert(update.id, content);
+                }
+                None => {
+                    self.status_widgets.remove(&update.id);
+                }
+            }
+        }
+    }
+
+    pub fn status_widgets(&self) -> Vec<(String, vulcan_frontend_api::WidgetContent)> {
+        self.status_widgets
+            .iter()
+            .map(|(id, content)| (id.clone(), content.clone()))
+            .collect()
+    }
+
+    fn status_widget_summary(&self) -> String {
+        self.status_widgets
+            .values()
+            .map(|content| match content {
+                vulcan_frontend_api::WidgetContent::Text(text) => text.clone(),
+                vulcan_frontend_api::WidgetContent::Spinner(label) => label.clone(),
+                vulcan_frontend_api::WidgetContent::Progress { label, ratio } => {
+                    format!("{label} {:.0}%", ratio * 100.0)
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(" · ")
     }
 
     /// Estimated session cost in USD, computed from cumulative token

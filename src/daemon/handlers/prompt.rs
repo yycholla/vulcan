@@ -14,7 +14,9 @@ use tokio::sync::{mpsc, oneshot};
 
 use crate::daemon::protocol::{ProtocolError, Response, StreamFrame};
 use crate::daemon::session::SessionState;
+use crate::daemon::session_agent::SessionAgentOptions;
 use crate::daemon::state::DaemonState;
+use crate::extensions::api::{FrontendEvent, FrontendEventSink};
 use crate::provider::StreamEvent;
 
 /// Map a daemon-internal `StreamEvent` to a wire `StreamFrame`.
@@ -75,6 +77,20 @@ fn stream_event_to_frame(req_id: &str, ev: StreamEvent) -> Option<StreamFrame> {
             id: Some(req_id.into()),
             stream: "error".into(),
             data: json!({ "reason": e }),
+        }),
+    }
+}
+
+fn frontend_event_to_frame(event: FrontendEvent) -> StreamFrame {
+    StreamFrame {
+        version: 1,
+        id: None,
+        stream: "extension_event".into(),
+        data: json!({
+            "kind": "extension_event",
+            "session_id": event.session_id,
+            "extension_id": event.extension_id,
+            "payload": event.payload,
         }),
     }
 }
@@ -172,6 +188,7 @@ pub fn stream(
     req_id: String,
     session_id: String,
     input: String,
+    options: SessionAgentOptions,
 ) -> (mpsc::Receiver<StreamFrame>, oneshot::Receiver<Response>) {
     let (frame_tx, frame_rx) = mpsc::channel(32);
     let (done_tx, done_rx) = oneshot::channel();
@@ -195,10 +212,21 @@ pub fn stream(
     let assembler = state.session_agent_assembler();
     let state_for_runner = Arc::clone(&state);
     tokio::spawn(async move {
+        let (frontend_tx, mut frontend_rx) = tokio::sync::broadcast::channel(32);
+        let frontend_capabilities = options.frontend_capabilities();
+        let frontend_extensions = options.frontend_extensions();
+        let options = options.with_frontend_context(
+            frontend_capabilities,
+            frontend_extensions,
+            FrontendEventSink::new(frontend_tx),
+        );
         // Lazy-build the per-session Agent. Failure surfaces on the
         // done channel as AGENT_BUILD_FAILED; in_flight is cleared
         // before returning so daemon.status doesn't get stuck.
-        let agent_arc = match sess_for_task.ensure_agent(&assembler).await {
+        let agent_arc = match sess_for_task
+            .ensure_agent_with_options(&assembler, options)
+            .await
+        {
             Ok(a) => a,
             Err(e) => {
                 *sess_for_task.in_flight.lock() = false;
@@ -261,12 +289,31 @@ pub fn stream(
         });
 
         // Forward events as StreamFrames.
-        while let Some(ev) = event_rx.recv().await {
-            if let Some(frame) = stream_event_to_frame(&rid, ev) {
-                if frame_tx.send(frame).await.is_err() {
-                    // TUI disconnected -- cancel the turn.
-                    cancel_token.cancel();
-                    break;
+        loop {
+            tokio::select! {
+                ev = event_rx.recv() => {
+                    let Some(ev) = ev else {
+                        break;
+                    };
+                    if let Some(frame) = stream_event_to_frame(&rid, ev) {
+                        if frame_tx.send(frame).await.is_err() {
+                            // TUI disconnected -- cancel the turn.
+                            cancel_token.cancel();
+                            break;
+                        }
+                    }
+                }
+                event = frontend_rx.recv() => {
+                    match event {
+                        Ok(event) => {
+                            if frame_tx.send(frontend_event_to_frame(event)).await.is_err() {
+                                cancel_token.cancel();
+                                break;
+                            }
+                        }
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                    }
                 }
             }
         }
@@ -360,7 +407,24 @@ pub async fn cancel(state: &DaemonState, id: String, session_id: String) -> Resp
 mod tests {
     use super::*;
     use crate::daemon::state::DaemonState;
+    use crate::extensions::api::FrontendEvent;
     use std::sync::Arc;
+
+    #[test]
+    fn frontend_event_frame_is_out_of_band_push_envelope() {
+        let frame = frontend_event_to_frame(FrontendEvent {
+            session_id: "main".into(),
+            extension_id: "spinner-demo".into(),
+            payload: json!({ "widget_id": "long_task", "kind": "spinner" }),
+        });
+
+        assert_eq!(frame.id, None);
+        assert_eq!(frame.stream, "extension_event");
+        assert_eq!(frame.data["kind"], "extension_event");
+        assert_eq!(frame.data["session_id"], "main");
+        assert_eq!(frame.data["extension_id"], "spinner-demo");
+        assert_eq!(frame.data["payload"]["widget_id"], "long_task");
+    }
 
     #[tokio::test]
     async fn run_returns_session_not_found_for_bogus_session() {

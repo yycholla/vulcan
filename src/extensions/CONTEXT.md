@@ -32,6 +32,14 @@ _Avoid_: extension memory, extension cache
 A **Frontend Extension** handler that maps a known tool result shape into frontend-native lines or widgets. In the TUI today, renderers consume `ToolResult.details` from the streamed `ToolCallEnd` event and project it into the existing tool-card preview; the durable chat message stores the rendered preview, not the raw details.
 _Avoid_: daemon renderer, persistent UI schema
 
+**Frontend Event**:
+A daemon-to-frontend push frame with `kind = "extension_event"`, an `extension_id`, and an extension-owned `payload`. The daemon only wraps and routes the payload; the matching **Frontend Extension** interprets it through `on_event(payload, ctx)`.
+_Avoid_: daemon UI command, frontend hook event
+
+**Status Widget**:
+A small frontend-owned footer/status item set by a **Frontend Extension** via `ctx.ui.set_widget(id, content)`. The daemon-side extension emits frontend events; the frontend extension maps those events to `Text`, `Spinner`, or `Progress` widget updates and clears them with `None`.
+_Avoid_: daemon status row, persistent widget state
+
 **Frontend Command**:
 A slash command handled entirely by the **Frontend** before the prompt reaches the daemon. Frontend commands produce local UI actions such as opening a view; commands that need the LLM or daemon state remain daemon/session commands.
 _Avoid_: hidden tool call, daemon-routed UI command
@@ -45,6 +53,8 @@ _Avoid_: hidden tool call, daemon-routed UI command
 - A **Frontend** owns its own **Frontend Extension** registry; daemon and frontend extensions are linked into separate binaries even when they ship from the same crate.
 - A **Frontend Extension** consumes daemon push frames addressed to its extension id; it never owns agent state and never receives hook events directly.
 - An extension activates on a **Session** only when the connected **Frontend**'s declared capabilities satisfy the **Extension Manifest**'s required surface.
+- When a daemon extension and frontend extension share an id, their versions must match for that session; a mismatch marks the extension `Broken` with `extension version mismatch`.
+- Frontend event payloads are intentionally extension-owned JSON. The stable daemon contract is the envelope, not a shared widget schema.
 - Renderer collisions are resolved in frontend registry order with last-active wins plus a warning; this mirrors extension load order and avoids daemon-side renderer arbitration.
 
 ## ADRs
@@ -53,3 +63,4 @@ _Avoid_: hidden tool call, daemon-routed UI command
 - `docs/adr/0004-extension-distribution-and-lifecycle.md` — Cargo crate distribution + mid-session enable/disable/kill policy.
 - `docs/adr/0005-extension-compaction-control.md` — extension control over compaction with validation safety net.
 - `docs/adr/0006-extension-details-replay-and-frontend-rendering.md` — `ToolResult.details` as replay state plus frontend projection boundary.
+- `docs/adr/0007-extension-frontend-events-and-status-widgets.md` — daemon push events routed to frontend extensions plus local status widgets.

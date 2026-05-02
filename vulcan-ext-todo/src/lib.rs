@@ -266,11 +266,11 @@ mod tests {
     use super::*;
 
     fn ctx(memory: Arc<vulcan::memory::SessionStore>) -> SessionExtensionCtx {
-        SessionExtensionCtx {
-            cwd: std::path::PathBuf::from("/tmp/test"),
-            session_id: "todo-test".to_string(),
+        SessionExtensionCtx::new(
+            std::path::PathBuf::from("/tmp/test"),
+            "todo-test".to_string(),
             memory,
-        }
+        )
     }
 
     #[tokio::test]

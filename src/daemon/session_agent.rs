@@ -27,6 +27,11 @@ impl SessionAgentAssembler {
         if let Some(pool) = &self.pool {
             builder = builder.with_pool(Arc::clone(pool));
         }
+        builder = builder.with_frontend_context(
+            options.frontend_capabilities.clone(),
+            options.frontend_extensions.clone(),
+            options.frontend_events.clone(),
+        );
         if let Some(max_iterations) = options.max_iterations {
             builder = builder.with_max_iterations(max_iterations);
         }
@@ -42,11 +47,27 @@ impl SessionAgentAssembler {
     }
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub struct SessionAgentOptions {
     max_iterations: Option<u32>,
     tool_profile: Option<String>,
     allowed_tools: Option<Vec<String>>,
+    frontend_capabilities: Vec<crate::extensions::FrontendCapability>,
+    frontend_extensions: Vec<vulcan_frontend_api::FrontendExtensionDescriptor>,
+    frontend_events: crate::extensions::api::FrontendEventSink,
+}
+
+impl Default for SessionAgentOptions {
+    fn default() -> Self {
+        Self {
+            max_iterations: None,
+            tool_profile: None,
+            allowed_tools: None,
+            frontend_capabilities: crate::extensions::FrontendCapability::text_only(),
+            frontend_extensions: Vec::new(),
+            frontend_events: crate::extensions::api::FrontendEventSink::default(),
+        }
+    }
 }
 
 impl SessionAgentOptions {
@@ -59,7 +80,28 @@ impl SessionAgentOptions {
             max_iterations: Some(max_iterations),
             tool_profile,
             allowed_tools: Some(allowed_tools),
+            ..Self::default()
         }
+    }
+
+    pub fn with_frontend_context(
+        mut self,
+        capabilities: Vec<crate::extensions::FrontendCapability>,
+        extensions: Vec<vulcan_frontend_api::FrontendExtensionDescriptor>,
+        events: crate::extensions::api::FrontendEventSink,
+    ) -> Self {
+        self.frontend_capabilities = capabilities;
+        self.frontend_extensions = extensions;
+        self.frontend_events = events;
+        self
+    }
+
+    pub fn frontend_capabilities(&self) -> Vec<crate::extensions::FrontendCapability> {
+        self.frontend_capabilities.clone()
+    }
+
+    pub fn frontend_extensions(&self) -> Vec<vulcan_frontend_api::FrontendExtensionDescriptor> {
+        self.frontend_extensions.clone()
     }
 }
 

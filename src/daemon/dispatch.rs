@@ -9,6 +9,7 @@ use tokio::sync::{mpsc, oneshot};
 use crate::daemon::handlers::{agent, approval, cortex, daemon_ops, extension, prompt, session};
 use crate::daemon::protocol::{ProtocolError, Request, Response, StreamFrame};
 use crate::daemon::state::DaemonState;
+use crate::extensions::FrontendCapability;
 
 /// Result of dispatching a request -- either a single response or a
 /// streaming response with incremental frames and a final result.
@@ -112,8 +113,9 @@ impl Dispatcher {
                     .and_then(|v| v.as_str())
                     .unwrap_or("")
                     .to_string();
+                let options = frontend_options_from_params(&req.params);
                 let (frames, done) =
-                    prompt::stream(Arc::clone(&self.state), req.id, session, input);
+                    prompt::stream(Arc::clone(&self.state), req.id, session, input, options);
                 DispatchResult::Stream { frames, done }
             }
             "prompt.cancel" => {
@@ -371,6 +373,36 @@ impl Dispatcher {
             )),
         }
     }
+}
+
+fn frontend_options_from_params(
+    params: &serde_json::Value,
+) -> crate::daemon::session_agent::SessionAgentOptions {
+    let capabilities = params
+        .get("frontend_capabilities")
+        .and_then(|value| value.as_array())
+        .map(|values| {
+            values
+                .iter()
+                .filter_map(|value| value.as_str())
+                .filter_map(FrontendCapability::parse)
+                .collect::<Vec<_>>()
+        })
+        .filter(|capabilities| !capabilities.is_empty())
+        .unwrap_or_else(FrontendCapability::text_only);
+    let extensions = params
+        .get("frontend_extensions")
+        .cloned()
+        .and_then(|value| {
+            serde_json::from_value::<Vec<vulcan_frontend_api::FrontendExtensionDescriptor>>(value)
+                .ok()
+        })
+        .unwrap_or_default();
+    crate::daemon::session_agent::SessionAgentOptions::default().with_frontend_context(
+        capabilities,
+        extensions,
+        crate::extensions::api::FrontendEventSink::default(),
+    )
 }
 
 #[cfg(test)]
