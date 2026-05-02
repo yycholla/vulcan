@@ -36,6 +36,7 @@ pub mod hooks;
 pub mod impact;
 pub mod knowledge;
 pub mod memory;
+pub mod observability;
 pub mod orchestration;
 pub mod pause;
 pub mod platform;

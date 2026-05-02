@@ -51,12 +51,22 @@ async fn main() -> anyhow::Result<()> {
         ..
     }) = cli.command
     {
-        init_cli_logging();
         let dir = vulcan::config::vulcan_home();
-        let config = Config::load().unwrap_or_else(|e| {
-            tracing::warn!("config load failed before gateway init; continuing with defaults: {e}");
-            Config::default()
-        });
+        let config = match Config::load() {
+            Ok(config) => config,
+            Err(e) => {
+                let config = Config::default();
+                let _log_guard = init_cli_logging(&config);
+                let _process_span = process_span("gateway").entered();
+                tracing::warn!(
+                    "config load failed before gateway init; continuing with defaults: {e}"
+                );
+                vulcan::cli_gateway::init(&dir, &config, force)?;
+                return Ok(());
+            }
+        };
+        let _log_guard = init_cli_logging(&config);
+        let _process_span = process_span("gateway").entered();
         vulcan::cli_gateway::init(&dir, &config, force)?;
         return Ok(());
     }
@@ -65,15 +75,30 @@ async fn main() -> anyhow::Result<()> {
     // YYC-264: when `--seed-cortex` is passed and cortex is enabled, seed
     // the knowledge graph from recent SQLite sessions before the session
     // starts. Non-fatal — failures are logged and we continue.
-    if cli.seed_cortex && config.cortex.enabled {
-        if let Err(e) = vulcan::cli_cortex::seed_from_sessions(3).await {
-            tracing::warn!("cortex seed failed: {e}");
-        }
+    if cli.seed_cortex
+        && config.cortex.enabled
+        && let Err(e) = vulcan::cli_cortex::seed_from_sessions(3).await
+    {
+        tracing::warn!("cortex seed failed: {e}");
+    }
+
+    macro_rules! init_cli_observability {
+        ($command:literal) => {
+            let _log_guard = init_cli_logging(&config);
+            let _process_span = process_span($command).entered();
+        };
+    }
+
+    macro_rules! init_tui_observability {
+        ($command:literal) => {
+            let _log_guard = init_tui_logging(&config);
+            let _process_span = process_span($command).entered();
+        };
     }
 
     match cli.command {
         None | Some(Command::Chat) => {
-            init_tui_logging();
+            init_tui_observability!("chat");
             let resume = if cli.resume {
                 // --resume takes priority over --continue
                 ResumeTarget::Pick
@@ -85,7 +110,7 @@ async fn main() -> anyhow::Result<()> {
             run_tui(&config, resume, cli.profile.clone()).await?;
         }
         Some(Command::Prompt { text }) => {
-            init_cli_logging();
+            init_cli_observability!("prompt");
             #[cfg(feature = "daemon")]
             if !cli.no_daemon {
                 match prompt_via_daemon(text.clone(), cli.profile.clone()).await {
@@ -102,11 +127,11 @@ async fn main() -> anyhow::Result<()> {
             run_prompt_direct(&config, text, cli.profile.clone()).await?;
         }
         Some(Command::Session { id }) => {
-            init_tui_logging();
+            init_tui_observability!("session");
             run_tui(&config, ResumeTarget::Specific(id), cli.profile.clone()).await?;
         }
         Some(Command::Search { query, limit }) => {
-            init_cli_logging();
+            init_cli_observability!("search");
             #[cfg(feature = "daemon")]
             if !cli.no_daemon {
                 match search_via_daemon(query.clone(), limit).await {
@@ -124,7 +149,7 @@ async fn main() -> anyhow::Result<()> {
         }
         #[cfg(feature = "gateway")]
         Some(Command::Gateway { cmd, bind }) => {
-            init_cli_logging();
+            init_cli_observability!("gateway");
             match cmd.unwrap_or(GatewaySubcommand::Run { bind: None }) {
                 GatewaySubcommand::Run { bind: run_bind } => {
                     vulcan::gateway::run(&config, run_bind.or(bind)).await?
@@ -133,7 +158,7 @@ async fn main() -> anyhow::Result<()> {
             }
         }
         Some(Command::MigrateConfig { force }) => {
-            init_cli_logging();
+            init_cli_observability!("migrate-config");
             let dir = vulcan::config::vulcan_home();
             let report = vulcan::config::Config::migrate(&dir, force)?;
             if !report.main_rewritten {
@@ -149,16 +174,16 @@ async fn main() -> anyhow::Result<()> {
             }
         }
         Some(Command::Provider { cmd }) => {
-            init_cli_logging();
+            init_cli_observability!("provider");
             let dir = vulcan::config::vulcan_home();
             vulcan::cli_provider::run(cmd, dir).await?;
         }
         Some(Command::Model { cmd }) => {
-            init_cli_logging();
+            init_cli_observability!("model");
             vulcan::cli_model::run(cmd).await?;
         }
         Some(Command::Auth(args)) => {
-            init_cli_logging();
+            init_cli_observability!("auth");
             let dir = vulcan::config::vulcan_home();
             vulcan::cli_auth::run(args, dir).await?;
         }
@@ -171,63 +196,63 @@ async fn main() -> anyhow::Result<()> {
             generate(shell, &mut cmd, "vulcan", &mut std::io::stdout());
         }
         Some(Command::Run { cmd }) => {
-            init_cli_logging();
+            init_cli_observability!("run");
             vulcan::cli_run::run(cmd).await?;
         }
         Some(Command::Artifact { cmd }) => {
-            init_cli_logging();
+            init_cli_observability!("artifact");
             vulcan::cli_artifact::run(cmd).await?;
         }
         Some(Command::Knowledge { cmd }) => {
-            init_cli_logging();
+            init_cli_observability!("knowledge");
             vulcan::cli_knowledge::run(cmd).await?;
         }
         Some(Command::ContextPack { cmd }) => {
-            init_cli_logging();
+            init_cli_observability!("context-pack");
             vulcan::cli_context_pack::run(cmd).await?;
         }
         Some(Command::Config { cmd }) => {
-            init_cli_logging();
+            init_cli_observability!("config");
             vulcan::cli_config::run(cmd).await?;
         }
         Some(Command::Trust { cmd }) => {
-            init_cli_logging();
+            init_cli_observability!("trust");
             vulcan::cli_trust::run(cmd).await?;
         }
         Some(Command::Review { cmd }) => {
-            init_cli_logging();
+            init_cli_observability!("review");
             vulcan::cli_review::run(cmd).await?;
         }
         Some(Command::Doctor) => unreachable!("handled before Config::load above"),
         Some(Command::Release { range }) => {
-            init_cli_logging();
+            init_cli_observability!("release");
             // YYC-221: ingest git log → build summary → render.
             let commits = vulcan::release::ingest_git_log(&range)?;
             let summary = vulcan::release::build_summary(&range, &commits);
             print!("{}", vulcan::release::render_markdown(&summary));
         }
         Some(Command::Policy { cmd }) => {
-            init_cli_logging();
+            init_cli_observability!("policy");
             vulcan::cli_policy::run(cmd).await?;
         }
         Some(Command::Replay { cmd }) => {
-            init_cli_logging();
+            init_cli_observability!("replay");
             vulcan::cli_replay::run(cmd).await?;
         }
         Some(Command::Impact { target, save }) => {
-            init_cli_logging();
+            init_cli_observability!("impact");
             vulcan::cli_impact::run(&target, save).await?;
         }
         Some(Command::Playbook { cmd }) => {
-            init_cli_logging();
+            init_cli_observability!("playbook");
             vulcan::cli_playbook::run(cmd).await?;
         }
         Some(Command::Extension { cmd }) => {
-            init_cli_logging();
+            init_cli_observability!("extension");
             vulcan::cli_extension::run(cmd).await?;
         }
         Some(Command::Cortex { cmd }) => {
-            init_cli_logging();
+            init_cli_observability!("cortex");
             #[cfg(feature = "daemon")]
             {
                 if cli.no_daemon {
@@ -243,12 +268,12 @@ async fn main() -> anyhow::Result<()> {
         }
         #[cfg(feature = "daemon")]
         Some(Command::Daemon { action }) => {
-            init_cli_logging();
+            init_cli_observability!("daemon");
             vulcan::daemon::cli::run(action).await?;
         }
         #[cfg(feature = "daemon")]
         Some(Command::HiddenPing) => {
-            init_cli_logging();
+            init_cli_observability!("hidden-ping");
             let client = vulcan::client::Client::connect_or_autostart().await?;
             let result = client.call("daemon.ping", serde_json::json!({})).await?;
             println!("{}", serde_json::to_string_pretty(&result)?);
@@ -258,13 +283,22 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
+fn process_span(command: &'static str) -> tracing::Span {
+    tracing::info_span!(
+        vulcan::observability::span::PROCESS,
+        command,
+        surface = "process"
+    )
+}
+
 /// Log to stderr for CLI/one-shot mode — fine because there's no TUI
-fn init_cli_logging() {
+fn init_cli_logging(config: &Config) -> vulcan::observability::ObservabilityGuard {
     let filter = EnvFilter::try_from_env("VULCAN_LOG").unwrap_or_else(|_| EnvFilter::new("info"));
-    tracing_subscriber::fmt()
-        .with_env_filter(filter)
-        .with_writer(std::io::stderr)
-        .init();
+    vulcan::observability::init_with_writer(&config.observability, filter, std::io::stderr, true)
+        .unwrap_or_else(|err| {
+            eprintln!("Vulcan logging initialization failed: {err:#}");
+            vulcan::observability::ObservabilityGuard::disabled()
+        })
 }
 
 /// YYC-200: outcome of selecting the TUI log destination. The
@@ -294,26 +328,34 @@ fn pick_tui_log_target(log_path: PathBuf) -> TuiLogTarget {
 }
 
 /// Log to a file for TUI mode so the alternate screen stays clean
-fn init_tui_logging() {
+fn init_tui_logging(config: &Config) -> vulcan::observability::ObservabilityGuard {
     let log_path = vulcan::config::vulcan_home().join("vulcan.log");
     let filter = EnvFilter::try_from_env("VULCAN_LOG").unwrap_or_else(|_| EnvFilter::new("info"));
 
     match pick_tui_log_target(log_path) {
         TuiLogTarget::File { file, path } => {
-            tracing_subscriber::fmt()
-                .with_env_filter(filter)
-                .with_writer(file)
-                .with_ansi(false)
-                .init();
+            let guard =
+                vulcan::observability::init_with_writer(&config.observability, filter, file, false)
+                    .unwrap_or_else(|err| {
+                        eprintln!("Vulcan logging initialization failed: {err:#}");
+                        vulcan::observability::ObservabilityGuard::disabled()
+                    });
             eprintln!("Vulcan TUI starting... logs → {path:?}");
+            guard
         }
         TuiLogTarget::Sink { reason } => {
-            tracing_subscriber::fmt()
-                .with_env_filter(filter)
-                .with_writer(std::io::sink)
-                .with_ansi(false)
-                .init();
+            let guard = vulcan::observability::init_with_writer(
+                &config.observability,
+                filter,
+                std::io::sink,
+                false,
+            )
+            .unwrap_or_else(|err| {
+                eprintln!("Vulcan logging initialization failed: {err:#}");
+                vulcan::observability::ObservabilityGuard::disabled()
+            });
             eprintln!("Vulcan TUI starting... log file unavailable ({reason}); logs disabled.");
+            guard
         }
     }
 }
