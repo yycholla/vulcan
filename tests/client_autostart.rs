@@ -12,14 +12,18 @@
 //! * concurrent invocations settle on a single live daemon (PID file is
 //!   acquired exclusively).
 
-use assert_cmd::Command;
 use predicates::prelude::*;
 use std::path::Path;
 use std::time::Duration;
 use tempfile::tempdir;
 
+mod support;
+use support::vulcan_command;
+
+use assert_cmd::Command;
+
 fn vulcan_with_home(home: &Path) -> Command {
-    let mut c = Command::cargo_bin("vulcan").unwrap();
+    let mut c = vulcan_command();
     c.env("VULCAN_HOME", home);
     c.env("RUST_LOG", "warn");
     c

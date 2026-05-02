@@ -19,11 +19,11 @@ async fn todo_details_survive_session_end_then_session_start_replay() {
 
     let hooks = HookRegistry::new();
     let mut tools = ToolRegistry::new();
-    let ctx = SessionExtensionCtx {
-        cwd: std::env::current_dir().expect("cwd"),
-        session_id: session_id.to_string(),
-        memory: Arc::clone(&memory),
-    };
+    let ctx = SessionExtensionCtx::new(
+        std::env::current_dir().expect("cwd"),
+        session_id.to_string(),
+        Arc::clone(&memory),
+    );
     let (sessions, extension_tools) =
         registry.wire_daemon_extensions_into_runtime(ctx, &hooks, Some(&mut tools));
     assert_eq!(sessions, 1);
@@ -76,11 +76,11 @@ async fn todo_details_survive_session_end_then_session_start_replay() {
 
     let restarted_hooks = HookRegistry::new();
     let mut restarted_tools = ToolRegistry::new();
-    let ctx = SessionExtensionCtx {
-        cwd: std::env::current_dir().expect("cwd"),
-        session_id: session_id.to_string(),
-        memory: Arc::clone(&memory),
-    };
+    let ctx = SessionExtensionCtx::new(
+        std::env::current_dir().expect("cwd"),
+        session_id.to_string(),
+        Arc::clone(&memory),
+    );
     registry.wire_daemon_extensions_into_runtime(ctx, &restarted_hooks, Some(&mut restarted_tools));
     restarted_hooks.session_start(session_id).await;
 

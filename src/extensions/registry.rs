@@ -243,15 +243,32 @@ impl ExtensionRegistry {
         let daemon_snapshot = self.daemon_extensions.read().clone();
         for ext in daemon_snapshot {
             let id = ext.metadata().id;
-            let active = metadata_snapshot
-                .iter()
-                .find(|m| m.id == id)
-                .map(|m| m.status == ExtensionStatus::Active)
-                .unwrap_or(false);
+            let Some(metadata) = metadata_snapshot.iter().find(|m| m.id == id) else {
+                continue;
+            };
+            let active = metadata.status == ExtensionStatus::Active;
             if !active {
                 continue;
             }
-            let session_ext = ext.instantiate(ctx.clone());
+            if let Some(frontend) = ctx
+                .frontend_extensions
+                .iter()
+                .find(|frontend| frontend.id == id)
+            {
+                if frontend.version != metadata.version {
+                    self.mark_broken(&id, "extension version mismatch");
+                    continue;
+                }
+            }
+            if !metadata.requires_frontend.is_empty()
+                && !metadata
+                    .requires_frontend
+                    .iter()
+                    .all(|required| ctx.frontend_capabilities.contains(required))
+            {
+                continue;
+            }
+            let session_ext = ext.instantiate(ctx.for_extension(id.clone()));
             let runtime = SessionExtensionRuntime::new(id, session_ext);
             for handler in runtime.wrapped_hook_handlers() {
                 hooks.register(handler);
@@ -309,7 +326,10 @@ impl ExtensionRegistry {
         let ext = daemon_snapshot
             .into_iter()
             .find(|e| e.metadata().id == id)?;
-        let runtime = SessionExtensionRuntime::new(id.to_string(), ext.instantiate(ctx));
+        let runtime = SessionExtensionRuntime::new(
+            id.to_string(),
+            ext.instantiate(ctx.for_extension(id.to_string())),
+        );
         for handler in runtime.wrapped_hook_handlers() {
             hooks.register(handler);
         }
@@ -428,6 +448,11 @@ impl ExtensionRegistry {
                     if let Some(desc) = manifest.description.clone() {
                         meta.description = desc;
                     }
+                    meta.requires_frontend = manifest
+                        .requires_frontend
+                        .iter()
+                        .filter_map(|capability| super::FrontendCapability::parse(capability))
+                        .collect();
                     if let Some(perm) = manifest.permissions.clone() {
                         meta.permissions_summary = Some(perm);
                     }
@@ -744,6 +769,54 @@ mod tests {
         assert_eq!(fields.len(), 1);
         assert_eq!(fields[0].0, "active-fielded");
         assert_eq!(fields[0].1.path, "enabled");
+    }
+
+    #[test]
+    fn daemon_extension_version_mismatch_marks_extension_broken() {
+        struct VersionedDaemonExtension {
+            meta: ExtensionMetadata,
+        }
+
+        impl crate::extensions::api::DaemonCodeExtension for VersionedDaemonExtension {
+            fn metadata(&self) -> ExtensionMetadata {
+                self.meta.clone()
+            }
+
+            fn instantiate(
+                &self,
+                _ctx: crate::extensions::api::SessionExtensionCtx,
+            ) -> Arc<dyn crate::extensions::api::SessionExtension> {
+                panic!("mismatched frontend version must not instantiate");
+            }
+        }
+
+        let reg = ExtensionRegistry::new();
+        let mut meta = ExtensionMetadata::new(
+            "versioned",
+            "Versioned",
+            "1.0.0",
+            crate::extensions::ExtensionSource::Builtin,
+        );
+        meta.status = ExtensionStatus::Active;
+        reg.register_daemon_extension(Arc::new(VersionedDaemonExtension { meta }));
+        let hooks = crate::hooks::HookRegistry::new();
+        let ctx =
+            crate::extensions::api::test_session_extension_ctx().with_frontend_extensions(vec![
+                vulcan_frontend_api::FrontendExtensionDescriptor {
+                    id: "versioned".into(),
+                    version: "2.0.0".into(),
+                },
+            ]);
+
+        let runtimes = reg.wire_daemon_extensions_runtime(ctx, &hooks);
+
+        assert!(runtimes.is_empty());
+        let got = reg.get("versioned").unwrap();
+        assert_eq!(got.status, ExtensionStatus::Broken);
+        assert_eq!(
+            got.broken_reason.as_deref(),
+            Some("extension version mismatch")
+        );
     }
 
     // ── YYC-232 (YYC-166 PR-4): store + install_state bridge ────────

@@ -123,6 +123,45 @@ impl ExtensionCapability {
     }
 }
 
+/// Frontend-side capabilities a daemon extension may require before it
+/// activates for a Session.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FrontendCapability {
+    TextIo,
+    RichText,
+    CellCanvas,
+    RawInput,
+    StatusWidgets,
+}
+
+impl FrontendCapability {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            FrontendCapability::TextIo => "text_io",
+            FrontendCapability::RichText => "rich_text",
+            FrontendCapability::CellCanvas => "cell_canvas",
+            FrontendCapability::RawInput => "raw_input",
+            FrontendCapability::StatusWidgets => "status_widgets",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "text_io" => Some(Self::TextIo),
+            "rich_text" => Some(Self::RichText),
+            "cell_canvas" => Some(Self::CellCanvas),
+            "raw_input" => Some(Self::RawInput),
+            "status_widgets" => Some(Self::StatusWidgets),
+            _ => None,
+        }
+    }
+
+    pub fn text_only() -> Vec<Self> {
+        vec![Self::TextIo]
+    }
+}
+
 /// Static description of an extension. Carries everything needed
 /// to render `vulcan extension list/show` and to decide whether
 /// to activate, without touching code execution paths.
@@ -140,6 +179,10 @@ pub struct ExtensionMetadata {
     /// when active. Display-only today; PR-4 enforces against the
     /// active hook/tool wiring.
     pub capabilities: Vec<ExtensionCapability>,
+    /// Frontend capabilities required before this extension should be
+    /// activated for a frontend-backed Session.
+    #[serde(default)]
+    pub requires_frontend: Vec<FrontendCapability>,
     /// Optional human-readable permissions summary surfaced in
     /// `vulcan extension show`. Caller-provided; the registry
     /// does not interpret it.
@@ -173,6 +216,7 @@ impl ExtensionMetadata {
             source,
             status: ExtensionStatus::Inactive,
             capabilities: Vec::new(),
+            requires_frontend: Vec::new(),
             permissions_summary: None,
             requires_user_approval: false,
             broken_reason: None,

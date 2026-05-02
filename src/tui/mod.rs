@@ -153,6 +153,7 @@ pub async fn run_tui(
     // overlay and routes the response back via the pause's oneshot reply.
     let (pause_tx, mut pause_rx) = pause::channel(8);
     let pause_tx_for_agent = pause_tx.clone();
+    let (frontend_event_tx, mut frontend_event_rx) = tokio::sync::broadcast::channel(32);
 
     // ── Long-lived agent: one per TUI session, shared across prompts so
     // hook handlers' state (audit log, rate limits, etc.) survives turns.
@@ -161,6 +162,11 @@ pub async fn run_tui(
             .with_hooks(hook_reg)
             .with_pause_channel(pause_tx_for_agent)
             .with_tool_profile(tool_profile)
+            .with_frontend_context(
+                frontend.extension_frontend_capabilities(),
+                frontend.frontend_extensions(),
+                crate::extensions::api::FrontendEventSink::new(frontend_event_tx),
+            )
             .build()
             .await?,
     ));
@@ -1599,6 +1605,21 @@ pub async fn run_tui(
                         app.thinking = false;
                         app.current_turn_cancel = None;
                     }
+                }
+            }
+            frontend_event = frontend_event_rx.recv() => {
+                match frontend_event {
+                    Ok(event) => {
+                        let updates = app.frontend.handle_extension_event(&serde_json::json!({
+                            "kind": "extension_event",
+                            "session_id": event.session_id,
+                            "extension_id": event.extension_id,
+                            "payload": event.payload,
+                        }));
+                        app.apply_widget_updates(updates);
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => {}
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
                 }
             }
         }

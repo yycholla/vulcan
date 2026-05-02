@@ -213,6 +213,9 @@ pub struct AgentBuilder<'a> {
     /// non-daemon CLI/test paths still pass `None` and fall back to
     /// the legacy build-everything path.
     pool: Option<Arc<RuntimeResourcePool>>,
+    frontend_capabilities: Vec<crate::extensions::FrontendCapability>,
+    frontend_extensions: Vec<vulcan_frontend_api::FrontendExtensionDescriptor>,
+    frontend_events: crate::extensions::api::FrontendEventSink,
 }
 
 impl<'a> AgentBuilder<'a> {
@@ -247,6 +250,18 @@ impl<'a> AgentBuilder<'a> {
         self
     }
 
+    pub fn with_frontend_context(
+        mut self,
+        capabilities: Vec<crate::extensions::FrontendCapability>,
+        extensions: Vec<vulcan_frontend_api::FrontendExtensionDescriptor>,
+        events: crate::extensions::api::FrontendEventSink,
+    ) -> Self {
+        self.frontend_capabilities = capabilities;
+        self.frontend_extensions = extensions;
+        self.frontend_events = events;
+        self
+    }
+
     pub async fn build(self) -> Result<Agent> {
         Agent::build_from_parts(
             self.config,
@@ -255,6 +270,9 @@ impl<'a> AgentBuilder<'a> {
             self.max_iterations,
             self.tool_profile,
             self.pool,
+            self.frontend_capabilities,
+            self.frontend_extensions,
+            self.frontend_events,
         )
         .await
     }
@@ -269,6 +287,9 @@ impl Agent {
             max_iterations: None,
             tool_profile: None,
             pool: None,
+            frontend_capabilities: crate::extensions::FrontendCapability::text_only(),
+            frontend_extensions: Vec::new(),
+            frontend_events: crate::extensions::api::FrontendEventSink::default(),
         }
     }
 
@@ -287,6 +308,9 @@ impl Agent {
         max_iterations: Option<u32>,
         tool_profile_override: Option<String>,
         pool: Option<Arc<RuntimeResourcePool>>,
+        frontend_capabilities: Vec<crate::extensions::FrontendCapability>,
+        frontend_extensions: Vec<vulcan_frontend_api::FrontendExtensionDescriptor>,
+        frontend_events: crate::extensions::api::FrontendEventSink,
     ) -> Result<Self> {
         // YYC-239: TUI + gateway resolve their starting provider
         // through the same `active_provider_config` indirection.
@@ -502,10 +526,16 @@ impl Agent {
             // the CLI / `vulcan extension audit` reads from.
             hooks = hooks.with_audit_log(p.extension_audit_log());
 
+            let ctx = crate::extensions::api::SessionExtensionCtx::new(
+                cwd.clone(),
+                session_id.clone(),
+                Arc::clone(&memory),
+            )
+            .with_frontend_capabilities(frontend_capabilities.clone())
+            .with_frontend_extensions(frontend_extensions.clone());
             let ctx = crate::extensions::api::SessionExtensionCtx {
-                cwd: cwd.clone(),
-                session_id: session_id.clone(),
-                memory: Arc::clone(&memory),
+                frontend_events: frontend_events.clone(),
+                ..ctx
             };
             let registry = p.extension_registry();
             session_extensions = registry.wire_daemon_extensions_runtime(ctx, &hooks);
@@ -966,11 +996,11 @@ impl Agent {
         if self.session_extensions.iter().any(|ext| ext.id() == id) {
             return Ok(false);
         }
-        let ctx = crate::extensions::api::SessionExtensionCtx {
-            cwd: self.tool_context.cwd.clone(),
-            session_id: self.session_id.clone(),
-            memory: Arc::clone(&self.memory),
-        };
+        let ctx = crate::extensions::api::SessionExtensionCtx::new(
+            self.tool_context.cwd.clone(),
+            self.session_id.clone(),
+            Arc::clone(&self.memory),
+        );
         let Some(runtime) = registry.instantiate_daemon_extension_runtime(id, ctx, &self.hooks)
         else {
             return Ok(false);

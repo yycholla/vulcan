@@ -7177,6 +7177,7 @@ dependencies = [
  "vulcan-core",
  "vulcan-ext-auto-commit",
  "vulcan-ext-input-demo",
+ "vulcan-ext-spinner-demo",
  "vulcan-ext-todo",
 ]
 
@@ -7295,6 +7296,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "vulcan-ext-spinner-demo"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "inventory",
+ "serde_json",
+ "tokio",
+ "tokio-util",
+ "vulcan-core",
+ "vulcan-frontend-api",
+]
+
+[[package]]
 name = "vulcan-ext-todo"
 version = "0.1.0"
 dependencies = [
@@ -7322,6 +7337,7 @@ name = "vulcan-frontend-api"
 version = "0.1.0"
 dependencies = [
  "inventory",
+ "serde",
  "serde_json",
 ]
 

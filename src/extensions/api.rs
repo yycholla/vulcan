@@ -18,6 +18,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use super::ExtensionMetadata;
+use super::FrontendCapability;
 use crate::hooks::{HookHandler, HookOutcome};
 use crate::memory::SessionStore;
 use crate::provider::factory::ProviderFactory;
@@ -25,6 +26,7 @@ use crate::provider::{ChatResponse, LLMProvider, Message, StreamEvent, ToolCall}
 use crate::tools::{Tool, ToolProgress, ToolResult};
 use anyhow::Result;
 use serde_json::Value;
+use tokio::sync::broadcast;
 use tokio_util::sync::CancellationToken;
 
 /// Parsed `[package.metadata.vulcan]` block for a cargo-crate
@@ -54,6 +56,83 @@ pub struct SessionExtensionCtx {
     /// Durable session history store for replaying extension state
     /// carried through `ToolResult.details`.
     pub memory: Arc<SessionStore>,
+    /// Capabilities declared by the current frontend.
+    pub frontend_capabilities: Vec<FrontendCapability>,
+    /// Frontend extension descriptors declared by the current frontend.
+    pub frontend_extensions: Vec<vulcan_frontend_api::FrontendExtensionDescriptor>,
+    /// Push channel for daemon extensions to emit frontend events.
+    pub frontend_events: FrontendEventSink,
+    /// The daemon extension id this context is currently scoped to.
+    pub extension_id: Option<String>,
+}
+
+impl SessionExtensionCtx {
+    pub fn new(cwd: PathBuf, session_id: String, memory: Arc<SessionStore>) -> Self {
+        Self {
+            cwd,
+            session_id,
+            memory,
+            frontend_capabilities: FrontendCapability::text_only(),
+            frontend_extensions: Vec::new(),
+            frontend_events: FrontendEventSink::default(),
+            extension_id: None,
+        }
+    }
+
+    pub fn for_extension(&self, extension_id: impl Into<String>) -> Self {
+        let mut ctx = self.clone();
+        ctx.extension_id = Some(extension_id.into());
+        ctx
+    }
+
+    pub fn with_frontend_extensions(
+        mut self,
+        frontend_extensions: Vec<vulcan_frontend_api::FrontendExtensionDescriptor>,
+    ) -> Self {
+        self.frontend_extensions = frontend_extensions;
+        self
+    }
+
+    pub fn with_frontend_capabilities(mut self, capabilities: Vec<FrontendCapability>) -> Self {
+        self.frontend_capabilities = capabilities;
+        self
+    }
+
+    pub fn emit_frontend_event(&self, payload: Value) -> Result<()> {
+        let Some(extension_id) = &self.extension_id else {
+            anyhow::bail!("frontend event emission requires extension-scoped context");
+        };
+        self.frontend_events.emit(FrontendEvent {
+            session_id: self.session_id.clone(),
+            extension_id: extension_id.clone(),
+            payload,
+        })
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct FrontendEvent {
+    pub session_id: String,
+    pub extension_id: String,
+    pub payload: Value,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct FrontendEventSink {
+    tx: Option<broadcast::Sender<FrontendEvent>>,
+}
+
+impl FrontendEventSink {
+    pub fn new(tx: broadcast::Sender<FrontendEvent>) -> Self {
+        Self { tx: Some(tx) }
+    }
+
+    pub fn emit(&self, event: FrontendEvent) -> Result<()> {
+        if let Some(tx) = &self.tx {
+            let _ = tx.send(event);
+        }
+        Ok(())
+    }
 }
 
 /// Daemon-global registration for an extension. One implementation per
@@ -442,6 +521,15 @@ pub fn wire_inventory_into_registry(registry: &super::ExtensionRegistry) -> usiz
 }
 
 #[cfg(test)]
+pub(crate) fn test_session_extension_ctx() -> SessionExtensionCtx {
+    SessionExtensionCtx::new(
+        PathBuf::from("/tmp/test-session"),
+        "test-session-id".to_string(),
+        Arc::new(SessionStore::in_memory()),
+    )
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::extensions::ExtensionSource;
@@ -466,11 +554,7 @@ mod tests {
 
     /// Test-only ctx with deterministic placeholder values.
     fn test_ctx() -> SessionExtensionCtx {
-        SessionExtensionCtx {
-            cwd: PathBuf::from("/tmp/test-session"),
-            session_id: "test-session-id".to_string(),
-            memory: Arc::new(SessionStore::in_memory()),
-        }
+        test_session_extension_ctx()
     }
 
     inventory::submit! {
@@ -592,11 +676,11 @@ mod tests {
 
         let seen = Arc::new(RwLock::new(None));
         let ext: Arc<dyn DaemonCodeExtension> = Arc::new(CapturingExtension { seen: seen.clone() });
-        let ctx = SessionExtensionCtx {
-            cwd: PathBuf::from("/tmp/example-session"),
-            session_id: "sess-42".to_string(),
-            memory: Arc::new(SessionStore::in_memory()),
-        };
+        let ctx = SessionExtensionCtx::new(
+            PathBuf::from("/tmp/example-session"),
+            "sess-42".to_string(),
+            Arc::new(SessionStore::in_memory()),
+        );
         let _ = ext.instantiate(ctx);
 
         let captured = seen.read().clone().expect("instantiate ran");

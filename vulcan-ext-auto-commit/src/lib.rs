@@ -195,11 +195,11 @@ mod tests {
         assert_eq!(commit_count(&repo), 1, "starts with one commit");
 
         let ext = AutoCommitExtension;
-        let session = ext.instantiate(SessionExtensionCtx {
-            cwd: repo.clone(),
-            session_id: "test-session".to_string(),
-            memory: Arc::new(vulcan::memory::SessionStore::in_memory()),
-        });
+        let session = ext.instantiate(SessionExtensionCtx::new(
+            repo.clone(),
+            "test-session".to_string(),
+            Arc::new(vulcan::memory::SessionStore::in_memory()),
+        ));
         let handlers = session.hook_handlers();
         assert_eq!(handlers.len(), 1);
         handlers[0].session_end("test-session", 1).await;
@@ -215,11 +215,11 @@ mod tests {
         assert_eq!(commit_count(&repo), 1);
 
         let ext = AutoCommitExtension;
-        let session = ext.instantiate(SessionExtensionCtx {
-            cwd: repo.clone(),
-            session_id: "clean-session".to_string(),
-            memory: Arc::new(vulcan::memory::SessionStore::in_memory()),
-        });
+        let session = ext.instantiate(SessionExtensionCtx::new(
+            repo.clone(),
+            "clean-session".to_string(),
+            Arc::new(vulcan::memory::SessionStore::in_memory()),
+        ));
         session.hook_handlers()[0]
             .session_end("clean-session", 0)
             .await;
@@ -235,11 +235,11 @@ mod tests {
         // Not a git repo.
 
         let ext = AutoCommitExtension;
-        let session = ext.instantiate(SessionExtensionCtx {
-            cwd: path,
-            session_id: "no-git".to_string(),
-            memory: Arc::new(vulcan::memory::SessionStore::in_memory()),
-        });
+        let session = ext.instantiate(SessionExtensionCtx::new(
+            path,
+            "no-git".to_string(),
+            Arc::new(vulcan::memory::SessionStore::in_memory()),
+        ));
         session.hook_handlers()[0].session_end("no-git", 0).await;
         // No panic, no error — just silently no-op.
     }
