@@ -162,6 +162,16 @@ pub struct ActiveTick {
     next_fire: Instant,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum ChatClearPhase {
+    #[default]
+    Idle,
+    Requested,
+    Exploding,
+    RevealRequested,
+    Revealing,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CancelScope {
     Turn,
@@ -251,7 +261,7 @@ pub struct AppState {
     pub active_ticks: Vec<ActiveTick>,
     pub activity_throbber: ThrobberState,
     pub effects: TuiEffects,
-    chat_clear_pending: Cell<bool>,
+    chat_clear_phase: Cell<ChatClearPhase>,
 
     /// When the agent emits an `AgentPause`, the TUI parks it here. Render
     /// shows an overlay; key handler intercepts Y/A/N keys and consumes the
@@ -411,7 +421,7 @@ impl AppState {
             active_ticks: Vec::new(),
             activity_throbber: ThrobberState::default(),
             effects: TuiEffects::default(),
-            chat_clear_pending: Cell::new(false),
+            chat_clear_phase: Cell::new(ChatClearPhase::Idle),
             pending_pause: None,
 
             cursor: Cell::new((0, 0)),
@@ -710,7 +720,7 @@ impl AppState {
                 .status_widgets
                 .values()
                 .any(|content| !matches!(content, vulcan_frontend_api::WidgetContent::Text(_)))
-            || self.chat_clear_pending.get()
+            || self.chat_clear_phase.get() != ChatClearPhase::Idle
             || self.effects.chat_running()
             || self.messages.iter().any(|message| {
                 message.segments.iter().any(|segment| {
@@ -733,24 +743,45 @@ impl AppState {
     }
 
     pub fn request_chat_clear(&self) {
-        self.chat_clear_pending.set(true);
+        self.chat_clear_phase.set(ChatClearPhase::Requested);
     }
 
     pub fn start_chat_clear_effect_if_pending(&self, area: ratatui::layout::Rect) {
-        if !self.chat_clear_pending.get() || self.effects.chat_running() {
+        if self.effects.chat_running() {
             return;
         }
-        self.effects.trigger_chat_clear(area);
+        match self.chat_clear_phase.get() {
+            ChatClearPhase::Requested => {
+                self.effects.trigger_chat_clear(area);
+                self.chat_clear_phase.set(ChatClearPhase::Exploding);
+            }
+            ChatClearPhase::RevealRequested => {
+                self.effects.trigger_chat_reveal(area);
+                self.chat_clear_phase.set(ChatClearPhase::Revealing);
+            }
+            ChatClearPhase::Idle | ChatClearPhase::Exploding | ChatClearPhase::Revealing => {}
+        }
     }
 
     pub fn finish_chat_clear_if_idle(&mut self) -> bool {
-        if self.chat_clear_pending.get() && !self.effects.chat_running() {
-            self.messages.clear();
-            self.chat_render_store.borrow_mut().clear();
-            self.chat_clear_pending.set(false);
-            return true;
+        if self.effects.chat_running() {
+            return false;
         }
-        false
+        match self.chat_clear_phase.get() {
+            ChatClearPhase::Exploding => {
+                self.messages.clear();
+                self.chat_render_store.borrow_mut().clear();
+                self.chat_clear_phase.set(ChatClearPhase::RevealRequested);
+                true
+            }
+            ChatClearPhase::Revealing => {
+                self.chat_clear_phase.set(ChatClearPhase::Idle);
+                true
+            }
+            ChatClearPhase::Idle | ChatClearPhase::Requested | ChatClearPhase::RevealRequested => {
+                false
+            }
+        }
     }
 
     pub fn cancel_stack(&self) -> Vec<CancelScope> {

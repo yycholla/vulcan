@@ -242,6 +242,22 @@ fn activity_motion_advances_throbber_only_while_active() {
     assert_eq!(app.effects.prompt_border_phase(), 1);
 }
 
+#[test]
+fn chat_clear_phases_clear_then_reveal_welcome() {
+    let mut app = AppState::new("test-model".into(), 128_000);
+    app.messages
+        .push(ChatMessage::new(ChatRole::User, "clear me"));
+    app.chat_clear_phase.set(ChatClearPhase::Exploding);
+
+    assert!(app.finish_chat_clear_if_idle());
+    assert!(app.messages.is_empty());
+    assert_eq!(app.chat_clear_phase.get(), ChatClearPhase::RevealRequested);
+
+    app.chat_clear_phase.set(ChatClearPhase::Revealing);
+    assert!(app.finish_chat_clear_if_idle());
+    assert_eq!(app.chat_clear_phase.get(), ChatClearPhase::Idle);
+}
+
 struct TestCanvas;
 
 impl vulcan_frontend_api::Canvas for TestCanvas {
