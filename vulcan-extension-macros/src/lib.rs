@@ -42,6 +42,10 @@ pub fn include_manifest(_input: TokenStream) -> TokenStream {
         .and_then(toml::Value::as_str)
         .unwrap_or(package_version);
     let daemon_entry = vulcan.get("daemon_entry").and_then(toml::Value::as_str);
+    let core = vulcan
+        .get("core")
+        .and_then(toml::Value::as_bool)
+        .unwrap_or(false);
     let requires_user_approval = vulcan
         .get("requires_user_approval")
         .and_then(toml::Value::as_bool)
@@ -55,7 +59,7 @@ pub fn include_manifest(_input: TokenStream) -> TokenStream {
     };
 
     format!(
-        "::vulcan::extensions::api::ExtensionManifest {{ id: {id_lit}.to_string(), version: {version_lit}.to_string(), daemon_entry: {daemon_entry_tokens}, requires_user_approval: {requires_user_approval} }}"
+        "::vulcan::extensions::api::ExtensionManifest {{ id: {id_lit}.to_string(), version: {version_lit}.to_string(), daemon_entry: {daemon_entry_tokens}, core: {core}, requires_user_approval: {requires_user_approval} }}"
     )
     .parse()
     .expect("include_manifest! generated invalid tokens")

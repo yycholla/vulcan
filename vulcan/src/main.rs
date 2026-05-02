@@ -2,6 +2,8 @@
 // `inventory::submit!` site into the daemon binary so its `register`
 // fn pointer survives dead-code elimination. Bare `extern crate`
 // suffices — no symbols need importing into source.
+extern crate vulcan_core_ext_safety as _vulcan_core_ext_safety;
+extern crate vulcan_core_ext_skills as _vulcan_core_ext_skills;
 extern crate vulcan_ext_auto_commit as _vulcan_ext_auto_commit;
 extern crate vulcan_ext_input_demo as _vulcan_ext_input_demo;
 extern crate vulcan_ext_snake as _vulcan_ext_snake;

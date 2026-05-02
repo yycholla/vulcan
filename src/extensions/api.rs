@@ -19,8 +19,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use super::ExtensionMetadata;
 use super::FrontendCapability;
+use crate::config::DangerousCommandsConfig;
 use crate::hooks::{HookHandler, HookOutcome};
 use crate::memory::SessionStore;
+use crate::pause::PauseSender;
 use crate::provider::factory::ProviderFactory;
 use crate::provider::{ChatResponse, LLMProvider, Message, StreamEvent, ToolCall};
 use crate::tools::{Tool, ToolProgress, ToolResult};
@@ -36,6 +38,7 @@ pub struct ExtensionManifest {
     pub id: String,
     pub version: String,
     pub daemon_entry: Option<String>,
+    pub core: bool,
     pub requires_user_approval: bool,
 }
 
@@ -56,6 +59,14 @@ pub struct SessionExtensionCtx {
     /// Durable session history store for replaying extension state
     /// carried through `ToolResult.details`.
     pub memory: Arc<SessionStore>,
+    /// Skills directory configured for this Session. Core skills uses
+    /// this to build the same catalog the previous hard-wired hook used.
+    pub skills_dir: PathBuf,
+    /// Optional interactive pause channel for Session extensions that
+    /// need HITL approval, including core safety.
+    pub pause_tx: Option<PauseSender>,
+    /// Dangerous-command policy for core safety.
+    pub dangerous_commands: DangerousCommandsConfig,
     /// Capabilities declared by the current frontend.
     pub frontend_capabilities: Vec<FrontendCapability>,
     /// Frontend extension descriptors declared by the current frontend.
@@ -72,6 +83,9 @@ impl SessionExtensionCtx {
             cwd,
             session_id,
             memory,
+            skills_dir: PathBuf::from(".agents/skills"),
+            pause_tx: None,
+            dangerous_commands: DangerousCommandsConfig::default(),
             frontend_capabilities: FrontendCapability::text_only(),
             frontend_extensions: Vec::new(),
             frontend_events: FrontendEventSink::default(),
@@ -95,6 +109,21 @@ impl SessionExtensionCtx {
 
     pub fn with_frontend_capabilities(mut self, capabilities: Vec<FrontendCapability>) -> Self {
         self.frontend_capabilities = capabilities;
+        self
+    }
+
+    pub fn with_skills_dir(mut self, skills_dir: PathBuf) -> Self {
+        self.skills_dir = skills_dir;
+        self
+    }
+
+    pub fn with_pause_channel(mut self, pause_tx: Option<PauseSender>) -> Self {
+        self.pause_tx = pause_tx;
+        self
+    }
+
+    pub fn with_dangerous_commands(mut self, dangerous_commands: DangerousCommandsConfig) -> Self {
+        self.dangerous_commands = dangerous_commands;
         self
     }
 

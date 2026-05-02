@@ -205,6 +205,11 @@ pub struct ExtensionMetadata {
     /// `vulcan extension show`. Caller-provided; the registry
     /// does not interpret it.
     pub permissions_summary: Option<String>,
+    /// Core extensions are part of Vulcan's own runtime contract.
+    /// They always sort ahead of non-core extensions and cannot be
+    /// disabled through the normal lifecycle path.
+    #[serde(default)]
+    pub core: bool,
     /// Whether input rewrites from this extension require explicit
     /// user approval before the rewritten text is applied.
     pub requires_user_approval: bool,
@@ -236,6 +241,7 @@ impl ExtensionMetadata {
             capabilities: Vec::new(),
             requires_frontend: Vec::new(),
             permissions_summary: None,
+            core: false,
             requires_user_approval: false,
             broken_reason: None,
             priority: 100,

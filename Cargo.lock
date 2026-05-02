@@ -7175,6 +7175,8 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "vulcan-core",
+ "vulcan-core-ext-safety",
+ "vulcan-core-ext-skills",
  "vulcan-ext-auto-commit",
  "vulcan-ext-input-demo",
  "vulcan-ext-snake",
@@ -7254,6 +7256,24 @@ dependencies = [
  "url",
  "uuid",
  "vulcan-frontend-api",
+]
+
+[[package]]
+name = "vulcan-core-ext-safety"
+version = "0.1.0"
+dependencies = [
+ "inventory",
+ "vulcan-core",
+ "vulcan-extension-macros",
+]
+
+[[package]]
+name = "vulcan-core-ext-skills"
+version = "0.1.0"
+dependencies = [
+ "inventory",
+ "vulcan-core",
+ "vulcan-extension-macros",
 ]
 
 [[package]]
@@ -7356,6 +7376,8 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "vulcan-core",
+ "vulcan-core-ext-safety",
+ "vulcan-core-ext-skills",
  "vulcan-ext-snake",
  "vulcan-ext-spinner-demo",
  "vulcan-ext-todo",

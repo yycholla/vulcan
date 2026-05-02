@@ -22,6 +22,8 @@ telegram = ["vulcan/telegram"]
 # as `vulcan-core`. The `package =` rename keeps the existing
 # `use vulcan::*` imports compiling.
 vulcan = { package = "vulcan-core", path = ".." }
+vulcan-core-ext-safety = { path = "../vulcan-core-ext-safety" }
+vulcan-core-ext-skills = { path = "../vulcan-core-ext-skills" }
 
 # GH issue #549: link the auto-commit dogfood extension so its
 # `inventory::submit!` site is visible at daemon startup. Without a

@@ -1,0 +1,17 @@
+[package]
+name = "vulcan-core-ext-safety"
+version = "0.1.0"
+edition = "2024"
+description = "Core Vulcan safety hook extension"
+license = "MIT"
+
+[package.metadata.vulcan]
+id = "core-safety"
+daemon_entry = "vulcan_core_ext_safety::CoreSafetyExtension"
+core = true
+requires_user_approval = true
+
+[dependencies]
+inventory = "0.3.24"
+vulcan = { package = "vulcan-core", path = ".." }
+vulcan-extension-macros = { path = "../vulcan-extension-macros" }

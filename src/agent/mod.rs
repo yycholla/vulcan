@@ -6,8 +6,6 @@ use crate::hooks::HookRegistry;
 use crate::hooks::approval::ApprovalHook;
 use crate::hooks::diagnostics::DiagnosticsHook;
 use crate::hooks::recall::RecallHook;
-use crate::hooks::safety::SafetyHook;
-use crate::hooks::skills::SkillsHook;
 use crate::memory::SessionStore;
 use crate::pause::PauseSender;
 use crate::prompt_builder::PromptBuilder;
@@ -444,9 +442,6 @@ impl Agent {
             ContextManager::with_config(provider.max_context(), config.compaction.clone());
         let session_id = Uuid::new_v4().to_string();
 
-        // Built-in hook: surface available skills to the LLM via BeforePrompt.
-        hooks.register(Arc::new(SkillsHook::new(skills.clone())));
-
         // YYC-42: optionally recall relevant past-session context on the
         // first turn of a fresh session. Off by default — config
         // `[recall].enabled = true` opts in. Uses its own SessionStore
@@ -480,15 +475,6 @@ impl Agent {
         };
         hooks.register(Arc::new(approval_hook));
 
-        // Built-in hook: block dangerous shell invocations unless yolo_mode is on.
-        // Skipped entirely (not even registered as observe-only) when yolo_mode
-        // is true — keeps the no-op path zero-cost. With a pause emitter
-        // wired up, blocks become interactive prompts.
-        if !config.tools.yolo_mode {
-            let safety = SafetyHook::with_config(pause_tx.clone(), config.tools.dangerous_commands);
-            hooks.register(Arc::new(safety));
-        }
-
         // Built-in hook (YYC-87 / YYC-84): redirect bash invocations to
         // native tools when there's a clear equivalent. Skipped entirely
         // when the knob is `Off`. Sits at priority 5 — after safety
@@ -511,53 +497,63 @@ impl Agent {
         // when RTK is not installed — zero per-call overhead.
         hooks.register(Arc::new(crate::hooks::rtk::RtkHook::new()));
 
-        // GH issue #549: cargo-crate extensions registered via
-        // `inventory::submit!` and discovered into the pool's
-        // `ExtensionRegistry` at daemon startup. Each `Active`
-        // `DaemonCodeExtension` is instantiated per **Session** and its
-        // `hook_handlers` registered into this Agent's `HookRegistry`.
-        // No-op when the agent runs without a pool (CLI one-shot) or
-        // when no daemon extensions are registered.
-        let mut session_extensions = Vec::new();
-        if let Some(p) = pool.as_ref() {
+        // GH issue #549/#561: cargo-crate extensions registered via
+        // `inventory::submit!` now include core hook providers such as
+        // skills and safety. Every Agent wires active daemon extensions,
+        // using the daemon-owned registry when a pool exists and a local
+        // registry for direct CLI/TUI construction.
+        let extension_registry = if let Some(p) = pool.as_ref() {
             // GH issue #557: install the daemon's shared audit log on
             // the registry before extension hook handlers register so
             // any `on_input` outcome they emit lands on the same ring
             // the CLI / `vulcan extension audit` reads from.
             hooks = hooks.with_audit_log(p.extension_audit_log());
-
-            let ctx = crate::extensions::api::SessionExtensionCtx::new(
-                cwd.clone(),
-                session_id.clone(),
-                Arc::clone(&memory),
-            )
-            .with_frontend_capabilities(frontend_capabilities.clone())
-            .with_frontend_extensions(frontend_extensions.clone());
-            let ctx = crate::extensions::api::SessionExtensionCtx {
-                frontend_events: frontend_events.clone(),
-                ..ctx
-            };
-            let registry = p.extension_registry();
-            session_extensions = registry.wire_daemon_extensions_runtime(ctx, &hooks);
-            for ext in &session_extensions {
-                for tool in ext.wrapped_tools() {
-                    if let Err(err) = tools.register_extension_tool(ext.id(), tool) {
-                        registry.mark_broken(ext.id(), err.to_string());
-                        tracing::warn!(
-                            extension_id = ext.id(),
-                            %err,
-                            "Agent: failed to register extension tool"
-                        );
-                    }
+            p.extension_registry()
+        } else {
+            let registry = Arc::new(crate::extensions::ExtensionRegistry::new());
+            crate::extensions::api::wire_inventory_into_registry(&registry);
+            registry
+        };
+        let dangerous_commands = if config.tools.yolo_mode {
+            let mut cfg = config.tools.dangerous_commands;
+            cfg.policy = crate::config::DangerousCommandPolicy::Allow;
+            cfg
+        } else {
+            config.tools.dangerous_commands
+        };
+        let ctx = crate::extensions::api::SessionExtensionCtx::new(
+            cwd.clone(),
+            session_id.clone(),
+            Arc::clone(&memory),
+        )
+        .with_frontend_capabilities(frontend_capabilities.clone())
+        .with_frontend_extensions(frontend_extensions.clone())
+        .with_skills_dir(config.skills_dir.clone())
+        .with_pause_channel(pause_tx.clone())
+        .with_dangerous_commands(dangerous_commands);
+        let ctx = crate::extensions::api::SessionExtensionCtx {
+            frontend_events: frontend_events.clone(),
+            ..ctx
+        };
+        let session_extensions = extension_registry.wire_daemon_extensions_runtime(ctx, &hooks);
+        for ext in &session_extensions {
+            for tool in ext.wrapped_tools() {
+                if let Err(err) = tools.register_extension_tool(ext.id(), tool) {
+                    extension_registry.mark_broken(ext.id(), err.to_string());
+                    tracing::warn!(
+                        extension_id = ext.id(),
+                        %err,
+                        "Agent: failed to register extension tool"
+                    );
                 }
-                ext.activate().await;
             }
-            if !session_extensions.is_empty() {
-                tracing::info!(
-                    daemon_extensions = session_extensions.len(),
-                    "Agent: wired daemon-side cargo-crate extensions"
-                );
-            }
+            ext.activate().await;
+        }
+        if !session_extensions.is_empty() {
+            tracing::info!(
+                daemon_extensions = session_extensions.len(),
+                "Agent: wired daemon-side cargo-crate extensions"
+            );
         }
 
         // YYC-264: embedded cortex-memory-core graph memory. When enabled,

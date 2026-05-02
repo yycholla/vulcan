@@ -48,8 +48,8 @@ fn list(home: &Path, install: &SqliteInstallStateStore) -> Result<()> {
         return Ok(());
     }
     println!(
-        "{:<24} {:<10} {:<10} {:<8} description",
-        "id", "status", "version", "source"
+        "{:<24} {:<10} {:<10} {:<8} {:<5} description",
+        "id", "status", "version", "source", "core"
     );
     for meta in entries {
         let source = match meta.source {
@@ -65,11 +65,12 @@ fn list(home: &Path, install: &SqliteInstallStateStore) -> Result<()> {
             .take(60)
             .collect();
         println!(
-            "{:<24} {:<10} {:<10} {:<8} {}",
+            "{:<24} {:<10} {:<10} {:<8} {:<5} {}",
             meta.id,
             meta.status.as_str(),
             meta.version,
             source,
+            meta.core,
             desc_preview
         );
     }
@@ -97,6 +98,7 @@ fn show(home: &Path, install: &SqliteInstallStateStore, id: &str) -> Result<()> 
         crate::extensions::ExtensionSource::SkillDraft => "skill-draft",
     };
     println!("  source:      {source}");
+    println!("  core:        {}", meta.core);
     println!("  priority:    {}", meta.priority);
     if !meta.description.is_empty() {
         println!("  description: {}", meta.description);
@@ -135,6 +137,7 @@ async fn set_enabled(
     // Confirm the manifest exists before flipping state — flipping
     // state on an unknown id would silently rot.
     let registry = ExtensionRegistry::new();
+    crate::extensions::api::wire_inventory_into_registry(&registry);
     let cwd = std::env::current_dir()?;
     registry.load_from_store_and_workspace(home, &cwd, install, install);
     let meta = registry
@@ -146,6 +149,11 @@ async fn set_enabled(
     {
         return Err(anyhow!(
             "extension `{id}` was discovered from this workspace and must be trusted first"
+        ));
+    }
+    if meta.core && !enabled {
+        return Err(anyhow!(
+            "extension `{id}` is core and cannot be disabled; use `vulcan extension kill {id}` for an emergency stop"
         ));
     }
     // Upsert a state row if missing so subsequent flips have
@@ -181,11 +189,23 @@ async fn set_enabled(
 }
 
 async fn kill(home: &Path, install: &SqliteInstallStateStore, id: &str) -> Result<()> {
-    set_enabled(home, install, id, false).await?;
+    let registry = ExtensionRegistry::new();
+    crate::extensions::api::wire_inventory_into_registry(&registry);
+    let cwd = std::env::current_dir()?;
+    registry.load_from_store_and_workspace(home, &cwd, install, install);
+    let is_core = registry.get(id).map(|meta| meta.core).unwrap_or(false);
+    if is_core {
+        println!("warning: `{id}` is a core extension; killing it may break runtime invariants");
+    } else {
+        set_enabled(home, install, id, false).await?;
+    }
     if let Some(result) = call_daemon("extension.kill", serde_json::json!({ "id": id })).await? {
         println!("live daemon: {}", serde_json::to_string(&result)?);
     }
     println!("warning: kill may break in-flight tool calls for `{id}`");
+    if is_core {
+        println!("warning: core kill may also break in-flight safety or context hooks");
+    }
     println!("force-stopped {id}");
     Ok(())
 }
