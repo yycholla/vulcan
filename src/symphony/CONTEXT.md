@@ -36,13 +36,22 @@ _Avoid_: crash-on-reload, partial config mutation
 Per-task workspace boundary. It sanitizes the **Normalized Task** identifier into a deterministic key, derives a contained path under `workspace.root`, creates or reuses the directory, and runs lifecycle hooks from the **Effective Config** with documented fatal/best-effort semantics.
 _Avoid_: ad hoc cwd selection, tracker-specific checkout policy
 
+**Task Source**:
+Read-only adapter boundary that returns **Normalized Task** records to the orchestrator. It exposes candidate fetch, state fetch, and ID refresh capabilities without leaking GitHub, markdown, or agent-todo payload shapes into scheduling code.
+_Avoid_: source-specific orchestrator branches, write-back side effects
+
+**Markdown Task Source**:
+First file-backed **Task Source** implementation. It scans a configured markdown/todo file containing `---` YAML records and normalizes each record into the shared task model. It uses full-file scans; pagination and incremental cursors are not relevant for this adapter.
+_Avoid_: remote tracker client, local database
+
 ## Relationships
 
 - Symphony is daemon-adjacent orchestration, not part of the user-facing **Daemon** session/turn path.
 - The **Workflow File** is loaded before dispatch; file read and YAML errors block new work.
 - The **Effective Config** is built from preserved front matter after workflow load; startup validation is fatal, while poll-time validation can skip new dispatch and keep the **Last Known Good Config**.
 - Template render failures are run-attempt failures, not workflow-file load failures.
-- Task-source adapters normalize source payloads before rendering. The workflow layer does not know GitHub, Linear, markdown tasks, or agent todos.
+- **Task Source** adapters normalize source payloads before rendering. The workflow layer does not know GitHub, markdown tasks, or agent todos.
+- The **Markdown Task Source** is the only implemented adapter in this slice. GitHub and other remote adapters remain unsupported by the factory until later slices add authenticated API clients.
 - The **Workspace Manager** prepares the cwd boundary before an agent process exists. It does not implement repository checkout/sync policy; use lifecycle hooks for implementation-defined workspace population.
 - Agent process execution is a later slice.
 
