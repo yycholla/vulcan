@@ -311,9 +311,37 @@ pub trait MessageRenderer: Send + Sync {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub enum FrontendSurfacePlacement {
+    Modal,
+    Fullscreen,
+    RightDrawer,
+    BottomDrawer,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FrontendSurface {
+    pub id: String,
+    pub title: String,
+    pub body: Vec<String>,
+    pub placement: FrontendSurfacePlacement,
+}
+
+impl FrontendSurface {
+    pub fn modal(id: impl Into<String>, title: impl Into<String>, body: Vec<String>) -> Self {
+        Self {
+            id: id.into(),
+            title: title.into(),
+            body,
+            placement: FrontendSurfacePlacement::Modal,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum FrontendCommandAction {
     Noop,
     SystemMessage(String),
+    OpenSurface(FrontendSurface),
     OpenView {
         id: String,
         title: String,

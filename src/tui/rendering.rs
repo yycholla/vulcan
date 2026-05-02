@@ -12,7 +12,7 @@ use ratatui::{
     layout::Rect,
     style::{Modifier, Style},
     text::{Line, Span},
-    widgets::Paragraph,
+    widgets::{Clear, Paragraph, Wrap},
 };
 use tokio::sync::Mutex;
 
@@ -21,8 +21,8 @@ use crate::config::Config;
 
 use super::keymap::SlashCommand;
 use super::miller_columns;
-use super::model_picker;
 use super::state::{AppState, SessionStatus};
+use super::surface::{SurfacePlacement, resolve_surface_area};
 use super::theme::Theme;
 use super::{body, short_id};
 
@@ -147,7 +147,7 @@ pub(super) fn draw_session_picker(f: &mut Frame, area: Rect, app: &AppState) {
         )));
     } else {
         let active = app
-            .session_picker_selection
+            .session_picker_selection()
             .min(app.sessions.len().saturating_sub(1));
         for (i, s) in app.sessions.iter().enumerate() {
             let is_active = i == active;
@@ -216,16 +216,11 @@ pub(super) fn draw_model_picker(f: &mut Frame, area: Rect, app: &AppState) {
     // YYC-102: render via the universal miller_columns widget. The
     // overlay anchors top-left and grows rightward as the user drills.
     // Column 0 = configured providers; columns 1+ = lab/series/version.
-    let source = model_picker::UnifiedPickerSource {
-        provider_labels: &app.picker_provider_labels,
-        provider_keys: &app.picker_provider_keys,
-        items_by_key: &app.picker_items_by_key,
-        trees_by_key: &app.picker_trees_by_key,
+    let Some(model_picker) = app.model_picker_state() else {
+        return;
     };
-    let state = miller_columns::MillerState {
-        path: app.model_picker_path.clone(),
-        focus: app.model_picker_focus,
-    };
+    let source = model_picker.source();
+    let state = model_picker.miller_state();
     // Inset by 1 from the top-left so we don't paint over the very edge.
     let rect = Rect {
         x: area.x + 1,
@@ -233,7 +228,10 @@ pub(super) fn draw_model_picker(f: &mut Frame, area: Rect, app: &AppState) {
         width: area.width.saturating_sub(2),
         height: area.height.saturating_sub(2),
     };
-    miller_columns::render(f, rect, &state, &source, &app.theme);
+    if let Some(occupied) = miller_columns::render(f, rect, &state, &source, &app.theme) {
+        app.effects.trigger_model_picker_open_if_armed(occupied);
+        app.effects.process_model_picker(f.buffer_mut(), occupied);
+    }
     // Footer hint anchored to the bottom of the area.
     let hint = "  hjkl navigate · Enter select · Esc cancel  ";
     let footer = Rect {
@@ -246,6 +244,77 @@ pub(super) fn draw_model_picker(f: &mut Frame, area: Rect, app: &AppState) {
         Paragraph::new(Line::from(Span::styled(hint, app.theme.muted))),
         footer,
     );
+}
+
+pub(super) fn draw_text_surface(
+    f: &mut Frame,
+    area: Rect,
+    title: &str,
+    body_lines: &[String],
+    app: &AppState,
+) {
+    let width = area.width.min(88);
+    let max_height = area.height.saturating_sub(2);
+    if max_height < 4 {
+        return;
+    }
+    let content_height = body_lines.len() as u16;
+    let height = (content_height + 5).max(8).min(max_height);
+    let box_area = resolve_surface_area(area, SurfacePlacement::Modal { width, height });
+    if box_area.height < 4 {
+        return;
+    }
+
+    f.render_widget(Clear, box_area);
+    f.render_widget(
+        Paragraph::new("").style(body().bg(app.theme.body_bg)),
+        box_area,
+    );
+
+    let bar = Rect {
+        x: box_area.x,
+        y: box_area.y,
+        width: box_area.width,
+        height: 1,
+    };
+    let title = format!("  {title}  ");
+    f.render_widget(
+        Paragraph::new(title).style(app.theme.accent.add_modifier(Modifier::BOLD)),
+        bar,
+    );
+
+    let inner = Rect {
+        x: box_area.x + 2,
+        y: box_area.y + 2,
+        width: box_area.width.saturating_sub(4),
+        height: box_area.height.saturating_sub(4),
+    };
+    let lines = body_lines
+        .iter()
+        .cloned()
+        .map(Line::from)
+        .collect::<Vec<_>>();
+    f.render_widget(
+        Paragraph::new(lines)
+            .style(body().bg(app.theme.body_bg))
+            .wrap(Wrap { trim: false }),
+        inner,
+    );
+
+    let hint = Rect {
+        x: box_area.x + 2,
+        y: box_area.y + box_area.height.saturating_sub(2),
+        width: box_area.width.saturating_sub(4),
+        height: 1,
+    };
+    f.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            "Esc/Ctrl+C close",
+            app.theme.muted,
+        ))),
+        hint,
+    );
+    draw_picker_border(f, box_area, &app.theme);
 }
 
 pub(super) async fn open_unified_picker(
@@ -362,13 +431,15 @@ pub(super) async fn open_unified_picker(
     let mut path = vec![active_idx];
     path.extend(inner_path);
 
-    app.picker_provider_labels = labels;
-    app.picker_provider_keys = keys;
-    app.picker_items_by_key = items_by_key;
-    app.picker_trees_by_key = trees_by_key;
-    app.model_picker_focus = path.len().saturating_sub(1);
-    app.model_picker_path = path;
-    app.show_model_picker = true;
+    app.open_model_picker(crate::tui::model_picker::ModelPickerState {
+        provider_labels: labels,
+        provider_keys: keys,
+        items_by_key,
+        trees_by_key,
+        focus: path.len().saturating_sub(1),
+        path,
+    });
+    app.effects.arm_model_picker_open();
 }
 
 fn initial_path_for_active_model(
@@ -404,9 +475,12 @@ fn initial_path_for_active_model(
 }
 
 pub(super) fn draw_diff_scrubber(f: &mut Frame, area: Rect, app: &AppState) {
+    let Some(scrubber) = app.diff_scrubber_state() else {
+        return;
+    };
     let theme = &app.theme;
     let width = area.width.min(96);
-    let total = app.scrubber_hunks.len() as u16;
+    let total = scrubber.hunks.len() as u16;
     let height = (total * 4 + 8).min(area.height.saturating_sub(2));
     let x = area.x + (area.width.saturating_sub(width)) / 2;
     let y = area.y + (area.height.saturating_sub(height)) / 2;
@@ -426,10 +500,7 @@ pub(super) fn draw_diff_scrubber(f: &mut Frame, area: Rect, app: &AppState) {
         width: box_area.width,
         height: 1,
     };
-    let title = format!(
-        "  Edit Scrubber — {} ({} hunks)  ",
-        app.scrubber_path, total
-    );
+    let title = format!("  Edit Scrubber — {} ({} hunks)  ", scrubber.path, total);
     f.render_widget(
         Paragraph::new(title).style(theme.accent.add_modifier(Modifier::BOLD)),
         bar,
@@ -443,12 +514,12 @@ pub(super) fn draw_diff_scrubber(f: &mut Frame, area: Rect, app: &AppState) {
     };
 
     let mut lines: Vec<Line<'static>> = Vec::new();
-    let active = app
-        .scrubber_selection
-        .min(app.scrubber_hunks.len().saturating_sub(1));
-    for (i, hunk) in app.scrubber_hunks.iter().enumerate() {
+    let active = scrubber
+        .selection
+        .min(scrubber.hunks.len().saturating_sub(1));
+    for (i, hunk) in scrubber.hunks.iter().enumerate() {
         let is_active = i == active;
-        let accepted = app.scrubber_accepted.get(i).copied().unwrap_or(true);
+        let accepted = scrubber.accepted.get(i).copied().unwrap_or(true);
         let marker = if is_active { "▸ " } else { "  " };
         let state = if accepted { "[✓]" } else { "[ ]" };
         let header = format!(

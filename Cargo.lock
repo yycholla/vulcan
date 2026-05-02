@@ -150,7 +150,7 @@ version = "1.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "40c48f72fd53cd289104fc64099abca73db4166ad86ea0b4341abe65af83dadc"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -1314,7 +1314,7 @@ dependencies = [
  "libc",
  "option-ext",
  "redox_users",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -5651,7 +5651,7 @@ dependencies = [
  "security-framework",
  "security-framework-sys",
  "webpki-root-certs",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -7168,7 +7168,6 @@ version = "0.10.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "74a31ca0965e3ff6a7ac5ecb02b20a88b4f68ebf138d8ae438e8510b27a1f00f"
 dependencies = [
- "crossterm",
  "portable-atomic",
  "ratatui-core",
  "ratatui-widgets",
@@ -7455,7 +7454,6 @@ dependencies = [
  "clap_complete",
  "cortex-memory-core",
  "cron",
- "crossterm",
  "dhat",
  "dialoguer",
  "divan",
@@ -7500,6 +7498,7 @@ dependencies = [
  "tachyonfx",
  "teloxide-core",
  "tempfile",
+ "termwiz",
  "thiserror 2.0.18",
  "throbber-widgets-tui",
  "tiktoken-rs",

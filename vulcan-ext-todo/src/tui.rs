@@ -2,7 +2,8 @@ use std::sync::Arc;
 
 use vulcan_frontend_api::{
     FrontendCodeExtension, FrontendCommand, FrontendCommandAction, FrontendCtx,
-    FrontendExtensionRegistration, MessageRenderer, RenderedMessage, ToolResultView,
+    FrontendExtensionRegistration, FrontendSurface, MessageRenderer, RenderedMessage,
+    ToolResultView,
 };
 
 pub struct TodoFrontendExtension;
@@ -58,11 +59,11 @@ impl FrontendCommand for TodosCommand {
     }
 
     fn run(&self, _ctx: &mut FrontendCtx) -> FrontendCommandAction {
-        FrontendCommandAction::OpenView {
-            id: "todo".into(),
-            title: "Todos".into(),
-            body: vec!["Todo view opened. Ask the agent to add or list todos.".into()],
-        }
+        FrontendCommandAction::OpenSurface(FrontendSurface::modal(
+            "todo",
+            "Todos",
+            vec!["Todo view opened. Ask the agent to add or list todos.".into()],
+        ))
     }
 }
 
@@ -124,7 +125,7 @@ mod tests {
 
         assert!(matches!(
             action,
-            FrontendCommandAction::OpenView { ref id, .. } if id == "todo"
+            FrontendCommandAction::OpenSurface(FrontendSurface { ref id, .. }) if id == "todo"
         ));
     }
 }

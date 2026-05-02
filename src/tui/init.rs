@@ -1,13 +1,15 @@
 //! Terminal lifecycle helpers extracted from `tui/mod.rs` (YYC-108).
 //!
-//! `init_terminal` enables raw mode + alternate screen and hands back a
-//! configured ratatui `Terminal`. `restore_terminal` undoes both on
-//! shutdown so the user's shell isn't left in raw mode after a panic
-//! or clean exit.
+//! `init_terminal` creates the Ratatui terminal session and captures
+//! terminal capabilities. The Termwiz backend owns raw mode and
+//! alternate-screen lifecycle, restoring both when dropped.
 
 use anyhow::Result;
 use ratatui::Terminal;
-use ratatui::backend::CrosstermBackend;
+use ratatui::backend::TermwizBackend;
+use termwiz::caps::{Capabilities, ColorLevel, ProbeHints};
+use termwiz::input::InputEvent;
+use termwiz::terminal::{SystemTerminal, Terminal as TermwizTerminal, buffered::BufferedTerminal};
 
 const ENABLE_MOUSE_CAPTURE_BY_DEFAULT: bool = false;
 
@@ -15,42 +17,77 @@ fn mouse_capture_enabled_by_default() -> bool {
     ENABLE_MOUSE_CAPTURE_BY_DEFAULT
 }
 
-pub(super) fn init_terminal() -> Result<Terminal<CrosstermBackend<std::io::Stdout>>> {
-    ratatui::crossterm::terminal::enable_raw_mode()?;
-    let mut stdout = std::io::stdout();
-    ratatui::crossterm::execute!(
-        stdout,
-        ratatui::crossterm::terminal::EnterAlternateScreen,
-        // YYC-124: ask the terminal to wrap pastes in CSI 200~/201~ so
-        // crossterm hands them to us as one Event::Paste(String) instead
-        // of N KeyCode::Char events. Without this, multiline pastes
-        // submit a prompt per line.
-        ratatui::crossterm::event::EnableBracketedPaste,
-    )?;
-    if mouse_capture_enabled_by_default() {
-        // YYC-581: mouse capture blocks normal terminal drag-selection in
-        // common emulators. Keep it off by default so visible chat text can
-        // be highlighted and copied; keyboard scrolling remains available.
-        ratatui::crossterm::execute!(stdout, ratatui::crossterm::event::EnableMouseCapture)?;
-    }
-    let backend = CrosstermBackend::new(stdout);
-    let terminal = Terminal::new(backend)?;
-    Ok(terminal)
+pub(super) type TuiTerminal = Terminal<TermwizBackend>;
+pub(super) type TuiInputTerminal = SystemTerminal;
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(super) struct TerminalCapabilities {
+    pub color_level: TerminalColorLevel,
+    pub bracketed_paste: bool,
+    pub hyperlinks: bool,
+    pub sixel: bool,
+    pub iterm2_image: bool,
+    pub mouse_reporting: bool,
+    pub background_color_erase: bool,
 }
 
-pub(super) fn restore_terminal() -> Result<()> {
-    ratatui::crossterm::terminal::disable_raw_mode()?;
-    ratatui::crossterm::execute!(
-        std::io::stdout(),
-        // Disable before leaving the alt screen so the user's primary
-        // terminal isn't left in bracketed-paste / mouse-capture state
-        // if Vulcan exits. This is intentionally defensive even though
-        // mouse capture is not enabled by default.
-        ratatui::crossterm::event::DisableMouseCapture,
-        ratatui::crossterm::event::DisableBracketedPaste,
-        ratatui::crossterm::terminal::LeaveAlternateScreen,
-    )?;
-    Ok(())
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum TerminalColorLevel {
+    Monochrome,
+    Sixteen,
+    TwoFiftySix,
+    TrueColor,
+}
+
+impl TerminalCapabilities {
+    fn from_termwiz(caps: &Capabilities) -> Self {
+        Self {
+            color_level: match caps.color_level() {
+                ColorLevel::MonoChrome => TerminalColorLevel::Monochrome,
+                ColorLevel::Sixteen => TerminalColorLevel::Sixteen,
+                ColorLevel::TwoFiftySix => TerminalColorLevel::TwoFiftySix,
+                ColorLevel::TrueColor => TerminalColorLevel::TrueColor,
+            },
+            bracketed_paste: caps.bracketed_paste(),
+            hyperlinks: caps.hyperlinks(),
+            sixel: caps.sixel(),
+            iterm2_image: caps.iterm2_image(),
+            mouse_reporting: caps.mouse_reporting(),
+            background_color_erase: caps.bce(),
+        }
+    }
+}
+
+pub(super) struct TerminalSession {
+    pub terminal: TuiTerminal,
+    pub capabilities: TerminalCapabilities,
+}
+
+pub(super) fn init_terminal() -> Result<TerminalSession> {
+    let caps = terminal_capabilities()?;
+    let capabilities = TerminalCapabilities::from_termwiz(&caps);
+    let mut buffered_terminal = BufferedTerminal::new(SystemTerminal::new(caps)?)?;
+    buffered_terminal.terminal().set_raw_mode()?;
+    buffered_terminal.terminal().enter_alternate_screen()?;
+    let backend = TermwizBackend::with_buffered_terminal(buffered_terminal);
+    Ok(TerminalSession {
+        terminal: Terminal::new(backend)?,
+        capabilities,
+    })
+}
+
+pub(super) fn init_input_terminal() -> Result<TuiInputTerminal> {
+    Ok(SystemTerminal::new(terminal_capabilities()?)?)
+}
+
+pub(super) fn read_input_event(terminal: &mut TuiInputTerminal) -> Result<Option<InputEvent>> {
+    Ok(terminal.poll_input(None)?)
+}
+
+fn terminal_capabilities() -> Result<Capabilities> {
+    let hints =
+        ProbeHints::new_from_env().mouse_reporting(Some(mouse_capture_enabled_by_default()));
+    Ok(Capabilities::new_with_hints(hints)?)
 }
 
 #[cfg(test)]
@@ -60,5 +97,19 @@ mod tests {
     #[test]
     fn mouse_capture_is_disabled_by_default_for_terminal_selection() {
         assert!(!mouse_capture_enabled_by_default());
+    }
+
+    #[test]
+    fn capabilities_snapshot_maps_termwiz_values() {
+        let caps = terminal_capabilities().expect("terminal caps from env");
+        let snapshot = TerminalCapabilities::from_termwiz(&caps);
+        assert_eq!(snapshot.bracketed_paste, caps.bracketed_paste());
+        assert_eq!(snapshot.hyperlinks, caps.hyperlinks());
+    }
+
+    #[test]
+    fn terminal_capabilities_keep_mouse_capture_disabled() {
+        let caps = terminal_capabilities().expect("terminal caps from env");
+        assert!(!caps.mouse_reporting());
     }
 }

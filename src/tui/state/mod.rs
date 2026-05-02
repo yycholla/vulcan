@@ -31,8 +31,7 @@ use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, VecDeque};
 use std::time::{Duration, Instant};
 
-use crossterm::event::KeyEvent;
-
+use super::input::TuiKeyEvent;
 use super::keybinds::Keybinds;
 
 /// Format a u32 with comma thousands separators (YYC-60).
@@ -67,9 +66,14 @@ pub use super::orchestration::{
 pub use super::picker_state::{ProviderPickerEntry, SessionState, SessionStatus};
 pub use super::prompt::{PromptEditMode, PromptEditor, PromptEnterIntent, PromptEscapeIntent};
 
+use super::diff_scrubber::{DiffScrubberOutcome, DiffScrubberState};
 use super::effects::TuiEffects;
-use super::surface::{SurfaceFrame, SurfaceStack};
+use super::model_picker::{ModelPickerOutcome, ModelPickerState};
+use super::pause_prompt::{PausePromptOutcome, PausePromptState};
+use super::provider_picker::ProviderPickerOutcome;
+use super::surface::SurfaceFrame;
 use super::theme::{Palette, Theme};
+use super::ui_runtime::UiRuntime;
 use super::views::{DiffKind, DiffLine, View};
 
 /// Diff render style (YYC-77). Toggled by `/diff-style`.
@@ -257,16 +261,11 @@ pub struct AppState {
     pub audit_log: Option<AuditBuffer>,
     pub frontend: super::frontend::TuiFrontend,
     status_widgets: BTreeMap<String, vulcan_frontend_api::WidgetContent>,
-    surfaces: SurfaceStack,
+    ui_runtime: UiRuntime,
     pub active_ticks: Vec<ActiveTick>,
     pub activity_throbber: ThrobberState,
     pub effects: TuiEffects,
     chat_clear_phase: Cell<ChatClearPhase>,
-
-    /// When the agent emits an `AgentPause`, the TUI parks it here. Render
-    /// shows an overlay; key handler intercepts Y/A/N keys and consumes the
-    /// pause via `take()` to send the reply.
-    pub pending_pause: Option<crate::pause::AgentPause>,
 
     cursor: Cell<(u16, u16)>,
     pub model_label: String,
@@ -293,44 +292,6 @@ pub struct AppState {
     pub chat_render_store: RefCell<super::chat_render::ChatRenderStore>,
 
     /// When true, overlays a session picker on top of the normal view.
-    /// Set by `ResumeTarget::Pick` at startup; cleared when the user
-    /// selects a session or dismisses with Esc.
-    pub show_session_picker: bool,
-    /// Index into `sessions` for the highlighted row in the picker.
-    pub session_picker_selection: usize,
-
-    /// Unified model picker overlay (YYC-97 → YYC-101 → YYC-102). Opened
-    /// by `/model` with no args. Column 0 lists configured providers;
-    /// columns 1+ drill the highlighted provider's catalog
-    /// lab → series → version. `Enter` switches both provider and model.
-    pub show_model_picker: bool,
-    /// Display labels for column 0, parallel to `picker_provider_keys`.
-    pub picker_provider_labels: Vec<String>,
-    /// Cache keys per column-0 row. `None` = legacy `[provider]` block.
-    pub picker_provider_keys: Vec<Option<String>>,
-    /// Catalog cache keyed by provider key (`"default"` for legacy).
-    pub picker_items_by_key:
-        std::collections::HashMap<String, Vec<crate::provider::catalog::ModelInfo>>,
-    /// Tree cache keyed by provider key.
-    pub picker_trees_by_key: std::collections::HashMap<String, super::model_picker::ModelTree>,
-    /// Selection index per drilled column.
-    pub model_picker_path: Vec<usize>,
-    /// Which column currently has focus (0 = column 0, etc.).
-    pub model_picker_focus: usize,
-
-    /// Diff scrubber overlay (YYC-75). Opened when `edit_file` matches
-    /// multiple sites and the pause channel is wired. Each hunk
-    /// individually opt-in/out via `scrubber_accepted`.
-    pub show_diff_scrubber: bool,
-    pub scrubber_path: String,
-    pub scrubber_hunks: Vec<crate::pause::DiffScrubHunk>,
-    pub scrubber_accepted: Vec<bool>,
-    pub scrubber_selection: usize,
-    /// The pause we'll reply to when the user resolves the scrubber.
-    /// Stored separately from `pending_pause` so it doesn't conflict
-    /// with the pill-style prompts.
-    pub scrubber_pause: Option<crate::pause::AgentPause>,
-
     /// Active TUI theme — render code reads role styles via `state.theme.<role>`.
     /// Defaults to `Theme::system()` in `AppState::new` so unconfigured/test
     /// callers inherit terminal palette; production wires the real config-derived
@@ -417,12 +378,11 @@ impl AppState {
             audit_log: None,
             frontend: super::frontend::TuiFrontend::default(),
             status_widgets: BTreeMap::new(),
-            surfaces: SurfaceStack::default(),
+            ui_runtime: UiRuntime::default(),
             active_ticks: Vec::new(),
             activity_throbber: ThrobberState::default(),
             effects: TuiEffects::default(),
             chat_clear_phase: Cell::new(ChatClearPhase::Idle),
-            pending_pause: None,
 
             cursor: Cell::new((0, 0)),
             model_label,
@@ -433,24 +393,6 @@ impl AppState {
             prompt_tokens_last: 0,
             token_max,
             chat_render_store: RefCell::new(super::chat_render::ChatRenderStore::default()),
-
-            show_session_picker: false,
-            session_picker_selection: 0,
-
-            show_model_picker: false,
-            picker_provider_labels: Vec::new(),
-            picker_provider_keys: Vec::new(),
-            picker_items_by_key: std::collections::HashMap::new(),
-            picker_trees_by_key: std::collections::HashMap::new(),
-            model_picker_path: Vec::new(),
-            model_picker_focus: 0,
-
-            show_diff_scrubber: false,
-            scrubber_path: String::new(),
-            scrubber_hunks: Vec::new(),
-            scrubber_accepted: Vec::new(),
-            scrubber_selection: 0,
-            scrubber_pause: None,
 
             theme: Theme::system(),
             keybinds: Keybinds::default(),
@@ -537,7 +479,7 @@ impl AppState {
     /// draw so the badge tracks reality without each call site updating
     /// it manually.
     pub fn refresh_prompt_mode(&mut self) {
-        self.prompt_mode = if self.pending_pause.is_some() {
+        self.prompt_mode = if self.has_pause_prompt() {
             PromptMode::Ask
         } else if self.thinking {
             PromptMode::Busy
@@ -563,7 +505,7 @@ impl AppState {
         self.input = self.prompt_editor.text();
     }
 
-    pub fn prompt_handle_key(&mut self, key: KeyEvent) -> bool {
+    pub fn prompt_handle_key(&mut self, key: TuiKeyEvent) -> bool {
         let changed = self.prompt_editor.handle_key(key);
         if changed {
             self.input = self.prompt_editor.text();
@@ -645,7 +587,11 @@ impl AppState {
     }
 
     pub fn install_canvas_request(&mut self, request: vulcan_frontend_api::CanvasRequest) {
-        self.surfaces.install_canvas(request);
+        self.ui_runtime.mount_canvas(request);
+    }
+
+    pub fn open_frontend_surface(&mut self, surface: vulcan_frontend_api::FrontendSurface) {
+        self.ui_runtime.open_text_surface(surface);
     }
 
     pub fn install_tick_request(&mut self, request: vulcan_frontend_api::TickRequest) {
@@ -658,43 +604,145 @@ impl AppState {
     }
 
     pub fn active_canvas_frame(&self) -> Option<vulcan_frontend_api::CanvasFrame> {
-        self.surfaces.active_canvas_frame()
+        self.ui_runtime.active_canvas_frame()
     }
 
     pub fn active_surface_frame(&self) -> Option<SurfaceFrame> {
-        self.surfaces.active_frame()
+        self.ui_runtime.active_frame()
+    }
+
+    pub fn open_session_picker(&mut self, selection: usize) {
+        self.ui_runtime.open_session_picker(selection);
+    }
+
+    pub fn has_text_surface(&self) -> bool {
+        self.ui_runtime.has_text_surface()
+    }
+
+    pub fn close_text_surface(&mut self) -> bool {
+        self.ui_runtime.close_text_surface()
+    }
+
+    pub fn has_session_picker(&self) -> bool {
+        self.ui_runtime.has_session_picker()
+    }
+
+    pub fn session_picker_selection(&self) -> usize {
+        self.ui_runtime.session_picker_selection()
+    }
+
+    pub fn session_picker_up(&mut self) {
+        self.ui_runtime.session_picker_up();
+    }
+
+    pub fn session_picker_down(&mut self) {
+        let max = self.sessions.len().saturating_sub(1);
+        self.ui_runtime.session_picker_down(max);
+    }
+
+    pub fn close_session_picker(&mut self) -> bool {
+        self.ui_runtime.close_session_picker()
+    }
+
+    pub fn open_model_picker(&mut self, state: ModelPickerState) {
+        self.ui_runtime.open_model_picker(state);
+    }
+
+    pub fn has_model_picker(&self) -> bool {
+        self.ui_runtime.has_model_picker()
+    }
+
+    pub fn model_picker_state(&self) -> Option<&ModelPickerState> {
+        self.ui_runtime.model_picker_state()
+    }
+
+    pub fn handle_model_picker_key(&mut self, key: TuiKeyEvent) -> ModelPickerOutcome {
+        self.ui_runtime.handle_model_picker_key(key)
+    }
+
+    pub fn close_model_picker(&mut self) -> bool {
+        self.ui_runtime.close_model_picker()
+    }
+
+    pub fn open_diff_scrubber(
+        &mut self,
+        path: String,
+        hunks: Vec<crate::pause::DiffScrubHunk>,
+        pause: crate::pause::AgentPause,
+    ) {
+        self.ui_runtime.open_diff_scrubber(path, hunks, pause);
+    }
+
+    pub fn has_diff_scrubber(&self) -> bool {
+        self.ui_runtime.has_diff_scrubber()
+    }
+
+    pub fn diff_scrubber_state(&self) -> Option<&DiffScrubberState> {
+        self.ui_runtime.diff_scrubber_state()
+    }
+
+    pub fn handle_diff_scrubber_key(&mut self, key: TuiKeyEvent) -> DiffScrubberOutcome {
+        self.ui_runtime.handle_diff_scrubber_key(key)
+    }
+
+    pub fn close_diff_scrubber(&mut self) -> Option<crate::pause::AgentPause> {
+        self.ui_runtime.close_diff_scrubber()
+    }
+
+    pub fn open_pause_prompt(&mut self, summary: String, pause: crate::pause::AgentPause) {
+        self.ui_runtime.open_pause_prompt(summary, pause);
+    }
+
+    pub fn has_pause_prompt(&self) -> bool {
+        self.ui_runtime.has_pause_prompt()
+    }
+
+    pub fn pause_prompt_state(&self) -> Option<&PausePromptState> {
+        self.ui_runtime.pause_prompt_state()
+    }
+
+    pub fn handle_pause_prompt_key(&mut self, key: TuiKeyEvent) -> PausePromptOutcome {
+        self.ui_runtime.handle_pause_prompt_key(key)
+    }
+
+    pub fn close_pause_prompt(&mut self) -> Option<crate::pause::AgentPause> {
+        self.ui_runtime.close_pause_prompt()
     }
 
     pub fn has_active_canvas(&self) -> bool {
-        self.surfaces.has_canvas()
+        self.ui_runtime.has_canvas()
     }
 
     pub fn open_provider_picker(&mut self, items: Vec<ProviderPickerEntry>, selection: usize) {
-        self.surfaces.open_provider_picker(items, selection);
+        self.ui_runtime.open_provider_picker(items, selection);
     }
 
     pub fn has_provider_picker(&self) -> bool {
-        self.surfaces.has_provider_picker()
+        self.ui_runtime.has_provider_picker()
     }
 
     pub fn provider_picker_up(&mut self) {
-        self.surfaces.provider_picker_up();
+        self.ui_runtime.provider_picker_up();
     }
 
     pub fn provider_picker_down(&mut self) {
-        self.surfaces.provider_picker_down();
+        self.ui_runtime.provider_picker_down();
     }
 
     pub fn selected_provider(&self) -> Option<ProviderPickerEntry> {
-        self.surfaces.selected_provider()
+        self.ui_runtime.selected_provider()
+    }
+
+    pub fn handle_provider_picker_key(&mut self, key: TuiKeyEvent) -> ProviderPickerOutcome {
+        self.ui_runtime.handle_provider_picker_key(key)
     }
 
     pub fn close_provider_picker(&mut self) -> bool {
-        self.surfaces.close_provider_picker()
+        self.ui_runtime.close_provider_picker()
     }
 
     pub fn handle_canvas_key(&mut self, key: vulcan_frontend_api::CanvasKey) -> bool {
-        self.surfaces.handle_canvas_key(key)
+        self.ui_runtime.handle_canvas_key(key)
     }
 
     pub fn pump_frontend_ticks(&mut self) {
@@ -709,7 +757,7 @@ impl AppState {
             }
         }
         self.active_ticks.retain(|tick| !tick.handle.is_stopped());
-        self.surfaces.handle_tick();
+        self.ui_runtime.handle_tick();
     }
 
     pub fn activity_motion_active(&self) -> bool {
@@ -722,6 +770,7 @@ impl AppState {
                 .any(|content| !matches!(content, vulcan_frontend_api::WidgetContent::Text(_)))
             || self.chat_clear_phase.get() != ChatClearPhase::Idle
             || self.effects.chat_running()
+            || self.effects.model_picker_running()
             || self.messages.iter().any(|message| {
                 message.segments.iter().any(|segment| {
                     matches!(
@@ -789,10 +838,10 @@ impl AppState {
         if self.thinking {
             stack.push(CancelScope::Turn);
         }
-        if self.pending_pause.is_some() || self.show_diff_scrubber {
+        if self.has_pause_prompt() || self.has_diff_scrubber() || self.has_text_surface() {
             stack.push(CancelScope::Dialog);
         }
-        if self.surfaces.has_canvas() {
+        if self.ui_runtime.has_canvas() {
             stack.push(CancelScope::Canvas);
         }
         stack
@@ -801,17 +850,17 @@ impl AppState {
     pub fn pop_cancel_scope(&mut self) -> CancelPop {
         match self.cancel_stack().pop() {
             Some(CancelScope::Canvas) => {
-                self.surfaces.exit_canvas();
+                self.ui_runtime.exit_canvas();
                 CancelPop::Popped(CancelScope::Canvas)
             }
             Some(CancelScope::Dialog) => {
-                if let Some(pause) = self.pending_pause.take() {
+                if let Some(pause) = self.close_pause_prompt() {
                     let _ = pause.reply.send(crate::pause::AgentResume::Deny);
                 }
-                if let Some(pause) = self.scrubber_pause.take() {
+                if let Some(pause) = self.close_diff_scrubber() {
                     let _ = pause.reply.send(crate::pause::AgentResume::Deny);
                 }
-                self.show_diff_scrubber = false;
+                self.close_text_surface();
                 CancelPop::Popped(CancelScope::Dialog)
             }
             Some(CancelScope::Turn) => CancelPop::CancelTurn,

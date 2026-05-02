@@ -29,26 +29,25 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
-use ratatui::{
-    crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers},
-    layout::Rect,
-    prelude::Position,
-};
+use ratatui::{layout::Rect, prelude::Position};
 use tokio::sync::{Mutex, mpsc};
 
 use crate::agent::Agent;
 use crate::config::Config;
 use crate::hooks::HookRegistry;
 use crate::hooks::audit::AuditHook;
-use crate::pause::{self, AgentResume, PauseKind};
+use crate::pause::{self, PauseKind};
 use crate::provider::StreamEvent;
 
 pub mod chat_message;
 pub mod chat_render;
+pub mod diff_scrubber;
 pub mod effects;
 mod events;
+mod focus;
 pub mod frontend;
 mod init;
+pub mod input;
 pub mod keybinds;
 mod keymap;
 mod layouts;
@@ -56,12 +55,16 @@ pub mod markdown;
 pub mod miller_columns;
 pub mod model_picker;
 pub mod orchestration;
+pub mod pause_prompt;
 pub mod picker_state;
 pub mod prompt;
+pub mod provider_picker;
 mod rendering;
 pub mod state;
 mod surface;
+mod surface_events;
 pub mod theme;
+mod ui_runtime;
 pub mod views;
 pub mod widgets;
 
@@ -70,6 +73,8 @@ use theme::{Theme, body};
 use views::{View, render_view};
 use vulcan_frontend_api::{CanvasKey, FrontendCommandAction};
 use widgets::ProviderPickerWidget;
+
+use self::input::{TuiInputEvent, TuiKeyCode, TuiKeyEvent, TuiKeyModifiers, TuiMouseEventKind};
 
 const MOTION_FRAME_BUDGET: Duration = Duration::from_millis(120);
 
@@ -88,8 +93,8 @@ pub enum ResumeTarget {
     Pick,
 }
 
-enum KeyEv {
-    Press(Event),
+pub(super) enum KeyEv {
+    Press(TuiInputEvent),
     Error(String),
 }
 
@@ -104,14 +109,11 @@ fn apply_frontend_command_action(app: &mut AppState, action: FrontendCommandActi
             app.messages
                 .push(ChatMessage::new(ChatRole::System, content));
         }
-        FrontendCommandAction::OpenView { title, body, .. } => {
-            let content = if body.is_empty() {
-                title
-            } else {
-                format!("{title}\n{}", body.join("\n"))
-            };
-            app.messages
-                .push(ChatMessage::new(ChatRole::System, content));
+        FrontendCommandAction::OpenSurface(surface) => {
+            app.open_frontend_surface(surface);
+        }
+        FrontendCommandAction::OpenView { id, title, body } => {
+            app.open_frontend_surface(vulcan_frontend_api::FrontendSurface::modal(id, title, body));
         }
     }
 }
@@ -129,19 +131,20 @@ fn apply_frontend_dispatch(app: &mut AppState, dispatch: frontend::FrontendComma
     }
 }
 
-fn canvas_key_from_event(key: ratatui::crossterm::event::KeyEvent) -> CanvasKey {
-    if key.modifiers.contains(KeyModifiers::CONTROL) && matches!(key.code, KeyCode::Char('c')) {
+fn canvas_key_from_event(key: TuiKeyEvent) -> CanvasKey {
+    if key.modifiers.contains(TuiKeyModifiers::CONTROL) && matches!(key.code, TuiKeyCode::Char('c'))
+    {
         return CanvasKey::CtrlC;
     }
     match key.code {
-        KeyCode::Up => CanvasKey::Up,
-        KeyCode::Down => CanvasKey::Down,
-        KeyCode::Left => CanvasKey::Left,
-        KeyCode::Right => CanvasKey::Right,
-        KeyCode::Esc => CanvasKey::Esc,
-        KeyCode::Enter => CanvasKey::Enter,
-        KeyCode::Backspace => CanvasKey::Backspace,
-        KeyCode::Char(c) => CanvasKey::Char(c),
+        TuiKeyCode::Up => CanvasKey::Up,
+        TuiKeyCode::Down => CanvasKey::Down,
+        TuiKeyCode::Left => CanvasKey::Left,
+        TuiKeyCode::Right => CanvasKey::Right,
+        TuiKeyCode::Esc => CanvasKey::Esc,
+        TuiKeyCode::Enter => CanvasKey::Enter,
+        TuiKeyCode::Backspace => CanvasKey::Backspace,
+        TuiKeyCode::Char(c) => CanvasKey::Char(c),
         other => CanvasKey::Other(format!("{other:?}")),
     }
 }
@@ -151,19 +154,32 @@ pub async fn run_tui(
     resume: ResumeTarget,
     tool_profile: Option<String>,
 ) -> Result<()> {
-    let mut terminal = init::init_terminal()?;
+    let terminal_session = init::init_terminal()?;
+    tracing::debug!(
+        ?terminal_session.capabilities,
+        "detected terminal capabilities"
+    );
+    let mut terminal = terminal_session.terminal;
 
     // keyboard
     let (key_tx, mut key_rx) = mpsc::unbounded_channel::<KeyEv>();
     let tx_keys = key_tx.clone();
     std::thread::spawn(move || {
+        let mut input_terminal = match init::init_input_terminal() {
+            Ok(terminal) => terminal,
+            Err(e) => {
+                let _ = tx_keys.send(KeyEv::Error(e.to_string()));
+                return;
+            }
+        };
         loop {
-            match event::read() {
-                Ok(ev) => {
-                    if tx_keys.send(KeyEv::Press(ev)).is_err() {
+            match init::read_input_event(&mut input_terminal) {
+                Ok(Some(ev)) => {
+                    if tx_keys.send(KeyEv::Press(TuiInputEvent::from(ev))).is_err() {
                         break;
                     }
                 }
+                Ok(None) => {}
                 Err(e) => {
                     let _ = tx_keys.send(KeyEv::Error(e.to_string()));
                     break;
@@ -271,7 +287,9 @@ pub async fn run_tui(
     events::refresh_sessions(&agent, &mut app).await;
 
     // YYC-86: if the user invoked --resume, activate the session picker.
-    app.show_session_picker = matches!(resume, ResumeTarget::Pick);
+    if matches!(resume, ResumeTarget::Pick) {
+        app.open_session_picker(0);
+    }
 
     if let Some(note) = resume_note {
         app.messages.push(ChatMessage {
@@ -390,11 +408,11 @@ pub async fn run_tui(
             }
 
             // YYC-86: session picker overlay (--resume flag).
-            if app.show_session_picker {
+            if app.has_session_picker() {
                 rendering::draw_session_picker(f, area, &app);
             }
             // YYC-97: model / provider picker overlays.
-            if app.show_model_picker {
+            if app.has_model_picker() {
                 rendering::draw_model_picker(f, area, &app);
             }
             if let Some(surface::SurfaceFrame::ProviderPicker { items, selection }) =
@@ -409,8 +427,13 @@ pub async fn run_tui(
                     area,
                 );
             }
+            if let Some(surface::SurfaceFrame::TextSurface { title, body }) =
+                app.active_surface_frame()
+            {
+                rendering::draw_text_surface(f, area, &title, &body, &app);
+            }
             // YYC-75: diff scrubber overlay.
-            if app.show_diff_scrubber {
+            if app.has_diff_scrubber() {
                 rendering::draw_diff_scrubber(f, area, &app);
             }
         })?;
@@ -420,235 +443,39 @@ pub async fn run_tui(
         }
 
         // ── Diff scrubber overlay (YYC-75): intercept input until resolved.
-        if app.show_diff_scrubber {
-            tokio::select! {
-                ev = key_rx.recv() => {
-                    match ev {
-                        Some(KeyEv::Press(event)) => {
-                            if let Event::Key(key) = event
-                                && key.kind == KeyEventKind::Press {
-                                    let total = app.scrubber_hunks.len();
-                                    match key.code {
-                                        KeyCode::Up | KeyCode::Char('k') => {
-                                            app.scrubber_selection = app.scrubber_selection.saturating_sub(1);
-                                        }
-                                        KeyCode::Down | KeyCode::Char('j') => {
-                                            app.scrubber_selection = app.scrubber_selection.saturating_add(1).min(total.saturating_sub(1));
-                                        }
-                                        KeyCode::Char('y') => {
-                                            if let Some(slot) = app.scrubber_accepted.get_mut(app.scrubber_selection) {
-                                                *slot = !*slot;
-                                            }
-                                        }
-                                        KeyCode::Char('Y') => {
-                                            for slot in &mut app.scrubber_accepted {
-                                                *slot = true;
-                                            }
-                                        }
-                                        KeyCode::Char('n') => {
-                                            if let Some(slot) = app.scrubber_accepted.get_mut(app.scrubber_selection) {
-                                                *slot = false;
-                                            }
-                                        }
-                                        KeyCode::Char('N') => {
-                                            for slot in &mut app.scrubber_accepted {
-                                                *slot = false;
-                                            }
-                                        }
-                                        KeyCode::Enter => {
-                                            let indices: Vec<usize> = app
-                                                .scrubber_accepted
-                                                .iter()
-                                                .enumerate()
-                                                .filter_map(|(i, ok)| if *ok { Some(i) } else { None })
-                                                .collect();
-                                            if let Some(p) = app.scrubber_pause.take() {
-                                                let _ = p.reply.send(AgentResume::AcceptHunks(indices.clone()));
-                                            }
-                                            let label = if indices.is_empty() {
-                                                "no hunks accepted — file unchanged"
-                                            } else if indices.len() == total {
-                                                "all hunks accepted"
-                                            } else {
-                                                "subset of hunks accepted"
-                                            };
-                                            app.messages.push(ChatMessage {
-                                                role: ChatRole::System,
-                                                content: format!(
-                                                    "▶  edit_file resumed — {} ({}/{})",
-                                                    label, indices.len(), total
-                                                ),
-                                                ..Default::default()
-                                            });
-                                            app.show_diff_scrubber = false;
-                                            app.scrubber_hunks.clear();
-                                            app.scrubber_accepted.clear();
-                                            app.scrubber_path.clear();
-                                            app.scrubber_selection = 0;
-                                        }
-                                        KeyCode::Esc => {
-                                            if let Some(p) = app.scrubber_pause.take() {
-                                                let _ = p.reply.send(AgentResume::AcceptHunks(Vec::new()));
-                                            }
-                                            app.messages.push(ChatMessage {
-                                                role: ChatRole::System,
-                                                content: "▶  edit_file cancelled — file unchanged".into(),
-                                                ..Default::default()
-                                            });
-                                            app.show_diff_scrubber = false;
-                                            app.scrubber_hunks.clear();
-                                            app.scrubber_accepted.clear();
-                                            app.scrubber_path.clear();
-                                            app.scrubber_selection = 0;
-                                        }
-                                        _ => {}
-                                    }
-                                }
-                        }
-                        Some(KeyEv::Error(e)) => {
-                            tracing::error!("Terminal input error (diff scrubber): {e}");
-                            if let Some(p) = app.scrubber_pause.take() {
-                                let _ = p.reply.send(AgentResume::AcceptHunks(Vec::new()));
-                            }
-                            app.show_diff_scrubber = false;
-                        }
-                        None => {
-                            if let Some(p) = app.scrubber_pause.take() {
-                                let _ = p.reply.send(AgentResume::AcceptHunks(Vec::new()));
-                            }
-                            app.show_diff_scrubber = false;
-                        }
-                    }
-                }
-            }
+        if app.has_diff_scrubber() {
+            surface_events::drive_diff_scrubber(&mut app, &mut key_rx).await;
             continue;
         }
 
         // ── Hierarchical model picker (YYC-101): miller columns,
         // hjkl drill-down. Intercepts input until dismissed.
-        if app.show_model_picker {
+        if app.has_model_picker() {
             tokio::select! {
-                ev = key_rx.recv() => {
-                    match ev {
-                        Some(KeyEv::Press(event)) => {
-                            if let Event::Key(key) = event
-                                && key.kind == KeyEventKind::Press {
-                                    let mut commit: Option<(Option<String>, String)> = None;
-                                    let mut close = false;
-                                    let mut state = miller_columns::MillerState {
-                                        path: app.model_picker_path.clone(),
-                                        focus: app.model_picker_focus,
-                                    };
-                                    let source = model_picker::UnifiedPickerSource {
-                                        provider_labels: &app.picker_provider_labels,
-                                        provider_keys: &app.picker_provider_keys,
-                                        items_by_key: &app.picker_items_by_key,
-                                        trees_by_key: &app.picker_trees_by_key,
-                                    };
-                                    let resolve_leaf = |path: &[usize]| -> Option<(Option<String>, String)> {
-                                        source.leaf_at(path).map(|(k, id)| {
-                                            let key = if k == "default" { None } else { Some(k) };
-                                            (key, id)
-                                        })
-                                    };
-                                    match key.code {
-                                        KeyCode::Up | KeyCode::Char('k') => {
-                                            miller_columns::move_cursor(&mut state, &source, -1);
-                                        }
-                                        KeyCode::Down | KeyCode::Char('j') => {
-                                            miller_columns::move_cursor(&mut state, &source, 1);
-                                        }
-                                        KeyCode::Left | KeyCode::Char('h') => {
-                                            if !miller_columns::ascend(&mut state) {
-                                                close = true;
-                                            }
-                                        }
-                                        KeyCode::Right | KeyCode::Char('l') => {
-                                            if !miller_columns::drill(&mut state, &source) {
-                                                commit = resolve_leaf(&state.path);
-                                            }
-                                        }
-                                        KeyCode::Char('L') => {
-                                            miller_columns::drill(&mut state, &source);
-                                            commit = resolve_leaf(&state.path);
-                                        }
-                                        KeyCode::Char('H') => {
-                                            if !miller_columns::ascend(&mut state) {
-                                                close = true;
-                                            }
-                                        }
-                                        KeyCode::Enter => {
-                                            commit = resolve_leaf(&state.path);
-                                        }
-                                        KeyCode::Esc | KeyCode::Char('q') => close = true,
-                                        _ => {}
-                                    }
-                                    app.model_picker_path = state.path;
-                                    app.model_picker_focus = state.focus;
-                                    if let Some((profile, id)) = commit {
-                                        let result = {
-                                            let mut a = agent.lock().await;
-                                            // Switch provider first when the
-                                            // picked profile differs from the
-                                            // active one.
-                                            let active = a.active_profile().map(str::to_string);
-                                            if active != profile {
-                                                a.switch_provider_model(
-                                                    profile.as_deref(),
-                                                    config,
-                                                    &id,
-                                                )
-                                                .await
-                                            } else {
-                                                a.switch_model(&id).await
-                                            }
-                                        };
-                                        match result {
-                                            Ok(selection) => {
-                                                app.model_label =
-                                                    selection.model.id.clone();
-                                                app.token_max =
-                                                    selection.max_context as u32;
-                                                app.pricing = selection.pricing;
-                                                app.provider_label = profile.clone();
-                                                let label = profile
-                                                    .as_deref()
-                                                    .unwrap_or("default");
-                                                app.messages.push(ChatMessage {
-                                                    role: ChatRole::System,
-                                                    content: format!(
-                                                        "Switched to {label} · {} · context {}",
-                                                        app.model_label,
-                                                        crate::tui::state::format_thousands(
-                                                            app.token_max
-                                                        ),
-                                                    ),
-                                                    ..Default::default()
-                                                });
-                                            }
-                                            Err(e) => {
-                                                app.messages.push(ChatMessage {
-                                                    role: ChatRole::System,
-                                                    content: format!("Model switch failed: {e}"),
-                                                    ..Default::default()
-                                                });
-                                            }
-                                        }
-                                        close = true;
-                                    }
-                                    if close {
-                                        app.show_model_picker = false;
-                                        app.model_picker_path.clear();
-                                        app.model_picker_focus = 0;
-                                    }
-                                }
-                        }
-                        Some(KeyEv::Error(e)) => {
-                            tracing::error!("Terminal input error (model picker): {e}");
-                            app.show_model_picker = false;
-                        }
-                        None => app.show_model_picker = false,
+                _ = surface_events::drive_model_picker(&mut app, &agent, config, &mut key_rx) => {}
+                _ = tokio::time::sleep(MOTION_FRAME_BUDGET), if app.activity_motion_active() => {}
+            }
+            continue;
+        }
+
+        if app.has_text_surface() {
+            match key_rx.recv().await {
+                Some(KeyEv::Press(TuiInputEvent::Key(key))) => match key.code {
+                    TuiKeyCode::Esc => {
+                        app.close_text_surface();
                     }
+                    TuiKeyCode::Char('c') if key.modifiers.contains(TuiKeyModifiers::CONTROL) => {
+                        app.close_text_surface();
+                    }
+                    _ => {}
+                },
+                Some(KeyEv::Press(_)) => {}
+                Some(KeyEv::Error(e)) => {
+                    tracing::error!("Terminal input error (frontend surface): {e}");
+                    app.close_text_surface();
+                }
+                None => {
+                    app.close_text_surface();
                 }
             }
             continue;
@@ -656,193 +483,21 @@ pub async fn run_tui(
 
         // ── Provider picker overlay (YYC-97): intercept input until dismissed.
         if app.has_provider_picker() {
-            tokio::select! {
-                ev = key_rx.recv() => {
-                    match ev {
-                        Some(KeyEv::Press(event)) => {
-                            if let Event::Key(key) = event
-                                && key.kind == KeyEventKind::Press {
-                                    match key.code {
-                                        KeyCode::Up | KeyCode::Char('k') => {
-                                            app.provider_picker_up();
-                                        }
-                                        KeyCode::Down | KeyCode::Char('j') => {
-                                            app.provider_picker_down();
-                                        }
-                                        KeyCode::Enter => {
-                                            if let Some(picked) = app.selected_provider() {
-                                                let target: Option<&str> = picked.name.as_deref();
-                                                let result = {
-                                                    let mut a = agent.lock().await;
-                                                    a.switch_provider(target, config).await
-                                                };
-                                                match result {
-                                                    Ok(selection) => {
-                                                        app.model_label = selection.model.id.clone();
-                                                        app.token_max = selection.max_context as u32;
-                                                        app.pricing = selection.pricing;
-                                                        app.provider_label = target.map(str::to_string);
-                                                        let label = target.unwrap_or("default");
-                                                        app.messages.push(ChatMessage {
-                                                            role: ChatRole::System,
-                                                            content: format!(
-                                                                "Provider switched to {label} · {} · context {}",
-                                                                app.model_label,
-                                                                crate::tui::state::format_thousands(app.token_max),
-                                                            ),
-                                                            ..Default::default()
-                                                        });
-                                                    }
-                                                    Err(e) => {
-                                                        app.messages.push(ChatMessage {
-                                                            role: ChatRole::System,
-                                                            content: format!("Provider switch failed: {e}"),
-                                                            ..Default::default()
-                                                        });
-                                                    }
-                                                }
-                                            }
-                                            app.close_provider_picker();
-                                        }
-                                        KeyCode::Esc => {
-                                            app.close_provider_picker();
-                                        }
-                                        _ => {}
-                                    }
-                                }
-                        }
-                        Some(KeyEv::Error(e)) => {
-                            tracing::error!("Terminal input error (provider picker): {e}");
-                            app.close_provider_picker();
-                        }
-                        None => {
-                            app.close_provider_picker();
-                        }
-                    }
-                }
-            }
+            surface_events::drive_provider_picker(&mut app, &agent, config, &mut key_rx).await;
             continue;
         }
 
         // ── Session picker mode: intercept all input until dismissed.
-        if app.show_session_picker {
-            tokio::select! {
-                ev = key_rx.recv() => {
-                    match ev {
-                        Some(KeyEv::Press(event)) => {
-                            if let Event::Key(key) = event
-                                && key.kind == KeyEventKind::Press {
-                                    match key.code {
-                                        KeyCode::Up | KeyCode::Char('k') => {
-                                            app.session_picker_selection = app.session_picker_selection.saturating_sub(1);
-                                        }
-                                        KeyCode::Down | KeyCode::Char('j') => {
-                                            let max = app.sessions.len().saturating_sub(1);
-                                            app.session_picker_selection = app.session_picker_selection.saturating_add(1).min(max);
-                                        }
-                                        KeyCode::Enter => {
-                                            let idx = app.session_picker_selection.min(app.sessions.len().saturating_sub(1));
-                                            let picked = app.sessions[idx].id.clone();
-                                            let current = app.active_session_id.clone().unwrap_or_default();
-
-                                            if picked == current {
-                                                // Already on this session — just dismiss.
-                                                app.show_session_picker = false;
-                                            } else {
-                                                // Resume the selected session, then hydrate.
-                                                let (note, should_hydrate) = {
-                                                    let mut a = agent.lock().await;
-                                                    match a.resume_session(&picked) {
-                                                        Ok(()) => {
-                                                            if let Err(e) = a.restore_persisted_provider(config).await {
-                                                                tracing::warn!("provider restore failed during picker resume: {e}");
-                                                            }
-                                                            (Some(format!("Resumed session {}", short_id(&picked))), true)
-                                                        }
-                                                        Err(e) => (Some(format!("Could not resume session: {e}")), false),
-                                                    }
-                                                };
-                                                app.show_session_picker = false;
-                                                if should_hydrate {
-                                                    let a = agent.lock().await;
-                                                    app.model_label = a.active_model().to_string();
-                                                    app.token_max = a.max_context() as u32;
-                                                    app.pricing = a.pricing().cloned();
-                                                    app.provider_label = a.active_profile().map(str::to_string);
-                                                }
-                                                if let Some(n) = note {
-                                                    app.messages.push(ChatMessage {
-                                                        role: ChatRole::System,
-                                                        content: n,
-                                                        ..Default::default()
-                                                    });
-                                                }
-                                                if should_hydrate {
-                                                    let history = {
-                                                        let a = agent.lock().await;
-                                                        a.memory().load_history(&picked).ok().flatten()
-                                                    };
-                                                    if let Some(msgs) = history {
-                                                        for msg in msgs {
-                                                            use crate::provider::Message;
-                                                            match msg {
-                                                                Message::User { content } => {
-                                                                    app.messages.push(ChatMessage::new(ChatRole::User, content));
-                                                                }
-                                                                Message::System { content } => {
-                                                                    app.messages.push(ChatMessage::new(ChatRole::System, content));
-                                                                }
-                                                                Message::Assistant { content, reasoning_content, .. } => {
-                                                                    app.messages.push(ChatMessage {
-                                                                        role: ChatRole::Agent,
-                                                                        content: content.unwrap_or_default(),
-                                                                        reasoning: reasoning_content.unwrap_or_default(),
-                                                                        segments: Vec::new(),
-                                                                        render_version: 0,
-                                                                    });
-                                                                }
-                                                                Message::Tool { .. } => {}
-                                                            }
-                                                        }
-                                                    }
-                                                }
-                                                events::refresh_sessions(&agent, &mut app).await;
-                                            }
-                                        }
-                                        KeyCode::Esc => {
-                                            app.show_session_picker = false;
-                                            app.messages.push(ChatMessage {
-                                                role: ChatRole::System,
-                                                content: "Starting a new session — use /search to find past conversations.".into(),
-                                                ..Default::default()
-                                            });
-                                        }
-                                        _ => {}
-                                    }
-                                }
-                        }
-                        Some(KeyEv::Error(e)) => {
-                            tracing::error!("Terminal input error (picker): {e}");
-                            app.show_session_picker = false;
-                        }
-                        None => app.show_session_picker = false,
-                    }
-                }
-                pause = pause_rx.recv() => {
-                    // If a pause arrives while the picker is open, dismiss the
-                    // picker and let the normal loop handle it.
-                    if let Some(p) = pause {
-                        app.show_session_picker = false;
-                        // Re-route to normal pause handling by pushing it back.
-                        // The pause channel is multi-consumer safe; redeliver.
-                        // In practice this won't happen because no agent turn
-                        // is running at startup, but be defensive.
-                        if let Err(e) = pause_tx.send(p).await {
-                            tracing::warn!("failed to re-route pause: {e}");
-                        }
-                    }
-                }
-            }
+        if app.has_session_picker() {
+            surface_events::drive_session_picker(
+                &mut app,
+                &agent,
+                config,
+                &mut key_rx,
+                &mut pause_rx,
+                &pause_tx,
+            )
+            .await;
             continue;
         }
 
@@ -855,63 +510,10 @@ pub async fn run_tui(
                     // pill prompt route. Capture state and let the
                     // dedicated overlay drive the response.
                     if let PauseKind::DiffScrub { path, hunks } = &p.kind {
-                        app.scrubber_path = path.clone();
-                        app.scrubber_hunks = hunks.clone();
-                        app.scrubber_accepted = vec![true; hunks.len()];
-                        app.scrubber_selection = 0;
-                        app.show_diff_scrubber = true;
-                        app.scrubber_pause = Some(p);
+                        app.open_diff_scrubber(path.clone(), hunks.clone(), p);
                         continue;
                     }
-                    let summary = match (&p.kind, p.options.is_empty()) {
-                        (PauseKind::SafetyApproval { command, reason, .. }, false) => {
-                            format!("Safety: {reason}\n  $ {command}")
-                        }
-                        (PauseKind::ToolArgConfirm { tool, summary, .. }, false) => {
-                            format!("Confirm tool '{tool}': {summary}")
-                        }
-                        (PauseKind::SkillSave { suggested_name, .. }, false) => {
-                            format!("Save this as a skill named '{suggested_name}'?")
-                        }
-                        // YYC-81: ask_user always supplies its own pills,
-                        // so the legacy hint case is unreachable but kept
-                        // for exhaustiveness.
-                        (PauseKind::UserChoice { question }, _) => question.clone(),
-                        // No options → legacy bracket-list hint stays in.
-                        (PauseKind::SafetyApproval { command, reason, .. }, true) => {
-                            format!("Safety: {reason}\n  $ {command}\n  [a]llow once, [r]emember & allow, [d]eny")
-                        }
-                        (PauseKind::ToolArgConfirm { tool, summary, .. }, true) => {
-                            format!("Confirm tool '{tool}': {summary}\n  [a]llow once, [r]emember & allow, [d]eny")
-                        }
-                        (PauseKind::SkillSave { suggested_name, .. }, true) => {
-                            format!("Save this as a skill named '{suggested_name}'?\n  [a]llow once, [d]eny")
-                        }
-                        // DiffScrub handled above; arm kept for exhaustiveness.
-                        (PauseKind::DiffScrub { .. }, _) => unreachable!(),
-                        // GH issue #557: extension wants to rewrite raw
-                        // user input. Show before/after to the user.
-                        (
-                            PauseKind::InputRewriteApproval {
-                                extension_id,
-                                before,
-                                after,
-                            },
-                            false,
-                        ) => format!(
-                            "Extension '{extension_id}' proposes input rewrite:\n  before: {before}\n  after:  {after}"
-                        ),
-                        (
-                            PauseKind::InputRewriteApproval {
-                                extension_id,
-                                before,
-                                after,
-                            },
-                            true,
-                        ) => format!(
-                            "Extension '{extension_id}' proposes input rewrite:\n  before: {before}\n  after:  {after}\n  [a]llow once, [d]eny"
-                        ),
-                    };
+                    let summary = pause_prompt::pause_summary(&p);
                     app.messages.push(ChatMessage {
                         role: ChatRole::System,
                         content: format!("⏸  Agent paused — {summary}"),
@@ -920,52 +522,55 @@ pub async fn run_tui(
                         render_version: 0,
                     });
                     app.note_pause(&summary);
-                    app.pending_pause = Some(p);
+                    app.open_pause_prompt(summary, p);
                 }
                 continue;
             }
             ev = key_rx.recv() => {
                 match ev {
-                    Some(KeyEv::Press(event)) => {
+                    Some(KeyEv::Press(TuiInputEvent::Paste(text))) => {
                         // YYC-124: bracketed-paste payload — terminals that
                         // support CSI 200~/201~ deliver the whole pasted
-                        // buffer as one Event::Paste(String) instead of N
-                        // separate KeyCode::Char events. Append the chunk
+                        // buffer as one paste event instead of N
+                        // separate TuiKeyCode::Char events. Append the chunk
                         // to the input buffer in one shot; embedded
                         // newlines stay literal so multiline pastes don't
                         // submit a prompt per line. Skipped while a pause
                         // overlay is active so the paste can't smuggle
                         // text into the resume keystroke handler.
-                        if let Event::Paste(text) = &event {
-                            if app.pending_pause.is_none() {
-                                app.prompt_insert_str(text);
-                            }
-                            continue;
+                        if !app.has_pause_prompt() {
+                            app.prompt_insert_str(&text);
                         }
+                        continue;
+                    }
+                    Some(KeyEv::Press(TuiInputEvent::Mouse(m))) => {
                         // YYC-123: mouse wheel drives the chat viewport
                         // directly. Three lines per notch matches a
                         // typical terminal scroll feel; PageUp/PageDown
                         // remain available for bigger jumps.
-                        if let Event::Mouse(m) = &event {
-                            use ratatui::crossterm::event::MouseEventKind;
-                            const SCROLL_LINES: u16 = 3;
-                            match m.kind {
-                                MouseEventKind::ScrollUp => {
-                                    app.scroll = app.scroll.saturating_sub(SCROLL_LINES);
-                                    app.at_bottom = false;
-                                }
-                                MouseEventKind::ScrollDown => {
-                                    let max = app.chat_max_scroll.get();
-                                    app.scroll =
-                                        app.scroll.saturating_add(SCROLL_LINES).min(max);
-                                    app.at_bottom = app.scroll >= max;
-                                }
-                                _ => {}
+                        const SCROLL_LINES: u16 = 3;
+                        match m.kind {
+                            TuiMouseEventKind::ScrollUp => {
+                                app.scroll = app.scroll.saturating_sub(SCROLL_LINES);
+                                app.at_bottom = false;
                             }
-                            continue;
+                            TuiMouseEventKind::ScrollDown => {
+                                let max = app.chat_max_scroll.get();
+                                app.scroll = app.scroll.saturating_add(SCROLL_LINES).min(max);
+                                app.at_bottom = app.scroll >= max;
+                            }
+                            TuiMouseEventKind::Other => {}
                         }
-                        if let Event::Key(key) = event
-                            && key.kind == KeyEventKind::Press {
+                        continue;
+                    }
+                    Some(KeyEv::Press(
+                        TuiInputEvent::Resize { .. }
+                        | TuiInputEvent::Wake
+                        | TuiInputEvent::Unsupported,
+                    )) => {
+                        continue;
+                    }
+                    Some(KeyEv::Press(TuiInputEvent::Key(key))) => {
                                 if app.has_active_canvas() {
                                     app.handle_canvas_key(canvas_key_from_event(key));
                                     pending_quit = false;
@@ -975,52 +580,20 @@ pub async fn run_tui(
                                 // ── If a pause is active, intercept the keys that
                                 // dispatch a response. Anything else falls through
                                 // to normal handling so the user can still scroll, etc.
-                                if let Some(p) = app.pending_pause.as_ref() {
-                                    // YYC-59: if the pause carries inline options, the
-                                    // user's keystroke is matched against options[i].key
-                                    // (case-insensitive) and the option's `resume` is
-                                    // sent back. Esc is always Deny. Falls back to the
-                                    // legacy a/r/d modal when options is empty.
-                                    let resume = if !p.options.is_empty() {
-                                        match key.code {
-                                            KeyCode::Esc => Some(AgentResume::Deny),
-                                            KeyCode::Char(c) => p
-                                                .options
-                                                .iter()
-                                                .find(|o| {
-                                                    o.key.eq_ignore_ascii_case(&c)
-                                                })
-                                                .map(|o| o.resume.clone()),
-                                            _ => None,
-                                        }
-                                    } else {
-                                        match key.code {
-                                            KeyCode::Char('a') | KeyCode::Char('A') => Some(AgentResume::Allow),
-                                            KeyCode::Char('r') | KeyCode::Char('R') => Some(AgentResume::AllowAndRemember),
-                                            KeyCode::Char('d') | KeyCode::Char('D') | KeyCode::Esc => Some(AgentResume::Deny),
-                                            _ => None,
-                                        }
-                                    };
-                                    if let Some(r) = resume {
-                                        if let Some(p) = app.pending_pause.take() {
-                                            let label = match &r {
-                                                AgentResume::Allow => "allowed (once)",
-                                                AgentResume::AllowAndRemember => "allowed (remembered)",
-                                                AgentResume::Deny => "denied",
-                                                AgentResume::DenyWithReason(_) => "denied",
-                                                AgentResume::Custom(_) => "responded",
-                                                AgentResume::AcceptHunks(_) => "applied",
-                                            };
-                                            let _ = p.reply.send(r);
-                                            app.messages.push(ChatMessage {
-                                                role: ChatRole::System,
-                                                content: format!("▶  Resumed — {label}"),
-                                                reasoning: String::new(),
-                            segments: Vec::new(),
-                                                render_version: 0,
-                                            });
-                                            app.note_resume(label);
-                                        }
+                                if app.has_pause_prompt() {
+                                    let outcome = app.handle_pause_prompt_key(key);
+                                    if let (Some(p), Some(resume), Some(label)) =
+                                        (outcome.pause, outcome.resume, outcome.label)
+                                    {
+                                        let _ = p.reply.send(resume);
+                                        app.messages.push(ChatMessage {
+                                            role: ChatRole::System,
+                                            content: format!("▶  Resumed — {label}"),
+                                            reasoning: String::new(),
+                                            segments: Vec::new(),
+                                            render_version: 0,
+                                        });
+                                        app.note_resume(label);
                                         continue;
                                     }
                                 }
@@ -1043,8 +616,7 @@ pub async fn run_tui(
                                     && !app.input.starts_with('/')
                                 {
                                     events::refresh_sessions(&agent, &mut app).await;
-                                    app.show_session_picker = true;
-                                    app.session_picker_selection = 0;
+                                    app.open_session_picker(0);
                                     continue;
                                 }
                                 if app.keybinds.toggle_reasoning.matches(&key) {
@@ -1053,9 +625,9 @@ pub async fn run_tui(
                                 }
 
                                 // ── view switching: Ctrl+1..5
-                                if key.modifiers.contains(KeyModifiers::CONTROL) {
+                                if key.modifiers.contains(TuiKeyModifiers::CONTROL) {
                                     match key.code {
-                                        KeyCode::Char(c @ '1'..='5') => {
+                                        TuiKeyCode::Char(c @ '1'..='5') => {
                                             if let Some(v) = View::from_index(c.to_digit(10).unwrap() as u8) {
                                                 app.view = v;
                                             }
@@ -1065,8 +637,8 @@ pub async fn run_tui(
                                         // Ctrl+Backspace pops the most recent queued
                                         // submission; Ctrl+Shift+Backspace drops the
                                         // entire queue.
-                                        KeyCode::Backspace => {
-                                            if key.modifiers.contains(KeyModifiers::SHIFT) {
+                                        TuiKeyCode::Backspace => {
+                                            if key.modifiers.contains(TuiKeyModifiers::SHIFT) {
                                                 app.queue.clear();
                                             } else {
                                                 app.queue.pop_back();
@@ -1075,12 +647,12 @@ pub async fn run_tui(
                                         }
                                         // YYC-70: Ctrl+J / Ctrl+K navigate the
                                         // slash menu when it's open.
-                                        KeyCode::Char('j') | KeyCode::Char('k') => {
+                                        TuiKeyCode::Char('j') | TuiKeyCode::Char('k') => {
                                             if app.input.starts_with('/') {
                                                 let candidates = keymap::current_palette(&app.input);
                                                 if !candidates.is_empty() {
                                                     let len = candidates.len();
-                                                    if matches!(key.code, KeyCode::Char('j')) {
+                                                    if matches!(key.code, TuiKeyCode::Char('j')) {
                                                         app.slash_menu_selection =
                                                             (app.slash_menu_selection + 1).min(len - 1);
                                                     } else {
@@ -1091,7 +663,7 @@ pub async fn run_tui(
                                                 }
                                             }
                                         }
-                                        KeyCode::Char('c') => {
+                                        TuiKeyCode::Char('c') => {
                                             match app.pop_cancel_scope() {
                                                 CancelPop::Popped(_) => {
                                                     pending_quit = false;
@@ -1136,7 +708,7 @@ pub async fn run_tui(
                                 }
 
                                 match key.code {
-                                    KeyCode::Enter => {
+                                    TuiKeyCode::Enter => {
                                         // YYC-70: when the slash menu is open with at least one
                                         // match, Enter commits the highlighted command.
                                         if app.input.starts_with('/') {
@@ -1146,7 +718,7 @@ pub async fn run_tui(
                                                 app.prompt_set(format!("/{}", candidates[idx].name));
                                             }
                                         }
-                                        if key.modifiers.contains(KeyModifiers::SHIFT) {
+                                        if key.modifiers.contains(TuiKeyModifiers::SHIFT) {
                                             app.prompt_handle_key(key);
                                             pending_quit = false;
                                             continue;
@@ -1312,8 +884,7 @@ pub async fn run_tui(
                                                     }
                                                     "resume" => {
                                                         events::refresh_sessions(&agent, &mut app).await;
-                                                        app.show_session_picker = true;
-                                                        app.session_picker_selection = 0;
+                                                        app.open_session_picker(0);
                                                         continue;
                                                     }
                                                     s if s.starts_with("queue ") => {
@@ -1586,19 +1157,19 @@ pub async fn run_tui(
                                             events::submit_prompt(&mut app, &agent, &stream_tx, msg);
                                         }
                                     }
-                                    KeyCode::Char(_) => {
+                                    TuiKeyCode::Char(_) => {
                                         pending_quit = false;
                                         app.prompt_handle_key(key);
                                         // Re-filtering may shrink the menu; keep the highlight
                                         // anchored at the top so the visible top row is selected.
                                         app.slash_menu_selection = 0;
                                     }
-                                    KeyCode::Backspace => {
+                                    TuiKeyCode::Backspace => {
                                         pending_quit = false;
                                         app.prompt_handle_key(key);
                                         app.slash_menu_selection = 0;
                                     }
-                                    KeyCode::Tab => {
+                                    TuiKeyCode::Tab => {
                                         pending_quit = false;
                                         if let Some(rest) = app.input.strip_prefix('/')
                                             && let Some(c) = keymap::complete_slash(rest) {
@@ -1607,7 +1178,7 @@ pub async fn run_tui(
                                                 app.prompt_handle_key(key);
                                             }
                                     }
-                                    KeyCode::Up => {
+                                    TuiKeyCode::Up => {
                                         // YYC-70: arrows navigate the slash menu when open.
                                         if app.input.starts_with('/') {
                                             let candidates = keymap::current_palette(&app.input);
@@ -1628,7 +1199,7 @@ pub async fn run_tui(
                                         app.scroll = app.scroll.saturating_sub(3);
                                         app.at_bottom = false;
                                     }
-                                    KeyCode::Down => {
+                                    TuiKeyCode::Down => {
                                         if app.input.starts_with('/') {
                                             let candidates = keymap::current_palette(&app.input);
                                             if !candidates.is_empty() {
@@ -1646,24 +1217,24 @@ pub async fn run_tui(
                                         app.scroll = app.scroll.saturating_add(3).min(max);
                                         app.at_bottom = app.scroll >= max;
                                     }
-                                    KeyCode::Left
-                                    | KeyCode::Right
-                                    | KeyCode::Home
-                                    | KeyCode::End
-                                    | KeyCode::Delete => {
+                                    TuiKeyCode::Left
+                                    | TuiKeyCode::Right
+                                    | TuiKeyCode::Home
+                                    | TuiKeyCode::End
+                                    | TuiKeyCode::Delete => {
                                         pending_quit = false;
                                         app.prompt_handle_key(key);
                                     }
-                                    KeyCode::PageUp => {
+                                    TuiKeyCode::PageUp => {
                                         app.scroll = app.scroll.saturating_sub(10);
                                         app.at_bottom = false;
                                     }
-                                    KeyCode::PageDown => {
+                                    TuiKeyCode::PageDown => {
                                         let max = app.chat_max_scroll.get();
                                         app.scroll = app.scroll.saturating_add(10).min(max);
                                         app.at_bottom = app.scroll >= max;
                                     }
-                                    KeyCode::Esc => {
+                                    TuiKeyCode::Esc => {
                                         // YYC-58: in Command mode (slash buffer pending), Esc
                                         // clears the buffer and drops back to Insert; only Esc
                                         // with an empty buffer exits.
@@ -1682,7 +1253,6 @@ pub async fn run_tui(
                                     }
                                     _ => { pending_quit = false; }
                                 }
-                            }
                     }
                     Some(KeyEv::Error(e)) => {
                         tracing::error!("Terminal input error: {e}");
@@ -1739,7 +1309,7 @@ pub async fn run_tui(
         a.end_session().await;
     }
 
-    init::restore_terminal()?;
+    drop(terminal);
     Ok(())
 }
 

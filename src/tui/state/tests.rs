@@ -1,6 +1,6 @@
+use super::super::input::{TuiKeyCode, TuiKeyEvent, TuiKeyModifiers};
 use super::*;
 use crate::memory::SessionSummary;
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use vulcan_frontend_api::{WidgetContent, WidgetUpdate};
 
 #[test]
@@ -376,12 +376,12 @@ fn prompt_hints_default_keybinds_match_ascii_labels() {
 
 #[test]
 fn prompt_hints_reflect_overridden_keybind() {
+    use super::super::input::{TuiKeyCode, TuiKeyModifiers};
     use super::super::keybinds::{KeyBinding, Keybinds};
-    use crossterm::event::{KeyCode, KeyModifiers};
     let mut kb = Keybinds::defaults();
     kb.toggle_tools = KeyBinding {
-        code: KeyCode::F(2),
-        mods: KeyModifiers::NONE,
+        code: TuiKeyCode::F(2),
+        mods: TuiKeyModifiers::NONE,
     };
     let app = AppState::new("test".into(), 100).with_keybinds(kb);
     let pairs: Vec<(String, String)> = app.prompt_hints().to_vec();
@@ -589,10 +589,10 @@ fn delegated_worker_count_filters_terminal_records() {
 fn prompt_editor_uses_shift_enter_for_multiline_insert_mode() {
     let mut app = AppState::new("test-model".into(), 128_000);
     app.prompt_insert_str("first");
-    app.prompt_handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    app.prompt_handle_key(TuiKeyEvent::new(TuiKeyCode::Enter, TuiKeyModifiers::NONE));
     assert_eq!(app.input, "first");
 
-    app.prompt_handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::SHIFT));
+    app.prompt_handle_key(TuiKeyEvent::new(TuiKeyCode::Enter, TuiKeyModifiers::SHIFT));
     app.prompt_insert_str("second");
 
     assert_eq!(app.input, "first\nsecond");
@@ -604,11 +604,14 @@ fn prompt_editor_esc_enters_vim_normal_mode_and_i_returns_to_insert() {
     let mut app = AppState::new("test-model".into(), 128_000);
     app.prompt_insert_str("hello");
 
-    app.prompt_handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+    app.prompt_handle_key(TuiKeyEvent::new(TuiKeyCode::Esc, TuiKeyModifiers::NONE));
     assert_eq!(app.prompt_editor.mode(), PromptEditMode::Normal);
     assert_eq!(app.mode_label(), "NORMAL");
 
-    app.prompt_handle_key(KeyEvent::new(KeyCode::Char('i'), KeyModifiers::NONE));
+    app.prompt_handle_key(TuiKeyEvent::new(
+        TuiKeyCode::Char('i'),
+        TuiKeyModifiers::NONE,
+    ));
     assert_eq!(app.prompt_editor.mode(), PromptEditMode::Insert);
     assert_eq!(app.mode_label(), "INSERT");
 }

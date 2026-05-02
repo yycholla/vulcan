@@ -6,12 +6,12 @@ TUI mode logs to file (so `tracing` doesn't splat the screen); one-shot mode log
 
 ## Glossary
 
-**Surface Stack**:
-The retained TUI module that owns transient foreground surfaces such as extension canvases, future drawers, popups, and modals. Ratatui still renders immediate-mode frames; the Surface Stack only decides which surfaces exist, receive input/ticks, and close.
+**UiRuntime**:
+The retained TUI runtime that owns transient foreground surfaces such as extension canvases, future drawers, popups, and modals. Ratatui still renders immediate-mode frames; `UiRuntime` decides which surfaces exist, which surface has focus, which prior surface regains focus, and which surfaces receive input/ticks.
 _Avoid_: view branch, overlay booleans, widget registry
 
 **Surface**:
-A transient TUI interaction layer owned by the Surface Stack. A surface can render on top of or beside a normal view and can receive focused input independently from chat prompt entry.
+A transient TUI interaction layer owned by `UiRuntime`. A surface can render on top of or beside a normal view and can receive focused input independently from chat prompt entry.
 _Avoid_: page, screen, canvas unless specifically referring to extension canvases
 
 **Surface Placement**:

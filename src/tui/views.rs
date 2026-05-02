@@ -171,7 +171,7 @@ pub(in crate::tui) fn build_chat_window(
             &app.theme,
             message_scroll,
             remaining_height,
-            app.pending_pause.as_ref(),
+            app.pause_prompt_state().and_then(|state| state.pause()),
             app.queue.len(),
         );
         total_lines = total_lines.saturating_add(message_window.total_lines);
@@ -282,7 +282,7 @@ fn figlet_welcome_banner(
 fn build_chat_suffix_lines(app: &AppState) -> Vec<Line<'static>> {
     let mut lines = Vec::new();
 
-    if let Some(p) = app.pending_pause.as_ref()
+    if let Some(p) = app.pause_prompt_state().and_then(|state| state.pause())
         && !p.options.is_empty()
     {
         let mut pill_spans: Vec<Span<'static>> = Vec::new();
