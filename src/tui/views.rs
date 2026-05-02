@@ -455,6 +455,8 @@ fn split_sessions(f: &mut TuiFrame, area: Rect, app: &AppState) {
         model_status: &model_status,
         capacity_ratio: app.context_ratio(),
         thinking: app.thinking,
+        activity_active: app.activity_motion_active(),
+        activity_throbber: Some(&app.activity_throbber),
         theme: &app.theme,
     };
     let (cx, cy) = prompt.cursor(v[1]);
@@ -619,6 +621,8 @@ fn tiled_mesh(f: &mut TuiFrame, area: Rect, app: &AppState) {
         model_status: &model_status,
         capacity_ratio: app.context_ratio(),
         thinking: app.thinking,
+        activity_active: app.activity_motion_active(),
+        activity_throbber: Some(&app.activity_throbber),
         theme: &app.theme,
     };
     let (cx, cy) = prompt.cursor(v[1]);
@@ -735,6 +739,8 @@ fn tree_of_thought(f: &mut TuiFrame, area: Rect, app: &AppState) {
         model_status: &model_status,
         capacity_ratio: app.context_ratio(),
         thinking: app.thinking,
+        activity_active: app.activity_motion_active(),
+        activity_throbber: Some(&app.activity_throbber),
         theme: &app.theme,
     };
     let (cx, cy) = prompt.cursor(v[1]);
@@ -1142,6 +1148,8 @@ fn trading_floor(f: &mut TuiFrame, area: Rect, app: &AppState) {
         model_status: &model_status,
         capacity_ratio: app.context_ratio(),
         thinking: app.thinking,
+        activity_active: app.activity_motion_active(),
+        activity_throbber: Some(&app.activity_throbber),
         theme: &app.theme,
     };
     let (cx, cy) = prompt.cursor(v[2]);
