@@ -12,6 +12,7 @@ Pointer index for per-area `CONTEXT.md` files. Multi-context layout: skills shou
 | gateway    | `src/gateway/CONTEXT.md`       | External platform connectors (Discord, Telegram, loopback), inbound/outbound queues, scheduler |
 | hooks      | `src/hooks/CONTEXT.md`         | Five-event hook system, registry, built-in vs caller hooks |
 | provider   | `src/provider/CONTEXT.md`      | OpenAI-compatible LLM provider, buffered + streaming paths |
+| symphony   | `src/symphony/CONTEXT.md`      | Workflow contract, task normalization boundary, runner/scheduler vocabulary |
 | tools      | `src/tools/CONTEXT.md`         | Tool trait, dispatch, `BeforeToolCall`/`AfterToolCall` integration |
 | tui        | `src/tui/CONTEXT.md`           | Terminal UI, session ownership, `Arc<Mutex<Agent>>` lifecycle |
 

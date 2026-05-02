@@ -49,6 +49,7 @@ pub mod review;
 pub mod run_record;
 pub mod runtime_pool;
 pub mod skills;
+pub mod symphony;
 pub mod tools;
 pub mod trust;
 pub mod tui;
