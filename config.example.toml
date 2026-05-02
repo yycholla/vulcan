@@ -113,6 +113,8 @@ enabled = false
 #   traces  -> http://localhost:4318/v1/traces
 #   metrics -> http://localhost:4318/v1/metrics
 # Start a local collector, then set enabled = true for manual E2E validation.
+# In SigNoz Explorer, add columns like operation, provider_mode, tool_name,
+# hook_event, hook_handler, outcome, error_kind, and total_tokens.
 endpoint = "http://localhost:4318"
 traces = true
 metrics = true
