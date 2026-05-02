@@ -45,6 +45,7 @@ use crate::provider::StreamEvent;
 
 pub mod chat_message;
 pub mod chat_render;
+pub mod effects;
 mod events;
 pub mod frontend;
 mod init;

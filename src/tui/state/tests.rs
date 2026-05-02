@@ -234,10 +234,12 @@ fn activity_motion_advances_throbber_only_while_active() {
     let mut app = AppState::new("test-model".into(), 128_000);
     app.advance_activity_motion();
     assert_eq!(app.activity_throbber.index(), 0);
+    assert_eq!(app.effects.prompt_border_phase(), 0);
 
     app.thinking = true;
     app.advance_activity_motion();
     assert_eq!(app.activity_throbber.index(), 1);
+    assert_eq!(app.effects.prompt_border_phase(), 1);
 }
 
 struct TestCanvas;

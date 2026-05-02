@@ -67,6 +67,7 @@ pub use super::orchestration::{
 pub use super::picker_state::{ProviderPickerEntry, SessionState, SessionStatus};
 pub use super::prompt::{PromptEditMode, PromptEditor, PromptEnterIntent, PromptEscapeIntent};
 
+use super::effects::TuiEffects;
 use super::surface::{SurfaceFrame, SurfaceStack};
 use super::theme::{Palette, Theme};
 use super::views::{DiffKind, DiffLine, View};
@@ -249,6 +250,7 @@ pub struct AppState {
     surfaces: SurfaceStack,
     pub active_ticks: Vec<ActiveTick>,
     pub activity_throbber: ThrobberState,
+    pub effects: TuiEffects,
 
     /// When the agent emits an `AgentPause`, the TUI parks it here. Render
     /// shows an overlay; key handler intercepts Y/A/N keys and consumes the
@@ -407,6 +409,7 @@ impl AppState {
             surfaces: SurfaceStack::default(),
             active_ticks: Vec::new(),
             activity_throbber: ThrobberState::default(),
+            effects: TuiEffects::default(),
             pending_pause: None,
 
             cursor: Cell::new((0, 0)),
@@ -721,6 +724,7 @@ impl AppState {
     pub fn advance_activity_motion(&mut self) {
         if self.activity_motion_active() {
             self.activity_throbber.calc_next();
+            self.effects.advance_prompt_border_sweep();
         }
     }
 
