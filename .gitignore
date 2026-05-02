@@ -18,9 +18,7 @@ config.toml
 story.md
 
 # Claude Code session-local artifacts (loop lockfile, etc.)
-.claude/
 code-analysis.md
 /code-review.md
-/docs/features
 /.fastembed_cache/models--Xenova--bge-small-en-v1.5
 .gitnexus

@@ -294,7 +294,7 @@ cargo test <name>         # Run a single test by name
 
 **Planned** — context compaction with LLM summarization, external hook handlers (Python/JS), Telegram connector, richer Discord controls, cron scheduling, sub-agent orchestration.
 
-Tracked in [Linear — Vulcan: Rust AI Agent](https://linear.app/yycholla/project/vulcan-rust-ai-agent-37bc34d04e48).
+Tracked in [GitHub Issues — yycholla/vulcan](https://github.com/yycholla/vulcan/issues).
 
 ---
 

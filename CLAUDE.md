@@ -6,11 +6,11 @@ Vulcan is a pure-Rust personal AI agent (CLI + TUI). The binary is `vulcan`; cha
 
 ## Github PR flow
 
-- This project uses Graphite for pr stacks and review. Branches should follow linear best practice for best sync between github state and linear
+- This project uses Graphite for pr stacks and review. Branches should follow GitHub issue/Graphite best practice for clean PR stacks and issue closure automation
 
 ## Where work is tracked and planned
 
-- **Linear** is the source of truth for tasks. Workspace team **Yycholla**, project **Vulcan — Rust AI Agent** — issues use the `YYC-` prefix. Check existing issues before creating new ones; ask before bulk-creating tickets. Group under an epic issue where possible.
+- **GitHub Issues** is the source of truth for tasks in `yycholla/vulcan`. Historical `YYC-` identifiers were carried over in issue titles where useful. Check existing issues before creating new ones; ask before bulk-creating tickets. Group related work with labels/milestones where possible.
 - **`~/wiki/queries/rust-hermes-plan.md`** is the master vision (Phase 1 → 2 → 3, locked Phase 1 scope, tool trait + provider trait shapes). Anything that contradicts the plan is either an open question or a documentation lag — don't silently diverge.
 - **`~/wiki/queries/`** also holds design docs (e.g. `hooks-design.md` once written) — prefer adding cross-cutting design docs there, not in the repo.
 
@@ -48,7 +48,7 @@ Three load-bearing invariants:
 
 **Skills** are no longer hard-coded into `PromptBuilder` — they flow through `SkillsHook` as a `BeforePrompt` injection at `InjectPosition::AfterSystem`. `PromptBuilder::build_system_prompt` is now tool-only.
 
-**Tool dispatch** runs `BeforeToolCall` (block / replace args) → execute → `AfterToolCall` (replace result). Today `Tool::call` returns `Result<String>`; the master plan specifies `ToolResult { output, media, is_error }` — that upgrade is tracked in Linear and is the natural next structural change.
+**Tool dispatch** runs `BeforeToolCall` (block / replace args) → execute → `AfterToolCall` (replace result). Today `Tool::call` returns `Result<String>`; the master plan specifies `ToolResult { output, media, is_error }` — that upgrade is tracked in GitHub Issues and is the natural next structural change.
 
 **Provider** is OpenAI-compatible (`src/provider/openai.rs`). Both buffered (`chat`) and streaming (`chat_stream`) paths are honored by every hook event; if you add a new event, wire it into both.
 
@@ -59,9 +59,10 @@ Three load-bearing invariants:
 The project was renamed from `ferris` → `vulcan`. Some references still say "ferris" (e.g. `config.example.toml` says `FERRIS_API_KEY` even though the code reads `VULCAN_API_KEY`; `~/wiki/queries/rust-hermes-plan.md` still says "ferris (binary)"). Fix in passing when you touch a file, but don't open a sweeping rename PR — the rename is being absorbed gradually.
 
 <!-- gitnexus:start -->
+
 # GitNexus — Code Intelligence
 
-This project is indexed by GitNexus as **vulcan** (6752 symbols, 17643 relationships, 300 execution flows). Use the GitNexus MCP tools to understand code, assess impact, and navigate safely.
+This project is indexed by GitNexus as **vulcan** (7408 symbols, 19384 relationships, 300 execution flows). Use the GitNexus MCP tools to understand code, assess impact, and navigate safely.
 
 > If any GitNexus tool warns the index is stale, run `npx gitnexus analyze` in terminal first.
 
@@ -82,23 +83,23 @@ This project is indexed by GitNexus as **vulcan** (6752 symbols, 17643 relations
 
 ## Resources
 
-| Resource | Use for |
-|----------|---------|
-| `gitnexus://repo/vulcan/context` | Codebase overview, check index freshness |
-| `gitnexus://repo/vulcan/clusters` | All functional areas |
-| `gitnexus://repo/vulcan/processes` | All execution flows |
-| `gitnexus://repo/vulcan/process/{name}` | Step-by-step execution trace |
+| Resource                                | Use for                                  |
+| --------------------------------------- | ---------------------------------------- |
+| `gitnexus://repo/vulcan/context`        | Codebase overview, check index freshness |
+| `gitnexus://repo/vulcan/clusters`       | All functional areas                     |
+| `gitnexus://repo/vulcan/processes`      | All execution flows                      |
+| `gitnexus://repo/vulcan/process/{name}` | Step-by-step execution trace             |
 
 ## CLI
 
-| Task | Read this skill file |
-|------|---------------------|
-| Understand architecture / "How does X work?" | `.claude/skills/gitnexus/gitnexus-exploring/SKILL.md` |
-| Blast radius / "What breaks if I change X?" | `.claude/skills/gitnexus/gitnexus-impact-analysis/SKILL.md` |
-| Trace bugs / "Why is X failing?" | `.claude/skills/gitnexus/gitnexus-debugging/SKILL.md` |
-| Rename / extract / split / refactor | `.claude/skills/gitnexus/gitnexus-refactoring/SKILL.md` |
-| Tools, resources, schema reference | `.claude/skills/gitnexus/gitnexus-guide/SKILL.md` |
-| Index, status, clean, wiki CLI commands | `.claude/skills/gitnexus/gitnexus-cli/SKILL.md` |
+| Task                                         | Read this skill file                                        |
+| -------------------------------------------- | ----------------------------------------------------------- |
+| Understand architecture / "How does X work?" | `.claude/skills/gitnexus/gitnexus-exploring/SKILL.md`       |
+| Blast radius / "What breaks if I change X?"  | `.claude/skills/gitnexus/gitnexus-impact-analysis/SKILL.md` |
+| Trace bugs / "Why is X failing?"             | `.claude/skills/gitnexus/gitnexus-debugging/SKILL.md`       |
+| Rename / extract / split / refactor          | `.claude/skills/gitnexus/gitnexus-refactoring/SKILL.md`     |
+| Tools, resources, schema reference           | `.claude/skills/gitnexus/gitnexus-guide/SKILL.md`           |
+| Index, status, clean, wiki CLI commands      | `.claude/skills/gitnexus/gitnexus-cli/SKILL.md`             |
 
 <!-- gitnexus:end -->
 
@@ -115,3 +116,17 @@ Canonical strings (`needs-triage`, `needs-info`, `ready-for-agent`, `ready-for-h
 ### Domain docs
 
 Multi-context: `CONTEXT-MAP.md` + root `CONTEXT.md` + per-area `src/<area>/CONTEXT.md` (agent, daemon, gateway, hooks, provider, tools, tui). See `docs/agents/domain.md`.
+
+# SlayZone Environment
+
+You are an agent running inside a [SlayZone](https://slayzone.com) task. Other agents may be running in their own tasks in parallel, and a human or another agent can reach you through this terminal at any time.
+
+## Interact with SlayZone
+
+If useful, you have a toolbox for acting on SlayZone itself. You can:
+
+- create and update tasks, and spawn sub-tasks with their own agents
+- attach assets, run processes, open web panels, set up automations
+- change your own task's state
+
+The toolbox is the `slay` CLI. `$SLAYZONE_TASK_ID` holds your task's ID, and most `slay` commands default to it. **Load the `slay` skill before running any `slay` command** — it holds the full reference of commands, flags, and domain-specific guides. Never guess subcommands or flags.

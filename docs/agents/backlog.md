@@ -21,6 +21,6 @@ Create a GitHub issue.
 
 Run `gh issue view <number> --comments`.
 
-## Note on Linear
+## Source of truth
 
-This project's `CLAUDE.md` mentions Linear (Yycholla team, project "Vulcan — Rust AI Agent", `YYC-*`) as the historical source of truth for tasks. The Matt Pocock skills target GitHub. Use GitHub issues for skill-driven work; mirror to Linear manually if cross-tracking needed.
+GitHub Issues is the sole source of truth for task tracking. Historical `YYC-*` identifiers may appear in issue titles or old notes, but new task operations should use GitHub only.
