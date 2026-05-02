@@ -243,6 +243,85 @@ pub struct Config {
     /// etc.).
     #[serde(default)]
     pub daemon: DaemonConfig,
+
+    /// Shared OpenTelemetry/tracing export configuration. Disabled by
+    /// default; when enabled, every supported runtime surface emits through
+    /// the common Vulcan observability layer unless a surface gate is turned
+    /// off.
+    #[serde(default)]
+    pub observability: ObservabilityConfig,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct ObservabilityConfig {
+    /// Master switch. When true, Vulcan installs OpenTelemetry layers for the
+    /// current process and emits telemetry for every enabled surface.
+    pub enabled: bool,
+    /// Export traces through OTLP.
+    pub traces: bool,
+    /// Export metrics through OTLP.
+    pub metrics: bool,
+    /// Reserved for OTel log export. Structured tracing logs continue to work
+    /// regardless of this flag; OTel logs are off for v1.
+    pub logs: bool,
+    /// Base OTLP/HTTP endpoint. When set to e.g. `http://localhost:4318`,
+    /// traces and metrics derive `/v1/traces` and `/v1/metrics`.
+    pub endpoint: Option<String>,
+    /// Explicit trace endpoint override.
+    pub traces_endpoint: Option<String>,
+    /// Explicit metrics endpoint override.
+    pub metrics_endpoint: Option<String>,
+    /// Service name reported to OTel resources.
+    pub service_name: String,
+    /// Periodic metrics export interval in seconds.
+    pub export_interval_secs: u64,
+    /// Per-surface gates. Defaults are broad so `enabled = true` means full
+    /// supported surface tracing.
+    pub surfaces: ObservabilitySurfaceConfig,
+}
+
+impl Default for ObservabilityConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            traces: true,
+            metrics: true,
+            logs: false,
+            endpoint: None,
+            traces_endpoint: None,
+            metrics_endpoint: None,
+            service_name: "vulcan".into(),
+            export_interval_secs: 30,
+            surfaces: ObservabilitySurfaceConfig::default(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct ObservabilitySurfaceConfig {
+    pub agent: bool,
+    pub hooks: bool,
+    pub tools: bool,
+    pub provider: bool,
+    pub daemon: bool,
+    pub gateway: bool,
+    pub symphony: bool,
+}
+
+impl Default for ObservabilitySurfaceConfig {
+    fn default() -> Self {
+        Self {
+            agent: true,
+            hooks: true,
+            tools: true,
+            provider: true,
+            daemon: true,
+            gateway: true,
+            symphony: true,
+        }
+    }
 }
 
 /// YYC-266: daemon-process configuration.
@@ -1214,6 +1293,7 @@ impl Default for Config {
             active_profile: None,
             knowledge: KnowledgeConfig::default(),
             daemon: DaemonConfig::default(),
+            observability: ObservabilityConfig::default(),
         }
     }
 }
@@ -1306,6 +1386,7 @@ impl Config {
             "active_profile",
             "knowledge",
             "daemon",
+            "observability",
         ];
         let Ok(value) = toml::from_str::<toml::Value>(raw) else {
             return Vec::new();
