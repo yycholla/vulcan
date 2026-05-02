@@ -621,7 +621,7 @@ impl Agent {
         let provider_span = observability::provider_request_span(
             &self.provider_config.r#type,
             &self.provider_config.model,
-            false,
+            observability::ProviderSpanMode::Compaction,
             request.len(),
             0,
         );
@@ -792,7 +792,7 @@ impl Agent {
         let provider_span = observability::provider_request_span(
             &self.provider_config.r#type,
             &self.provider_config.model,
-            true,
+            observability::ProviderSpanMode::Streaming,
             outgoing.len(),
             tool_defs.len(),
         );
@@ -1151,7 +1151,7 @@ impl TurnRunnerMut<'_> {
                     let provider_span = observability::provider_request_span(
                         &self.agent.provider_config.r#type,
                         &self.agent.provider_config.model,
-                        false,
+                        observability::ProviderSpanMode::Buffered,
                         outgoing.len(),
                         tool_defs.len(),
                     );
