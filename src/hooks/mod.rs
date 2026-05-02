@@ -17,7 +17,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::time::timeout;
 use tokio_util::sync::CancellationToken;
+use tracing::Instrument;
 
+use crate::observability;
 use crate::pause::{AgentPause, AgentResume, OptionKind, PauseKind, PauseOption, PauseSender};
 use crate::provider::{ChatResponse, Message, StreamEvent, ToolCall};
 use crate::tools::{ToolProgress, ToolResult};
@@ -467,7 +469,10 @@ impl HookRegistry {
         let mut appended: Vec<Message> = Vec::new();
 
         for h in self.handlers_snapshot() {
-            match self.run(&h, h.on_context(&current, cancel.clone())).await {
+            match self
+                .run("on_context", &h, h.on_context(&current, cancel.clone()))
+                .await
+            {
                 Some(HookOutcome::RewriteMessages(rewritten)) => {
                     tracing::info!("hook {} rewrote context messages", h.name());
                     current = rewritten;
@@ -489,7 +494,11 @@ impl HookRegistry {
                 }
             }
             match self
-                .run(&h, h.before_prompt(messages, cancel.clone()))
+                .run(
+                    "before_prompt",
+                    &h,
+                    h.before_prompt(messages, cancel.clone()),
+                )
                 .await
             {
                 Some(HookOutcome::InjectMessages {
@@ -539,7 +548,10 @@ impl HookRegistry {
 
     pub async fn on_turn_start(&self, turn: u32, cancel: CancellationToken) {
         for h in self.handlers_snapshot() {
-            match self.run(&h, h.on_turn_start(turn, cancel.clone())).await {
+            match self
+                .run("on_turn_start", &h, h.on_turn_start(turn, cancel.clone()))
+                .await
+            {
                 Some(HookOutcome::Continue) | None => {}
                 Some(other) => {
                     tracing::warn!(
@@ -554,7 +566,10 @@ impl HookRegistry {
 
     pub async fn on_turn_end(&self, turn: u32, cancel: CancellationToken) {
         for h in self.handlers_snapshot() {
-            match self.run(&h, h.on_turn_end(turn, cancel.clone())).await {
+            match self
+                .run("on_turn_end", &h, h.on_turn_end(turn, cancel.clone()))
+                .await
+            {
                 Some(HookOutcome::Continue) | None => {}
                 Some(other) => {
                     tracing::warn!(
@@ -572,8 +587,12 @@ impl HookRegistry {
             self.ignore_observe_outcome(
                 &h,
                 "on_message_start",
-                self.run(&h, h.on_message_start(delta, cancel.clone()))
-                    .await,
+                self.run(
+                    "on_message_start",
+                    &h,
+                    h.on_message_start(delta, cancel.clone()),
+                )
+                .await,
             );
         }
     }
@@ -583,8 +602,12 @@ impl HookRegistry {
             self.ignore_observe_outcome(
                 &h,
                 "on_message_update",
-                self.run(&h, h.on_message_update(delta, cancel.clone()))
-                    .await,
+                self.run(
+                    "on_message_update",
+                    &h,
+                    h.on_message_update(delta, cancel.clone()),
+                )
+                .await,
             );
         }
     }
@@ -594,7 +617,12 @@ impl HookRegistry {
             self.ignore_observe_outcome(
                 &h,
                 "on_message_end",
-                self.run(&h, h.on_message_end(delta, cancel.clone())).await,
+                self.run(
+                    "on_message_end",
+                    &h,
+                    h.on_message_end(delta, cancel.clone()),
+                )
+                .await,
             );
         }
     }
@@ -604,8 +632,12 @@ impl HookRegistry {
             self.ignore_observe_outcome(
                 &h,
                 "on_tool_execution_start",
-                self.run(&h, h.on_tool_execution_start(call, cancel.clone()))
-                    .await,
+                self.run(
+                    "on_tool_execution_start",
+                    &h,
+                    h.on_tool_execution_start(call, cancel.clone()),
+                )
+                .await,
             );
         }
     }
@@ -621,6 +653,7 @@ impl HookRegistry {
                 &h,
                 "on_tool_execution_update",
                 self.run(
+                    "on_tool_execution_update",
                     &h,
                     h.on_tool_execution_update(call, progress, cancel.clone()),
                 )
@@ -634,8 +667,12 @@ impl HookRegistry {
             self.ignore_observe_outcome(
                 &h,
                 "on_tool_execution_end",
-                self.run(&h, h.on_tool_execution_end(call, cancel.clone()))
-                    .await,
+                self.run(
+                    "on_tool_execution_end",
+                    &h,
+                    h.on_tool_execution_end(call, cancel.clone()),
+                )
+                .await,
             );
         }
     }
@@ -649,8 +686,12 @@ impl HookRegistry {
             self.ignore_observe_outcome(
                 &h,
                 "on_before_provider_request",
-                self.run(&h, h.on_before_provider_request(messages, cancel.clone()))
-                    .await,
+                self.run(
+                    "on_before_provider_request",
+                    &h,
+                    h.on_before_provider_request(messages, cancel.clone()),
+                )
+                .await,
             );
         }
     }
@@ -664,8 +705,12 @@ impl HookRegistry {
             self.ignore_observe_outcome(
                 &h,
                 "on_after_provider_response",
-                self.run(&h, h.on_after_provider_response(response, cancel.clone()))
-                    .await,
+                self.run(
+                    "on_after_provider_response",
+                    &h,
+                    h.on_after_provider_response(response, cancel.clone()),
+                )
+                .await,
             );
         }
     }
@@ -677,7 +722,11 @@ impl HookRegistry {
     ) -> CompactionDecision {
         for h in self.handlers_snapshot() {
             match self
-                .run(&h, h.on_session_before_compact(messages, cancel.clone()))
+                .run(
+                    "on_session_before_compact",
+                    &h,
+                    h.on_session_before_compact(messages, cancel.clone()),
+                )
                 .await
             {
                 Some(HookOutcome::Block { reason }) => {
@@ -712,8 +761,12 @@ impl HookRegistry {
             self.ignore_observe_outcome(
                 &h,
                 "on_session_compact",
-                self.run(&h, h.on_session_compact(summary, cancel.clone()))
-                    .await,
+                self.run(
+                    "on_session_compact",
+                    &h,
+                    h.on_session_compact(summary, cancel.clone()),
+                )
+                .await,
             );
         }
     }
@@ -723,7 +776,12 @@ impl HookRegistry {
             self.ignore_observe_outcome(
                 &h,
                 "on_session_before_fork",
-                self.run(&h, h.on_session_before_fork(cancel.clone())).await,
+                self.run(
+                    "on_session_before_fork",
+                    &h,
+                    h.on_session_before_fork(cancel.clone()),
+                )
+                .await,
             );
         }
     }
@@ -733,7 +791,12 @@ impl HookRegistry {
             self.ignore_observe_outcome(
                 &h,
                 "on_session_shutdown",
-                self.run(&h, h.on_session_shutdown(cancel.clone())).await,
+                self.run(
+                    "on_session_shutdown",
+                    &h,
+                    h.on_session_shutdown(cancel.clone()),
+                )
+                .await,
             );
         }
     }
@@ -747,7 +810,10 @@ impl HookRegistry {
     /// as the audit `extension_id`.
     pub async fn apply_on_input(&self, raw: &str, cancel: CancellationToken) -> InputDecision {
         for h in self.handlers_snapshot() {
-            match self.run(&h, h.on_input(raw, cancel.clone())).await {
+            match self
+                .run("on_input", &h, h.on_input(raw, cancel.clone()))
+                .await
+            {
                 Some(HookOutcome::BlockInput { reason }) => {
                     tracing::info!("hook {} blocked input: {reason}", h.name());
                     self.record_input_intercept(
@@ -927,7 +993,11 @@ impl HookRegistry {
     ) -> ToolCallDecision {
         for h in self.handlers_snapshot() {
             match self
-                .run(&h, h.before_tool_call(tool, args, cancel.clone()))
+                .run(
+                    "before_tool_call",
+                    &h,
+                    h.before_tool_call(tool, args, cancel.clone()),
+                )
                 .await
             {
                 Some(HookOutcome::Block { reason }) => {
@@ -960,7 +1030,11 @@ impl HookRegistry {
     ) -> Option<ToolResult> {
         for h in self.handlers_snapshot() {
             match self
-                .run(&h, h.after_tool_call(tool, result, cancel.clone()))
+                .run(
+                    "after_tool_call",
+                    &h,
+                    h.after_tool_call(tool, result, cancel.clone()),
+                )
                 .await
             {
                 Some(HookOutcome::ReplaceResult(new)) => {
@@ -989,7 +1063,11 @@ impl HookRegistry {
     ) -> Option<String> {
         for h in self.handlers_snapshot() {
             match self
-                .run(&h, h.before_agent_end(response, cancel.clone()))
+                .run(
+                    "before_agent_end",
+                    &h,
+                    h.before_agent_end(response, cancel.clone()),
+                )
                 .await
             {
                 Some(HookOutcome::ForceContinue { instruction }) => {
@@ -1013,22 +1091,42 @@ impl HookRegistry {
         for h in self.handlers_snapshot() {
             // Each handler gets its own timeout window. session_X are observe-
             // only so we don't care about return values.
-            let _ = timeout(self.handler_timeout, h.session_start(session_id)).await;
+            let span = hook_span("session_start", h.name());
+            let result = timeout(self.handler_timeout, h.session_start(session_id))
+                .instrument(span.clone())
+                .await;
+            record_unit_hook_result(&span, &result, self.handler_timeout);
         }
     }
 
     pub async fn session_end(&self, session_id: &str, total_turns: u32) {
         for h in self.handlers_snapshot() {
-            let _ = timeout(self.handler_timeout, h.session_end(session_id, total_turns)).await;
+            let span = hook_span("session_end", h.name());
+            let result = timeout(self.handler_timeout, h.session_end(session_id, total_turns))
+                .instrument(span.clone())
+                .await;
+            record_unit_hook_result(&span, &result, self.handler_timeout);
         }
     }
 
-    async fn run<F>(&self, h: &Arc<dyn HookHandler>, fut: F) -> Option<HookOutcome>
+    async fn run<F>(
+        &self,
+        event: &'static str,
+        h: &Arc<dyn HookHandler>,
+        fut: F,
+    ) -> Option<HookOutcome>
     where
         F: std::future::Future<Output = Result<HookOutcome>>,
     {
-        match timeout(self.handler_timeout, fut).await {
-            Ok(Ok(o)) => Some(o),
+        let span = hook_span(event, h.name());
+        match timeout(self.handler_timeout, fut)
+            .instrument(span.clone())
+            .await
+        {
+            Ok(Ok(o)) => {
+                span.record(observability::attr::OUTCOME, hook_outcome_name(&o));
+                Some(o)
+            }
             Ok(Err(e)) => {
                 // YYC-120: errors and timeouts both drop the handler's
                 // contribution to the event, but they're operationally
@@ -1037,8 +1135,11 @@ impl HookRegistry {
                 // metrics surfaces (and `failure_metrics()`) can branch on
                 // the failure mode rather than just "something went wrong".
                 self.failure_metrics.errors.fetch_add(1, Ordering::Relaxed);
+                span.record(observability::attr::OUTCOME, "error");
+                span.record(observability::attr::ERROR_KIND, "handler_error");
                 tracing::warn!(
                     handler = h.name(),
+                    hook_event = event,
                     failure = "error",
                     "hook {} returned error: {e}",
                     h.name()
@@ -1049,8 +1150,11 @@ impl HookRegistry {
                 self.failure_metrics
                     .timeouts
                     .fetch_add(1, Ordering::Relaxed);
+                span.record(observability::attr::OUTCOME, "timeout");
+                span.record(observability::attr::ERROR_KIND, "handler_timeout");
                 tracing::warn!(
                     handler = h.name(),
+                    hook_event = event,
                     failure = "timeout",
                     timeout_ms = self.handler_timeout.as_millis() as u64,
                     "hook {} timed out after {:?}",
@@ -1078,6 +1182,54 @@ impl HookRegistry {
                     event
                 );
             }
+        }
+    }
+}
+
+fn hook_span(event: &'static str, handler: &str) -> tracing::Span {
+    tracing::info_span!(
+        observability::span::HOOK_EVENT,
+        surface = "hooks",
+        hook_event = event,
+        hook_handler = handler,
+        outcome = tracing::field::Empty,
+        error_kind = tracing::field::Empty
+    )
+}
+
+fn hook_outcome_name(outcome: &HookOutcome) -> &'static str {
+    match outcome {
+        HookOutcome::Continue => "continue",
+        HookOutcome::Block { .. } => "block",
+        HookOutcome::ReplaceArgs(_) => "replace_args",
+        HookOutcome::ReplaceResult(_) => "replace_result",
+        HookOutcome::InjectMessages { .. } => "inject_messages",
+        HookOutcome::RewriteMessages(_) => "rewrite_messages",
+        HookOutcome::RewriteHistory(_) => "rewrite_history",
+        HookOutcome::ForceContinue { .. } => "force_continue",
+        HookOutcome::BlockInput { .. } => "block_input",
+        HookOutcome::ReplaceInput(_) => "replace_input",
+    }
+}
+
+fn record_unit_hook_result(
+    span: &tracing::Span,
+    result: &std::result::Result<(), tokio::time::error::Elapsed>,
+    timeout: Duration,
+) {
+    match result {
+        Ok(()) => {
+            span.record(observability::attr::OUTCOME, "continue");
+        }
+        Err(_) => {
+            span.record(observability::attr::OUTCOME, "timeout");
+            span.record(observability::attr::ERROR_KIND, "handler_timeout");
+            tracing::warn!(
+                failure = "timeout",
+                timeout_ms = timeout.as_millis() as u64,
+                "hook session notification timed out after {:?}",
+                timeout
+            );
         }
     }
 }
@@ -1241,6 +1393,37 @@ mod tests {
         let counts = reg.failure_metrics();
         assert_eq!(counts.timeouts, 2);
         assert_eq!(counts.errors, 2);
+    }
+
+    #[test]
+    fn hook_outcome_names_are_stable_for_observability() {
+        assert_eq!(hook_outcome_name(&HookOutcome::Continue), "continue");
+        assert_eq!(
+            hook_outcome_name(&HookOutcome::Block {
+                reason: "no".into()
+            }),
+            "block"
+        );
+        assert_eq!(
+            hook_outcome_name(&HookOutcome::ReplaceArgs(Value::Null)),
+            "replace_args"
+        );
+        assert_eq!(
+            hook_outcome_name(&HookOutcome::ForceContinue {
+                instruction: "keep going".into()
+            }),
+            "force_continue"
+        );
+        assert_eq!(
+            hook_outcome_name(&HookOutcome::BlockInput {
+                reason: "no".into()
+            }),
+            "block_input"
+        );
+        assert_eq!(
+            hook_outcome_name(&HookOutcome::ReplaceInput("rewritten".into())),
+            "replace_input"
+        );
     }
 
     #[tokio::test]
