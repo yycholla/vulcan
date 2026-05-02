@@ -57,6 +57,7 @@ pub mod orchestration;
 pub mod picker_state;
 mod rendering;
 pub mod state;
+mod surface;
 pub mod theme;
 pub mod views;
 pub mod widgets;
@@ -938,7 +939,7 @@ pub async fn run_tui(
                         }
                         if let Event::Key(key) = event
                             && key.kind == KeyEventKind::Press {
-                                if app.active_canvas.is_some() {
+                                if app.has_active_canvas() {
                                     app.handle_canvas_key(canvas_key_from_event(key));
                                     pending_quit = false;
                                     continue;

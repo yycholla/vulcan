@@ -66,6 +66,7 @@ pub use super::orchestration::{
 };
 pub use super::picker_state::{ProviderPickerEntry, SessionState, SessionStatus};
 
+use super::surface::SurfaceStack;
 use super::theme::{Palette, Theme};
 use super::views::{DiffKind, DiffLine, View};
 
@@ -383,11 +384,6 @@ pub enum ToolStatus {
     Done(bool),
 }
 
-pub struct ActiveCanvas {
-    pub handle: vulcan_frontend_api::CanvasHandle,
-    canvas: Box<dyn vulcan_frontend_api::Canvas>,
-}
-
 pub struct ActiveTick {
     pub rate: vulcan_frontend_api::TickRate,
     pub handle: vulcan_frontend_api::TickHandle,
@@ -480,7 +476,7 @@ pub struct AppState {
     pub audit_log: Option<AuditBuffer>,
     pub frontend: super::frontend::TuiFrontend,
     status_widgets: BTreeMap<String, vulcan_frontend_api::WidgetContent>,
-    pub active_canvas: Option<ActiveCanvas>,
+    surfaces: SurfaceStack,
     pub active_ticks: Vec<ActiveTick>,
 
     /// When the agent emits an `AgentPause`, the TUI parks it here. Render
@@ -644,7 +640,7 @@ impl AppState {
             audit_log: None,
             frontend: super::frontend::TuiFrontend::default(),
             status_widgets: BTreeMap::new(),
-            active_canvas: None,
+            surfaces: SurfaceStack::default(),
             active_ticks: Vec::new(),
             pending_pause: None,
 
@@ -865,11 +861,7 @@ impl AppState {
     }
 
     pub fn install_canvas_request(&mut self, request: vulcan_frontend_api::CanvasRequest) {
-        let canvas = request.factory.create(request.handle.clone());
-        self.active_canvas = Some(ActiveCanvas {
-            handle: request.handle,
-            canvas,
-        });
+        self.surfaces.install_canvas(request);
     }
 
     pub fn install_tick_request(&mut self, request: vulcan_frontend_api::TickRequest) {
@@ -882,21 +874,15 @@ impl AppState {
     }
 
     pub fn active_canvas_frame(&self) -> Option<vulcan_frontend_api::CanvasFrame> {
-        self.active_canvas
-            .as_ref()
-            .map(|active| active.canvas.render())
+        self.surfaces.active_canvas_frame()
+    }
+
+    pub fn has_active_canvas(&self) -> bool {
+        self.surfaces.has_canvas()
     }
 
     pub fn handle_canvas_key(&mut self, key: vulcan_frontend_api::CanvasKey) -> bool {
-        let Some(active) = self.active_canvas.as_ref() else {
-            return false;
-        };
-        let control = active.canvas.on_key(key, &active.handle);
-        if active.handle.has_exited() || matches!(control, vulcan_frontend_api::CanvasControl::Exit)
-        {
-            self.active_canvas = None;
-        }
-        true
+        self.surfaces.handle_canvas_key(key)
     }
 
     pub fn pump_frontend_ticks(&mut self) {
@@ -911,12 +897,7 @@ impl AppState {
             }
         }
         self.active_ticks.retain(|tick| !tick.handle.is_stopped());
-        if let Some(active) = self.active_canvas.as_ref() {
-            active.canvas.on_tick(&active.handle);
-            if active.handle.has_exited() {
-                self.active_canvas = None;
-            }
-        }
+        self.surfaces.handle_tick();
     }
 
     pub fn cancel_stack(&self) -> Vec<CancelScope> {
@@ -927,7 +908,7 @@ impl AppState {
         if self.pending_pause.is_some() || self.show_diff_scrubber {
             stack.push(CancelScope::Dialog);
         }
-        if self.active_canvas.is_some() {
+        if self.surfaces.has_canvas() {
             stack.push(CancelScope::Canvas);
         }
         stack
@@ -936,10 +917,7 @@ impl AppState {
     pub fn pop_cancel_scope(&mut self) -> CancelPop {
         match self.cancel_stack().pop() {
             Some(CancelScope::Canvas) => {
-                if let Some(active) = &self.active_canvas {
-                    active.handle.exit();
-                }
-                self.active_canvas = None;
+                self.surfaces.exit_canvas();
                 CancelPop::Popped(CancelScope::Canvas)
             }
             Some(CancelScope::Dialog) => {

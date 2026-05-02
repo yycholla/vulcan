@@ -227,7 +227,7 @@ fn canvas_request_installs_and_exits_on_default_escape() {
     );
 
     assert!(app.handle_canvas_key(vulcan_frontend_api::CanvasKey::Esc));
-    assert!(app.active_canvas.is_none());
+    assert!(!app.has_active_canvas());
 }
 
 #[test]
@@ -249,7 +249,7 @@ fn cancel_stack_pops_canvas_before_turn() {
         app.pop_cancel_scope(),
         CancelPop::Popped(CancelScope::Canvas)
     );
-    assert!(app.active_canvas.is_none());
+    assert!(!app.has_active_canvas());
     assert_eq!(app.pop_cancel_scope(), CancelPop::CancelTurn);
 }
 
