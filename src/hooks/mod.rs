@@ -1187,14 +1187,48 @@ impl HookRegistry {
 }
 
 fn hook_span(event: &'static str, handler: &str) -> tracing::Span {
-    tracing::info_span!(
-        observability::span::HOOK_EVENT,
-        surface = "hooks",
-        hook_event = event,
-        hook_handler = handler,
-        outcome = tracing::field::Empty,
-        error_kind = tracing::field::Empty
-    )
+    let operation = format!("hook.{event}");
+    macro_rules! span {
+        ($name:expr) => {
+            tracing::info_span!(
+                $name,
+                surface = "hooks",
+                operation = operation.as_str(),
+                hook_event = event,
+                hook_handler = handler,
+                outcome = tracing::field::Empty,
+                error_kind = tracing::field::Empty
+            )
+        };
+    }
+
+    match event {
+        "after_tool_call" => span!(observability::span::HOOK_AFTER_TOOL_CALL),
+        "before_agent_end" => span!(observability::span::HOOK_BEFORE_AGENT_END),
+        "before_prompt" => span!(observability::span::HOOK_BEFORE_PROMPT),
+        "before_tool_call" => span!(observability::span::HOOK_BEFORE_TOOL_CALL),
+        "on_after_provider_response" => {
+            span!(observability::span::HOOK_ON_AFTER_PROVIDER_RESPONSE)
+        }
+        "on_before_provider_request" => span!(observability::span::HOOK_ON_BEFORE_PROVIDER_REQUEST),
+        "on_context" => span!(observability::span::HOOK_ON_CONTEXT),
+        "on_input" => span!(observability::span::HOOK_ON_INPUT),
+        "on_message_end" => span!(observability::span::HOOK_ON_MESSAGE_END),
+        "on_message_start" => span!(observability::span::HOOK_ON_MESSAGE_START),
+        "on_message_update" => span!(observability::span::HOOK_ON_MESSAGE_UPDATE),
+        "on_session_before_compact" => span!(observability::span::HOOK_ON_SESSION_BEFORE_COMPACT),
+        "on_session_before_fork" => span!(observability::span::HOOK_ON_SESSION_BEFORE_FORK),
+        "on_session_compact" => span!(observability::span::HOOK_ON_SESSION_COMPACT),
+        "on_session_shutdown" => span!(observability::span::HOOK_ON_SESSION_SHUTDOWN),
+        "on_tool_execution_end" => span!(observability::span::HOOK_ON_TOOL_EXECUTION_END),
+        "on_tool_execution_start" => span!(observability::span::HOOK_ON_TOOL_EXECUTION_START),
+        "on_tool_execution_update" => span!(observability::span::HOOK_ON_TOOL_EXECUTION_UPDATE),
+        "on_turn_end" => span!(observability::span::HOOK_ON_TURN_END),
+        "on_turn_start" => span!(observability::span::HOOK_ON_TURN_START),
+        "session_end" => span!(observability::span::HOOK_SESSION_END),
+        "session_start" => span!(observability::span::HOOK_SESSION_START),
+        _ => span!(observability::span::HOOK_EVENT),
+    }
 }
 
 fn hook_outcome_name(outcome: &HookOutcome) -> &'static str {

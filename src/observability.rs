@@ -21,12 +21,14 @@ use crate::config::ObservabilityConfig;
 use crate::hooks::{HookFailureCounts, HookRegistry};
 
 pub mod attr {
+    pub const OPERATION: &str = "operation";
     pub const SESSION_ID: &str = "session_id";
     pub const RUN_ID: &str = "run_id";
     pub const TASK_ID: &str = "task_id";
     pub const TASK_IDENTIFIER: &str = "task_identifier";
     pub const TOOL_NAME: &str = "tool_name";
     pub const PROVIDER: &str = "provider";
+    pub const PROVIDER_MODE: &str = "provider_mode";
     pub const MODEL: &str = "model";
     pub const STREAMING: &str = "streaming";
     pub const MESSAGE_COUNT: &str = "message_count";
@@ -46,8 +48,33 @@ pub mod span {
     pub const AGENT_SESSION: &str = "vulcan.agent.session";
     pub const AGENT_TURN: &str = "vulcan.agent.turn";
     pub const HOOK_EVENT: &str = "vulcan.hook.event";
+    pub const HOOK_AFTER_TOOL_CALL: &str = "vulcan.hook.after_tool_call";
+    pub const HOOK_BEFORE_AGENT_END: &str = "vulcan.hook.before_agent_end";
+    pub const HOOK_BEFORE_PROMPT: &str = "vulcan.hook.before_prompt";
+    pub const HOOK_BEFORE_TOOL_CALL: &str = "vulcan.hook.before_tool_call";
+    pub const HOOK_ON_AFTER_PROVIDER_RESPONSE: &str = "vulcan.hook.on_after_provider_response";
+    pub const HOOK_ON_BEFORE_PROVIDER_REQUEST: &str = "vulcan.hook.on_before_provider_request";
+    pub const HOOK_ON_CONTEXT: &str = "vulcan.hook.on_context";
+    pub const HOOK_ON_INPUT: &str = "vulcan.hook.on_input";
+    pub const HOOK_ON_MESSAGE_END: &str = "vulcan.hook.on_message_end";
+    pub const HOOK_ON_MESSAGE_START: &str = "vulcan.hook.on_message_start";
+    pub const HOOK_ON_MESSAGE_UPDATE: &str = "vulcan.hook.on_message_update";
+    pub const HOOK_ON_SESSION_BEFORE_COMPACT: &str = "vulcan.hook.on_session_before_compact";
+    pub const HOOK_ON_SESSION_BEFORE_FORK: &str = "vulcan.hook.on_session_before_fork";
+    pub const HOOK_ON_SESSION_COMPACT: &str = "vulcan.hook.on_session_compact";
+    pub const HOOK_ON_SESSION_SHUTDOWN: &str = "vulcan.hook.on_session_shutdown";
+    pub const HOOK_ON_TOOL_EXECUTION_END: &str = "vulcan.hook.on_tool_execution_end";
+    pub const HOOK_ON_TOOL_EXECUTION_START: &str = "vulcan.hook.on_tool_execution_start";
+    pub const HOOK_ON_TOOL_EXECUTION_UPDATE: &str = "vulcan.hook.on_tool_execution_update";
+    pub const HOOK_ON_TURN_END: &str = "vulcan.hook.on_turn_end";
+    pub const HOOK_ON_TURN_START: &str = "vulcan.hook.on_turn_start";
+    pub const HOOK_SESSION_END: &str = "vulcan.hook.session_end";
+    pub const HOOK_SESSION_START: &str = "vulcan.hook.session_start";
     pub const TOOL_CALL: &str = "vulcan.tool.call";
     pub const PROVIDER_REQUEST: &str = "vulcan.provider.request";
+    pub const PROVIDER_BUFFERED: &str = "vulcan.provider.buffered";
+    pub const PROVIDER_COMPACTION: &str = "vulcan.provider.compaction";
+    pub const PROVIDER_STREAMING: &str = "vulcan.provider.streaming";
     pub const DAEMON_REQUEST: &str = "vulcan.daemon.request";
     pub const GATEWAY_MESSAGE: &str = "vulcan.gateway.message";
     pub const TASK_ORCHESTRATION: &str = "vulcan.task.orchestration";
@@ -62,10 +89,41 @@ pub mod metric {
     pub const RUNTIME_SECONDS: &str = "vulcan.runtime.seconds";
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProviderSpanMode {
+    Buffered,
+    Compaction,
+    Streaming,
+}
+
+impl ProviderSpanMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Buffered => "buffered",
+            Self::Compaction => "compaction",
+            Self::Streaming => "streaming",
+        }
+    }
+
+    pub fn operation(self) -> &'static str {
+        match self {
+            Self::Buffered => "provider.buffered",
+            Self::Compaction => "provider.compaction",
+            Self::Streaming => "provider.streaming",
+        }
+    }
+
+    pub fn streaming(self) -> bool {
+        matches!(self, Self::Streaming)
+    }
+}
+
 pub fn tool_call_span(tool_name: &str) -> tracing::Span {
+    let operation = format!("tool.{tool_name}");
     tracing::info_span!(
         span::TOOL_CALL,
         surface = "tools",
+        operation = operation.as_str(),
         tool_name,
         outcome = tracing::field::Empty,
         error_kind = tracing::field::Empty
@@ -75,24 +133,36 @@ pub fn tool_call_span(tool_name: &str) -> tracing::Span {
 pub fn provider_request_span(
     provider: &str,
     model: &str,
-    streaming: bool,
+    mode: ProviderSpanMode,
     message_count: usize,
     tool_count: usize,
 ) -> tracing::Span {
-    tracing::info_span!(
-        span::PROVIDER_REQUEST,
-        surface = "provider",
-        provider,
-        model,
-        streaming,
-        message_count = message_count as u64,
-        tool_count = tool_count as u64,
-        outcome = tracing::field::Empty,
-        error_kind = tracing::field::Empty,
-        prompt_tokens = tracing::field::Empty,
-        completion_tokens = tracing::field::Empty,
-        total_tokens = tracing::field::Empty
-    )
+    macro_rules! span {
+        ($name:expr) => {
+            tracing::info_span!(
+                $name,
+                surface = "provider",
+                operation = mode.operation(),
+                provider,
+                provider_mode = mode.as_str(),
+                model,
+                streaming = mode.streaming(),
+                message_count = message_count as u64,
+                tool_count = tool_count as u64,
+                outcome = tracing::field::Empty,
+                error_kind = tracing::field::Empty,
+                prompt_tokens = tracing::field::Empty,
+                completion_tokens = tracing::field::Empty,
+                total_tokens = tracing::field::Empty
+            )
+        };
+    }
+
+    match mode {
+        ProviderSpanMode::Buffered => span!(span::PROVIDER_BUFFERED),
+        ProviderSpanMode::Compaction => span!(span::PROVIDER_COMPACTION),
+        ProviderSpanMode::Streaming => span!(span::PROVIDER_STREAMING),
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -320,12 +390,14 @@ mod tests {
     #[test]
     fn stable_attribute_and_span_names_cover_runtime_surfaces() {
         let attrs = [
+            attr::OPERATION,
             attr::SESSION_ID,
             attr::RUN_ID,
             attr::TASK_ID,
             attr::TASK_IDENTIFIER,
             attr::TOOL_NAME,
             attr::PROVIDER,
+            attr::PROVIDER_MODE,
             attr::MODEL,
             attr::STREAMING,
             attr::MESSAGE_COUNT,
@@ -343,7 +415,37 @@ mod tests {
         assert!(attrs.iter().all(|name| !name.contains('.')));
         assert_eq!(span::PROCESS, "vulcan.process");
         assert_eq!(span::AGENT_SESSION, "vulcan.agent.session");
+        assert_eq!(span::HOOK_ON_CONTEXT, "vulcan.hook.on_context");
+        assert_eq!(
+            span::HOOK_ON_BEFORE_PROVIDER_REQUEST,
+            "vulcan.hook.on_before_provider_request"
+        );
+        assert_eq!(span::TOOL_CALL, "vulcan.tool.call");
+        assert_eq!(span::PROVIDER_BUFFERED, "vulcan.provider.buffered");
+        assert_eq!(span::PROVIDER_COMPACTION, "vulcan.provider.compaction");
+        assert_eq!(span::PROVIDER_STREAMING, "vulcan.provider.streaming");
         assert_eq!(span::TASK_ORCHESTRATION, "vulcan.task.orchestration");
+    }
+
+    #[test]
+    fn provider_span_modes_are_stable_for_explorer_grouping() {
+        assert_eq!(ProviderSpanMode::Buffered.as_str(), "buffered");
+        assert_eq!(ProviderSpanMode::Buffered.operation(), "provider.buffered");
+        assert!(!ProviderSpanMode::Buffered.streaming());
+
+        assert_eq!(ProviderSpanMode::Compaction.as_str(), "compaction");
+        assert_eq!(
+            ProviderSpanMode::Compaction.operation(),
+            "provider.compaction"
+        );
+        assert!(!ProviderSpanMode::Compaction.streaming());
+
+        assert_eq!(ProviderSpanMode::Streaming.as_str(), "streaming");
+        assert_eq!(
+            ProviderSpanMode::Streaming.operation(),
+            "provider.streaming"
+        );
+        assert!(ProviderSpanMode::Streaming.streaming());
     }
 
     #[test]
