@@ -5,8 +5,10 @@
 
 use serde_json::Value;
 use tokio_util::sync::CancellationToken;
+use tracing::Instrument;
 
 use crate::hooks::ToolCallDecision;
+use crate::observability;
 use crate::run_record::{PayloadFingerprint, RunEvent};
 use crate::tools::{ProgressSink, ToolResult};
 
@@ -67,7 +69,9 @@ impl Agent {
             }
         };
 
+        let tool_span = observability::tool_call_span(name);
         let raw_result: ToolResult = if let Some(reason) = blocked.clone() {
+            tool_span.record(observability::attr::OUTCOME, "blocked");
             // YYC-179: record the block before failing the tool
             // call so dashboards can group denied dispatches.
             self.record_run_event(RunEvent::HookDecision {
@@ -81,10 +85,23 @@ impl Agent {
             match self
                 .tools
                 .execute_with_progress(name, &effective_args_str, cancel.clone(), progress)
+                .instrument(tool_span.clone())
                 .await
             {
-                Ok(r) => r,
-                Err(e) => ToolResult::err(format!("Error: {e}")),
+                Ok(r) => {
+                    if r.is_error {
+                        tool_span.record(observability::attr::OUTCOME, "error");
+                        tool_span.record(observability::attr::ERROR_KIND, "tool_error");
+                    } else {
+                        tool_span.record(observability::attr::OUTCOME, "ok");
+                    }
+                    r
+                }
+                Err(e) => {
+                    tool_span.record(observability::attr::OUTCOME, "error");
+                    tool_span.record(observability::attr::ERROR_KIND, "dispatch_error");
+                    ToolResult::err(format!("Error: {e}"))
+                }
             }
         };
 
@@ -104,6 +121,12 @@ impl Agent {
             }
             None => raw_result,
         };
+        if final_result.is_error {
+            tool_span.record(observability::attr::OUTCOME, "error");
+            tool_span.record(observability::attr::ERROR_KIND, "tool_error");
+        } else if blocked.is_none() {
+            tool_span.record(observability::attr::OUTCOME, "ok");
+        }
 
         // YYC-179: emit one ToolCall event per dispatch with the
         // duration, approval surface, and structured error flag.

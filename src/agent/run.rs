@@ -6,8 +6,10 @@
 use anyhow::Result;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
+use tracing::Instrument;
 
 use crate::hooks::{CompactionDecision, validate_rewrite_history};
+use crate::observability;
 use crate::provider::{ChatResponse, Message, StreamEvent, ToolCall, ToolDefinition, Usage};
 use crate::run_record::{PayloadFingerprint, RunEvent, RunOrigin, RunRecord, RunStatus};
 use crate::tools::ToolResult;
@@ -53,6 +55,19 @@ fn empty_terminal_message(
     }
     format!("_({} — terminal turn)_", parts.join("; "))
 }
+
+fn record_provider_usage(span: &tracing::Span, usage: &Usage) {
+    span.record(
+        observability::attr::PROMPT_TOKENS,
+        usage.prompt_tokens as u64,
+    );
+    span.record(
+        observability::attr::COMPLETION_TOKENS,
+        usage.completion_tokens as u64,
+    );
+    span.record(observability::attr::TOTAL_TOKENS, usage.total_tokens as u64);
+}
+
 pub(crate) fn sanitize_orphan_tool_messages(messages: &mut Vec<Message>) -> usize {
     use std::collections::HashSet;
     let mut active_call_ids: HashSet<String> = HashSet::new();
@@ -603,9 +618,29 @@ impl Agent {
         };
 
         let request = ContextManager::summarization_request(&messages[1..split]);
-        let response = match self.provider.chat(&request, &[], cancel.clone()).await {
-            Ok(r) => r,
+        let provider_span = observability::provider_request_span(
+            &self.provider_config.r#type,
+            &self.provider_config.model,
+            false,
+            request.len(),
+            0,
+        );
+        let response = match self
+            .provider
+            .chat(&request, &[], cancel.clone())
+            .instrument(provider_span.clone())
+            .await
+        {
+            Ok(r) => {
+                provider_span.record(observability::attr::OUTCOME, "ok");
+                if let Some(usage) = &r.usage {
+                    record_provider_usage(&provider_span, usage);
+                }
+                r
+            }
             Err(e) => {
+                provider_span.record(observability::attr::OUTCOME, "error");
+                provider_span.record(observability::attr::ERROR_KIND, "provider_error");
                 tracing::warn!("compaction summarizer call failed: {e}");
                 return false;
             }
@@ -754,11 +789,21 @@ impl Agent {
             .on_before_provider_request(outgoing, cancel.clone())
             .await;
 
+        let provider_span = observability::provider_request_span(
+            &self.provider_config.r#type,
+            &self.provider_config.model,
+            true,
+            outgoing.len(),
+            tool_defs.len(),
+        );
         if let Err(e) = self
             .provider
             .chat_stream(outgoing, tool_defs, inner_tx, cancel.clone())
+            .instrument(provider_span.clone())
             .await
         {
+            provider_span.record(observability::attr::OUTCOME, "error");
+            provider_span.record(observability::attr::ERROR_KIND, "provider_error");
             // Surface provider failures to the TUI rather than dropping
             // the channel silently. ProviderError carries actionable hints
             // via its Display impl; if the error chain has one (most
@@ -791,11 +836,15 @@ impl Agent {
                 .await;
             return Err(e);
         }
+        provider_span.record(observability::attr::OUTCOME, "ok");
 
         let mut final_response: Option<ChatResponse> = None;
         while let Some(event) = priv_rx.recv().await {
             match event {
                 TurnEvent::ProviderDone { response } => {
+                    if let Some(usage) = &response.usage {
+                        record_provider_usage(&provider_span, usage);
+                    }
                     final_response = Some(response);
                     break;
                 }
@@ -1099,14 +1148,30 @@ impl TurnRunnerMut<'_> {
                         .hooks
                         .on_before_provider_request(&outgoing, cancel.clone())
                         .await;
+                    let provider_span = observability::provider_request_span(
+                        &self.agent.provider_config.r#type,
+                        &self.agent.provider_config.model,
+                        false,
+                        outgoing.len(),
+                        tool_defs.len(),
+                    );
                     let resp = match self
                         .agent
                         .provider
                         .chat(&outgoing, &tool_defs, cancel.clone())
+                        .instrument(provider_span.clone())
                         .await
                     {
-                        Ok(r) => r,
+                        Ok(r) => {
+                            provider_span.record(observability::attr::OUTCOME, "ok");
+                            if let Some(usage) = &r.usage {
+                                record_provider_usage(&provider_span, usage);
+                            }
+                            r
+                        }
                         Err(e) => {
+                            provider_span.record(observability::attr::OUTCOME, "error");
+                            provider_span.record(observability::attr::ERROR_KIND, "provider_error");
                             self.agent.record_run_event(RunEvent::ProviderError {
                                 message: e.to_string(),
                                 retryable: false,
