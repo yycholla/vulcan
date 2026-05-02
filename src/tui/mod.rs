@@ -26,7 +26,7 @@
 //! lives in its own submodule from day one.
 
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use ratatui::{
@@ -69,6 +69,8 @@ use theme::{Theme, body};
 use views::{View, render_view};
 use vulcan_frontend_api::{CanvasKey, FrontendCommandAction};
 use widgets::ProviderPickerWidget;
+
+const MOTION_FRAME_BUDGET: Duration = Duration::from_millis(120);
 
 /// What session, if any, the TUI should load on startup.
 #[derive(Debug, Clone)]
@@ -1713,6 +1715,9 @@ pub async fn run_tui(
                     Err(tokio::sync::broadcast::error::RecvError::Closed) => {}
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
                 }
+            }
+            _ = tokio::time::sleep(MOTION_FRAME_BUDGET), if app.activity_motion_active() => {
+                app.advance_activity_motion();
             }
         }
     }
