@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use tokio::sync::{mpsc, oneshot};
 
-use crate::daemon::handlers::{agent, approval, cortex, daemon_ops, prompt, session};
+use crate::daemon::handlers::{agent, approval, cortex, daemon_ops, extension, prompt, session};
 use crate::daemon::protocol::{ProtocolError, Request, Response, StreamFrame};
 use crate::daemon::state::DaemonState;
 
@@ -119,6 +119,22 @@ impl Dispatcher {
             "prompt.cancel" => {
                 let session = req.session.clone();
                 DispatchResult::Response(prompt::cancel(&self.state, req.id, session).await)
+            }
+
+            // -- Extensions --
+            "extension.enable" => {
+                let extension_id = req.params.get("id").and_then(|v| v.as_str()).unwrap_or("");
+                DispatchResult::Response(extension::enable(&self.state, req.id, extension_id).await)
+            }
+            "extension.disable" => {
+                let extension_id = req.params.get("id").and_then(|v| v.as_str()).unwrap_or("");
+                DispatchResult::Response(
+                    extension::disable(&self.state, req.id, extension_id).await,
+                )
+            }
+            "extension.kill" => {
+                let extension_id = req.params.get("id").and_then(|v| v.as_str()).unwrap_or("");
+                DispatchResult::Response(extension::kill(&self.state, req.id, extension_id).await)
             }
 
             // -- Cortex --

@@ -12,6 +12,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use anyhow::Result;
+use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::time::timeout;
@@ -362,7 +363,7 @@ impl HookFailureMetrics {
 /// Holds the registered handlers in priority order and exposes one emit method
 /// per event.
 pub struct HookRegistry {
-    handlers: Vec<Arc<dyn HookHandler>>,
+    handlers: RwLock<Vec<Arc<dyn HookHandler>>>,
     handler_timeout: Duration,
     failure_metrics: HookFailureMetrics,
     /// GH issue #557: optional audit log. When set, `apply_on_input`
@@ -379,7 +380,7 @@ pub struct HookRegistry {
 impl HookRegistry {
     pub fn new() -> Self {
         Self {
-            handlers: Vec::new(),
+            handlers: RwLock::new(Vec::new()),
             audit_log: None,
             input_rewrite_approval_required: HashSet::new(),
             input_rewrite_pause_tx: None,
@@ -418,13 +419,18 @@ impl HookRegistry {
             .insert(extension_id.into());
     }
 
-    pub fn register(&mut self, handler: Arc<dyn HookHandler>) {
-        self.handlers.push(handler);
-        self.handlers.sort_by_key(|h| h.priority());
+    pub fn register(&self, handler: Arc<dyn HookHandler>) {
+        let mut handlers = self.handlers.write();
+        handlers.push(handler);
+        handlers.sort_by_key(|h| h.priority());
     }
 
     pub fn handler_count(&self) -> usize {
-        self.handlers.len()
+        self.handlers.read().len()
+    }
+
+    fn handlers_snapshot(&self) -> Vec<Arc<dyn HookHandler>> {
+        self.handlers.read().clone()
     }
 
     /// Snapshot of per-failure-mode counters since registry construction
@@ -460,8 +466,8 @@ impl HookRegistry {
         let mut after_system: Vec<Message> = Vec::new();
         let mut appended: Vec<Message> = Vec::new();
 
-        for h in &self.handlers {
-            match self.run(h, h.on_context(&current, cancel.clone())).await {
+        for h in self.handlers_snapshot() {
+            match self.run(&h, h.on_context(&current, cancel.clone())).await {
                 Some(HookOutcome::RewriteMessages(rewritten)) => {
                     tracing::info!("hook {} rewrote context messages", h.name());
                     current = rewritten;
@@ -482,7 +488,10 @@ impl HookRegistry {
                     );
                 }
             }
-            match self.run(h, h.before_prompt(messages, cancel.clone())).await {
+            match self
+                .run(&h, h.before_prompt(messages, cancel.clone()))
+                .await
+            {
                 Some(HookOutcome::InjectMessages {
                     messages: msgs,
                     position,
@@ -529,8 +538,8 @@ impl HookRegistry {
     }
 
     pub async fn on_turn_start(&self, turn: u32, cancel: CancellationToken) {
-        for h in &self.handlers {
-            match self.run(h, h.on_turn_start(turn, cancel.clone())).await {
+        for h in self.handlers_snapshot() {
+            match self.run(&h, h.on_turn_start(turn, cancel.clone())).await {
                 Some(HookOutcome::Continue) | None => {}
                 Some(other) => {
                     tracing::warn!(
@@ -544,8 +553,8 @@ impl HookRegistry {
     }
 
     pub async fn on_turn_end(&self, turn: u32, cancel: CancellationToken) {
-        for h in &self.handlers {
-            match self.run(h, h.on_turn_end(turn, cancel.clone())).await {
+        for h in self.handlers_snapshot() {
+            match self.run(&h, h.on_turn_end(turn, cancel.clone())).await {
                 Some(HookOutcome::Continue) | None => {}
                 Some(other) => {
                     tracing::warn!(
@@ -559,42 +568,43 @@ impl HookRegistry {
     }
 
     pub async fn on_message_start(&self, delta: &StreamEvent, cancel: CancellationToken) {
-        for h in &self.handlers {
+        for h in self.handlers_snapshot() {
             self.ignore_observe_outcome(
-                h,
+                &h,
                 "on_message_start",
-                self.run(h, h.on_message_start(delta, cancel.clone())).await,
+                self.run(&h, h.on_message_start(delta, cancel.clone()))
+                    .await,
             );
         }
     }
 
     pub async fn on_message_update(&self, delta: &StreamEvent, cancel: CancellationToken) {
-        for h in &self.handlers {
+        for h in self.handlers_snapshot() {
             self.ignore_observe_outcome(
-                h,
+                &h,
                 "on_message_update",
-                self.run(h, h.on_message_update(delta, cancel.clone()))
+                self.run(&h, h.on_message_update(delta, cancel.clone()))
                     .await,
             );
         }
     }
 
     pub async fn on_message_end(&self, delta: &StreamEvent, cancel: CancellationToken) {
-        for h in &self.handlers {
+        for h in self.handlers_snapshot() {
             self.ignore_observe_outcome(
-                h,
+                &h,
                 "on_message_end",
-                self.run(h, h.on_message_end(delta, cancel.clone())).await,
+                self.run(&h, h.on_message_end(delta, cancel.clone())).await,
             );
         }
     }
 
     pub async fn on_tool_execution_start(&self, call: &ToolCall, cancel: CancellationToken) {
-        for h in &self.handlers {
+        for h in self.handlers_snapshot() {
             self.ignore_observe_outcome(
-                h,
+                &h,
                 "on_tool_execution_start",
-                self.run(h, h.on_tool_execution_start(call, cancel.clone()))
+                self.run(&h, h.on_tool_execution_start(call, cancel.clone()))
                     .await,
             );
         }
@@ -606,12 +616,12 @@ impl HookRegistry {
         progress: &ToolProgress,
         cancel: CancellationToken,
     ) {
-        for h in &self.handlers {
+        for h in self.handlers_snapshot() {
             self.ignore_observe_outcome(
-                h,
+                &h,
                 "on_tool_execution_update",
                 self.run(
-                    h,
+                    &h,
                     h.on_tool_execution_update(call, progress, cancel.clone()),
                 )
                 .await,
@@ -620,11 +630,11 @@ impl HookRegistry {
     }
 
     pub async fn on_tool_execution_end(&self, call: &ToolCall, cancel: CancellationToken) {
-        for h in &self.handlers {
+        for h in self.handlers_snapshot() {
             self.ignore_observe_outcome(
-                h,
+                &h,
                 "on_tool_execution_end",
-                self.run(h, h.on_tool_execution_end(call, cancel.clone()))
+                self.run(&h, h.on_tool_execution_end(call, cancel.clone()))
                     .await,
             );
         }
@@ -635,11 +645,11 @@ impl HookRegistry {
         messages: &[Message],
         cancel: CancellationToken,
     ) {
-        for h in &self.handlers {
+        for h in self.handlers_snapshot() {
             self.ignore_observe_outcome(
-                h,
+                &h,
                 "on_before_provider_request",
-                self.run(h, h.on_before_provider_request(messages, cancel.clone()))
+                self.run(&h, h.on_before_provider_request(messages, cancel.clone()))
                     .await,
             );
         }
@@ -650,11 +660,11 @@ impl HookRegistry {
         response: &ChatResponse,
         cancel: CancellationToken,
     ) {
-        for h in &self.handlers {
+        for h in self.handlers_snapshot() {
             self.ignore_observe_outcome(
-                h,
+                &h,
                 "on_after_provider_response",
-                self.run(h, h.on_after_provider_response(response, cancel.clone()))
+                self.run(&h, h.on_after_provider_response(response, cancel.clone()))
                     .await,
             );
         }
@@ -665,9 +675,9 @@ impl HookRegistry {
         messages: &[Message],
         cancel: CancellationToken,
     ) -> CompactionDecision {
-        for h in &self.handlers {
+        for h in self.handlers_snapshot() {
             match self
-                .run(h, h.on_session_before_compact(messages, cancel.clone()))
+                .run(&h, h.on_session_before_compact(messages, cancel.clone()))
                 .await
             {
                 Some(HookOutcome::Block { reason }) => {
@@ -698,32 +708,32 @@ impl HookRegistry {
     }
 
     pub async fn on_session_compact(&self, summary: &str, cancel: CancellationToken) {
-        for h in &self.handlers {
+        for h in self.handlers_snapshot() {
             self.ignore_observe_outcome(
-                h,
+                &h,
                 "on_session_compact",
-                self.run(h, h.on_session_compact(summary, cancel.clone()))
+                self.run(&h, h.on_session_compact(summary, cancel.clone()))
                     .await,
             );
         }
     }
 
     pub async fn on_session_before_fork(&self, cancel: CancellationToken) {
-        for h in &self.handlers {
+        for h in self.handlers_snapshot() {
             self.ignore_observe_outcome(
-                h,
+                &h,
                 "on_session_before_fork",
-                self.run(h, h.on_session_before_fork(cancel.clone())).await,
+                self.run(&h, h.on_session_before_fork(cancel.clone())).await,
             );
         }
     }
 
     pub async fn on_session_shutdown(&self, cancel: CancellationToken) {
-        for h in &self.handlers {
+        for h in self.handlers_snapshot() {
             self.ignore_observe_outcome(
-                h,
+                &h,
                 "on_session_shutdown",
-                self.run(h, h.on_session_shutdown(cancel.clone())).await,
+                self.run(&h, h.on_session_shutdown(cancel.clone())).await,
             );
         }
     }
@@ -736,8 +746,8 @@ impl HookRegistry {
     /// installed via `with_audit_log`), with the handler's `name()`
     /// as the audit `extension_id`.
     pub async fn apply_on_input(&self, raw: &str, cancel: CancellationToken) -> InputDecision {
-        for h in &self.handlers {
-            match self.run(h, h.on_input(raw, cancel.clone())).await {
+        for h in self.handlers_snapshot() {
+            match self.run(&h, h.on_input(raw, cancel.clone())).await {
                 Some(HookOutcome::BlockInput { reason }) => {
                     tracing::info!("hook {} blocked input: {reason}", h.name());
                     self.record_input_intercept(
@@ -915,9 +925,9 @@ impl HookRegistry {
         args: &Value,
         cancel: CancellationToken,
     ) -> ToolCallDecision {
-        for h in &self.handlers {
+        for h in self.handlers_snapshot() {
             match self
-                .run(h, h.before_tool_call(tool, args, cancel.clone()))
+                .run(&h, h.before_tool_call(tool, args, cancel.clone()))
                 .await
             {
                 Some(HookOutcome::Block { reason }) => {
@@ -948,9 +958,9 @@ impl HookRegistry {
         result: &ToolResult,
         cancel: CancellationToken,
     ) -> Option<ToolResult> {
-        for h in &self.handlers {
+        for h in self.handlers_snapshot() {
             match self
-                .run(h, h.after_tool_call(tool, result, cancel.clone()))
+                .run(&h, h.after_tool_call(tool, result, cancel.clone()))
                 .await
             {
                 Some(HookOutcome::ReplaceResult(new)) => {
@@ -977,9 +987,9 @@ impl HookRegistry {
         response: &str,
         cancel: CancellationToken,
     ) -> Option<String> {
-        for h in &self.handlers {
+        for h in self.handlers_snapshot() {
             match self
-                .run(h, h.before_agent_end(response, cancel.clone()))
+                .run(&h, h.before_agent_end(response, cancel.clone()))
                 .await
             {
                 Some(HookOutcome::ForceContinue { instruction }) => {
@@ -1000,7 +1010,7 @@ impl HookRegistry {
     }
 
     pub async fn session_start(&self, session_id: &str) {
-        for h in &self.handlers {
+        for h in self.handlers_snapshot() {
             // Each handler gets its own timeout window. session_X are observe-
             // only so we don't care about return values.
             let _ = timeout(self.handler_timeout, h.session_start(session_id)).await;
@@ -1008,7 +1018,7 @@ impl HookRegistry {
     }
 
     pub async fn session_end(&self, session_id: &str, total_turns: u32) {
-        for h in &self.handlers {
+        for h in self.handlers_snapshot() {
             let _ = timeout(self.handler_timeout, h.session_end(session_id, total_turns)).await;
         }
     }
@@ -1145,7 +1155,7 @@ mod tests {
 
     #[tokio::test]
     async fn first_block_wins_and_short_circuits_subsequent_handlers() {
-        let mut reg = HookRegistry::new();
+        let reg = HookRegistry::new();
         let blocker = Arc::new(Probe::new(
             "blocker",
             10,
@@ -1173,7 +1183,7 @@ mod tests {
 
     #[tokio::test]
     async fn priority_ordering_lower_runs_first() {
-        let mut reg = HookRegistry::new();
+        let reg = HookRegistry::new();
         let probe_a = Arc::new(Probe::new(
             "a",
             1,
@@ -1207,7 +1217,7 @@ mod tests {
         // "handler too slow" and "handler crashed". Both still drop the
         // outcome (the loop is unaffected), but the counters differ so
         // metrics surfaces can branch on the failure mode.
-        let mut reg = HookRegistry::new().with_timeout(std::time::Duration::from_millis(50));
+        let reg = HookRegistry::new().with_timeout(std::time::Duration::from_millis(50));
         let slow = Arc::new(Probe::new("slow", 10, HookOutcome::Continue).slow(500));
         let crashed = Arc::new(Probe::new("crashed", 20, HookOutcome::Continue).errors());
         reg.register(slow);
@@ -1235,7 +1245,7 @@ mod tests {
 
     #[tokio::test]
     async fn handler_timeout_does_not_break_loop() {
-        let mut reg = HookRegistry::new().with_timeout(std::time::Duration::from_millis(50));
+        let reg = HookRegistry::new().with_timeout(std::time::Duration::from_millis(50));
         // First handler sleeps past the timeout window.
         let slow = Arc::new(
             Probe::new(
@@ -1290,7 +1300,7 @@ mod tests {
 
     #[tokio::test]
     async fn before_prompt_injections_accumulate_and_position() {
-        let mut reg = HookRegistry::new();
+        let reg = HookRegistry::new();
         reg.register(Arc::new(Injector {
             name: "after-system-1",
             msg: "AS1".into(),
@@ -1510,7 +1520,7 @@ mod tests {
 
     #[tokio::test]
     async fn on_context_rewrite_messages_replaces_outgoing_prompt_transiently() {
-        let mut reg = HookRegistry::new();
+        let reg = HookRegistry::new();
         reg.register(Arc::new(ContextRewriter));
         let input = vec![Message::User {
             content: "original".into(),
@@ -1553,7 +1563,7 @@ mod tests {
             }
         }
 
-        let mut reg = HookRegistry::new().with_timeout(std::time::Duration::from_millis(10));
+        let reg = HookRegistry::new().with_timeout(std::time::Duration::from_millis(10));
         reg.register(Arc::new(SlowTurnStart));
 
         reg.on_turn_start(1, CancellationToken::new()).await;
@@ -1726,7 +1736,7 @@ mod tests {
     #[tokio::test]
     async fn wide_observe_events_run_in_priority_order() {
         let events = Arc::new(Mutex::new(Vec::new()));
-        let mut reg = HookRegistry::new();
+        let reg = HookRegistry::new();
         reg.register(Arc::new(WideRecorder {
             name: "second",
             priority: 20,
@@ -1828,7 +1838,7 @@ mod tests {
         }
 
         let fast_calls = Arc::new(AtomicUsize::new(0));
-        let mut reg = HookRegistry::new().with_timeout(std::time::Duration::from_millis(10));
+        let reg = HookRegistry::new().with_timeout(std::time::Duration::from_millis(10));
         reg.register(Arc::new(SlowMessageUpdate));
         reg.register(Arc::new(FastMessageUpdate(fast_calls.clone())));
 
@@ -1886,7 +1896,7 @@ mod tests {
         }
 
         let later_calls = Arc::new(AtomicUsize::new(0));
-        let mut reg = HookRegistry::new();
+        let reg = HookRegistry::new();
         reg.register(Arc::new(BlockingCompact));
         reg.register(Arc::new(LaterCompact(later_calls.clone())));
 
@@ -1962,7 +1972,7 @@ mod tests {
         }
 
         let audit = Arc::new(ExtensionAuditLog::new(8));
-        let mut reg = HookRegistry::new().with_audit_log(audit.clone());
+        let reg = HookRegistry::new().with_audit_log(audit.clone());
         reg.register(Arc::new(Rewriter));
 
         let _ = reg.apply_on_input("raw", CancellationToken::new()).await;
@@ -2003,7 +2013,7 @@ mod tests {
         }
 
         let audit = Arc::new(ExtensionAuditLog::new(8));
-        let mut reg = HookRegistry::new().with_audit_log(audit.clone());
+        let reg = HookRegistry::new().with_audit_log(audit.clone());
         reg.register(Arc::new(Blocker));
 
         let _ = reg.apply_on_input("hello", CancellationToken::new()).await;
@@ -2037,7 +2047,7 @@ mod tests {
         }
 
         let audit = Arc::new(ExtensionAuditLog::new(8));
-        let mut reg = HookRegistry::new().with_audit_log(audit.clone());
+        let reg = HookRegistry::new().with_audit_log(audit.clone());
         reg.register(Arc::new(Noop));
 
         let _ = reg.apply_on_input("hello", CancellationToken::new()).await;
@@ -2063,7 +2073,7 @@ mod tests {
             }
         }
 
-        let mut reg = HookRegistry::new();
+        let reg = HookRegistry::new();
         reg.register(Arc::new(Rewriter));
 
         let decision = reg
@@ -2208,7 +2218,7 @@ mod tests {
             }
         }
 
-        let mut reg = HookRegistry::new();
+        let reg = HookRegistry::new();
         reg.register(Arc::new(Noop));
 
         let decision = reg
@@ -2259,7 +2269,7 @@ mod tests {
         }
 
         let later = Arc::new(AtomicUsize::new(0));
-        let mut reg = HookRegistry::new();
+        let reg = HookRegistry::new();
         reg.register(Arc::new(Rewriter));
         reg.register(Arc::new(LaterCounter(later.clone())));
 
@@ -2288,7 +2298,7 @@ mod tests {
             }
         }
 
-        let mut reg = HookRegistry::new();
+        let reg = HookRegistry::new();
         reg.register(Arc::new(BlockingInput));
 
         let decision = reg.apply_on_input("hello", CancellationToken::new()).await;

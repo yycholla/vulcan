@@ -9,8 +9,10 @@
 use parking_lot::RwLock;
 use std::sync::Arc;
 
-use super::api::{DaemonCodeExtension, SessionExtensionCtx};
-use super::{ExtensionCapability, ExtensionConfigField, ExtensionMetadata, ExtensionStatus};
+use super::api::{DaemonCodeExtension, SessionExtensionCtx, SessionExtensionRuntime};
+use super::{
+    ExtensionCapability, ExtensionConfigField, ExtensionMetadata, ExtensionSource, ExtensionStatus,
+};
 use crate::hooks::{HookHandler, HookRegistry};
 
 /// YYC-227 (YYC-165 PR-4): trait an in-process, code-backed
@@ -226,12 +228,16 @@ impl ExtensionRegistry {
     /// the supplied `HookRegistry`. Returns the number of session
     /// extensions instantiated. Inactive / Draft / Broken extensions
     /// are skipped.
-    pub fn wire_daemon_extensions(
+    pub fn wire_daemon_extensions(&self, ctx: SessionExtensionCtx, hooks: &HookRegistry) -> usize {
+        self.wire_daemon_extensions_runtime(ctx, hooks).len()
+    }
+
+    pub fn wire_daemon_extensions_runtime(
         &self,
         ctx: SessionExtensionCtx,
-        hooks: &mut HookRegistry,
-    ) -> usize {
-        let mut count = 0usize;
+        hooks: &HookRegistry,
+    ) -> Vec<SessionExtensionRuntime> {
+        let mut runtimes = Vec::new();
         let metadata_snapshot = self.inner.read().clone();
         let daemon_snapshot = self.daemon_extensions.read().clone();
         for ext in daemon_snapshot {
@@ -245,12 +251,39 @@ impl ExtensionRegistry {
                 continue;
             }
             let session_ext = ext.instantiate(ctx.clone());
-            for handler in session_ext.hook_handlers() {
+            let runtime = SessionExtensionRuntime::new(id, session_ext);
+            for handler in runtime.wrapped_hook_handlers() {
                 hooks.register(handler);
             }
-            count += 1;
+            runtimes.push(runtime);
         }
-        count
+        runtimes
+    }
+
+    pub fn instantiate_daemon_extension_runtime(
+        &self,
+        id: &str,
+        ctx: SessionExtensionCtx,
+        hooks: &HookRegistry,
+    ) -> Option<SessionExtensionRuntime> {
+        let metadata_snapshot = self.inner.read().clone();
+        let active = metadata_snapshot
+            .iter()
+            .find(|m| m.id == id)
+            .map(|m| m.status == ExtensionStatus::Active)
+            .unwrap_or(false);
+        if !active {
+            return None;
+        }
+        let daemon_snapshot = self.daemon_extensions.read().clone();
+        let ext = daemon_snapshot
+            .into_iter()
+            .find(|e| e.metadata().id == id)?;
+        let runtime = SessionExtensionRuntime::new(id.to_string(), ext.instantiate(ctx));
+        for handler in runtime.wrapped_hook_handlers() {
+            hooks.register(handler);
+        }
+        Some(runtime)
     }
 
     /// YYC-232 (YYC-166 PR-4): discover installed extensions in
@@ -270,6 +303,22 @@ impl ExtensionRegistry {
         self.load_from_store_with_version(home, install_state, env!("CARGO_PKG_VERSION"))
     }
 
+    pub fn load_from_store_and_workspace(
+        &self,
+        home: &std::path::Path,
+        workspace: &std::path::Path,
+        install_state: &dyn super::install_state::InstallStateStore,
+        trust: &dyn super::install_state::ExtensionTrustStore,
+    ) -> (usize, usize) {
+        self.load_from_store_and_workspace_with_version(
+            home,
+            workspace,
+            install_state,
+            trust,
+            env!("CARGO_PKG_VERSION"),
+        )
+    }
+
     /// Test-friendly variant — `running_version` lets fixtures
     /// pin a value instead of inheriting `CARGO_PKG_VERSION`.
     pub fn load_from_store_with_version(
@@ -278,7 +327,42 @@ impl ExtensionRegistry {
         install_state: &dyn super::install_state::InstallStateStore,
         running_version: &str,
     ) -> (usize, usize) {
-        let discovered = super::store::discover(home);
+        self.load_discovered(
+            super::store::discover(home),
+            None,
+            install_state,
+            None,
+            running_version,
+        )
+    }
+
+    pub fn load_from_store_and_workspace_with_version(
+        &self,
+        home: &std::path::Path,
+        workspace: &std::path::Path,
+        install_state: &dyn super::install_state::InstallStateStore,
+        trust: &dyn super::install_state::ExtensionTrustStore,
+        running_version: &str,
+    ) -> (usize, usize) {
+        self.load_discovered(
+            super::store::discover_with_workspace(home, workspace),
+            Some(super::store::manifest_checksum(
+                &workspace.display().to_string(),
+            )),
+            install_state,
+            Some(trust),
+            running_version,
+        )
+    }
+
+    fn load_discovered(
+        &self,
+        discovered: Vec<super::store::DiscoveredExtension>,
+        workspace_hash: Option<String>,
+        install_state: &dyn super::install_state::InstallStateStore,
+        trust: Option<&dyn super::install_state::ExtensionTrustStore>,
+        running_version: &str,
+    ) -> (usize, usize) {
         let mut ok = 0usize;
         let mut broken = 0usize;
         for entry in discovered {
@@ -295,7 +379,7 @@ impl ExtensionRegistry {
                             manifest.id.clone(),
                             manifest.name.clone(),
                             manifest.version.clone(),
-                            crate::extensions::ExtensionSource::LocalManifest,
+                            entry.source.clone(),
                         );
                         meta.status = ExtensionStatus::Broken;
                         meta.broken_reason = Some(reason.clone());
@@ -309,7 +393,7 @@ impl ExtensionRegistry {
                         manifest.id.clone(),
                         manifest.name.clone(),
                         manifest.version.clone(),
-                        crate::extensions::ExtensionSource::LocalManifest,
+                        entry.source.clone(),
                     );
                     if let Some(desc) = manifest.description.clone() {
                         meta.description = desc;
@@ -321,17 +405,35 @@ impl ExtensionRegistry {
                     // to Inactive otherwise so freshly-dropped
                     // extensions stay quiet until the user opts
                     // in.
-                    let enabled = install_state
-                        .get(&manifest.id)
-                        .ok()
-                        .flatten()
-                        .map(|s| s.enabled)
-                        .unwrap_or(false);
+                    let trusted = if entry.source == ExtensionSource::UntrustedSource {
+                        match (
+                            workspace_hash.as_deref(),
+                            entry.manifest_checksum.as_deref(),
+                            trust,
+                        ) {
+                            (Some(hash), Some(checksum), Some(trust)) => trust
+                                .is_trusted(hash, &manifest.id, checksum)
+                                .unwrap_or(false),
+                            _ => false,
+                        }
+                    } else {
+                        true
+                    };
+                    let enabled = trusted
+                        && install_state
+                            .get(&manifest.id)
+                            .ok()
+                            .flatten()
+                            .map(|s| s.enabled)
+                            .unwrap_or(false);
                     meta.status = if enabled {
                         ExtensionStatus::Active
                     } else {
                         ExtensionStatus::Inactive
                     };
+                    if entry.source == ExtensionSource::UntrustedSource && !trusted {
+                        meta.broken_reason = Some("workspace extension requires trust".into());
+                    }
                     self.upsert(meta);
                     let _ = install_state.clear_load_error(&manifest.id);
                     ok += 1;
@@ -342,7 +444,7 @@ impl ExtensionRegistry {
                         dir_id.clone(),
                         dir_id.clone(),
                         "0.0.0",
-                        crate::extensions::ExtensionSource::LocalManifest,
+                        entry.source.clone(),
                     );
                     meta.status = ExtensionStatus::Broken;
                     meta.broken_reason = Some(reason.clone());
@@ -711,6 +813,71 @@ kind = "builtin"
         let got = reg.get("needs-future").unwrap();
         assert_eq!(got.status, ExtensionStatus::Broken);
         assert!(got.broken_reason.as_deref().unwrap().contains("Vulcan ≥"));
+    }
+
+    #[test]
+    fn workspace_extension_requires_matching_trust_marker_to_activate() {
+        let home = tempfile::tempdir().unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        let raw = r#"
+id = "workspace-tool"
+name = "Workspace Tool"
+version = "0.1.0"
+
+[entry]
+kind = "builtin"
+"#;
+        write_manifest(
+            workspace
+                .path()
+                .join(".vulcan/extensions/workspace-tool/extension.toml"),
+            raw,
+        );
+        let install =
+            crate::extensions::install_state::SqliteInstallStateStore::try_open_in_memory()
+                .unwrap();
+        crate::extensions::install_state::InstallStateStore::upsert(
+            &install,
+            &crate::extensions::install_state::InstallState {
+                id: "workspace-tool".into(),
+                version: "0.1.0".into(),
+                enabled: true,
+                installed_at: chrono::Utc::now(),
+                last_load_error: None,
+            },
+        )
+        .unwrap();
+
+        let reg = ExtensionRegistry::new();
+        reg.load_from_store_and_workspace(home.path(), workspace.path(), &install, &install);
+        let got = reg.get("workspace-tool").unwrap();
+        assert_eq!(
+            got.source,
+            crate::extensions::ExtensionSource::UntrustedSource
+        );
+        assert_eq!(got.status, ExtensionStatus::Inactive);
+        assert_eq!(
+            got.broken_reason.as_deref(),
+            Some("workspace extension requires trust")
+        );
+
+        let workspace_hash =
+            crate::extensions::store::manifest_checksum(&workspace.path().display().to_string());
+        let checksum = crate::extensions::store::manifest_checksum(raw);
+        crate::extensions::install_state::ExtensionTrustStore::trust(
+            &install,
+            &workspace_hash,
+            "workspace-tool",
+            &checksum,
+        )
+        .unwrap();
+
+        let reg = ExtensionRegistry::new();
+        reg.load_from_store_and_workspace(home.path(), workspace.path(), &install, &install);
+        assert_eq!(
+            reg.get("workspace-tool").unwrap().status,
+            ExtensionStatus::Active
+        );
     }
 
     #[test]

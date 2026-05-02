@@ -6,5 +6,6 @@ pub mod agent;
 pub mod approval;
 pub mod cortex;
 pub mod daemon_ops;
+pub mod extension;
 pub mod prompt;
 pub mod session;

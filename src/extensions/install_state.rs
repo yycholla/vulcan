@@ -21,6 +21,14 @@ pub struct InstallState {
     pub last_load_error: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TrustMarker {
+    pub workspace_hash: String,
+    pub extension_id: String,
+    pub manifest_checksum: String,
+    pub trusted_at: chrono::DateTime<chrono::Utc>,
+}
+
 pub trait InstallStateStore: Send + Sync {
     fn upsert(&self, state: &InstallState) -> Result<()>;
     fn get(&self, id: &str) -> Result<Option<InstallState>>;
@@ -29,6 +37,23 @@ pub trait InstallStateStore: Send + Sync {
     fn record_load_error(&self, id: &str, error: &str) -> Result<bool>;
     fn clear_load_error(&self, id: &str) -> Result<bool>;
     fn remove(&self, id: &str) -> Result<bool>;
+}
+
+pub trait ExtensionTrustStore: Send + Sync {
+    fn trust(
+        &self,
+        workspace_hash: &str,
+        extension_id: &str,
+        manifest_checksum: &str,
+    ) -> Result<()>;
+    fn untrust(&self, workspace_hash: &str, extension_id: &str) -> Result<bool>;
+    fn is_trusted(
+        &self,
+        workspace_hash: &str,
+        extension_id: &str,
+        manifest_checksum: &str,
+    ) -> Result<bool>;
+    fn list_trusted(&self, workspace_hash: &str) -> Result<Vec<TrustMarker>>;
 }
 
 pub struct SqliteInstallStateStore {
@@ -71,6 +96,14 @@ impl SqliteInstallStateStore {
                 installed_at    TEXT NOT NULL,
                 last_load_error TEXT
             );
+
+            CREATE TABLE IF NOT EXISTS extension_trust (
+                workspace_hash    TEXT NOT NULL,
+                extension_id      TEXT NOT NULL,
+                manifest_checksum TEXT NOT NULL,
+                trusted_at        TEXT NOT NULL,
+                PRIMARY KEY (workspace_hash, extension_id)
+            );
             "#,
         )?;
         Ok(())
@@ -91,6 +124,90 @@ impl SqliteInstallStateStore {
                 .with_timezone(&chrono::Utc),
             last_load_error,
         })
+    }
+}
+
+impl ExtensionTrustStore for SqliteInstallStateStore {
+    fn trust(
+        &self,
+        workspace_hash: &str,
+        extension_id: &str,
+        manifest_checksum: &str,
+    ) -> Result<()> {
+        let conn = self.conn.lock();
+        conn.execute(
+            "INSERT INTO extension_trust
+                (workspace_hash, extension_id, manifest_checksum, trusted_at)
+             VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(workspace_hash, extension_id) DO UPDATE SET
+                manifest_checksum = excluded.manifest_checksum,
+                trusted_at = excluded.trusted_at",
+            params![
+                workspace_hash,
+                extension_id,
+                manifest_checksum,
+                chrono::Utc::now().to_rfc3339(),
+            ],
+        )?;
+        Ok(())
+    }
+
+    fn untrust(&self, workspace_hash: &str, extension_id: &str) -> Result<bool> {
+        let conn = self.conn.lock();
+        let n = conn.execute(
+            "DELETE FROM extension_trust WHERE workspace_hash = ?1 AND extension_id = ?2",
+            params![workspace_hash, extension_id],
+        )?;
+        Ok(n > 0)
+    }
+
+    fn is_trusted(
+        &self,
+        workspace_hash: &str,
+        extension_id: &str,
+        manifest_checksum: &str,
+    ) -> Result<bool> {
+        let conn = self.conn.lock();
+        let found: Option<String> = conn
+            .query_row(
+                "SELECT manifest_checksum FROM extension_trust
+                 WHERE workspace_hash = ?1 AND extension_id = ?2",
+                params![workspace_hash, extension_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        Ok(found.as_deref() == Some(manifest_checksum))
+    }
+
+    fn list_trusted(&self, workspace_hash: &str) -> Result<Vec<TrustMarker>> {
+        let conn = self.conn.lock();
+        let mut stmt = conn.prepare(
+            "SELECT workspace_hash, extension_id, manifest_checksum, trusted_at
+             FROM extension_trust WHERE workspace_hash = ?1 ORDER BY extension_id ASC",
+        )?;
+        let rows: Vec<_> = stmt
+            .query_map(params![workspace_hash], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                ))
+            })?
+            .collect::<Result<_, _>>()?;
+        rows.into_iter()
+            .map(
+                |(workspace_hash, extension_id, manifest_checksum, trusted_at)| {
+                    Ok(TrustMarker {
+                        workspace_hash,
+                        extension_id,
+                        manifest_checksum,
+                        trusted_at: chrono::DateTime::parse_from_rfc3339(&trusted_at)?
+                            .with_timezone(&chrono::Utc),
+                    })
+                },
+            )
+            .collect()
     }
 }
 
@@ -290,5 +407,34 @@ mod tests {
         let listed = reopened.list().unwrap();
         assert_eq!(listed.len(), 1);
         assert_eq!(listed[0].id, "lint-helper");
+    }
+
+    #[test]
+    fn trust_marker_requires_current_checksum() {
+        let store = SqliteInstallStateStore::try_open_in_memory().unwrap();
+        store.trust("workspace-a", "todo", "sha256:old").unwrap();
+        assert!(
+            store
+                .is_trusted("workspace-a", "todo", "sha256:old")
+                .unwrap()
+        );
+        assert!(
+            !store
+                .is_trusted("workspace-a", "todo", "sha256:new")
+                .unwrap()
+        );
+
+        store.trust("workspace-a", "todo", "sha256:new").unwrap();
+        assert!(
+            store
+                .is_trusted("workspace-a", "todo", "sha256:new")
+                .unwrap()
+        );
+        assert!(store.untrust("workspace-a", "todo").unwrap());
+        assert!(
+            !store
+                .is_trusted("workspace-a", "todo", "sha256:new")
+                .unwrap()
+        );
     }
 }
