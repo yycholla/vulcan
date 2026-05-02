@@ -9,6 +9,7 @@ use tokio::sync::{Notify, watch};
 
 use crate::config::Config;
 use crate::daemon::session::SessionMap;
+use crate::daemon::session_agent::SessionAgentAssembler;
 use crate::memory::cortex::CortexStore;
 use crate::runtime_pool::RuntimeResourcePool;
 
@@ -60,6 +61,13 @@ impl DaemonState {
     /// Borrow the daemon-owned runtime resource pool, if installed.
     pub fn pool(&self) -> Option<&Arc<RuntimeResourcePool>> {
         self.pool.as_ref()
+    }
+
+    /// Build the Session-facing Agent assembler for lazy session
+    /// installs. Callers pass only session-specific options to
+    /// `SessionState`; config and pool wiring stay centralized here.
+    pub fn session_agent_assembler(&self) -> SessionAgentAssembler {
+        SessionAgentAssembler::new(Arc::clone(&self.config), self.pool.clone())
     }
 
     /// Test-only constructor. Returns a `DaemonState` with the default

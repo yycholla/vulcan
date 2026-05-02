@@ -16,6 +16,7 @@ pub mod lifecycle;
 pub mod protocol;
 pub mod server;
 pub mod session;
+pub mod session_agent;
 pub mod state;
 pub mod subagent;
 

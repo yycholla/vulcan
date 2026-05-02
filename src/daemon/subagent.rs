@@ -6,6 +6,7 @@ use anyhow::Result;
 use async_trait::async_trait;
 use tokio_util::sync::CancellationToken;
 
+use crate::daemon::session_agent::SessionAgentOptions;
 use crate::daemon::state::DaemonState;
 use crate::tools::spawn::{SubagentRunOutput, SubagentRunRequest, SubagentRunner};
 
@@ -44,11 +45,12 @@ impl SubagentRunner for DaemonSubagentRunner {
             .ok_or_else(|| anyhow::anyhow!("child session was not created: {child_session_id}"))?;
         let agent_arc = sess
             .ensure_agent_with_options(
-                self.state.config(),
-                self.state.pool().cloned(),
-                Some(request.max_iterations),
-                request.profile_name.clone(),
-                Some(&request.allowed_tools),
+                &self.state.session_agent_assembler(),
+                SessionAgentOptions::subagent(
+                    request.max_iterations,
+                    request.profile_name.clone(),
+                    request.allowed_tools.clone(),
+                ),
             )
             .await?;
 

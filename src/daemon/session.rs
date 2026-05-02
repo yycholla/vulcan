@@ -17,6 +17,8 @@ use std::time::Instant;
 use parking_lot::{Mutex, RwLock};
 use tokio_util::sync::CancellationToken;
 
+use crate::daemon::session_agent::{SessionAgentAssembler, SessionAgentOptions};
+
 /// Shared, async-locked handle to a per-session Agent. `Arc` so a
 /// single session can be locked from concurrent tasks (e.g. a
 /// streaming `prompt.stream` background task and an inbound
@@ -135,34 +137,19 @@ impl SessionState {
     /// `prompt.stream`, and `agent.*` handlers funnel through here.
     pub async fn ensure_agent(
         self: &Arc<Self>,
-        config: &crate::config::Config,
+        assembler: &SessionAgentAssembler,
     ) -> anyhow::Result<AgentHandle> {
-        self.ensure_agent_with_pool(config, None).await
-    }
-
-    /// Slice 3: assemble the lazy Agent from the daemon's
-    /// [`RuntimeResourcePool`] when one is provided. The
-    /// `pool == None` form still works for tests and any pre-Slice-3
-    /// boot path that hasn't installed the pool yet.
-    pub async fn ensure_agent_with_pool(
-        self: &Arc<Self>,
-        config: &crate::config::Config,
-        pool: Option<Arc<crate::runtime_pool::RuntimeResourcePool>>,
-    ) -> anyhow::Result<AgentHandle> {
-        self.ensure_agent_with_options(config, pool, None, None, None)
+        self.ensure_agent_with_options(assembler, SessionAgentOptions::default())
             .await
     }
 
-    /// Slice 7: daemon child sessions can carry spawn-time tool
-    /// profile, allowlist, and iteration cap before their Agent is
-    /// installed. Existing sessions ignore these options once warm.
+    /// Daemon child sessions can carry spawn-time tool profile,
+    /// allowlist, and iteration cap before their Agent is installed.
+    /// Existing sessions ignore these options once warm.
     pub async fn ensure_agent_with_options(
         self: &Arc<Self>,
-        config: &crate::config::Config,
-        pool: Option<Arc<crate::runtime_pool::RuntimeResourcePool>>,
-        max_iterations: Option<u32>,
-        tool_profile: Option<String>,
-        allowed_tools: Option<&[String]>,
+        assembler: &SessionAgentAssembler,
+        options: SessionAgentOptions,
     ) -> anyhow::Result<AgentHandle> {
         // Fast path: already installed.
         if let Some(handle) = self.agent_arc() {
@@ -178,21 +165,7 @@ impl SessionState {
             return Ok(handle);
         }
 
-        let mut builder = crate::agent::Agent::builder(config);
-        if let Some(pool) = pool {
-            builder = builder.with_pool(pool);
-        }
-        if let Some(max_iterations) = max_iterations {
-            builder = builder.with_max_iterations(max_iterations);
-        }
-        builder = builder.with_tool_profile(tool_profile.clone());
-        let agent = builder.build().await?;
-        let mut agent = agent;
-        if tool_profile.is_none() {
-            if let Some(allowed_tools) = allowed_tools {
-                agent.restrict_tools(allowed_tools);
-            }
-        }
+        let agent = assembler.assemble(options).await?;
         self.set_agent(agent);
         Ok(self.agent_arc().expect("just installed"))
     }
@@ -370,8 +343,9 @@ mod tests {
     async fn ensure_agent_returns_existing_when_set() {
         let sess = Arc::new(SessionState::new("foo".into()));
         sess.set_agent(test_agent());
-        let cfg = crate::config::Config::default();
-        let h = sess.ensure_agent(&cfg).await.unwrap();
+        let assembler =
+            SessionAgentAssembler::new(Arc::new(crate::config::Config::default()), None);
+        let h = sess.ensure_agent(&assembler).await.unwrap();
         let h2 = sess.agent_arc().unwrap();
         assert!(
             Arc::ptr_eq(&h, &h2),

@@ -2,11 +2,10 @@
 //!
 //! Slice 3: each request envelope carries a `session` field; the
 //! handler looks up the per-session warm Agent installed on that
-//! `SessionState`. The `"main"` session gets its Agent installed by
-//! the daemon boot path; other sessions are created without an Agent
-//! and currently surface `AGENT_NOT_AVAILABLE` until lazy-build lands
-//! in a later slice. Both buffered (`prompt.run`) and streaming
-//! (`prompt.stream`) variants are supported.
+//! `SessionState`. The `"main"` session is warmed by the daemon boot
+//! path; other sessions lazy-build their Agent on first prompt. Both
+//! buffered (`prompt.run`) and streaming (`prompt.stream`) variants are
+//! supported.
 
 use std::sync::Arc;
 
@@ -100,10 +99,7 @@ pub async fn run(state: Arc<DaemonState>, id: String, session_id: String, input:
         Ok(s) => s,
         Err(e) => return Response::error(id, e),
     };
-    let agent_arc = match sess
-        .ensure_agent_with_pool(state.config(), state.pool().cloned())
-        .await
-    {
+    let agent_arc = match sess.ensure_agent(&state.session_agent_assembler()).await {
         Ok(a) => a,
         Err(e) => {
             return Response::error(
@@ -194,21 +190,13 @@ pub fn stream(
 
     let rid = req_id.clone();
     let sess_for_task = sess.clone();
-    // Lazy-build needs `&Config`, but the spawned task can't borrow
-    // `state` so we clone the `Arc<Config>` out here.
-    let config = Arc::new(state.config().clone());
-    // Slice 3: clone the pool Arc out for the spawned task so the
-    // child Agent build reuses the daemon's shared adapters.
-    let pool_for_task = state.pool().cloned();
+    let assembler = state.session_agent_assembler();
     let state_for_runner = Arc::clone(&state);
     tokio::spawn(async move {
         // Lazy-build the per-session Agent. Failure surfaces on the
         // done channel as AGENT_BUILD_FAILED; in_flight is cleared
         // before returning so daemon.status doesn't get stuck.
-        let agent_arc = match sess_for_task
-            .ensure_agent_with_pool(&config, pool_for_task)
-            .await
-        {
+        let agent_arc = match sess_for_task.ensure_agent(&assembler).await {
             Ok(a) => a,
             Err(e) => {
                 *sess_for_task.in_flight.lock() = false;
@@ -355,9 +343,7 @@ pub async fn cancel(state: &DaemonState, id: String, session_id: String) -> Resp
             id,
             ProtocolError {
                 code: "AGENT_NOT_AVAILABLE".into(),
-                message: format!(
-                    "session '{session_id}' has no agent yet; lazy-build deferred to Task 3.X"
-                ),
+                message: format!("session '{session_id}' has no agent yet"),
                 retryable: false,
             },
         );
