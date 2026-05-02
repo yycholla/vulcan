@@ -60,17 +60,13 @@ pub struct WorkspaceConfig {
     pub preserve_success: bool,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct HooksConfig {
-    pub prepare: Vec<HookCommand>,
-    pub cleanup: Vec<HookCommand>,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct HookCommand {
-    pub command: String,
-    pub timeout_secs: u64,
-    pub fatal: bool,
+pub struct HooksConfig {
+    pub after_create: Option<String>,
+    pub before_run: Option<String>,
+    pub after_run: Option<String>,
+    pub before_remove: Option<String>,
+    pub timeout_ms: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -221,8 +217,13 @@ impl<'a> ConfigView<'a> {
             return Ok(HooksConfig::default());
         };
         Ok(HooksConfig {
-            prepare: optional_hooks(map, "prepare", "hooks.prepare")?,
-            cleanup: optional_hooks(map, "cleanup", "hooks.cleanup")?,
+            after_create: optional_string(map, "hooks.after_create")?,
+            before_run: optional_string(map, "hooks.before_run")?,
+            after_run: optional_string(map, "hooks.after_run")?,
+            before_remove: optional_string(map, "hooks.before_remove")?,
+            timeout_ms: optional_u64(map, "hooks.timeout_ms")?
+                .filter(|value| *value > 0)
+                .unwrap_or(default_hook_timeout_ms()),
         })
     }
 
@@ -374,6 +375,18 @@ impl Default for PollingConfig {
             terminal_states: vec!["closed".into(), "done".into(), "wontfix".into()],
             max_concurrent: 1,
             state_concurrency: BTreeMap::new(),
+        }
+    }
+}
+
+impl Default for HooksConfig {
+    fn default() -> Self {
+        Self {
+            after_create: None,
+            before_run: None,
+            after_run: None,
+            before_remove: None,
+            timeout_ms: default_hook_timeout_ms(),
         }
     }
 }
@@ -545,31 +558,8 @@ fn parse_state_concurrency(
     Ok(out)
 }
 
-fn optional_hooks(
-    map: &YamlMapping,
-    key_name: &str,
-    path: &str,
-) -> Result<Vec<HookCommand>, ConfigError> {
-    let Some(value) = map.get(key(key_name)) else {
-        return Ok(Vec::new());
-    };
-    let YamlValue::Sequence(items) = value else {
-        return Err(invalid(path, "must be a list"));
-    };
-    let mut out = Vec::with_capacity(items.len());
-    for (idx, item) in items.iter().enumerate() {
-        let item_path = format!("{path}[{idx}]");
-        let YamlValue::Mapping(map) = item else {
-            return Err(invalid(&item_path, "must be a map"));
-        };
-        out.push(HookCommand {
-            command: required_string(map, &format!("{item_path}.command"))?,
-            timeout_secs: optional_u64(map, &format!("{item_path}.timeout_secs"))?.unwrap_or(300),
-            fatal: optional_bool(map, &format!("{item_path}.fatal"))?
-                .unwrap_or(key_name == "prepare"),
-        });
-    }
-    Ok(out)
+fn default_hook_timeout_ms() -> u64 {
+    60_000
 }
 
 fn normalize_path(raw: &str, repo_root: &Path, env: Option<&BTreeMap<String, String>>) -> PathBuf {
@@ -662,12 +652,11 @@ workspace:
   root: workspaces
   preserve_success: false
 hooks:
-  prepare:
-    - command: ./bootstrap.sh
-      timeout_secs: "45"
-  cleanup:
-    - command: ./cleanup.sh
-      fatal: false
+  after_create: ./bootstrap.sh
+  before_run: ./before.sh
+  after_run: ./after.sh
+  before_remove: ./cleanup.sh
+  timeout_ms: "45000"
 agent:
   max_attempts: "4"
   max_turns: "3"
@@ -696,8 +685,11 @@ codex:
         );
         assert_eq!(config.workspace.root, PathBuf::from("/repo/workspaces"));
         assert!(!config.workspace.preserve_success);
-        assert_eq!(config.hooks.prepare[0].timeout_secs, 45);
-        assert!(!config.hooks.cleanup[0].fatal);
+        assert_eq!(config.hooks.after_create.as_deref(), Some("./bootstrap.sh"));
+        assert_eq!(config.hooks.before_run.as_deref(), Some("./before.sh"));
+        assert_eq!(config.hooks.after_run.as_deref(), Some("./after.sh"));
+        assert_eq!(config.hooks.before_remove.as_deref(), Some("./cleanup.sh"));
+        assert_eq!(config.hooks.timeout_ms, 45_000);
         assert_eq!(config.agent.max_attempts, 4);
         assert_eq!(config.agent.max_turns, 3);
         assert_eq!(config.agent.stall_timeout_secs, Some(120));
@@ -777,6 +769,72 @@ codex:
             config.workspace.root,
             PathBuf::from("/home/tester/symphony-work")
         );
+    }
+
+    #[test]
+    fn workspace_lifecycle_hooks_parse_with_shared_timeout() {
+        let root = map(r#"
+task_source:
+  kind: markdown
+  markdown:
+    path: tasks.md
+hooks:
+  after_create: "echo created"
+  before_run: "echo before"
+  after_run: "echo after"
+  before_remove: "echo remove"
+  timeout_ms: "2500"
+codex:
+  command: codex
+"#);
+
+        let config = ConfigView::new(&root, repo_root())
+            .effective_config()
+            .unwrap();
+
+        assert_eq!(config.hooks.after_create.as_deref(), Some("echo created"));
+        assert_eq!(config.hooks.before_run.as_deref(), Some("echo before"));
+        assert_eq!(config.hooks.after_run.as_deref(), Some("echo after"));
+        assert_eq!(config.hooks.before_remove.as_deref(), Some("echo remove"));
+        assert_eq!(config.hooks.timeout_ms, 2500);
+    }
+
+    #[test]
+    fn hooks_default_timeout_is_sixty_seconds() {
+        let root = map(r#"
+task_source:
+  kind: markdown
+  markdown:
+    path: tasks.md
+codex:
+  command: codex
+"#);
+
+        let config = ConfigView::new(&root, repo_root())
+            .effective_config()
+            .unwrap();
+
+        assert_eq!(config.hooks.timeout_ms, 60_000);
+    }
+
+    #[test]
+    fn non_positive_hook_timeout_falls_back_to_default() {
+        let root = map(r#"
+task_source:
+  kind: markdown
+  markdown:
+    path: tasks.md
+hooks:
+  timeout_ms: 0
+codex:
+  command: codex
+"#);
+
+        let config = ConfigView::new(&root, repo_root())
+            .effective_config()
+            .unwrap();
+
+        assert_eq!(config.hooks.timeout_ms, 60_000);
     }
 
     #[test]

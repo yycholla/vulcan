@@ -32,6 +32,10 @@ _Avoid_: ad hoc front-matter reads in orchestrator modules
 The most recent **Effective Config** that passed validation. Invalid poll-time reloads keep using this value and retain the validation error for operator-visible diagnostics.
 _Avoid_: crash-on-reload, partial config mutation
 
+**Workspace Manager**:
+Per-task workspace boundary. It sanitizes the **Normalized Task** identifier into a deterministic key, derives a contained path under `workspace.root`, creates or reuses the directory, and runs lifecycle hooks from the **Effective Config** with documented fatal/best-effort semantics.
+_Avoid_: ad hoc cwd selection, tracker-specific checkout policy
+
 ## Relationships
 
 - Symphony is daemon-adjacent orchestration, not part of the user-facing **Daemon** session/turn path.
@@ -39,7 +43,8 @@ _Avoid_: crash-on-reload, partial config mutation
 - The **Effective Config** is built from preserved front matter after workflow load; startup validation is fatal, while poll-time validation can skip new dispatch and keep the **Last Known Good Config**.
 - Template render failures are run-attempt failures, not workflow-file load failures.
 - Task-source adapters normalize source payloads before rendering. The workflow layer does not know GitHub, Linear, markdown tasks, or agent todos.
-- Workspace management and agent process execution are later slices; this area currently owns only workflow loading and prompt rendering.
+- The **Workspace Manager** prepares the cwd boundary before an agent process exists. It does not implement repository checkout/sync policy; use lifecycle hooks for implementation-defined workspace population.
+- Agent process execution is a later slice.
 
 ## ADRs
 
