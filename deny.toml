@@ -37,6 +37,21 @@ ignore = [
     # constraint check was running on input the library doesn't accept
     # in the first place. Functionally unreachable for our usage.
     { id = "RUSTSEC-2026-0098", reason = "transitive via serenity; URI name constraint API not exposed." },
+    # RUSTSEC-2025-0141: bincode 1.3.3 is unmaintained but still used
+    # transitively by cortex-memory-core. No safe upstream upgrade is
+    # available from the advisory. Re-evaluate when cortex-memory-core
+    # moves to a maintained serialization dependency.
+    { id = "RUSTSEC-2025-0141", reason = "transitive via cortex-memory-core; no safe upstream upgrade available." },
+    # RUSTSEC-2025-0119: number_prefix is unmaintained and reaches us via
+    # indicatif -> hf-hub -> fastembed. This is CLI progress formatting,
+    # not parsing untrusted input. Re-evaluate when hf-hub/fastembed
+    # replace indicatif or indicatif changes its dependency.
+    { id = "RUSTSEC-2025-0119", reason = "transitive via fastembed/hf-hub progress formatting; no safe upstream upgrade available." },
+    # RUSTSEC-2024-0436: paste is unmaintained and reaches us through
+    # tokenizers/rav1e in the fastembed/image graph. It is a macro helper
+    # used at compile time by dependencies. Re-evaluate when those
+    # upstream crates migrate to pastey or another replacement.
+    { id = "RUSTSEC-2024-0436", reason = "transitive macro helper via fastembed dependency graph; no safe upstream upgrade available." },
 ]
 
 [licenses]
@@ -60,11 +75,18 @@ allow = [
     # permissive). Used by `webpki-roots` and a few other transitive
     # crates. https://cdla.dev/permissive-2-0/
     "CDLA-Permissive-2.0",
+    # NCSA is a permissive OSI-approved license. Reaches us via
+    # libfuzzer-sys -> rav1e -> ravif -> image -> fastembed.
+    "NCSA",
 ]
 confidence-threshold = 0.93
 
 [bans]
-multiple-versions = "warn"
+# The all-features graph intentionally carries duplicate versions from
+# platform/provider stacks (gix, reqwest, serenity, fastembed, windows
+# target crates). Keep hard failures for explicit deny/wildcard bans;
+# track duplicate cleanup as dependency hygiene instead of blocking CI.
+multiple-versions = "allow"
 wildcards = "deny"
 # Crates the workspace must never link against.
 deny = []

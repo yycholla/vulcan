@@ -362,6 +362,7 @@ impl Agent {
         }
     }
 
+    #[allow(dead_code)]
     pub(in crate::agent) async fn prepare_stream_turn(
         &mut self,
         input: &str,
@@ -370,6 +371,7 @@ impl Agent {
         self.prepare_turn(input, cancel).await
     }
 
+    #[allow(dead_code)]
     pub(in crate::agent) async fn prepare_turn(
         &mut self,
         input: &str,
@@ -440,6 +442,7 @@ impl Agent {
         })
     }
 
+    #[allow(dead_code)]
     pub(in crate::agent) async fn compact_stream_messages_if_needed(
         &mut self,
         messages: &mut Vec<Message>,
@@ -463,6 +466,7 @@ impl Agent {
         let _ = forwarder.await;
     }
 
+    #[allow(dead_code)]
     pub(in crate::agent) async fn compact_turn_messages_if_needed(
         &mut self,
         messages: &mut Vec<Message>,
@@ -633,6 +637,7 @@ impl Agent {
         true
     }
 
+    #[allow(dead_code)]
     pub(in crate::agent) async fn collect_stream_response(
         &self,
         outgoing: &[Message],
@@ -675,6 +680,7 @@ impl Agent {
         result
     }
 
+    #[allow(dead_code)]
     pub(in crate::agent) async fn collect_turn_response(
         &self,
         outgoing: &[Message],
@@ -842,6 +848,7 @@ impl Agent {
         }
     }
 
+    #[allow(dead_code)]
     pub(in crate::agent) async fn execute_stream_tool_calls(
         &self,
         tool_calls: &[ToolCall],
@@ -866,6 +873,7 @@ impl Agent {
         results
     }
 
+    #[allow(dead_code)]
     pub(in crate::agent) async fn execute_turn_tool_calls(
         &self,
         tool_calls: &[ToolCall],
@@ -948,6 +956,7 @@ impl Agent {
                 // over the LLM-facing terse `output`.
                 let preview_source = result.display_preview.as_deref().unwrap_or(&result.output);
                 let output_preview = preview_output(preview_source);
+                let details = result.details.clone();
                 let result_meta = summarize_tool_result(&name, &result.output);
                 let elided = elided_lines(preview_source, output_preview.as_deref());
                 let _ = turn_tx
@@ -956,6 +965,7 @@ impl Agent {
                         name: name.clone(),
                         ok,
                         output_preview,
+                        details,
                         result_meta,
                         elided_lines: elided,
                         elapsed_ms,
@@ -969,6 +979,7 @@ impl Agent {
 }
 
 impl TurnRunner<'_> {
+    #[allow(dead_code)]
     pub(in crate::agent) async fn collect_response(
         &self,
         outgoing: &[Message],
@@ -982,6 +993,7 @@ impl TurnRunner<'_> {
             .await
     }
 
+    #[allow(dead_code)]
     pub(in crate::agent) async fn execute_tool_calls(
         &self,
         tool_calls: &[ToolCall],

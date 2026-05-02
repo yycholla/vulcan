@@ -19,6 +19,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use super::ExtensionMetadata;
 use crate::hooks::{HookHandler, HookOutcome};
+use crate::memory::SessionStore;
 use crate::provider::factory::ProviderFactory;
 use crate::provider::{ChatResponse, LLMProvider, Message, StreamEvent, ToolCall};
 use crate::tools::{Tool, ToolProgress, ToolResult};
@@ -41,7 +42,7 @@ pub struct ExtensionManifest {
 /// the auto-commit dogfood needs today; grows toward the full
 /// `ExtensionContext` (model, provider, pause, state, ui, ...) as
 /// later slices land.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct SessionExtensionCtx {
     /// Working directory of the **Session** the extension is being
     /// instantiated for. Auto-commit reads this to know which repo to
@@ -50,6 +51,9 @@ pub struct SessionExtensionCtx {
     /// **Session** identifier. Routes telemetry, audit log entries,
     /// and per-session state under a stable key.
     pub session_id: String,
+    /// Durable session history store for replaying extension state
+    /// carried through `ToolResult.details`.
+    pub memory: Arc<SessionStore>,
 }
 
 /// Daemon-global registration for an extension. One implementation per
@@ -465,6 +469,7 @@ mod tests {
         SessionExtensionCtx {
             cwd: PathBuf::from("/tmp/test-session"),
             session_id: "test-session-id".to_string(),
+            memory: Arc::new(SessionStore::in_memory()),
         }
     }
 
@@ -590,6 +595,7 @@ mod tests {
         let ctx = SessionExtensionCtx {
             cwd: PathBuf::from("/tmp/example-session"),
             session_id: "sess-42".to_string(),
+            memory: Arc::new(SessionStore::in_memory()),
         };
         let _ = ext.instantiate(ctx);
 

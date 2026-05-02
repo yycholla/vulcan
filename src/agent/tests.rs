@@ -488,7 +488,7 @@ async fn rewrite_history_from_before_compact_replaces_durable_history() {
         }
     }
 
-    let mut hooks = HookRegistry::new();
+    let hooks = HookRegistry::new();
     hooks.register(Arc::new(RewriteHook));
     let (mut agent, mock) = agent_with_mock_and_hooks(hooks);
     agent.context = ContextManager::new(10);
@@ -545,7 +545,7 @@ async fn invalid_rewrite_history_falls_back_to_builtin_and_audits_rejection() {
     }
 
     let audit = Arc::new(ExtensionAuditLog::new(8));
-    let mut hooks = HookRegistry::new().with_audit_log(audit.clone());
+    let hooks = HookRegistry::new().with_audit_log(audit.clone());
     hooks.register(Arc::new(BadRewriteHook));
     let (mut agent, mock) = agent_with_mock_and_hooks(hooks);
     agent.context = ContextManager::new(10);
@@ -607,7 +607,7 @@ async fn block_skips_compaction_until_context_overflow_is_imminent() {
         }
     }
 
-    let mut hooks = HookRegistry::new();
+    let hooks = HookRegistry::new();
     hooks.register(Arc::new(BlockHook));
     let (mut agent, mock) = agent_with_mock_and_hooks(hooks);
     agent.context = ContextManager::with_config(
@@ -663,7 +663,7 @@ async fn block_is_overridden_on_context_overflow_and_audited() {
     }
 
     let audit = Arc::new(ExtensionAuditLog::new(8));
-    let mut hooks = HookRegistry::new().with_audit_log(audit.clone());
+    let hooks = HookRegistry::new().with_audit_log(audit.clone());
     hooks.register(Arc::new(BlockHook));
     let (mut agent, mock) = agent_with_mock_and_hooks(hooks);
     agent.context = ContextManager::new(10);

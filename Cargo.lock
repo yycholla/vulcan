@@ -7177,6 +7177,7 @@ dependencies = [
  "vulcan-core",
  "vulcan-ext-auto-commit",
  "vulcan-ext-input-demo",
+ "vulcan-ext-todo",
 ]
 
 [[package]]
@@ -7250,6 +7251,7 @@ dependencies = [
  "tree-sitter-typescript",
  "url",
  "uuid",
+ "vulcan-frontend-api",
 ]
 
 [[package]]
@@ -7293,6 +7295,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "vulcan-ext-todo"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "inventory",
+ "parking_lot",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-util",
+ "vulcan-core",
+ "vulcan-frontend-api",
+]
+
+[[package]]
 name = "vulcan-extension-macros"
 version = "0.1.0"
 dependencies = [
@@ -7302,6 +7320,10 @@ dependencies = [
 [[package]]
 name = "vulcan-frontend-api"
 version = "0.1.0"
+dependencies = [
+ "inventory",
+ "serde_json",
+]
 
 [[package]]
 name = "vulcan-tui"
