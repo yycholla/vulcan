@@ -198,6 +198,60 @@ fn app_state_applies_status_widget_updates() {
     assert!(!app.model_status().contains("working"));
 }
 
+struct TestCanvas;
+
+impl vulcan_frontend_api::Canvas for TestCanvas {
+    fn render(&self) -> vulcan_frontend_api::CanvasFrame {
+        vulcan_frontend_api::CanvasFrame {
+            title: "Test canvas".into(),
+            lines: vec!["alive".into()],
+        }
+    }
+}
+
+#[test]
+fn canvas_request_installs_and_exits_on_default_escape() {
+    let mut app = AppState::new("test".into(), 100);
+    let mut ui = vulcan_frontend_api::ExtensionUi::default();
+    ui.custom(vulcan_frontend_api::CanvasFactory::new(|_handle| {
+        Box::new(TestCanvas)
+    }))
+    .expect("canvas request");
+    let request = ui.drain_canvas_requests().pop().expect("request");
+
+    app.install_canvas_request(request);
+    assert_eq!(
+        app.active_canvas_frame().expect("frame").title,
+        "Test canvas"
+    );
+
+    assert!(app.handle_canvas_key(vulcan_frontend_api::CanvasKey::Esc));
+    assert!(app.active_canvas.is_none());
+}
+
+#[test]
+fn cancel_stack_pops_canvas_before_turn() {
+    let mut app = AppState::new("test".into(), 100);
+    app.thinking = true;
+    let mut ui = vulcan_frontend_api::ExtensionUi::default();
+    ui.custom(vulcan_frontend_api::CanvasFactory::new(|_handle| {
+        Box::new(TestCanvas)
+    }))
+    .expect("canvas request");
+    app.install_canvas_request(ui.drain_canvas_requests().pop().expect("request"));
+
+    assert_eq!(
+        app.cancel_stack(),
+        vec![CancelScope::Turn, CancelScope::Canvas]
+    );
+    assert_eq!(
+        app.pop_cancel_scope(),
+        CancelPop::Popped(CancelScope::Canvas)
+    );
+    assert!(app.active_canvas.is_none());
+    assert_eq!(app.pop_cancel_scope(), CancelPop::CancelTurn);
+}
+
 #[test]
 fn chat_message_new_starts_at_zero_render_version() {
     let m = ChatMessage::new(ChatRole::User, "hello");

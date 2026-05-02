@@ -3,8 +3,8 @@ use std::sync::Arc;
 
 use serde_json::Value;
 use vulcan_frontend_api::{
-    FrontendCodeExtension, FrontendCommand, FrontendCommandAction, FrontendCtx, MessageRenderer,
-    ToolResultView, WidgetUpdate,
+    CanvasRequest, FrontendCodeExtension, FrontendCommand, FrontendCommandAction, FrontendCtx,
+    MessageRenderer, TickRequest, ToolResultView, WidgetUpdate,
 };
 
 #[derive(Default)]
@@ -101,12 +101,18 @@ impl TuiFrontend {
             .map(|rendered| rendered.lines)
     }
 
-    pub fn dispatch_slash(&self, input: &str) -> Option<FrontendCommandAction> {
+    pub fn dispatch_slash(&self, input: &str) -> Option<FrontendCommandDispatch> {
         let body = input.strip_prefix('/')?.trim();
         let name = body.split_whitespace().next().unwrap_or("");
         let command = self.commands.get(name)?;
         let mut ctx = FrontendCtx::default();
-        Some(command.run(&mut ctx))
+        let action = command.run(&mut ctx);
+        Some(FrontendCommandDispatch {
+            action,
+            canvas_requests: ctx.ui.drain_canvas_requests(),
+            tick_requests: ctx.ui.drain_tick_requests(),
+            widget_updates: ctx.ui.drain_widget_updates(),
+        })
     }
 
     pub fn handle_extension_event(&self, data: &Value) -> Vec<WidgetUpdate> {
@@ -164,4 +170,182 @@ pub struct FrontendCommandSpec {
     pub name: &'static str,
     pub description: &'static str,
     pub mid_turn_safe: bool,
+}
+
+#[derive(Debug)]
+pub struct FrontendCommandDispatch {
+    pub action: FrontendCommandAction,
+    pub canvas_requests: Vec<CanvasRequest>,
+    pub tick_requests: Vec<TickRequest>,
+    pub widget_updates: Vec<WidgetUpdate>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use std::sync::Arc;
+
+    use serde_json::json;
+    use vulcan_frontend_api::{
+        FrontendCodeExtension, FrontendCommand, FrontendCommandAction, FrontendCtx,
+        MessageRenderer, RenderedMessage, ToolResultView, WidgetContent,
+    };
+
+    struct Renderer(&'static str);
+
+    impl MessageRenderer for Renderer {
+        fn tool_name(&self) -> &'static str {
+            "todo_list"
+        }
+
+        fn render(
+            &self,
+            _ctx: &FrontendCtx,
+            _result: &ToolResultView<'_>,
+        ) -> Option<RenderedMessage> {
+            Some(RenderedMessage::from_lines([self.0]))
+        }
+    }
+
+    struct Command;
+
+    impl FrontendCommand for Command {
+        fn name(&self) -> &'static str {
+            "todos"
+        }
+
+        fn description(&self) -> &'static str {
+            "Open todos"
+        }
+
+        fn run(&self, _ctx: &mut FrontendCtx) -> FrontendCommandAction {
+            FrontendCommandAction::OpenView {
+                id: "todo".into(),
+                title: "Todos".into(),
+                body: vec!["body".into()],
+            }
+        }
+    }
+
+    struct Extension {
+        id: &'static str,
+        renderer: &'static str,
+    }
+
+    impl FrontendCodeExtension for Extension {
+        fn id(&self) -> &'static str {
+            self.id
+        }
+
+        fn version(&self) -> &'static str {
+            "0.1.0"
+        }
+
+        fn frontend_capabilities(&self) -> Vec<&'static str> {
+            vec!["text_io", "rich_text"]
+        }
+
+        fn message_renderers(&self) -> Vec<Arc<dyn MessageRenderer>> {
+            vec![Arc::new(Renderer(self.renderer))]
+        }
+
+        fn commands(&self) -> Vec<Arc<dyn FrontendCommand>> {
+            vec![Arc::new(Command)]
+        }
+
+        fn on_event(&self, payload: &Value, ctx: &mut FrontendCtx) {
+            if let Some(label) = payload.get("spinner").and_then(Value::as_str) {
+                ctx.ui
+                    .set_widget("job", Some(WidgetContent::Spinner(label.to_string())));
+            }
+        }
+    }
+
+    #[test]
+    fn renderer_collision_uses_last_extension() {
+        let frontend = TuiFrontend::from_extensions(vec![
+            Arc::new(Extension {
+                id: "first",
+                renderer: "first",
+            }),
+            Arc::new(Extension {
+                id: "second",
+                renderer: "second",
+            }),
+        ]);
+
+        let details = json!({ "items": ["buy milk"] });
+        let rendered =
+            frontend.render_tool_result("todo_list", true, Some("1. buy milk"), Some(&details));
+
+        assert_eq!(rendered, Some(vec!["second".into()]));
+    }
+
+    #[test]
+    fn frontend_slash_command_dispatches_locally() {
+        let frontend = TuiFrontend::from_extensions(vec![Arc::new(Extension {
+            id: "todo",
+            renderer: "todo",
+        })]);
+
+        let dispatch = frontend.dispatch_slash("/todos").expect("local command");
+
+        assert!(matches!(
+            dispatch.action,
+            FrontendCommandAction::OpenView { ref id, .. } if id == "todo"
+        ));
+    }
+
+    #[test]
+    fn unknown_slash_command_falls_through() {
+        let frontend = TuiFrontend::default();
+        assert!(frontend.dispatch_slash("/does-not-exist").is_none());
+    }
+
+    #[test]
+    fn maps_declared_capabilities_for_daemon_connection() {
+        let frontend = TuiFrontend::from_extensions(vec![Arc::new(Extension {
+            id: "todo",
+            renderer: "todo",
+        })]);
+
+        let caps = frontend.extension_frontend_capabilities();
+
+        assert!(caps.contains(&crate::extensions::FrontendCapability::TextIo));
+        assert!(caps.contains(&crate::extensions::FrontendCapability::RichText));
+    }
+
+    #[test]
+    fn frontend_event_dispatches_to_matching_extension_widget_updates() {
+        let frontend = TuiFrontend::from_extensions(vec![Arc::new(Extension {
+            id: "spinner",
+            renderer: "todo",
+        })]);
+
+        let updates = frontend.handle_extension_event(&json!({
+            "kind": "extension_event",
+            "session_id": "main",
+            "extension_id": "spinner",
+            "payload": { "spinner": "working" }
+        }));
+
+        assert_eq!(updates.len(), 1);
+        assert_eq!(updates[0].id, "job");
+        assert_eq!(
+            updates[0].content,
+            Some(WidgetContent::Spinner("working".into()))
+        );
+    }
+
+    #[test]
+    fn frontend_event_for_unknown_extension_is_dropped() {
+        let frontend = TuiFrontend::default();
+        let updates = frontend.handle_extension_event(&json!({
+            "kind": "extension_event",
+            "extension_id": "missing",
+            "payload": { "spinner": "working" }
+        }));
+        assert!(updates.is_empty());
+    }
 }

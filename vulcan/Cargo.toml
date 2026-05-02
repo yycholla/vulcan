@@ -36,6 +36,8 @@ vulcan-ext-spinner-demo = { path = "../vulcan-ext-spinner-demo", features = ["tu
 # GH issue #550: todo dogfood extension for daemon tool wiring and
 # ToolResult.details replay.
 vulcan-ext-todo = { path = "../vulcan-ext-todo", features = ["tui"] }
+# GH issue #560: canvas/raw-keys/tick dogfood extension.
+vulcan-ext-snake = { path = "../vulcan-ext-snake" }
 
 tokio = { version = "1", features = ["full"] }
 clap = { version = "4", features = ["derive"] }
