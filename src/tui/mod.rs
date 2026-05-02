@@ -937,6 +937,17 @@ pub async fn run_tui(
                         if let Event::Key(key) = event
                             && key.kind == KeyEventKind::Press {
                                 if app.active_canvas.is_some() {
+                                    // Preserve a framework-level escape hatch so an extension
+                                    // canvas cannot trap users in raw mode by swallowing every
+                                    // keypress and forgetting to close on Esc/Ctrl+C.
+                                    let is_canvas_escape = matches!(key.code, KeyCode::Esc)
+                                        || (matches!(key.code, KeyCode::Char('c'))
+                                            && key.modifiers.contains(KeyModifiers::CONTROL));
+                                    if is_canvas_escape {
+                                        app.close_canvas();
+                                        pending_quit = false;
+                                        continue;
+                                    }
                                     app.handle_canvas_key(canvas_key_from_event(key));
                                     pending_quit = false;
                                     continue;
