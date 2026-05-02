@@ -710,6 +710,7 @@ impl AppState {
                 .status_widgets
                 .values()
                 .any(|content| !matches!(content, vulcan_frontend_api::WidgetContent::Text(_)))
+            || self.chat_clear_pending.get()
             || self.effects.chat_running()
             || self.messages.iter().any(|message| {
                 message.segments.iter().any(|segment| {
@@ -742,12 +743,14 @@ impl AppState {
         self.effects.trigger_chat_clear(area);
     }
 
-    pub fn finish_chat_clear_if_idle(&mut self) {
+    pub fn finish_chat_clear_if_idle(&mut self) -> bool {
         if self.chat_clear_pending.get() && !self.effects.chat_running() {
             self.messages.clear();
             self.chat_render_store.borrow_mut().clear();
             self.chat_clear_pending.set(false);
+            return true;
         }
+        false
     }
 
     pub fn cancel_stack(&self) -> Vec<CancelScope> {

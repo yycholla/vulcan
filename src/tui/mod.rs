@@ -415,7 +415,9 @@ pub async fn run_tui(
             }
         })?;
         last_draw = Instant::now();
-        app.finish_chat_clear_if_idle();
+        if app.finish_chat_clear_if_idle() {
+            continue;
+        }
 
         // ── Diff scrubber overlay (YYC-75): intercept input until resolved.
         if app.show_diff_scrubber {
