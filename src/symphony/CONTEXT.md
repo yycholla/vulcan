@@ -24,10 +24,19 @@ _Avoid_: GitHub issue model, Linear issue model
 Per-run retry or continuation context passed to the **Workflow Prompt Template**. First attempts use no attempt value; retry and continuation runs may pass an integer.
 _Avoid_: hidden retry counter
 
+**Effective Config**:
+Typed Symphony runtime view derived from **Workflow Front Matter**. It centralizes defaults, environment indirection, path normalization, startup validation, and poll-time dispatch validation.
+_Avoid_: ad hoc front-matter reads in orchestrator modules
+
+**Last Known Good Config**:
+The most recent **Effective Config** that passed validation. Invalid poll-time reloads keep using this value and retain the validation error for operator-visible diagnostics.
+_Avoid_: crash-on-reload, partial config mutation
+
 ## Relationships
 
 - Symphony is daemon-adjacent orchestration, not part of the user-facing **Daemon** session/turn path.
 - The **Workflow File** is loaded before dispatch; file read and YAML errors block new work.
+- The **Effective Config** is built from preserved front matter after workflow load; startup validation is fatal, while poll-time validation can skip new dispatch and keep the **Last Known Good Config**.
 - Template render failures are run-attempt failures, not workflow-file load failures.
 - Task-source adapters normalize source payloads before rendering. The workflow layer does not know GitHub, Linear, markdown tasks, or agent todos.
 - Workspace management and agent process execution are later slices; this area currently owns only workflow loading and prompt rendering.
@@ -35,3 +44,4 @@ _Avoid_: hidden retry counter
 ## ADRs
 
 - `docs/adr/0007-symphony-workflow-contract.md` — repository-owned workflow contract and strict prompt boundary.
+- `docs/adr/0008-symphony-typed-config.md` — typed config defaults, validation, and last-known-good reload semantics.
