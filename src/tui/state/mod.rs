@@ -739,11 +739,7 @@ impl AppState {
         if !self.chat_clear_pending.get() || self.effects.chat_running() {
             return;
         }
-        let screen_bg = match self.theme.body_bg {
-            Color::Reset => Color::Black,
-            color => color,
-        };
-        self.effects.trigger_chat_clear(area, screen_bg);
+        self.effects.trigger_chat_clear(area);
     }
 
     pub fn finish_chat_clear_if_idle(&mut self) {
