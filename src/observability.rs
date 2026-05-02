@@ -29,6 +29,7 @@ pub mod attr {
     pub const PROVIDER: &str = "provider";
     pub const MODEL: &str = "model";
     pub const HOOK_HANDLER: &str = "hook_handler";
+    pub const HOOK_EVENT: &str = "hook_event";
     pub const OUTCOME: &str = "outcome";
     pub const ERROR_KIND: &str = "error_kind";
     pub const SURFACE: &str = "surface";
@@ -288,8 +289,10 @@ mod tests {
             attr::PROVIDER,
             attr::MODEL,
             attr::HOOK_HANDLER,
+            attr::HOOK_EVENT,
             attr::OUTCOME,
             attr::ERROR_KIND,
+            attr::SURFACE,
         ];
         assert!(attrs.iter().all(|name| !name.is_empty()));
         assert!(attrs.iter().all(|name| !name.contains('.')));
