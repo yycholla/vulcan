@@ -11,6 +11,8 @@ repository = "https://github.com/yycholla/vulcan"
 anyhow = "1"
 vulcan = { package = "vulcan-core", path = ".." }
 vulcan-frontend-api = { path = "../vulcan-frontend-api" }
+vulcan-core-ext-safety = { path = "../vulcan-core-ext-safety" }
+vulcan-core-ext-skills = { path = "../vulcan-core-ext-skills" }
 vulcan-ext-todo = { path = "../vulcan-ext-todo", features = ["tui"] }
 vulcan-ext-spinner-demo = { path = "../vulcan-ext-spinner-demo", features = ["tui"] }
 vulcan-ext-snake = { path = "../vulcan-ext-snake" }

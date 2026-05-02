@@ -1,0 +1,16 @@
+[package]
+name = "vulcan-core-ext-skills"
+version = "0.1.0"
+edition = "2024"
+description = "Core Vulcan skills hook extension"
+license = "MIT"
+
+[package.metadata.vulcan]
+id = "core-skills"
+daemon_entry = "vulcan_core_ext_skills::CoreSkillsExtension"
+core = true
+
+[dependencies]
+inventory = "0.3.24"
+vulcan = { package = "vulcan-core", path = ".." }
+vulcan-extension-macros = { path = "../vulcan-extension-macros" }

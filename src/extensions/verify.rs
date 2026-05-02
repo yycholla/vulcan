@@ -134,6 +134,7 @@ mod tests {
             requires_frontend: Vec::new(),
             permissions: None,
             checksum: checksum.map(String::from),
+            core: false,
             min_vulcan_version: min.map(String::from),
             description: None,
             requires_user_approval: false,

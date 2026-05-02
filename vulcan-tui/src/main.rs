@@ -2,6 +2,8 @@
 // #555 (Slice 4: Frontend extension binary + tool-result renderer).
 // Until then, the working TUI continues to ship as the `vulcan` daemon
 // binary's `chat` subcommand.
+use vulcan_core_ext_safety as _;
+use vulcan_core_ext_skills as _;
 use vulcan_ext_snake as _;
 use vulcan_ext_spinner_demo as _;
 use vulcan_ext_todo as _;

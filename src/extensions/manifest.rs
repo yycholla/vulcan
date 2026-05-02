@@ -58,6 +58,11 @@ pub struct ExtensionManifest {
     /// preserve it round-trip without enforcing.
     #[serde(default)]
     pub checksum: Option<String>,
+    /// Marks an extension as part of Vulcan's own runtime contract.
+    /// Core extensions cannot be disabled through normal lifecycle
+    /// commands and sort before non-core extensions.
+    #[serde(default)]
+    pub core: bool,
     /// Lowest Vulcan version that supports this manifest.
     #[serde(default)]
     pub min_vulcan_version: Option<String>,
@@ -294,5 +299,31 @@ kind = "builtin"
 "#;
         let opted_in_m = ExtensionManifest::from_toml_str(opted_in_raw).unwrap();
         assert!(opted_in_m.requires_user_approval);
+    }
+
+    #[test]
+    fn core_defaults_to_false_and_parses_when_present() {
+        let default_raw = r#"
+id = "input-demo"
+name = "Input Demo"
+version = "0.1.0"
+
+[entry]
+kind = "builtin"
+"#;
+        let default_m = ExtensionManifest::from_toml_str(default_raw).unwrap();
+        assert!(!default_m.core);
+
+        let core_raw = r#"
+id = "core-safety"
+name = "Core Safety"
+version = "0.1.0"
+core = true
+
+[entry]
+kind = "builtin"
+"#;
+        let core_m = ExtensionManifest::from_toml_str(core_raw).unwrap();
+        assert!(core_m.core);
     }
 }

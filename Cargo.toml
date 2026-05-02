@@ -8,6 +8,8 @@ members = [
     "vulcan-tui",
     "vulcan-frontend-api",
     "vulcan-extension-macros",
+    "vulcan-core-ext-skills",
+    "vulcan-core-ext-safety",
     "vulcan-ext-auto-commit",
     "vulcan-ext-compact-summary",
     "vulcan-ext-snake",

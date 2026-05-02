@@ -155,7 +155,12 @@ impl ExtensionRegistry {
     }
 
     fn sort_in_place(items: &mut [ExtensionMetadata]) {
-        items.sort_by(|a, b| a.priority.cmp(&b.priority).then_with(|| a.id.cmp(&b.id)));
+        items.sort_by(|a, b| {
+            b.core
+                .cmp(&a.core)
+                .then_with(|| a.priority.cmp(&b.priority))
+                .then_with(|| a.id.cmp(&b.id))
+        });
     }
 
     /// YYC-227: register a code-backed extension. The registry
@@ -448,6 +453,7 @@ impl ExtensionRegistry {
                     if let Some(desc) = manifest.description.clone() {
                         meta.description = desc;
                     }
+                    meta.core = manifest.core;
                     meta.requires_frontend = manifest
                         .requires_frontend
                         .iter()
@@ -571,6 +577,22 @@ mod tests {
         let ids: Vec<String> = reg.list().into_iter().map(|m| m.id).collect();
         // Tied priorities sort by id; lower priority first.
         assert_eq!(ids, vec!["alpha", "bravo", "charlie", "delta"]);
+    }
+
+    #[test]
+    fn list_returns_core_extensions_before_priority_order() {
+        let reg = ExtensionRegistry::new();
+        let non_core_first = meta("non-core-first", 0);
+        let mut core_later = meta("core-later", 100);
+        core_later.core = true;
+        let mut core_first = meta("core-first", 10);
+        core_first.core = true;
+        reg.upsert(non_core_first);
+        reg.upsert(core_later);
+        reg.upsert(core_first);
+
+        let ids: Vec<String> = reg.list().into_iter().map(|m| m.id).collect();
+        assert_eq!(ids, vec!["core-first", "core-later", "non-core-first"]);
     }
 
     #[test]
