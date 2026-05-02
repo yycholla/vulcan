@@ -44,6 +44,14 @@ _Avoid_: source-specific orchestrator branches, write-back side effects
 First file-backed **Task Source** implementation. It scans a configured markdown/todo file containing `---` YAML records and normalizes each record into the shared task model. It uses full-file scans; pagination and incremental cursors are not relevant for this adapter.
 _Avoid_: remote tracker client, local database
 
+**Orchestrator State**:
+Authoritative in-memory runtime bookkeeping for claimed tasks, running tasks, retry plans, completed tasks, token totals, and rate-limit snapshots. It is the single source used by poll ticks, reconciliation, and dispatch eligibility.
+_Avoid_: scattered scheduler flags, runner-owned task truth
+
+**Poll Tick**:
+One deterministic scheduler iteration. It reconciles active runs, validates dispatch assumptions, fetches candidates, applies eligibility rules, dispatches until slots are exhausted, and emits status events for later observability slices.
+_Avoid_: background side effects hidden outside the tick
+
 ## Relationships
 
 - Symphony is daemon-adjacent orchestration, not part of the user-facing **Daemon** session/turn path.
@@ -53,7 +61,8 @@ _Avoid_: remote tracker client, local database
 - **Task Source** adapters normalize source payloads before rendering. The workflow layer does not know GitHub, markdown tasks, or agent todos.
 - The **Markdown Task Source** is the only implemented adapter in this slice. GitHub and other remote adapters remain unsupported by the factory until later slices add authenticated API clients.
 - The **Workspace Manager** prepares the cwd boundary before an agent process exists. It does not implement repository checkout/sync policy; use lifecycle hooks for implementation-defined workspace population.
-- Agent process execution is a later slice.
+- The **Poll Tick** uses fake runner boundaries in this slice. Real agent process execution is a later slice.
+- Retry and reconciliation decisions live in **Orchestrator State** so later app-server, observability, and service slices can report the same source of truth.
 
 ## ADRs
 
