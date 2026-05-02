@@ -133,6 +133,8 @@ clap_complete = "4.6"
 dialoguer = { version = "0.12", features = ["fuzzy-select", "password"] }
 ratatui = "0.30"
 crossterm = "0.29"
+figlet-rs = "1.0.0"
+tui-textarea = { version = "0.10.2", package = "tui-textarea-2" }
 # YYC-287: lightweight ANSI terminal colors for styled CLI output
 # (config list/show/get, doctor, trust, etc.). Zero transitive deps.
 owo-colors = "4"

@@ -1,5 +1,6 @@
 use super::*;
 use crate::memory::SessionSummary;
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use vulcan_frontend_api::{WidgetContent, WidgetUpdate};
 
 #[test]
@@ -523,6 +524,31 @@ fn delegated_worker_count_filters_terminal_records() {
     let mut app = AppState::new("test-model".into(), 128_000);
     app.orchestration_store = Some(store);
     assert_eq!(app.delegated_worker_count(), 1);
+}
+
+#[test]
+fn prompt_editor_supports_multiline_insert_mode() {
+    let mut app = AppState::new("test-model".into(), 128_000);
+    app.prompt_insert_str("first");
+    app.prompt_handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    app.prompt_insert_str("second");
+
+    assert_eq!(app.input, "first\nsecond");
+    assert_eq!(app.prompt_editor.mode(), PromptEditMode::Insert);
+}
+
+#[test]
+fn prompt_editor_esc_enters_vim_normal_mode_and_i_returns_to_insert() {
+    let mut app = AppState::new("test-model".into(), 128_000);
+    app.prompt_insert_str("hello");
+
+    app.prompt_handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+    assert_eq!(app.prompt_editor.mode(), PromptEditMode::Normal);
+    assert_eq!(app.mode_label(), "NORMAL");
+
+    app.prompt_handle_key(KeyEvent::new(KeyCode::Char('i'), KeyModifiers::NONE));
+    assert_eq!(app.prompt_editor.mode(), PromptEditMode::Insert);
+    assert_eq!(app.mode_label(), "INSERT");
 }
 
 #[test]

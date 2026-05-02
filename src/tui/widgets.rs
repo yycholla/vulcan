@@ -5,6 +5,7 @@ use ratatui::{
     text::{Line, Span},
     widgets::{Block, BorderType, Borders, Paragraph, Wrap},
 };
+use tui_textarea::TextArea;
 
 use super::theme::{Palette, Theme};
 
@@ -160,12 +161,11 @@ pub enum ToolStatus {
     Err,
 }
 
-/// Reasoning trace block — italicized, hatched bg.
+/// Reasoning trace block — italicized text rows.
 ///
 /// The hidden-trace placeholder text uses the active theme's `muted`
-/// role. The visible reasoning rows sit on the structural FAINT
-/// backdrop (a Bauhaus tint that's always lighter than PAPER) — the
-/// inset-card affordance is design-locked, not themed.
+/// role. Visible reasoning stays copy-friendly: no repeated rails or
+/// leading pipe characters in body rows.
 pub fn reasoning_lines(text: &str, hidden: bool, theme: &Theme, width: u16) -> Vec<Line<'static>> {
     if hidden {
         return vec![Line::from(Span::styled(
@@ -174,29 +174,22 @@ pub fn reasoning_lines(text: &str, hidden: bool, theme: &Theme, width: u16) -> V
         ))];
     }
     let mut lines = vec![Line::from(Span::styled(
-        " ▒ THINKING",
+        "THINKING",
         theme.muted.add_modifier(Modifier::BOLD),
     ))];
-    // YYC-104 follow-up: pre-wrap each source line so the `▒` rail
-    // repeats on every visual row instead of breaking after the first
-    // when Paragraph::wrap takes over.
-    let prefix = " ▒ ";
-    let inner_width = width.saturating_sub(prefix.chars().count() as u16).max(1) as usize;
+    let inner_width = width.max(1) as usize;
     let body_style = theme.muted.add_modifier(Modifier::ITALIC);
     for raw in text.lines() {
         let chars: Vec<char> = raw.chars().collect();
         if chars.is_empty() {
-            lines.push(Line::from(Span::styled(prefix.to_string(), body_style)));
+            lines.push(Line::from(""));
             continue;
         }
         let mut idx = 0usize;
         while idx < chars.len() {
             let end = (idx + inner_width).min(chars.len());
             let chunk: String = chars[idx..end].iter().collect();
-            lines.push(Line::from(Span::styled(
-                format!("{prefix}{chunk}"),
-                body_style,
-            )));
+            lines.push(Line::from(Span::styled(chunk, body_style)));
             idx = end;
         }
     }
@@ -273,8 +266,8 @@ pub fn render_message_body(
     );
 }
 
-/// Bottom prompt row with mode pill, red caret, the input text + cursor,
-/// dashed key-hint line, and right-aligned model + token gauge.
+/// Bottom prompt row with metadata rail, red caret, input text + cursor,
+/// and key-hint command line.
 ///
 /// Returns the (x, y) where the OS cursor should be placed.
 ///
@@ -285,14 +278,15 @@ pub fn render_message_body(
 /// palette so the urgency cue is identical across themes.
 /// Compute total prompt-row height for a given input width + mode label.
 /// Caller layouts use this to reserve enough vertical space for wrap.
-/// Returns at least 3 (1 divider + 1 input + 1 hints).
-pub fn prompt_row_height(input: &str, width: u16, mode: &str) -> u16 {
-    let prefix = mode.chars().count() as u16 + 2 + 3 + 1; // [MODE] + space + ❯ + cursor
-    let avail = width.saturating_sub(prefix).max(1) as usize;
-    let chars = input.chars().count();
-    let input_lines = (chars + 1).max(1).div_ceil(avail); // +1 for cursor block
-    let input_lines = input_lines.max(1) as u16;
-    1 + input_lines + 1
+/// Returns at least 3 (1 metadata row + 1 input row + 1 hints row).
+pub fn prompt_row_height(input: &str, width: u16, _mode: &str) -> u16 {
+    let editor_width = width.saturating_sub(2).max(1) as usize;
+    let input_lines = input
+        .split('\n')
+        .map(|line| (line.chars().count() + 1).max(1).div_ceil(editor_width))
+        .sum::<usize>()
+        .max(1) as u16;
+    1 + input_lines + 2 + 1
 }
 
 // YYC-275: Frame + Rect + mode + input + 5 cosmetic fields per draw
@@ -302,7 +296,7 @@ pub fn prompt_row(
     f: &mut TuiFrame,
     area: Rect,
     mode: &str,
-    input: &str,
+    textarea: &TextArea<'_>,
     hints: &[(String, String)],
     model_status: &str,
     // capacity_ratio (YYC-60): current context / max. Drives the
@@ -317,7 +311,7 @@ pub fn prompt_row(
     let body_style = Style::default().fg(theme.body_fg);
     // YYC-104: input row height grows with wrap so long prompts stay
     // visible instead of scrolling off the right edge.
-    let input_height = area.height.saturating_sub(2).max(1);
+    let input_height = area.height.saturating_sub(2).max(3);
     let layout = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -327,46 +321,123 @@ pub fn prompt_row(
         ])
         .split(area);
 
-    let div = "─".repeat(area.width as usize);
-    f.render_widget(Paragraph::new(div).style(theme.border), layout[0]);
-
-    let mode_pill = Span::styled(
-        format!("[{}]", mode),
-        Style::default()
-            .fg(theme.body_fg)
-            .add_modifier(Modifier::BOLD),
+    render_prompt_meta(
+        f,
+        layout[0],
+        mode,
+        model_status,
+        capacity_ratio,
+        thinking,
+        theme,
     );
-    let caret = Span::styled(
-        " ❯ ",
-        Style::default()
-            .fg(Palette::RED)
-            .add_modifier(Modifier::BOLD),
-    );
-    let input_span = Span::styled(input.to_string(), body_style);
-    let cursor_block = Span::styled(
-        if thinking { "▒" } else { "█" },
-        body_style.add_modifier(if thinking {
-            Modifier::SLOW_BLINK
-        } else {
-            Modifier::empty()
-        }),
-    );
-    let line = Line::from(vec![mode_pill, caret, input_span, cursor_block]);
-    f.render_widget(Paragraph::new(line).wrap(Wrap { trim: false }), layout[1]);
 
-    // Compute cursor (x, y) accounting for wrap. The prefix is
-    // [MODE] + " ❯ " before the input.
-    let prefix_chars = mode.chars().count() as u16 + 2 + 3;
-    let cell_width = layout[1].width.max(1);
-    let typed = input.chars().count() as u16;
-    let total_offset = prefix_chars + typed;
-    let cursor_y_offset = total_offset / cell_width;
-    let cursor_x_offset = total_offset % cell_width;
-    let cursor_x = layout[1].x + cursor_x_offset;
-    let cursor_y = layout[1].y + cursor_y_offset;
+    let mut editor = textarea.clone();
+    editor.set_style(body_style);
+    editor.set_cursor_line_style(Style::default());
+    editor.set_cursor_style(
+        body_style
+            .fg(if thinking {
+                Palette::YELLOW
+            } else {
+                Palette::RED
+            })
+            .add_modifier(Modifier::REVERSED),
+    );
+    editor.set_block(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_type(BorderType::Plain)
+            .border_style(theme.border)
+            .title(Span::styled(
+                " ❯ prompt ",
+                Style::default()
+                    .fg(Palette::RED)
+                    .add_modifier(Modifier::BOLD),
+            )),
+    );
+    f.render_widget(&editor, layout[1]);
 
-    let muted_style = theme.muted;
-    let mut hint_spans: Vec<Span<'static>> = Vec::new();
+    let (cursor_row, cursor_col) = textarea.cursor();
+    let cursor_x = layout[1]
+        .x
+        .saturating_add(1)
+        .saturating_add(cursor_col as u16)
+        .min(layout[1].right().saturating_sub(2));
+    let cursor_y = layout[1]
+        .y
+        .saturating_add(1)
+        .saturating_add(cursor_row as u16)
+        .min(layout[1].bottom().saturating_sub(2));
+
+    render_prompt_hints(f, layout[2], hints, theme);
+
+    (cursor_x, cursor_y)
+}
+
+fn render_prompt_meta(
+    f: &mut TuiFrame,
+    area: Rect,
+    mode: &str,
+    model_status: &str,
+    capacity_ratio: f32,
+    thinking: bool,
+    theme: &Theme,
+) {
+    if area.width == 0 {
+        return;
+    }
+
+    let status_fg = capacity_color(capacity_ratio, theme);
+    let mode_color = if thinking {
+        Palette::YELLOW
+    } else {
+        theme.body_fg
+    };
+    let mode_label = if thinking { "BUSY" } else { mode };
+    let context = format!(
+        "CTX {:>3}%",
+        (capacity_ratio.clamp(0.0, 1.0) * 100.0).round() as u8
+    );
+
+    let left_text = format!("╭─ [{mode_label}]");
+    let context_text = format!("  {context}");
+    let right_text = format!("  {model_status}");
+    let left_len = left_text.chars().count();
+    let context_len = context_text.chars().count();
+    let right_len = right_text.chars().count();
+    let total_len = left_len + context_len + right_len;
+
+    let mut spans = vec![
+        Span::styled("╭─ ", theme.border),
+        Span::styled(
+            format!("[{mode_label}]"),
+            Style::default().fg(mode_color).add_modifier(Modifier::BOLD),
+        ),
+    ];
+
+    if total_len <= area.width as usize {
+        spans.push(Span::styled(context_text, Style::default().fg(status_fg)));
+        let used = left_len + context_len + right_len;
+        if used < area.width as usize {
+            spans.push(Span::raw(" ".repeat(area.width as usize - used)));
+        }
+        spans.push(Span::styled(
+            right_text,
+            Style::default().fg(status_fg).add_modifier(Modifier::BOLD),
+        ));
+    } else if left_len + context_len <= area.width as usize {
+        spans.push(Span::styled(context_text, Style::default().fg(status_fg)));
+    }
+
+    f.render_widget(Paragraph::new(Line::from(spans)), area);
+}
+
+fn render_prompt_hints(f: &mut TuiFrame, area: Rect, hints: &[(String, String)], theme: &Theme) {
+    if area.width == 0 {
+        return;
+    }
+
+    let mut hint_spans: Vec<Span<'static>> = vec![Span::styled("╰─ ", theme.border)];
     for (i, (key, label)) in hints.iter().enumerate() {
         if i > 0 {
             hint_spans.push(Span::raw("  "));
@@ -377,31 +448,89 @@ pub fn prompt_row(
                 .fg(theme.body_fg)
                 .add_modifier(Modifier::BOLD),
         ));
-        hint_spans.push(Span::styled(format!(" {label}"), muted_style));
+        hint_spans.push(Span::styled(format!(" {label}"), theme.muted));
     }
-    let hint_text_len: u16 = hint_spans
-        .iter()
-        .map(|s| s.content.chars().count() as u16)
-        .sum();
-    let model_len = model_status.chars().count() as u16;
-    if hint_text_len + model_len + 2 < area.width {
-        let pad = " ".repeat((area.width - hint_text_len - model_len - 1) as usize);
-        hint_spans.push(Span::raw(pad));
-        let status_fg = if capacity_ratio > 0.90 {
-            Palette::RED
-        } else if capacity_ratio > 0.70 {
-            Palette::YELLOW
-        } else {
-            theme.body_fg
-        };
-        hint_spans.push(Span::styled(
-            format!(" {model_status}"),
-            Style::default().fg(status_fg).add_modifier(Modifier::BOLD),
-        ));
-    }
-    f.render_widget(Paragraph::new(Line::from(hint_spans)), layout[2]);
 
-    (cursor_x, cursor_y)
+    f.render_widget(Paragraph::new(Line::from(hint_spans)), area);
+}
+
+fn capacity_color(capacity_ratio: f32, theme: &Theme) -> Color {
+    if capacity_ratio > 0.90 {
+        Palette::RED
+    } else if capacity_ratio > 0.70 {
+        Palette::YELLOW
+    } else {
+        theme.body_fg
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ratatui::{
+        Terminal,
+        backend::{Backend, TestBackend},
+    };
+
+    #[test]
+    fn prompt_row_moves_mode_context_and_model_to_meta_row() {
+        let backend = TestBackend::new(96, 5);
+        let mut terminal = Terminal::new(backend).expect("test terminal");
+        let theme = Theme::system();
+        let textarea = TextArea::new(vec!["hello".to_string()]);
+        let hints = vec![
+            ("Enter".to_string(), "send".to_string()),
+            ("Ctrl+T".to_string(), "tools".to_string()),
+            ("Ctrl+K".to_string(), "sessions".to_string()),
+            ("/".to_string(), "cmds".to_string()),
+        ];
+        let mut cursor = (0, 0);
+
+        terminal
+            .draw(|f| {
+                cursor = prompt_row(
+                    f,
+                    f.area(),
+                    "INSERT",
+                    &textarea,
+                    &hints,
+                    "qwen · 512 / 128,000",
+                    0.5,
+                    false,
+                    &theme,
+                );
+            })
+            .expect("draw prompt");
+
+        let body = terminal_buffer_text(terminal.backend());
+        assert!(body.contains("╭─ [INSERT]  CTX  50%"));
+        assert!(body.contains("qwen · 512 / 128,000"));
+        assert!(body.contains("❯ prompt"));
+        assert!(body.contains("hello"));
+        assert!(body.contains("╰─ [Enter] send  [Ctrl+T] tools"));
+        assert!(!body.contains("[INSERT] ❯"));
+        assert_eq!(cursor, (1, 2));
+    }
+
+    #[test]
+    fn prompt_row_height_wraps_without_mode_prefix() {
+        let input = "x".repeat(20);
+
+        assert_eq!(prompt_row_height(&input, 14, "INSERT"), 6);
+    }
+
+    fn terminal_buffer_text(backend: &TestBackend) -> String {
+        let area = backend.size().expect("backend size");
+        let buffer = backend.buffer();
+        let mut out = String::new();
+        for y in 0..area.height {
+            for x in 0..area.width {
+                out.push_str(buffer[(x, y)].symbol());
+            }
+            out.push('\n');
+        }
+        out
+    }
 }
 
 /// Bottom ticker strip — used in trading floor view. Scrolling text of
@@ -430,16 +559,16 @@ pub fn ticker(f: &mut TuiFrame, area: Rect, cells: &[(String, String, Color)]) {
 }
 
 /// Render a structured tool-call card per the design canvas (YYC-74).
-/// Single-line title bar (no surrounding box) — name pill on the
-/// left, status pill on the right, body indented underneath with the
-/// chat surface's left accent bar.
+/// Receipt-like, border-light, and copy-friendly: no vertical side
+/// pipes on body rows, with status carried by glyph + foreground.
 ///
 /// Layout (matches `Private/.../tools.jsx` T01–T14 title bars):
 /// ```text
-/// ▎ × tool_name · params_summary               ✓ OK · 0.34s
-/// ▎   N lines · 4.1 KB
-/// ▎   output_preview line 1
-/// ▎   output_preview line 2
+/// ╭─ × tool_name · params_summary               ✓ OK · 0.34s
+///    N lines · 4.1 KB
+///    output_preview line 1
+///    output_preview line 2
+/// ╰─
 /// ```
 ///
 /// YYC-52: this card is **structural** per the YYC-74 design canvas —
@@ -469,11 +598,10 @@ pub fn tool_card(
         ToolStatus::Done(false) => ("✗", "ERR", Palette::RED),
     };
 
-    // Card has a 1-col border on left + right (`│`).
-    let inner_w = width.saturating_sub(2) as usize;
+    let inner_w = width.saturating_sub(3) as usize;
 
     // Left half of header: name pill + " · params"
-    let name_pill_text = format!(" × {name} ");
+    let name_pill_text = format!("× {name} ");
     let mut left_chars = name_pill_text.chars().count();
     let mut params_text = String::new();
     if let Some(p) = params_summary {
@@ -483,9 +611,9 @@ pub fn tool_card(
 
     // Right half: status pill " ✓ OK 0.34s "
     let pill_body = match (status, elapsed_ms) {
-        (ToolStatus::InProgress, _) => format!(" {glyph} {label} "),
-        (_, Some(ms)) => format!(" {glyph} {label} {} ", format_elapsed(ms)),
-        (_, None) => format!(" {glyph} {label} "),
+        (ToolStatus::InProgress, _) => format!(" {glyph} {label}"),
+        (_, Some(ms)) => format!(" {glyph} {label} {}", format_elapsed(ms)),
+        (_, None) => format!(" {glyph} {label}"),
     };
     let right_chars = pill_body.chars().count();
 
@@ -505,19 +633,11 @@ pub fn tool_card(
     }
     let gap = inner_w.saturating_sub(left_chars + right_chars);
 
-    // Border-only card. Foreground emphasis carries the visual hierarchy
-    // so the active terminal background shows through and copy-paste
-    // captures plain text.
     let border = Style::default().fg(Palette::MUTED);
 
-    let mut out = vec![Line::from(vec![
-        Span::styled("┌", border),
-        Span::styled("─".repeat(inner_w), border),
-        Span::styled("┐", border),
-    ])];
-
     let mut header: Vec<Span<'static>> = Vec::new();
-    header.push(Span::styled("│", border));
+    header.push(Span::styled("╭─", border));
+    header.push(Span::raw(" "));
     header.push(Span::styled(
         name_pill_text,
         Style::default().add_modifier(Modifier::BOLD),
@@ -532,24 +652,13 @@ pub fn tool_card(
         pill_body,
         Style::default().fg(color).add_modifier(Modifier::BOLD),
     ));
-    header.push(Span::styled("│", border));
-    out.push(Line::from(header));
+    let mut out = vec![Line::from(header)];
 
-    let body_indent = "  ";
+    let body_indent = "   ";
     let body_inner = inner_w.saturating_sub(body_indent.chars().count());
 
-    let render_body = |spans: &mut Vec<Span<'static>>, used: usize| {
-        let pad = inner_w.saturating_sub(used);
-        if pad > 0 {
-            spans.push(Span::raw(" ".repeat(pad)));
-        }
-        spans.push(Span::styled("│", border));
-    };
-
     if let Some(meta) = result_meta {
-        let used = body_indent.chars().count() + meta.chars().count();
-        let mut spans = vec![
-            Span::styled("│", border),
+        let spans = vec![
             Span::raw(body_indent.to_string()),
             Span::styled(
                 meta.to_string(),
@@ -558,7 +667,6 @@ pub fn tool_card(
                     .add_modifier(Modifier::BOLD),
             ),
         ];
-        render_body(&mut spans, used);
         out.push(Line::from(spans));
     }
 
@@ -588,13 +696,10 @@ pub fn tool_card(
             } else {
                 Style::default()
             };
-            let used = body_indent.chars().count() + body.chars().count();
-            let mut spans = vec![
-                Span::styled("│", border),
+            let spans = vec![
                 Span::raw(body_indent.to_string()),
                 Span::styled(body, body_style),
             ];
-            render_body(&mut spans, used);
             out.push(Line::from(spans));
         }
     }
@@ -604,9 +709,7 @@ pub fn tool_card(
             "… {elided_lines} more line{} elided",
             if elided_lines == 1 { "" } else { "s" }
         );
-        let used = body_indent.chars().count() + footer.chars().count();
-        let mut spans = vec![
-            Span::styled("│", border),
+        let spans = vec![
             Span::raw(body_indent.to_string()),
             Span::styled(
                 footer,
@@ -615,14 +718,12 @@ pub fn tool_card(
                     .add_modifier(Modifier::ITALIC),
             ),
         ];
-        render_body(&mut spans, used);
         out.push(Line::from(spans));
     }
 
     out.push(Line::from(vec![
-        Span::styled("└", border),
-        Span::styled("─".repeat(inner_w), border),
-        Span::styled("┘", border),
+        Span::styled("╰─", border),
+        Span::styled("─".repeat(inner_w.min(18)), border),
     ]));
 
     out

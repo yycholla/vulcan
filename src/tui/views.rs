@@ -1,3 +1,4 @@
+use figlet_rs::FIGlet;
 use ratatui::{
     Frame as TuiFrame,
     layout::{Constraint, Direction, Layout, Rect},
@@ -116,20 +117,35 @@ fn build_chat_window(
     dense: bool,
     width: u16,
     height: u16,
+    include_prefix: bool,
+    include_welcome: bool,
 ) -> VisibleChatLines {
     let window_start = usize::from(app.scroll);
     let window_end = window_start.saturating_add(usize::from(height));
     let mut total_lines = 0usize;
     let mut lines = Vec::with_capacity(usize::from(height));
 
-    let prefix = build_chat_prefix_lines(app);
-    push_visible_fixed_lines(
-        &mut lines,
-        &prefix,
-        &mut total_lines,
-        window_start,
-        window_end,
-    );
+    if include_prefix {
+        let prefix = build_chat_prefix_lines(app);
+        push_visible_fixed_lines(
+            &mut lines,
+            &prefix,
+            &mut total_lines,
+            window_start,
+            window_end,
+        );
+    }
+
+    if include_welcome {
+        let welcome = build_chat_welcome_lines(width, &app.theme);
+        push_visible_fixed_lines(
+            &mut lines,
+            &welcome,
+            &mut total_lines,
+            window_start,
+            window_end,
+        );
+    }
 
     if !app.messages.is_empty() {
         let message_start = total_lines;
@@ -192,6 +208,67 @@ fn build_chat_prefix_lines(app: &AppState) -> Vec<Line<'static>> {
     }
 
     lines
+}
+
+fn build_chat_welcome_lines(width: u16, theme: &super::theme::Theme) -> Vec<Line<'static>> {
+    let mut lines = Vec::new();
+    lines.extend(figlet_welcome_banner("VULCAN", width, theme));
+
+    lines.push(Line::from(Span::styled(
+        "VULCAN · local agent workbench",
+        theme.muted.add_modifier(Modifier::BOLD),
+    )));
+    lines.push(Line::from(Span::styled(
+        "Command AI like a tool, not a conversation.",
+        theme.muted.add_modifier(Modifier::ITALIC),
+    )));
+    lines.push(Line::from(vec![
+        Span::styled("[Enter]", Style::default().fg(theme.body_fg)),
+        Span::styled(" send  ", theme.muted),
+        Span::styled("[/]", Style::default().fg(theme.body_fg)),
+        Span::styled(" commands  ", theme.muted),
+        Span::styled("[Ctrl+K]", Style::default().fg(theme.body_fg)),
+        Span::styled(" sessions", theme.muted),
+    ]));
+    lines.push(Line::from(""));
+    lines
+}
+
+fn figlet_welcome_banner(
+    text: &str,
+    width: u16,
+    theme: &super::theme::Theme,
+) -> Vec<Line<'static>> {
+    let width = usize::from(width);
+    for font in [FIGlet::standard, FIGlet::small] {
+        let Ok(font) = font() else {
+            continue;
+        };
+        let Some(figure) = font.convert(text) else {
+            continue;
+        };
+        let rows = figure
+            .as_str()
+            .lines()
+            .map(|line| line.trim_end().to_string())
+            .collect::<Vec<_>>();
+        if !rows.is_empty() && rows.iter().all(|line| line.chars().count() <= width) {
+            return rows
+                .into_iter()
+                .map(|line| {
+                    Line::from(Span::styled(
+                        line,
+                        theme.accent.add_modifier(Modifier::BOLD),
+                    ))
+                })
+                .collect();
+        }
+    }
+
+    vec![Line::from(Span::styled(
+        text.to_string(),
+        theme.accent.add_modifier(Modifier::BOLD),
+    ))]
 }
 
 fn build_chat_suffix_lines(app: &AppState) -> Vec<Line<'static>> {
@@ -278,31 +355,53 @@ fn single_stack(f: &mut TuiFrame, area: Rect, app: &AppState) {
     let inner = frame(
         f,
         layout[0],
-        app.view.title(),
-        Some("ses 1/1 · ●live"),
-        None,
+        "vulcan · single stack",
+        Some("focus"),
+        app.theme.accent.fg,
         &app.theme,
     );
-    let chat_w = inner.width.saturating_sub(2);
-    let window = build_chat_window(app, app.show_reasoning, false, chat_w, inner.height);
-    publish_chat_max_scroll(app, window.total_lines, inner.height);
+
+    if inner.height == 0 {
+        return;
+    }
+
+    let header = Rect {
+        x: inner.x + 1,
+        y: inner.y,
+        width: inner.width.saturating_sub(2),
+        height: 1,
+    };
+    render_single_stack_status(f, header, app);
+
+    let chat_area = Rect {
+        x: inner.x + 1,
+        y: inner.y + 1,
+        width: inner.width.saturating_sub(2),
+        height: inner.height.saturating_sub(1),
+    };
+    let chat_w = chat_area.width;
+    let window = build_chat_window(
+        app,
+        app.show_reasoning,
+        false,
+        chat_w,
+        chat_area.height,
+        false,
+        true,
+    );
+    publish_chat_max_scroll(app, window.total_lines, chat_area.height);
     f.render_widget(
         Paragraph::new(window.lines)
             .style(body())
             .wrap(Wrap { trim: false }),
-        Rect {
-            x: inner.x + 1,
-            y: inner.y,
-            width: chat_w,
-            height: inner.height,
-        },
+        chat_area,
     );
 
     let (cx, cy) = super::widgets::prompt_row(
         f,
         layout[1],
         app.mode_label(),
-        &app.input,
+        app.prompt_editor.textarea(),
         app.prompt_hints(),
         &app.model_status(),
         app.context_ratio(),
@@ -310,6 +409,58 @@ fn single_stack(f: &mut TuiFrame, area: Rect, app: &AppState) {
         &app.theme,
     );
     app.cursor_set(cx, cy);
+}
+
+fn render_single_stack_status(f: &mut TuiFrame, area: Rect, app: &AppState) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+
+    let session = format!("[SESSION] {}", app.session_label);
+    let live = if app.thinking { "[BUSY]" } else { "[READY]" };
+    let queue = if app.queue.is_empty() {
+        String::new()
+    } else {
+        format!(" · {} queued", app.queue.len())
+    };
+    let reasoning = if app.show_reasoning {
+        " · reasoning on"
+    } else {
+        " · reasoning hidden"
+    };
+    let tape = single_stack_activity_tape(app);
+    let text = format!(" {tape}  {session}   {live}{queue}{reasoning}");
+    let style = if app.thinking {
+        Style::default()
+            .fg(Palette::YELLOW)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        app.theme.muted.add_modifier(Modifier::BOLD)
+    };
+    f.render_widget(
+        Paragraph::new(truncate_to_width(&text, area.width)).style(style),
+        area,
+    );
+}
+
+fn single_stack_activity_tape(app: &AppState) -> &'static str {
+    if !app.thinking {
+        return "[..::]";
+    }
+    const FRAMES: [&str; 8] = [
+        "[>   ]", "[=>  ]", "[==> ]", "[===>]", "[ <==]", "[  <=]", "[   <]", "[.  .]",
+    ];
+    let frame = (app.session_started.elapsed().as_millis() / 180) as usize % FRAMES.len();
+    FRAMES[frame]
+}
+
+fn truncate_to_width(text: &str, width: u16) -> String {
+    let width = usize::from(width);
+    let mut out = String::new();
+    for ch in text.chars().take(width) {
+        out.push(ch);
+    }
+    out
 }
 
 // ─── 02 SPLIT SESSIONS ──────────────────────────────────────────────────
@@ -396,7 +547,15 @@ fn split_sessions(f: &mut TuiFrame, area: Rect, app: &AppState) {
     };
     let chat_width = body_area.width.saturating_sub(2);
     let chat_height = body_area.height;
-    let window = build_chat_window(app, app.show_reasoning, false, chat_width, chat_height);
+    let window = build_chat_window(
+        app,
+        app.show_reasoning,
+        false,
+        chat_width,
+        chat_height,
+        true,
+        false,
+    );
     publish_chat_max_scroll(app, window.total_lines, chat_height.saturating_sub(1));
     f.render_widget(
         Paragraph::new(window.lines)
@@ -414,7 +573,7 @@ fn split_sessions(f: &mut TuiFrame, area: Rect, app: &AppState) {
         f,
         v[1],
         app.mode_label(),
-        &app.input,
+        app.prompt_editor.textarea(),
         app.prompt_hints(),
         &app.model_status(),
         app.context_ratio(),
@@ -581,7 +740,7 @@ fn tiled_mesh(f: &mut TuiFrame, area: Rect, app: &AppState) {
         f,
         v[1],
         app.mode_label(),
-        &app.input,
+        app.prompt_editor.textarea(),
         app.prompt_hints(),
         &app.model_status(),
         app.context_ratio(),
@@ -700,7 +859,7 @@ fn tree_of_thought(f: &mut TuiFrame, area: Rect, app: &AppState) {
         f,
         v[1],
         app.mode_label(),
-        &app.input,
+        app.prompt_editor.textarea(),
         app.prompt_hints(),
         &app.model_status(),
         app.context_ratio(),
@@ -760,7 +919,15 @@ fn trading_floor(f: &mut TuiFrame, area: Rect, app: &AppState) {
     let primary_inner = section_header(f, top[0], "primary · auth-refactor", Some(Palette::RED));
     let chat_width = primary_inner.width.saturating_sub(2);
     let chat_height = primary_inner.height;
-    let window = build_chat_window(app, app.show_reasoning, true, chat_width, chat_height);
+    let window = build_chat_window(
+        app,
+        app.show_reasoning,
+        true,
+        chat_width,
+        chat_height,
+        true,
+        false,
+    );
     publish_chat_max_scroll(app, window.total_lines, chat_height);
     f.render_widget(
         Paragraph::new(window.lines)
@@ -1097,7 +1264,7 @@ fn trading_floor(f: &mut TuiFrame, area: Rect, app: &AppState) {
         f,
         v[2],
         app.mode_label(),
-        &app.input,
+        app.prompt_editor.textarea(),
         app.prompt_hints(),
         &app.model_status(),
         app.context_ratio(),
@@ -1174,6 +1341,10 @@ pub struct DiffLine {
 mod tests {
     use super::*;
     use crate::tui::state::ChatRole;
+    use ratatui::{
+        Terminal,
+        backend::{Backend, TestBackend},
+    };
 
     #[test]
     fn build_chat_window_uses_visible_height() {
@@ -1185,9 +1356,89 @@ mod tests {
             ));
         }
 
-        let window = build_chat_window(&app, true, false, 80, 5);
+        let window = build_chat_window(&app, true, false, 80, 5, true, false);
 
         assert_eq!(window.lines.len(), 5);
         assert!(window.total_lines > 5);
+    }
+
+    #[test]
+    fn single_stack_renders_focus_header_and_copy_friendly_body() {
+        let backend = TestBackend::new(140, 22);
+        let mut terminal = Terminal::new(backend).expect("test terminal");
+        let mut app = AppState::new("test-model".into(), 128_000);
+        app.view = View::SingleStack;
+        app.session_label = "main".into();
+        app.messages.push(crate::tui::state::ChatMessage::new(
+            ChatRole::User,
+            "copy this line",
+        ));
+
+        terminal
+            .draw(|f| render_view(f, f.area(), &app))
+            .expect("draw single stack");
+
+        let body = terminal_buffer_text(terminal.backend());
+        assert!(body.contains("VULCAN · SINGLE STACK"));
+        assert!(body.contains("Command AI like a tool"));
+        assert!(body.contains("[SESSION] main"));
+        assert!(body.contains("[INSERT]"));
+        assert!(body.contains("test-model · 0 / 128,000"));
+        assert!(body.contains("VULCAN · local agent workbench"));
+        assert!(!body.contains("── session"));
+        assert!(!body.contains("▎ copy this line"));
+        assert_eq!(app.messages.len(), 1);
+    }
+
+    #[test]
+    fn chat_welcome_is_render_only_prefix() {
+        let app = AppState::new("test-model".into(), 128_000);
+        let window = build_chat_window(&app, true, false, 120, 12, false, true);
+        let body = window
+            .lines
+            .iter()
+            .map(line_text)
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(body.contains("VULCAN · local agent workbench"));
+        assert!(body.contains("Command AI like a tool"));
+        assert!(app.messages.is_empty());
+    }
+
+    #[test]
+    fn figlet_welcome_uses_natural_line_count() {
+        let app = AppState::new("test-model".into(), 128_000);
+        let expected = FIGlet::standard()
+            .expect("standard figlet font")
+            .convert("VULCAN")
+            .expect("figlet conversion")
+            .as_str()
+            .lines()
+            .count();
+
+        let banner = figlet_welcome_banner("VULCAN", 120, &app.theme);
+
+        assert_eq!(banner.len(), expected);
+    }
+
+    fn terminal_buffer_text(backend: &TestBackend) -> String {
+        let area = backend.size().expect("backend size");
+        let buffer = backend.buffer();
+        let mut out = String::new();
+        for y in 0..area.height {
+            for x in 0..area.width {
+                out.push_str(buffer[(x, y)].symbol());
+            }
+            out.push('\n');
+        }
+        out
+    }
+
+    fn line_text(line: &Line<'static>) -> String {
+        line.spans
+            .iter()
+            .map(|s| s.content.as_ref())
+            .collect::<String>()
     }
 }

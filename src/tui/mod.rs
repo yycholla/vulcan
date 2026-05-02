@@ -61,7 +61,7 @@ pub mod theme;
 pub mod views;
 pub mod widgets;
 
-use state::{AppState, CancelPop, ChatMessage, ChatRole};
+use state::{AppState, CancelPop, ChatMessage, ChatRole, PromptEditMode};
 use theme::{Theme, body};
 use views::{View, render_view};
 use vulcan_frontend_api::{CanvasKey, FrontendCommandAction};
@@ -910,7 +910,7 @@ pub async fn run_tui(
                         // text into the resume keystroke handler.
                         if let Event::Paste(text) = &event {
                             if app.pending_pause.is_none() {
-                                app.input.push_str(text);
+                                app.prompt_insert_str(text);
                             }
                             continue;
                         }
@@ -1115,8 +1115,15 @@ pub async fn run_tui(
                                             let candidates = keymap::current_palette(&app.input);
                                             if !candidates.is_empty() {
                                                 let idx = app.slash_menu_selection.min(candidates.len() - 1);
-                                                app.input = format!("/{}", candidates[idx].name);
+                                                app.prompt_set(format!("/{}", candidates[idx].name));
                                             }
+                                        }
+                                        if !app.input.starts_with('/')
+                                            && app.prompt_editor.mode() == PromptEditMode::Insert
+                                        {
+                                            app.prompt_handle_key(key);
+                                            pending_quit = false;
+                                            continue;
                                         }
                                         if app.input.is_empty() {
                                             continue;
@@ -1144,7 +1151,7 @@ pub async fn run_tui(
                                         };
                                         if app.thinking && is_slash && !mid_turn_safe {
                                             let cmd_text = app.input.trim().to_string();
-                                            app.input.clear();
+                                            app.prompt_clear();
                                             app.slash_menu_selection = 0;
                                             pending_quit = false;
                                             app.messages.push(ChatMessage {
@@ -1176,7 +1183,7 @@ pub async fn run_tui(
                                                     ..Default::default()
                                                 });
                                             }
-                                            app.input.clear();
+                                            app.prompt_clear();
                                             app.slash_menu_selection = 0;
                                             pending_quit = false;
                                             continue;
@@ -1185,7 +1192,7 @@ pub async fn run_tui(
                                         // through to dispatch.
                                         if !app.input.is_empty() {
                                             let msg = app.input.trim().to_string();
-                                            app.input.clear();
+                                            app.prompt_clear();
                                             app.slash_menu_selection = 0;
                                             pending_quit = false;
 
@@ -1550,23 +1557,25 @@ pub async fn run_tui(
                                             events::submit_prompt(&mut app, &agent, &stream_tx, msg);
                                         }
                                     }
-                                    KeyCode::Char(c) => {
+                                    KeyCode::Char(_) => {
                                         pending_quit = false;
-                                        app.input.push(c);
+                                        app.prompt_handle_key(key);
                                         // Re-filtering may shrink the menu; keep the highlight
                                         // anchored at the top so the visible top row is selected.
                                         app.slash_menu_selection = 0;
                                     }
                                     KeyCode::Backspace => {
                                         pending_quit = false;
-                                        app.input.pop();
+                                        app.prompt_handle_key(key);
                                         app.slash_menu_selection = 0;
                                     }
                                     KeyCode::Tab => {
                                         pending_quit = false;
                                         if let Some(rest) = app.input.strip_prefix('/')
                                             && let Some(c) = keymap::complete_slash(rest) {
-                                                app.input = format!("/{c}");
+                                                app.prompt_set(format!("/{c}"));
+                                            } else {
+                                                app.prompt_handle_key(key);
                                             }
                                     }
                                     KeyCode::Up => {
@@ -1578,6 +1587,10 @@ pub async fn run_tui(
                                                     app.slash_menu_selection.saturating_sub(1);
                                                 continue;
                                             }
+                                        }
+                                        if !app.input.is_empty() && app.prompt_handle_key(key) {
+                                            pending_quit = false;
+                                            continue;
                                         }
                                         // YYC-123: 3 lines per arrow keypress so
                                         // holding Up/Down feels closer to a
@@ -1596,9 +1609,21 @@ pub async fn run_tui(
                                                 continue;
                                             }
                                         }
+                                        if !app.input.is_empty() && app.prompt_handle_key(key) {
+                                            pending_quit = false;
+                                            continue;
+                                        }
                                         let max = app.chat_max_scroll.get();
                                         app.scroll = app.scroll.saturating_add(3).min(max);
                                         app.at_bottom = app.scroll >= max;
+                                    }
+                                    KeyCode::Left
+                                    | KeyCode::Right
+                                    | KeyCode::Home
+                                    | KeyCode::End
+                                    | KeyCode::Delete => {
+                                        pending_quit = false;
+                                        app.prompt_handle_key(key);
                                     }
                                     KeyCode::PageUp => {
                                         app.scroll = app.scroll.saturating_sub(10);
@@ -1614,8 +1639,10 @@ pub async fn run_tui(
                                         // clears the buffer and drops back to Insert; only Esc
                                         // with an empty buffer exits.
                                         if app.input.starts_with('/') {
-                                            app.input.clear();
+                                            app.prompt_clear();
                                             app.slash_menu_selection = 0;
+                                        } else if app.prompt_editor.mode() == PromptEditMode::Insert {
+                                            app.prompt_handle_key(key);
                                         } else {
                                             exit = true;
                                         }

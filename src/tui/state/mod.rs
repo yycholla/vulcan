@@ -31,6 +31,9 @@ use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, VecDeque};
 use std::time::{Duration, Instant};
 
+use crossterm::event::KeyEvent;
+use tui_textarea::{CursorMove, Input, Key, TextArea};
+
 use super::keybinds::Keybinds;
 
 /// Format a u32 with comma thousands separators (YYC-60).
@@ -133,6 +136,237 @@ impl PromptMode {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum PromptEditMode {
+    Normal,
+    #[default]
+    Insert,
+}
+
+impl PromptEditMode {
+    pub fn badge(self) -> &'static str {
+        match self {
+            PromptEditMode::Normal => "NORMAL",
+            PromptEditMode::Insert => "INSERT",
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct PromptEditor {
+    textarea: TextArea<'static>,
+    mode: PromptEditMode,
+    pending: Input,
+}
+
+impl Default for PromptEditor {
+    fn default() -> Self {
+        let mut textarea = TextArea::default();
+        textarea.set_cursor_line_style(ratatui::style::Style::default());
+        Self {
+            textarea,
+            mode: PromptEditMode::Insert,
+            pending: Input::default(),
+        }
+    }
+}
+
+impl PromptEditor {
+    pub fn mode(&self) -> PromptEditMode {
+        self.mode
+    }
+
+    pub fn textarea(&self) -> &TextArea<'static> {
+        &self.textarea
+    }
+
+    pub fn text(&self) -> String {
+        self.textarea.lines().join("\n")
+    }
+
+    pub fn set_text(&mut self, text: impl AsRef<str>) {
+        let mut lines = text
+            .as_ref()
+            .split('\n')
+            .map(ToString::to_string)
+            .collect::<Vec<_>>();
+        if lines.is_empty() {
+            lines.push(String::new());
+        }
+        let row = lines.len().saturating_sub(1);
+        let col = lines.last().map(|line| line.chars().count()).unwrap_or(0);
+        self.textarea.set_lines(lines, (row, col));
+        self.pending = Input::default();
+    }
+
+    pub fn clear(&mut self) {
+        self.set_text("");
+        self.mode = PromptEditMode::Insert;
+    }
+
+    pub fn insert_str(&mut self, text: &str) {
+        self.textarea.insert_str(text);
+        self.pending = Input::default();
+    }
+
+    pub fn handle_key(&mut self, key: KeyEvent) -> bool {
+        let input = Input::from(key);
+        if input.key == Key::Null {
+            return false;
+        }
+
+        let changed = match self.mode {
+            PromptEditMode::Insert => self.handle_insert(input),
+            PromptEditMode::Normal => self.handle_normal(input),
+        };
+        if changed {
+            self.pending = Input::default();
+        }
+        changed
+    }
+
+    fn handle_insert(&mut self, input: Input) -> bool {
+        match input {
+            Input { key: Key::Esc, .. } => {
+                self.mode = PromptEditMode::Normal;
+                true
+            }
+            input => self.textarea.input(input),
+        }
+    }
+
+    fn handle_normal(&mut self, input: Input) -> bool {
+        match input {
+            Input {
+                key: Key::Char('h'),
+                ..
+            } => self.textarea.move_cursor(CursorMove::Back),
+            Input {
+                key: Key::Char('j'),
+                ..
+            } => self.textarea.move_cursor(CursorMove::Down),
+            Input {
+                key: Key::Char('k'),
+                ..
+            } => self.textarea.move_cursor(CursorMove::Up),
+            Input {
+                key: Key::Char('l'),
+                ..
+            } => self.textarea.move_cursor(CursorMove::Forward),
+            Input {
+                key: Key::Char('w'),
+                ..
+            } => self.textarea.move_cursor(CursorMove::WordForward),
+            Input {
+                key: Key::Char('e'),
+                ctrl: false,
+                ..
+            } => self.textarea.move_cursor(CursorMove::WordEnd),
+            Input {
+                key: Key::Char('b'),
+                ctrl: false,
+                ..
+            } => self.textarea.move_cursor(CursorMove::WordBack),
+            Input {
+                key: Key::Char('^'),
+                ..
+            } => self.textarea.move_cursor(CursorMove::Head),
+            Input {
+                key: Key::Char('$'),
+                ..
+            } => self.textarea.move_cursor(CursorMove::End),
+            Input {
+                key: Key::Char('G'),
+                ctrl: false,
+                ..
+            } => self.textarea.move_cursor(CursorMove::Bottom),
+            Input {
+                key: Key::Char('g'),
+                ctrl: false,
+                ..
+            } if matches!(
+                self.pending,
+                Input {
+                    key: Key::Char('g'),
+                    ctrl: false,
+                    ..
+                }
+            ) =>
+            {
+                self.textarea.move_cursor(CursorMove::Top);
+                self.pending = Input::default();
+                return true;
+            }
+            Input {
+                key: Key::Char('i'),
+                ..
+            } => self.mode = PromptEditMode::Insert,
+            Input {
+                key: Key::Char('a'),
+                ..
+            } => {
+                self.textarea.move_cursor(CursorMove::Forward);
+                self.mode = PromptEditMode::Insert;
+            }
+            Input {
+                key: Key::Char('A'),
+                ..
+            } => {
+                self.textarea.move_cursor(CursorMove::End);
+                self.mode = PromptEditMode::Insert;
+            }
+            Input {
+                key: Key::Char('o'),
+                ..
+            } => {
+                self.textarea.move_cursor(CursorMove::End);
+                self.textarea.insert_newline();
+                self.mode = PromptEditMode::Insert;
+            }
+            Input {
+                key: Key::Char('O'),
+                ..
+            } => {
+                self.textarea.move_cursor(CursorMove::Head);
+                self.textarea.insert_newline();
+                self.textarea.move_cursor(CursorMove::Up);
+                self.mode = PromptEditMode::Insert;
+            }
+            Input {
+                key: Key::Char('x'),
+                ..
+            } => {
+                self.textarea.delete_next_char();
+            }
+            Input {
+                key: Key::Char('D'),
+                ..
+            } => {
+                self.textarea.delete_line_by_end();
+            }
+            Input {
+                key: Key::Char('u'),
+                ctrl: false,
+                ..
+            } => {
+                self.textarea.undo();
+            }
+            Input {
+                key: Key::Char('r'),
+                ctrl: true,
+                ..
+            } => {
+                self.textarea.redo();
+            }
+            input => {
+                self.pending = input;
+                return false;
+            }
+        }
+        true
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
 pub enum ChatRole {
     User,
@@ -179,6 +413,7 @@ pub struct AppState {
     pub view: View,
     pub messages: Vec<ChatMessage>,
     pub input: String,
+    pub prompt_editor: PromptEditor,
     pub thinking: bool,
     pub scroll: u16,
     /// True when the chat viewport is following the bottom — new agent
@@ -381,6 +616,7 @@ impl AppState {
             view: View::TradingFloor,
             messages: Vec::new(),
             input: String::new(),
+            prompt_editor: PromptEditor::default(),
             thinking: false,
             scroll: 0,
             at_bottom: true,
@@ -499,9 +735,10 @@ impl AppState {
     }
 
     pub fn mode_label(&self) -> &'static str {
-        // YYC-58: badge follows the prompt mode rather than thinking flag.
-        // Busy is set externally when a turn starts (YYC-61).
-        self.prompt_mode.badge()
+        match self.prompt_mode {
+            PromptMode::Insert => self.prompt_editor.mode().badge(),
+            _ => self.prompt_mode.badge(),
+        }
     }
 
     /// Per-mode hint pairs for the prompt-row footer (YYC-58, YYC-90).
@@ -537,6 +774,29 @@ impl AppState {
         } else {
             PromptMode::Insert
         };
+    }
+
+    pub fn prompt_set(&mut self, text: impl Into<String>) {
+        self.input = text.into();
+        self.prompt_editor.set_text(&self.input);
+    }
+
+    pub fn prompt_clear(&mut self) {
+        self.input.clear();
+        self.prompt_editor.clear();
+    }
+
+    pub fn prompt_insert_str(&mut self, text: &str) {
+        self.prompt_editor.insert_str(text);
+        self.input = self.prompt_editor.text();
+    }
+
+    pub fn prompt_handle_key(&mut self, key: KeyEvent) -> bool {
+        let changed = self.prompt_editor.handle_key(key);
+        if changed {
+            self.input = self.prompt_editor.text();
+        }
+        changed
     }
 
     pub fn model_status(&self) -> String {

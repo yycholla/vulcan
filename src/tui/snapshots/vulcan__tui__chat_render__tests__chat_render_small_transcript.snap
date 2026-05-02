@@ -3,15 +3,14 @@ source: src/tui/chat_render.rs
 expression: body
 ---
 ▆ YOU
-▎ what's in src/main.rs?
+what's in src/main.rs?
 ▆ AGENT
- ▒ THINKING
- ▒ inspecting file
+THINKING
+inspecting file
 
-┌──────────────────────────────────────────────────────────┐
-│ × read_file   src/main.rs                      ✓ OK 12ms │
-│  1 line                                                  │
-│  fn main() {}                                            │
-└──────────────────────────────────────────────────────────┘
+╭─ × read_file   src/main.rs                       ✓ OK 12ms
+   1 line
+   fn main() {}
+╰───────────────────
 
-▎ The file is a one-line main.
+The file is a one-line main.
