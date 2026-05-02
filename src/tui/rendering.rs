@@ -22,6 +22,7 @@ use crate::config::Config;
 use super::keymap::SlashCommand;
 use super::miller_columns;
 use super::model_picker;
+use super::picker_state::ProviderPickerEntry;
 use super::state::{AppState, SessionStatus};
 use super::theme::Theme;
 use super::{body, short_id};
@@ -403,10 +404,15 @@ fn initial_path_for_active_model(
     path
 }
 
-pub(super) fn draw_provider_picker(f: &mut Frame, area: Rect, app: &AppState) {
-    let theme = &app.theme;
+pub(super) fn draw_provider_picker_frame(
+    f: &mut Frame,
+    area: Rect,
+    theme: &Theme,
+    items: &[ProviderPickerEntry],
+    selection: usize,
+) {
     let width = area.width.min(72);
-    let rows = (app.provider_picker_items.len() as u16).min(12);
+    let rows = (items.len() as u16).min(12);
     let height = (rows + 5).min(area.height.saturating_sub(2));
     let x = area.x + (area.width.saturating_sub(width)) / 2;
     let y = area.y + (area.height.saturating_sub(height)) / 2;
@@ -449,13 +455,11 @@ pub(super) fn draw_provider_picker(f: &mut Frame, area: Rect, app: &AppState) {
     };
 
     let mut lines: Vec<Line<'static>> = Vec::new();
-    if app.provider_picker_items.is_empty() {
+    if items.is_empty() {
         lines.push(Line::from(Span::styled("  (no providers)", theme.muted)));
     } else {
-        let active = app
-            .provider_picker_selection
-            .min(app.provider_picker_items.len().saturating_sub(1));
-        for (i, e) in app.provider_picker_items.iter().enumerate() {
+        let active = selection.min(items.len().saturating_sub(1));
+        for (i, e) in items.iter().enumerate() {
             let is_active = i == active;
             let marker = if is_active { "▸ " } else { "  " };
             let label = e.name.clone().unwrap_or_else(|| "default".into());

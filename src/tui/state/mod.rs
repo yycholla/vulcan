@@ -32,7 +32,6 @@ use std::collections::{BTreeMap, VecDeque};
 use std::time::{Duration, Instant};
 
 use crossterm::event::KeyEvent;
-use tui_textarea::{CursorMove, Input, Key, TextArea};
 
 use super::keybinds::Keybinds;
 
@@ -65,8 +64,9 @@ pub use super::orchestration::{
     ToolLogRow, TreeNode,
 };
 pub use super::picker_state::{ProviderPickerEntry, SessionState, SessionStatus};
+pub use super::prompt::{PromptEditMode, PromptEditor, PromptEnterIntent, PromptEscapeIntent};
 
-use super::surface::SurfaceStack;
+use super::surface::{SurfaceFrame, SurfaceStack};
 use super::theme::{Palette, Theme};
 use super::views::{DiffKind, DiffLine, View};
 
@@ -134,237 +134,6 @@ impl PromptMode {
             PromptMode::Ask => "ASK",
             PromptMode::Busy => "BUSY",
         }
-    }
-}
-
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum PromptEditMode {
-    Normal,
-    #[default]
-    Insert,
-}
-
-impl PromptEditMode {
-    pub fn badge(self) -> &'static str {
-        match self {
-            PromptEditMode::Normal => "NORMAL",
-            PromptEditMode::Insert => "INSERT",
-        }
-    }
-}
-
-#[derive(Clone, Debug)]
-pub struct PromptEditor {
-    textarea: TextArea<'static>,
-    mode: PromptEditMode,
-    pending: Input,
-}
-
-impl Default for PromptEditor {
-    fn default() -> Self {
-        let mut textarea = TextArea::default();
-        textarea.set_cursor_line_style(ratatui::style::Style::default());
-        Self {
-            textarea,
-            mode: PromptEditMode::Insert,
-            pending: Input::default(),
-        }
-    }
-}
-
-impl PromptEditor {
-    pub fn mode(&self) -> PromptEditMode {
-        self.mode
-    }
-
-    pub fn textarea(&self) -> &TextArea<'static> {
-        &self.textarea
-    }
-
-    pub fn text(&self) -> String {
-        self.textarea.lines().join("\n")
-    }
-
-    pub fn set_text(&mut self, text: impl AsRef<str>) {
-        let mut lines = text
-            .as_ref()
-            .split('\n')
-            .map(ToString::to_string)
-            .collect::<Vec<_>>();
-        if lines.is_empty() {
-            lines.push(String::new());
-        }
-        let row = lines.len().saturating_sub(1);
-        let col = lines.last().map(|line| line.chars().count()).unwrap_or(0);
-        self.textarea.set_lines(lines, (row, col));
-        self.pending = Input::default();
-    }
-
-    pub fn clear(&mut self) {
-        self.set_text("");
-        self.mode = PromptEditMode::Insert;
-    }
-
-    pub fn insert_str(&mut self, text: &str) {
-        self.textarea.insert_str(text);
-        self.pending = Input::default();
-    }
-
-    pub fn handle_key(&mut self, key: KeyEvent) -> bool {
-        let input = Input::from(key);
-        if input.key == Key::Null {
-            return false;
-        }
-
-        let changed = match self.mode {
-            PromptEditMode::Insert => self.handle_insert(input),
-            PromptEditMode::Normal => self.handle_normal(input),
-        };
-        if changed {
-            self.pending = Input::default();
-        }
-        changed
-    }
-
-    fn handle_insert(&mut self, input: Input) -> bool {
-        match input {
-            Input { key: Key::Esc, .. } => {
-                self.mode = PromptEditMode::Normal;
-                true
-            }
-            input => self.textarea.input(input),
-        }
-    }
-
-    fn handle_normal(&mut self, input: Input) -> bool {
-        match input {
-            Input {
-                key: Key::Char('h'),
-                ..
-            } => self.textarea.move_cursor(CursorMove::Back),
-            Input {
-                key: Key::Char('j'),
-                ..
-            } => self.textarea.move_cursor(CursorMove::Down),
-            Input {
-                key: Key::Char('k'),
-                ..
-            } => self.textarea.move_cursor(CursorMove::Up),
-            Input {
-                key: Key::Char('l'),
-                ..
-            } => self.textarea.move_cursor(CursorMove::Forward),
-            Input {
-                key: Key::Char('w'),
-                ..
-            } => self.textarea.move_cursor(CursorMove::WordForward),
-            Input {
-                key: Key::Char('e'),
-                ctrl: false,
-                ..
-            } => self.textarea.move_cursor(CursorMove::WordEnd),
-            Input {
-                key: Key::Char('b'),
-                ctrl: false,
-                ..
-            } => self.textarea.move_cursor(CursorMove::WordBack),
-            Input {
-                key: Key::Char('^'),
-                ..
-            } => self.textarea.move_cursor(CursorMove::Head),
-            Input {
-                key: Key::Char('$'),
-                ..
-            } => self.textarea.move_cursor(CursorMove::End),
-            Input {
-                key: Key::Char('G'),
-                ctrl: false,
-                ..
-            } => self.textarea.move_cursor(CursorMove::Bottom),
-            Input {
-                key: Key::Char('g'),
-                ctrl: false,
-                ..
-            } if matches!(
-                self.pending,
-                Input {
-                    key: Key::Char('g'),
-                    ctrl: false,
-                    ..
-                }
-            ) =>
-            {
-                self.textarea.move_cursor(CursorMove::Top);
-                self.pending = Input::default();
-                return true;
-            }
-            Input {
-                key: Key::Char('i'),
-                ..
-            } => self.mode = PromptEditMode::Insert,
-            Input {
-                key: Key::Char('a'),
-                ..
-            } => {
-                self.textarea.move_cursor(CursorMove::Forward);
-                self.mode = PromptEditMode::Insert;
-            }
-            Input {
-                key: Key::Char('A'),
-                ..
-            } => {
-                self.textarea.move_cursor(CursorMove::End);
-                self.mode = PromptEditMode::Insert;
-            }
-            Input {
-                key: Key::Char('o'),
-                ..
-            } => {
-                self.textarea.move_cursor(CursorMove::End);
-                self.textarea.insert_newline();
-                self.mode = PromptEditMode::Insert;
-            }
-            Input {
-                key: Key::Char('O'),
-                ..
-            } => {
-                self.textarea.move_cursor(CursorMove::Head);
-                self.textarea.insert_newline();
-                self.textarea.move_cursor(CursorMove::Up);
-                self.mode = PromptEditMode::Insert;
-            }
-            Input {
-                key: Key::Char('x'),
-                ..
-            } => {
-                self.textarea.delete_next_char();
-            }
-            Input {
-                key: Key::Char('D'),
-                ..
-            } => {
-                self.textarea.delete_line_by_end();
-            }
-            Input {
-                key: Key::Char('u'),
-                ctrl: false,
-                ..
-            } => {
-                self.textarea.undo();
-            }
-            Input {
-                key: Key::Char('r'),
-                ctrl: true,
-                ..
-            } => {
-                self.textarea.redo();
-            }
-            input => {
-                self.pending = input;
-                return false;
-            }
-        }
-        true
     }
 }
 
@@ -534,13 +303,6 @@ pub struct AppState {
     /// Which column currently has focus (0 = column 0, etc.).
     pub model_picker_focus: usize,
 
-    /// Provider picker overlay (YYC-97). Opened by `/provider` with no
-    /// args; items are the legacy `[provider]` block followed by named
-    /// `[providers.<name>]` profiles. `name = None` is the legacy entry.
-    pub show_provider_picker: bool,
-    pub provider_picker_selection: usize,
-    pub provider_picker_items: Vec<ProviderPickerEntry>,
-
     /// Diff scrubber overlay (YYC-75). Opened when `edit_file` matches
     /// multiple sites and the pause channel is wired. Each hunk
     /// individually opt-in/out via `scrubber_accepted`.
@@ -664,10 +426,6 @@ impl AppState {
             picker_trees_by_key: std::collections::HashMap::new(),
             model_picker_path: Vec::new(),
             model_picker_focus: 0,
-
-            show_provider_picker: false,
-            provider_picker_selection: 0,
-            provider_picker_items: Vec::new(),
 
             show_diff_scrubber: false,
             scrubber_path: String::new(),
@@ -795,6 +553,14 @@ impl AppState {
         changed
     }
 
+    pub fn prompt_enter_intent(&self) -> PromptEnterIntent {
+        self.prompt_editor.enter_intent()
+    }
+
+    pub fn prompt_escape_intent(&self) -> PromptEscapeIntent {
+        self.prompt_editor.escape_intent()
+    }
+
     pub fn model_status(&self) -> String {
         // YYC-60: design spec is `{model} · {used:n} / {max:n}` with comma
         // grouping. `used` is the latest turn's prompt_tokens (current
@@ -877,8 +643,36 @@ impl AppState {
         self.surfaces.active_canvas_frame()
     }
 
+    pub fn active_surface_frame(&self) -> Option<SurfaceFrame> {
+        self.surfaces.active_frame()
+    }
+
     pub fn has_active_canvas(&self) -> bool {
         self.surfaces.has_canvas()
+    }
+
+    pub fn open_provider_picker(&mut self, items: Vec<ProviderPickerEntry>, selection: usize) {
+        self.surfaces.open_provider_picker(items, selection);
+    }
+
+    pub fn has_provider_picker(&self) -> bool {
+        self.surfaces.has_provider_picker()
+    }
+
+    pub fn provider_picker_up(&mut self) {
+        self.surfaces.provider_picker_up();
+    }
+
+    pub fn provider_picker_down(&mut self) {
+        self.surfaces.provider_picker_down();
+    }
+
+    pub fn selected_provider(&self) -> Option<ProviderPickerEntry> {
+        self.surfaces.selected_provider()
+    }
+
+    pub fn close_provider_picker(&mut self) -> bool {
+        self.surfaces.close_provider_picker()
     }
 
     pub fn handle_canvas_key(&mut self, key: vulcan_frontend_api::CanvasKey) -> bool {

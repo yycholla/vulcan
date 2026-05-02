@@ -55,6 +55,7 @@ pub mod miller_columns;
 pub mod model_picker;
 pub mod orchestration;
 pub mod picker_state;
+pub mod prompt;
 mod rendering;
 pub mod state;
 mod surface;
@@ -62,7 +63,7 @@ pub mod theme;
 pub mod views;
 pub mod widgets;
 
-use state::{AppState, CancelPop, ChatMessage, ChatRole, PromptEditMode};
+use state::{AppState, CancelPop, ChatMessage, ChatRole, PromptEnterIntent, PromptEscapeIntent};
 use theme::{Theme, body};
 use views::{View, render_view};
 use vulcan_frontend_api::{CanvasKey, FrontendCommandAction};
@@ -382,8 +383,10 @@ pub async fn run_tui(
             if app.show_model_picker {
                 rendering::draw_model_picker(f, area, &app);
             }
-            if app.show_provider_picker {
-                rendering::draw_provider_picker(f, area, &app);
+            if let Some(surface::SurfaceFrame::ProviderPicker { items, selection }) =
+                app.active_surface_frame()
+            {
+                rendering::draw_provider_picker_frame(f, area, &app.theme, &items, selection);
             }
             // YYC-75: diff scrubber overlay.
             if app.show_diff_scrubber {
@@ -628,7 +631,7 @@ pub async fn run_tui(
         }
 
         // ── Provider picker overlay (YYC-97): intercept input until dismissed.
-        if app.show_provider_picker {
+        if app.has_provider_picker() {
             tokio::select! {
                 ev = key_rx.recv() => {
                     match ev {
@@ -637,15 +640,13 @@ pub async fn run_tui(
                                 && key.kind == KeyEventKind::Press {
                                     match key.code {
                                         KeyCode::Up | KeyCode::Char('k') => {
-                                            app.provider_picker_selection = app.provider_picker_selection.saturating_sub(1);
+                                            app.provider_picker_up();
                                         }
                                         KeyCode::Down | KeyCode::Char('j') => {
-                                            let max = app.provider_picker_items.len().saturating_sub(1);
-                                            app.provider_picker_selection = app.provider_picker_selection.saturating_add(1).min(max);
+                                            app.provider_picker_down();
                                         }
                                         KeyCode::Enter => {
-                                            let idx = app.provider_picker_selection.min(app.provider_picker_items.len().saturating_sub(1));
-                                            if let Some(picked) = app.provider_picker_items.get(idx).cloned() {
+                                            if let Some(picked) = app.selected_provider() {
                                                 let target: Option<&str> = picked.name.as_deref();
                                                 let result = {
                                                     let mut a = agent.lock().await;
@@ -677,10 +678,10 @@ pub async fn run_tui(
                                                     }
                                                 }
                                             }
-                                            app.show_provider_picker = false;
+                                            app.close_provider_picker();
                                         }
                                         KeyCode::Esc => {
-                                            app.show_provider_picker = false;
+                                            app.close_provider_picker();
                                         }
                                         _ => {}
                                     }
@@ -688,9 +689,11 @@ pub async fn run_tui(
                         }
                         Some(KeyEv::Error(e)) => {
                             tracing::error!("Terminal input error (provider picker): {e}");
-                            app.show_provider_picker = false;
+                            app.close_provider_picker();
                         }
-                        None => app.show_provider_picker = false,
+                        None => {
+                            app.close_provider_picker();
+                        }
                     }
                 }
             }
@@ -1119,15 +1122,14 @@ pub async fn run_tui(
                                                 app.prompt_set(format!("/{}", candidates[idx].name));
                                             }
                                         }
-                                        if !app.input.starts_with('/')
-                                            && app.prompt_editor.mode() == PromptEditMode::Insert
-                                        {
-                                            app.prompt_handle_key(key);
-                                            pending_quit = false;
-                                            continue;
-                                        }
-                                        if app.input.is_empty() {
-                                            continue;
+                                        match app.prompt_enter_intent() {
+                                            PromptEnterIntent::Edit => {
+                                                app.prompt_handle_key(key);
+                                                pending_quit = false;
+                                                continue;
+                                            }
+                                            PromptEnterIntent::Empty => continue,
+                                            PromptEnterIntent::Submit(_) => {}
                                         }
                                         // YYC-62: classify slash commands as mid-turn-safe or
                                         // must-defer. Mid-turn-safe slash dispatch falls through
@@ -1425,15 +1427,13 @@ pub async fn run_tui(
                                                                 let a = agent.lock().await;
                                                                 a.active_profile().map(str::to_string)
                                                             };
-                                                            app.provider_picker_items =
+                                                            let items =
                                                                 keymap::build_provider_picker_entries(config);
-                                                            let active_idx = app
-                                                                .provider_picker_items
+                                                            let active_idx = items
                                                                 .iter()
                                                                 .position(|e| e.name == active)
                                                                 .unwrap_or(0);
-                                                            app.provider_picker_selection = active_idx;
-                                                            app.show_provider_picker = true;
+                                                            app.open_provider_picker(items, active_idx);
                                                             continue;
                                                         }
 
@@ -1639,13 +1639,17 @@ pub async fn run_tui(
                                         // YYC-58: in Command mode (slash buffer pending), Esc
                                         // clears the buffer and drops back to Insert; only Esc
                                         // with an empty buffer exits.
-                                        if app.input.starts_with('/') {
-                                            app.prompt_clear();
-                                            app.slash_menu_selection = 0;
-                                        } else if app.prompt_editor.mode() == PromptEditMode::Insert {
-                                            app.prompt_handle_key(key);
-                                        } else {
-                                            exit = true;
+                                        match app.prompt_escape_intent() {
+                                            PromptEscapeIntent::ClearCommand => {
+                                                app.prompt_clear();
+                                                app.slash_menu_selection = 0;
+                                            }
+                                            PromptEscapeIntent::Edit => {
+                                                app.prompt_handle_key(key);
+                                            }
+                                            PromptEscapeIntent::Exit => {
+                                                exit = true;
+                                            }
                                         }
                                     }
                                     _ => { pending_quit = false; }

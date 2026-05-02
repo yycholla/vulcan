@@ -10,6 +10,7 @@ use ratatui::{
 use super::chat_render::{ChatRenderOptions, VisibleChatLines};
 use super::markdown::render_markdown;
 use super::state::{AppState, DiffStyle, SessionStatus};
+use super::surface::SurfaceFrame;
 use super::theme::{Palette, body, faint_bg};
 use super::widgets::{fill, frame, message_header, section_header, ticker};
 
@@ -17,7 +18,7 @@ use super::widgets::{fill, frame, message_header, section_header, ticker};
 /// its desired cursor position into `app` via `cursor_set`.
 pub fn render_view(f: &mut TuiFrame, area: Rect, app: &AppState) {
     fill(f, area, body());
-    if let Some(frame_data) = app.active_canvas_frame() {
+    if let Some(SurfaceFrame::FullscreenCanvas(frame_data)) = app.active_surface_frame() {
         render_canvas(f, area, app, frame_data);
         return;
     }
