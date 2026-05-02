@@ -1,6 +1,7 @@
 //! Picker / session list state extracted from `tui/state.rs` (YYC-110).
-//! The render implementations live in `tui/widgets.rs` and the per-
-//! picker overlays — only the data shape lives here.
+//! Picker / session list state extracted from `tui/state.rs` (YYC-110).
+//! Render implementations live in `tui/widgets/` and overlay composition
+//! code — only the data shape lives here.
 
 /// One entry in the session-list picker overlay (YYC-15).
 #[derive(Clone, Debug)]

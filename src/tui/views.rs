@@ -8,11 +8,14 @@ use ratatui::{
 };
 
 use super::chat_render::{ChatRenderOptions, VisibleChatLines};
+use super::layouts;
 use super::markdown::render_markdown;
 use super::state::{AppState, DiffStyle, SessionStatus};
 use super::surface::SurfaceFrame;
 use super::theme::{Palette, body, faint_bg};
-use super::widgets::{fill, frame, message_header, section_header, ticker};
+use super::widgets::{
+    PromptRowWidget, TickerWidget, fill, frame, message_header, prompt_row_height, section_header,
+};
 
 /// Public dispatch: render the active view inside `area`. The view writes
 /// its desired cursor position into `app` via `cursor_set`.
@@ -24,7 +27,7 @@ pub fn render_view(f: &mut TuiFrame, area: Rect, app: &AppState) {
     }
     match app.view {
         View::TradingFloor => trading_floor(f, area, app),
-        View::SingleStack => single_stack(f, area, app),
+        View::SingleStack => layouts::single_stack::render(f, area, app),
         View::SplitSessions => split_sessions(f, area, app),
         View::TiledMesh => tiled_mesh(f, area, app),
         View::TreeOfThought => tree_of_thought(f, area, app),
@@ -107,12 +110,16 @@ impl View {
 /// Note: the count is pre-wrap, so very long wrapped lines under-count the
 /// real bottom by a few rows. Acceptable for follow-bottom UX; the user can
 /// always nudge with Down to land exactly at the tail.
-fn publish_chat_max_scroll(app: &AppState, line_count: usize, viewport_height: u16) {
+pub(in crate::tui) fn publish_chat_max_scroll(
+    app: &AppState,
+    line_count: usize,
+    viewport_height: u16,
+) {
     let max = (line_count as u16).saturating_sub(viewport_height);
     app.chat_max_scroll.set(max);
 }
 
-fn build_chat_window(
+pub(in crate::tui) fn build_chat_window(
     app: &AppState,
     show_reasoning: bool,
     dense: bool,
@@ -338,132 +345,6 @@ fn push_visible_fixed_lines(
     out.extend(segment[start..end].iter().cloned());
 }
 
-// ─── 01 SINGLE STACK ────────────────────────────────────────────────────
-
-fn single_stack(f: &mut TuiFrame, area: Rect, app: &AppState) {
-    let layout = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Min(5),
-            Constraint::Length(super::widgets::prompt_row_height(
-                &app.input,
-                area.width,
-                app.mode_label(),
-            )),
-        ])
-        .split(area);
-
-    let inner = frame(
-        f,
-        layout[0],
-        "vulcan · single stack",
-        Some("focus"),
-        app.theme.accent.fg,
-        &app.theme,
-    );
-
-    if inner.height == 0 {
-        return;
-    }
-
-    let header = Rect {
-        x: inner.x + 1,
-        y: inner.y,
-        width: inner.width.saturating_sub(2),
-        height: 1,
-    };
-    render_single_stack_status(f, header, app);
-
-    let chat_area = Rect {
-        x: inner.x + 1,
-        y: inner.y + 1,
-        width: inner.width.saturating_sub(2),
-        height: inner.height.saturating_sub(1),
-    };
-    let chat_w = chat_area.width;
-    let window = build_chat_window(
-        app,
-        app.show_reasoning,
-        false,
-        chat_w,
-        chat_area.height,
-        false,
-        true,
-    );
-    publish_chat_max_scroll(app, window.total_lines, chat_area.height);
-    f.render_widget(
-        Paragraph::new(window.lines)
-            .style(body())
-            .wrap(Wrap { trim: false }),
-        chat_area,
-    );
-
-    let (cx, cy) = super::widgets::prompt_row(
-        f,
-        layout[1],
-        app.mode_label(),
-        app.prompt_editor.textarea(),
-        app.prompt_hints(),
-        &app.model_status(),
-        app.context_ratio(),
-        app.thinking,
-        &app.theme,
-    );
-    app.cursor_set(cx, cy);
-}
-
-fn render_single_stack_status(f: &mut TuiFrame, area: Rect, app: &AppState) {
-    if area.width == 0 || area.height == 0 {
-        return;
-    }
-
-    let session = format!("[SESSION] {}", app.session_label);
-    let live = if app.thinking { "[BUSY]" } else { "[READY]" };
-    let queue = if app.queue.is_empty() {
-        String::new()
-    } else {
-        format!(" · {} queued", app.queue.len())
-    };
-    let reasoning = if app.show_reasoning {
-        " · reasoning on"
-    } else {
-        " · reasoning hidden"
-    };
-    let tape = single_stack_activity_tape(app);
-    let text = format!(" {tape}  {session}   {live}{queue}{reasoning}");
-    let style = if app.thinking {
-        Style::default()
-            .fg(Palette::YELLOW)
-            .add_modifier(Modifier::BOLD)
-    } else {
-        app.theme.muted.add_modifier(Modifier::BOLD)
-    };
-    f.render_widget(
-        Paragraph::new(truncate_to_width(&text, area.width)).style(style),
-        area,
-    );
-}
-
-fn single_stack_activity_tape(app: &AppState) -> &'static str {
-    if !app.thinking {
-        return "[..::]";
-    }
-    const FRAMES: [&str; 8] = [
-        "[>   ]", "[=>  ]", "[==> ]", "[===>]", "[ <==]", "[  <=]", "[   <]", "[.  .]",
-    ];
-    let frame = (app.session_started.elapsed().as_millis() / 180) as usize % FRAMES.len();
-    FRAMES[frame]
-}
-
-fn truncate_to_width(text: &str, width: u16) -> String {
-    let width = usize::from(width);
-    let mut out = String::new();
-    for ch in text.chars().take(width) {
-        out.push(ch);
-    }
-    out
-}
-
 // ─── 02 SPLIT SESSIONS ──────────────────────────────────────────────────
 
 fn split_sessions(f: &mut TuiFrame, area: Rect, app: &AppState) {
@@ -479,11 +360,7 @@ fn split_sessions(f: &mut TuiFrame, area: Rect, app: &AppState) {
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Min(5),
-            Constraint::Length(super::widgets::prompt_row_height(
-                &app.input,
-                area.width,
-                app.mode_label(),
-            )),
+            Constraint::Length(prompt_row_height(&app.input, area.width, app.mode_label())),
         ])
         .split(outer);
 
@@ -570,17 +447,18 @@ fn split_sessions(f: &mut TuiFrame, area: Rect, app: &AppState) {
         },
     );
 
-    let (cx, cy) = super::widgets::prompt_row(
-        f,
-        v[1],
-        app.mode_label(),
-        app.prompt_editor.textarea(),
-        app.prompt_hints(),
-        &app.model_status(),
-        app.context_ratio(),
-        app.thinking,
-        &app.theme,
-    );
+    let model_status = app.model_status();
+    let prompt = PromptRowWidget {
+        mode: app.mode_label(),
+        textarea: app.prompt_editor.textarea(),
+        hints: app.prompt_hints(),
+        model_status: &model_status,
+        capacity_ratio: app.context_ratio(),
+        thinking: app.thinking,
+        theme: &app.theme,
+    };
+    let (cx, cy) = prompt.cursor(v[1]);
+    f.render_widget(prompt, v[1]);
     app.cursor_set(cx, cy);
 }
 
@@ -662,11 +540,7 @@ fn tiled_mesh(f: &mut TuiFrame, area: Rect, app: &AppState) {
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Min(5),
-            Constraint::Length(super::widgets::prompt_row_height(
-                &app.input,
-                area.width,
-                app.mode_label(),
-            )),
+            Constraint::Length(prompt_row_height(&app.input, area.width, app.mode_label())),
         ])
         .split(outer);
 
@@ -737,17 +611,18 @@ fn tiled_mesh(f: &mut TuiFrame, area: Rect, app: &AppState) {
         );
     }
 
-    let (cx, cy) = super::widgets::prompt_row(
-        f,
-        v[1],
-        app.mode_label(),
-        app.prompt_editor.textarea(),
-        app.prompt_hints(),
-        &app.model_status(),
-        app.context_ratio(),
-        app.thinking,
-        &app.theme,
-    );
+    let model_status = app.model_status();
+    let prompt = PromptRowWidget {
+        mode: app.mode_label(),
+        textarea: app.prompt_editor.textarea(),
+        hints: app.prompt_hints(),
+        model_status: &model_status,
+        capacity_ratio: app.context_ratio(),
+        thinking: app.thinking,
+        theme: &app.theme,
+    };
+    let (cx, cy) = prompt.cursor(v[1]);
+    f.render_widget(prompt, v[1]);
     app.cursor_set(cx, cy);
 }
 
@@ -761,11 +636,7 @@ fn tree_of_thought(f: &mut TuiFrame, area: Rect, app: &AppState) {
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Min(5),
-            Constraint::Length(super::widgets::prompt_row_height(
-                &app.input,
-                area.width,
-                app.mode_label(),
-            )),
+            Constraint::Length(prompt_row_height(&app.input, area.width, app.mode_label())),
         ])
         .split(outer);
     let h = Layout::default()
@@ -856,17 +727,18 @@ fn tree_of_thought(f: &mut TuiFrame, area: Rect, app: &AppState) {
         focus_inner,
     );
 
-    let (cx, cy) = super::widgets::prompt_row(
-        f,
-        v[1],
-        app.mode_label(),
-        app.prompt_editor.textarea(),
-        app.prompt_hints(),
-        &app.model_status(),
-        app.context_ratio(),
-        app.thinking,
-        &app.theme,
-    );
+    let model_status = app.model_status();
+    let prompt = PromptRowWidget {
+        mode: app.mode_label(),
+        textarea: app.prompt_editor.textarea(),
+        hints: app.prompt_hints(),
+        model_status: &model_status,
+        capacity_ratio: app.context_ratio(),
+        thinking: app.thinking,
+        theme: &app.theme,
+    };
+    let (cx, cy) = prompt.cursor(v[1]);
+    f.render_widget(prompt, v[1]);
     app.cursor_set(cx, cy);
 }
 
@@ -886,11 +758,7 @@ fn trading_floor(f: &mut TuiFrame, area: Rect, app: &AppState) {
         .constraints([
             Constraint::Min(8),    // grid
             Constraint::Length(1), // ticker
-            Constraint::Length(super::widgets::prompt_row_height(
-                &app.input,
-                area.width,
-                app.mode_label(),
-            )), // prompt row (YYC-104: wraps with input)
+            Constraint::Length(prompt_row_height(&app.input, area.width, app.mode_label())),
         ])
         .split(outer);
 
@@ -1258,20 +1126,26 @@ fn trading_floor(f: &mut TuiFrame, area: Rect, app: &AppState) {
         .iter()
         .map(|t| (t.sub.clone(), t.msg.clone(), t.color))
         .collect();
-    ticker(f, v[1], &ticker_cells);
+    f.render_widget(
+        TickerWidget {
+            cells: &ticker_cells,
+        },
+        v[1],
+    );
 
     // ── prompt row
-    let (cx, cy) = super::widgets::prompt_row(
-        f,
-        v[2],
-        app.mode_label(),
-        app.prompt_editor.textarea(),
-        app.prompt_hints(),
-        &app.model_status(),
-        app.context_ratio(),
-        app.thinking,
-        &app.theme,
-    );
+    let model_status = app.model_status();
+    let prompt = PromptRowWidget {
+        mode: app.mode_label(),
+        textarea: app.prompt_editor.textarea(),
+        hints: app.prompt_hints(),
+        model_status: &model_status,
+        capacity_ratio: app.context_ratio(),
+        thinking: app.thinking,
+        theme: &app.theme,
+    };
+    let (cx, cy) = prompt.cursor(v[2]);
+    f.render_widget(prompt, v[2]);
     app.cursor_set(cx, cy);
 }
 

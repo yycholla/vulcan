@@ -50,6 +50,7 @@ pub mod frontend;
 mod init;
 pub mod keybinds;
 mod keymap;
+mod layouts;
 pub mod markdown;
 pub mod miller_columns;
 pub mod model_picker;
@@ -67,6 +68,7 @@ use state::{AppState, CancelPop, ChatMessage, ChatRole, PromptEnterIntent, Promp
 use theme::{Theme, body};
 use views::{View, render_view};
 use vulcan_frontend_api::{CanvasKey, FrontendCommandAction};
+use widgets::ProviderPickerWidget;
 
 /// What session, if any, the TUI should load on startup.
 #[derive(Debug, Clone)]
@@ -386,7 +388,14 @@ pub async fn run_tui(
             if let Some(surface::SurfaceFrame::ProviderPicker { items, selection }) =
                 app.active_surface_frame()
             {
-                rendering::draw_provider_picker_frame(f, area, &app.theme, &items, selection);
+                f.render_widget(
+                    ProviderPickerWidget {
+                        theme: &app.theme,
+                        items: &items,
+                        selection,
+                    },
+                    area,
+                );
             }
             // YYC-75: diff scrubber overlay.
             if app.show_diff_scrubber {

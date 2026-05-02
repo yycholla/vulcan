@@ -22,7 +22,6 @@ use crate::config::Config;
 use super::keymap::SlashCommand;
 use super::miller_columns;
 use super::model_picker;
-use super::picker_state::ProviderPickerEntry;
 use super::state::{AppState, SessionStatus};
 use super::theme::Theme;
 use super::{body, short_id};
@@ -402,89 +401,6 @@ fn initial_path_for_active_model(
         path.push(0);
     }
     path
-}
-
-pub(super) fn draw_provider_picker_frame(
-    f: &mut Frame,
-    area: Rect,
-    theme: &Theme,
-    items: &[ProviderPickerEntry],
-    selection: usize,
-) {
-    let width = area.width.min(72);
-    let rows = (items.len() as u16).min(12);
-    let height = (rows + 5).min(area.height.saturating_sub(2));
-    let x = area.x + (area.width.saturating_sub(width)) / 2;
-    let y = area.y + (area.height.saturating_sub(height)) / 2;
-    let box_area = Rect {
-        x,
-        y,
-        width,
-        height,
-    };
-    if box_area.height < 4 {
-        return;
-    }
-
-    let bar = Rect {
-        x: box_area.x,
-        y: box_area.y,
-        width: box_area.width,
-        height: 1,
-    };
-    let mut title = "  Switch Provider  ".to_string();
-    if (title.chars().count() as u16) < bar.width {
-        let pad = bar.width as usize - title.chars().count();
-        title = format!(
-            "{}{}{}",
-            " ".repeat(pad / 2),
-            title.trim(),
-            " ".repeat(pad - pad / 2)
-        );
-    }
-    f.render_widget(
-        Paragraph::new(title).style(theme.accent.add_modifier(Modifier::BOLD)),
-        bar,
-    );
-
-    let list_area = Rect {
-        x: box_area.x,
-        y: box_area.y + 1,
-        width: box_area.width,
-        height: box_area.height.saturating_sub(2),
-    };
-
-    let mut lines: Vec<Line<'static>> = Vec::new();
-    if items.is_empty() {
-        lines.push(Line::from(Span::styled("  (no providers)", theme.muted)));
-    } else {
-        let active = selection.min(items.len().saturating_sub(1));
-        for (i, e) in items.iter().enumerate() {
-            let is_active = i == active;
-            let marker = if is_active { "▸ " } else { "  " };
-            let label = e.name.clone().unwrap_or_else(|| "default".into());
-            let row_style = Style::default()
-                .fg(theme.body_fg)
-                .add_modifier(if is_active {
-                    Modifier::BOLD
-                } else {
-                    Modifier::empty()
-                });
-            lines.push(Line::from(vec![
-                Span::styled(marker, row_style.add_modifier(Modifier::BOLD)),
-                Span::styled(format!("{label:<12}"), row_style),
-                Span::styled(format!(" {}", e.model), theme.muted),
-                Span::styled(format!("  ({})", e.base_url), theme.muted),
-            ]));
-        }
-    }
-
-    let hint = "  ↑↓ navigate · Enter select · Esc cancel  ";
-    lines.push(Line::from(""));
-    lines.push(Line::from(Span::styled(hint, theme.muted)));
-
-    f.render_widget(Paragraph::new(lines), list_area);
-    draw_picker_border(f, box_area, theme);
 }
 
 pub(super) fn draw_diff_scrubber(f: &mut Frame, area: Rect, app: &AppState) {
