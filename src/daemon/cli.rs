@@ -75,6 +75,12 @@ async fn start(detach: bool) -> anyhow::Result<()> {
         pool_builder = pool_builder.with_cortex_store(Arc::clone(cortex));
     }
     let pool = Arc::new(pool_builder);
+    let disabled = config
+        .extensions
+        .apply_to_registry(&pool.extension_registry());
+    if disabled > 0 {
+        tracing::info!(disabled, "daemon: extension config disabled extensions");
+    }
     state = state.with_pool(Arc::clone(&pool));
 
     // YYC-266 Slice 2/3: boot the warm Agent and install it into the

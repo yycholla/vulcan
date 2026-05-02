@@ -7289,6 +7289,7 @@ dependencies = [
  "tokio",
  "tokio-util",
  "vulcan-core",
+ "vulcan-extension-macros",
 ]
 
 [[package]]
