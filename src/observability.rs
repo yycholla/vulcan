@@ -28,6 +28,12 @@ pub mod attr {
     pub const TOOL_NAME: &str = "tool_name";
     pub const PROVIDER: &str = "provider";
     pub const MODEL: &str = "model";
+    pub const STREAMING: &str = "streaming";
+    pub const MESSAGE_COUNT: &str = "message_count";
+    pub const TOOL_COUNT: &str = "tool_count";
+    pub const PROMPT_TOKENS: &str = "prompt_tokens";
+    pub const COMPLETION_TOKENS: &str = "completion_tokens";
+    pub const TOTAL_TOKENS: &str = "total_tokens";
     pub const HOOK_HANDLER: &str = "hook_handler";
     pub const HOOK_EVENT: &str = "hook_event";
     pub const OUTCOME: &str = "outcome";
@@ -54,6 +60,39 @@ pub mod metric {
     pub const TOKENS_INPUT: &str = "vulcan.tokens.input";
     pub const TOKENS_OUTPUT: &str = "vulcan.tokens.output";
     pub const RUNTIME_SECONDS: &str = "vulcan.runtime.seconds";
+}
+
+pub fn tool_call_span(tool_name: &str) -> tracing::Span {
+    tracing::info_span!(
+        span::TOOL_CALL,
+        surface = "tools",
+        tool_name,
+        outcome = tracing::field::Empty,
+        error_kind = tracing::field::Empty
+    )
+}
+
+pub fn provider_request_span(
+    provider: &str,
+    model: &str,
+    streaming: bool,
+    message_count: usize,
+    tool_count: usize,
+) -> tracing::Span {
+    tracing::info_span!(
+        span::PROVIDER_REQUEST,
+        surface = "provider",
+        provider,
+        model,
+        streaming,
+        message_count = message_count as u64,
+        tool_count = tool_count as u64,
+        outcome = tracing::field::Empty,
+        error_kind = tracing::field::Empty,
+        prompt_tokens = tracing::field::Empty,
+        completion_tokens = tracing::field::Empty,
+        total_tokens = tracing::field::Empty
+    )
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -288,6 +327,12 @@ mod tests {
             attr::TOOL_NAME,
             attr::PROVIDER,
             attr::MODEL,
+            attr::STREAMING,
+            attr::MESSAGE_COUNT,
+            attr::TOOL_COUNT,
+            attr::PROMPT_TOKENS,
+            attr::COMPLETION_TOKENS,
+            attr::TOTAL_TOKENS,
             attr::HOOK_HANDLER,
             attr::HOOK_EVENT,
             attr::OUTCOME,
