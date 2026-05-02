@@ -1258,7 +1258,9 @@ mod tests {
         assert!(body.contains("Command AI like a tool"));
         assert!(body.contains("[SESSION] main"));
         assert!(body.contains("[INSERT]"));
-        assert!(body.contains("test-model · 0 / 128,000"));
+        assert!(body.contains("test-model"));
+        assert!(body.contains("0/128k"));
+        assert!(!body.contains("test-model · 0 / 128,000"));
         assert!(body.contains("VULCAN · local agent workbench"));
         assert!(!body.contains("── session"));
         assert!(!body.contains("▎ copy this line"));

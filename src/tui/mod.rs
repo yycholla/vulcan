@@ -1131,6 +1131,11 @@ pub async fn run_tui(
                                                 app.prompt_set(format!("/{}", candidates[idx].name));
                                             }
                                         }
+                                        if key.modifiers.contains(KeyModifiers::SHIFT) {
+                                            app.prompt_handle_key(key);
+                                            pending_quit = false;
+                                            continue;
+                                        }
                                         match app.prompt_enter_intent() {
                                             PromptEnterIntent::Edit => {
                                                 app.prompt_handle_key(key);

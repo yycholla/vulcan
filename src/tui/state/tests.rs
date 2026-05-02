@@ -527,10 +527,13 @@ fn delegated_worker_count_filters_terminal_records() {
 }
 
 #[test]
-fn prompt_editor_supports_multiline_insert_mode() {
+fn prompt_editor_uses_shift_enter_for_multiline_insert_mode() {
     let mut app = AppState::new("test-model".into(), 128_000);
     app.prompt_insert_str("first");
     app.prompt_handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    assert_eq!(app.input, "first");
+
+    app.prompt_handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::SHIFT));
     app.prompt_insert_str("second");
 
     assert_eq!(app.input, "first\nsecond");
