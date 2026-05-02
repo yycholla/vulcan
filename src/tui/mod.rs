@@ -322,6 +322,7 @@ pub async fn run_tui(
     let mut exit = false;
     let mut pending_quit = false;
     let mut last_draw: Instant;
+    let mut last_motion_frame = Instant::now();
 
     while !exit {
         let palette = if app.input.starts_with('/') && app.input.len() > 1 {
@@ -335,6 +336,14 @@ pub async fn run_tui(
         // YYC-58: derive prompt mode from current state once per tick.
         app.refresh_prompt_mode();
         app.pump_frontend_ticks();
+        app.effects.prepare_frame();
+        let now = Instant::now();
+        if app.activity_motion_active()
+            && now.saturating_duration_since(last_motion_frame) >= MOTION_FRAME_BUDGET
+        {
+            app.advance_activity_motion();
+            last_motion_frame = now;
+        }
 
         // YYC-69: keep the chat viewport pinned to the latest content while
         // the user hasn't scrolled away. `chat_max_scroll` is published by
@@ -406,6 +415,7 @@ pub async fn run_tui(
             }
         })?;
         last_draw = Instant::now();
+        app.finish_chat_clear_if_idle();
 
         // ── Diff scrubber overlay (YYC-75): intercept input until resolved.
         if app.show_diff_scrubber {
@@ -1237,8 +1247,7 @@ pub async fn run_tui(
                                                         continue;
                                                     }
                                                     "clear" => {
-                                                        app.messages.clear();
-                                                        app.chat_render_store.borrow_mut().clear();
+                                                        app.request_chat_clear();
                                                         continue;
                                                     }
                                                     "reasoning" => {
@@ -1717,9 +1726,7 @@ pub async fn run_tui(
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
                 }
             }
-            _ = tokio::time::sleep(MOTION_FRAME_BUDGET), if app.activity_motion_active() => {
-                app.advance_activity_motion();
-            }
+            _ = tokio::time::sleep(MOTION_FRAME_BUDGET), if app.activity_motion_active() => {}
         }
     }
 

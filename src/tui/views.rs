@@ -435,17 +435,20 @@ fn split_sessions(f: &mut TuiFrame, area: Rect, app: &AppState) {
         false,
     );
     publish_chat_max_scroll(app, window.total_lines, chat_height.saturating_sub(1));
+    let chat_area = Rect {
+        x: body_area.x + 1,
+        y: body_area.y,
+        width: chat_width,
+        height: body_area.height,
+    };
     f.render_widget(
         Paragraph::new(window.lines)
             .style(body())
             .wrap(Wrap { trim: false }),
-        Rect {
-            x: body_area.x + 1,
-            y: body_area.y,
-            width: chat_width,
-            height: body_area.height,
-        },
+        chat_area,
     );
+    app.start_chat_clear_effect_if_pending(chat_area);
+    app.effects.process_chat(f.buffer_mut(), chat_area);
 
     let model_status = app.model_status();
     let prompt = PromptRowWidget {
@@ -807,17 +810,20 @@ fn trading_floor(f: &mut TuiFrame, area: Rect, app: &AppState) {
         false,
     );
     publish_chat_max_scroll(app, window.total_lines, chat_height);
+    let chat_area = Rect {
+        x: primary_inner.x + 1,
+        y: primary_inner.y,
+        width: chat_width,
+        height: chat_height,
+    };
     f.render_widget(
         Paragraph::new(window.lines)
             .style(body())
             .wrap(Wrap { trim: false }),
-        Rect {
-            x: primary_inner.x + 1,
-            y: primary_inner.y,
-            width: chat_width,
-            height: chat_height,
-        },
+        chat_area,
     );
+    app.start_chat_clear_effect_if_pending(chat_area);
+    app.effects.process_chat(f.buffer_mut(), chat_area);
     // visual divider on the right edge
     draw_v_divider(f, top[0]);
 

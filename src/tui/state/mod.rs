@@ -251,6 +251,7 @@ pub struct AppState {
     pub active_ticks: Vec<ActiveTick>,
     pub activity_throbber: ThrobberState,
     pub effects: TuiEffects,
+    chat_clear_pending: Cell<bool>,
 
     /// When the agent emits an `AgentPause`, the TUI parks it here. Render
     /// shows an overlay; key handler intercepts Y/A/N keys and consumes the
@@ -410,6 +411,7 @@ impl AppState {
             active_ticks: Vec::new(),
             activity_throbber: ThrobberState::default(),
             effects: TuiEffects::default(),
+            chat_clear_pending: Cell::new(false),
             pending_pause: None,
 
             cursor: Cell::new((0, 0)),
@@ -708,6 +710,7 @@ impl AppState {
                 .status_widgets
                 .values()
                 .any(|content| !matches!(content, vulcan_frontend_api::WidgetContent::Text(_)))
+            || self.effects.chat_running()
             || self.messages.iter().any(|message| {
                 message.segments.iter().any(|segment| {
                     matches!(
@@ -725,6 +728,29 @@ impl AppState {
         if self.activity_motion_active() {
             self.activity_throbber.calc_next();
             self.effects.advance_prompt_border_sweep();
+        }
+    }
+
+    pub fn request_chat_clear(&self) {
+        self.chat_clear_pending.set(true);
+    }
+
+    pub fn start_chat_clear_effect_if_pending(&self, area: ratatui::layout::Rect) {
+        if !self.chat_clear_pending.get() || self.effects.chat_running() {
+            return;
+        }
+        let screen_bg = match self.theme.body_bg {
+            Color::Reset => Color::Black,
+            color => color,
+        };
+        self.effects.trigger_chat_clear(area, screen_bg);
+    }
+
+    pub fn finish_chat_clear_if_idle(&mut self) {
+        if self.chat_clear_pending.get() && !self.effects.chat_running() {
+            self.messages.clear();
+            self.chat_render_store.borrow_mut().clear();
+            self.chat_clear_pending.set(false);
         }
     }
 
