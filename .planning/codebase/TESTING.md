@@ -1,79 +1,236 @@
 ---
 title: TESTING
-last_mapped_commit: f5e07ca31dd7a4ac794b9838884bfdad74a7e37c
+last_mapped_commit: b48a9a7197a90fc5410b05ac5b66b4b2797dba6e
 mapped_at: 2026-05-03
 scope: full repo
 ---
 
-# Testing
+# Testing Patterns
 
-Vulcan uses cargo tests, nextest in CI, module-level unit tests, integration tests, feature builds, dependency checks, and benchmark workflows.
+**Analysis Date:** 2026-05-03
 
-## Local Commands
+## Test Framework
 
-- Standard test command: `cargo test`.
-- Full compile command from repo guidance: `cargo build --all-targets`.
-- Gateway-focused tests: `cargo test --features gateway gateway::`.
-- Single test filtering uses `cargo test <name_substring>`.
-- Release build command: `cargo build --release`.
-- TUI can be launched with `cargo run`.
-- One-shot mode can be tested with `cargo run -- prompt "your text"`.
+**Runner:**
+- Rust built-in test harness via `cargo test`, with async tests through `tokio::test`.
+- CI uses `cargo-nextest` with config in `.config/nextest.toml`.
+- Root dev dependencies live in `Cargo.toml`: `tempfile`, `tokio` with `test-util`, `insta`, `assert_cmd`, `predicates`, `divan`, and `hdrhistogram`.
+- Benchmarks use `divan` targets in `benches/tui_render.rs` and `benches/agent_core.rs`; soak testing uses the `vulcan-soak` bin at `benches/soak.rs`.
 
-## Integration Tests
+**Assertion Library:**
+- Standard Rust assertions: `assert_eq!`, `assert!`, `matches!`, and explicit `panic!` messages.
+- Snapshot assertions through `insta`, used in `src/prompt_builder.rs`, `src/tui/chat_render.rs`, and `src/tui/rendering.rs`.
+- CLI process assertions through `assert_cmd` and `predicates`, used in `tests/daemon_e2e.rs` and supported by `tests/support/mod.rs`.
 
-- Daemon end-to-end coverage lives in `tests/daemon_e2e.rs`.
-- Client auto-start behavior lives in `tests/client_autostart.rs`.
-- Agent loop contracts live in `tests/agent_loop.rs`.
-- Frontend extension contracts live in `tests/frontend_extensions.rs`.
-- Gateway behavior without agent map coverage lives in `tests/gateway_no_agent_map.rs`.
-- Shared integration helpers live in `tests/support/mod.rs`.
-- Contract-level tests live in `tests/contracts.rs`.
+**Run Commands:**
+```bash
+cargo test                                      # Run all default-feature tests
+cargo test --features gateway gateway::        # Run gateway-focused feature tests
+cargo test <name_substring>                    # Run tests matching a name substring
+cargo test --doc                               # Run doc tests with default features
+cargo test --doc --features gateway            # Run doc tests with gateway enabled
+cargo nextest run --profile ci --lib --bins --tests
+cargo nextest run --profile ci --lib --bins --tests --features gateway
+cargo llvm-cov nextest --all-features --workspace --lcov --output-path lcov.info
+cargo bench                                    # Run divan benchmarks
+cargo run --release --bin vulcan-soak --features bench-soak -- --turns 20
+```
 
-## Module Tests
+## Test File Organization
 
-- Agent tests live in `src/agent/tests.rs`.
-- Config tests live in `src/config/tests.rs`.
-- Daemon lifecycle tests live in `src/daemon/lifecycle_tests.rs`.
-- Daemon protocol tests live in `src/daemon/protocol_tests.rs`.
-- Memory tests live in `src/memory/tests.rs`.
-- TUI state tests live under `src/tui/state/tests.rs` when present in the module tree.
-- Additional inline tests are colocated with implementation modules.
+**Location:**
+- Unit tests are usually colocated in `#[cfg(test)] mod tests` inside implementation modules, such as `src/hooks/mod.rs`, `src/tools/file.rs`, `src/gateway/queue.rs`, `src/extensions/manifest.rs`, and `vulcan-ext-todo/src/lib.rs`.
+- Large module test suites can be split into sibling files named `tests.rs` or `*_tests.rs`, such as `src/agent/tests.rs`, `src/memory/tests.rs`, `src/config/tests.rs`, `src/daemon/lifecycle_tests.rs`, `src/daemon/protocol_tests.rs`, and `src/tui/state/tests.rs`.
+- Integration tests live under root `tests/`: `tests/agent_loop.rs`, `tests/contracts.rs`, `tests/client_autostart.rs`, `tests/daemon_e2e.rs`, `tests/frontend_extensions.rs`, and `tests/gateway_no_agent_map.rs`.
+- Extension crate integration tests live in the extension crate, such as `vulcan-ext-todo/tests/todo_e2e.rs`.
+- Snapshot files live under `src/snapshots/`, for example `src/snapshots/vulcan__prompt_builder__tests__system_prompt_default_registry.snap`.
 
-## Extension Tests
+**Naming:**
+- Use behavior-focused snake_case test names: `sanitize_drops_orphan_tool_with_no_preceding_assistant` in `src/agent/tests.rs`, `daemon_socket_is_0600` in `tests/daemon_e2e.rs`, and `readonly_profile_does_not_expose_mutating_tools` in `tests/contracts.rs`.
+- Use comments above contract tests when the test pins a design invariant or acceptance criterion, as in `tests/contracts.rs` and `tests/agent_loop.rs`.
+- Use feature gates at file/module level for feature-specific tests, such as `#![cfg(feature = "daemon")]` in `tests/daemon_e2e.rs`.
 
-- Todo extension E2E tests live in `vulcan-ext-todo/tests/todo_e2e.rs`.
-- Frontend extension integration is also tested from the root in `tests/frontend_extensions.rs`.
-- First-party extension crates should be tested both as independent crates and through root integration where daemon/frontend contracts matter.
+**Structure:**
+```text
+src/<module>.rs                 # inline #[cfg(test)] mod tests for local pure behavior
+src/<module>/tests.rs           # split module test suite for larger modules
+tests/<behavior>.rs             # root integration tests using public crate APIs
+tests/support/mod.rs            # shared integration helpers
+vulcan-ext-*/tests/*.rs         # extension-crate E2E/integration coverage
+src/snapshots/*.snap            # insta snapshot baselines
+benches/*.rs                    # performance and soak measurement targets
+```
 
-## CI Workflow
+## Test Structure
 
-- CI configuration lives in `.github/workflows/ci.yml`.
-- Pull requests and main pushes run formatting, clippy, tests, and dependency checks.
-- CI sets `RUSTFLAGS=-D warnings`.
-- Formatting runs `cargo fmt --all -- --check`.
-- Clippy runs `cargo clippy --all-targets --all-features`.
-- Clippy is currently `continue-on-error` because the repository has an existing warning baseline.
-- Test jobs build default and gateway feature sets, build the CLI, run nextest, run doc tests, and upload JUnit output.
+**Suite Organization:**
+```rust
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-## Benchmarks And Performance
+    #[test]
+    fn rejects_invalid_id_characters() {
+        let raw = r#"id = "Lint Helper!""#;
+        let err = ExtensionManifest::from_toml_str(raw).unwrap_err();
+        match err {
+            ManifestError::InvalidField { field, .. } => assert_eq!(field, "id"),
+            other => panic!("expected InvalidField, got {other:?}"),
+        }
+    }
+}
+```
 
-- Benchmark workflow lives in `.github/workflows/bench.yml`.
-- Benchmarks run on relevant PR paths, schedule, and manual dispatch.
-- The workflow runs `cargo bench`, `vulcan-soak`, median-of-3 measurement, and informational baseline comparison.
-- TUI render benchmark entry point is `src/bin/tui-render-bench.rs`.
-- Observability metrics are being added to help diagnose daemon, provider, hook, tool, TUI, and process performance.
+**Patterns:**
+- Build small fixture helpers near tests: `asst_with_tool_calls`, `tool_msg`, and `agent_with_mock` in `src/agent/tests.rs`; `vulcan_with_home` and `wait_for_socket` in `tests/daemon_e2e.rs`.
+- Use Arrange/Act/Assert in one function without explicit section comments unless the behavior is complex. `tests/agent_loop.rs` uses comments to pin lifecycle contracts.
+- Use `#[tokio::test]` for async agent, hook, gateway, tool, and extension tests; use `#[test]` for pure parsing, formatting, rendering, and state transitions.
+- Assert exact outputs for stable contracts (`assert_eq!`) and use substring/predicate checks for process output or generated text, as in `tests/daemon_e2e.rs`.
 
-## Quality Gates
+## Mocking
 
-- Dependency policy is checked through `cargo deny` using `deny.toml`.
-- Unused dependency detection is handled by cargo-machete in CI.
-- Feature coverage includes default and gateway builds in normal CI and broader powerset coverage on push workflows.
-- Coverage reporting runs on push workflows.
-- Doc tests run for default and gateway feature sets.
+**Framework:** Hand-rolled fakes and in-memory stores; no external mocking crate detected.
 
-## Test Environment Notes
+**Patterns:**
+```rust
+let mock = Arc::new(MockProvider::new(128_000));
+mock.enqueue_tool_call(
+    "read_file",
+    "read_missing",
+    serde_json::json!({"path": "/this/does/not/exist/yyc-193"}),
+);
+mock.enqueue_text("could not read.");
+let agent = Agent::for_test(
+    Box::new(ProviderHandle(mock.clone())),
+    ToolRegistry::new(),
+    HookRegistry::new(),
+    Arc::new(SkillRegistry::empty()),
+);
+```
 
-- Some tests need stable working directories or temp directories because tools execute shell/file operations.
-- Daemon and TUI tests should avoid constructing fresh agents per prompt when long-lived state is the behavior under test.
-- Gateway tests should consider durable queues and platform lane mapping.
-- Provider tests should avoid live network assumptions unless explicitly marked or mocked through `src/provider/mock.rs`.
+**What to Mock:**
+- Mock LLM/provider behavior with `src/provider/mock.rs`; tests enqueue text, tool calls, mixed responses, reasoning, or errors and inspect `captured_calls`.
+- Use in-memory stores for persistence contracts where possible, such as `SessionStore::in_memory()` in `vulcan-ext-todo/tests/todo_e2e.rs`.
+- Use `tempfile::tempdir` for filesystem, daemon home, config, and missing-path tests, as in `tests/daemon_e2e.rs`, `tests/agent_loop.rs`, and `src/tools/file.rs`.
+- Use public crate APIs and small wrapper structs (`ProviderHandle`) instead of patching private internals, as shown in `tests/contracts.rs`.
+
+**What NOT to Mock:**
+- Do not use live provider/network calls in normal tests; provider behavior should go through `MockProvider` or local HTTP/router harnesses.
+- Do not depend on a developer's real `~/.vulcan`; redirect `VULCAN_HOME` to a temp directory for daemon/config tests, as in `tests/daemon_e2e.rs`.
+- Do not mock tool registry filtering when the test is about profiles or tool exposure; build a real `ToolRegistry` and apply the profile as in `tests/contracts.rs`.
+- Do not rerun mutating tools in replay tests unless their `ReplaySafety` explicitly permits it; tool replay safety is defined in `src/tools/mod.rs`.
+
+## Fixtures and Factories
+
+**Test Data:**
+```rust
+fn empty_skills() -> Arc<SkillRegistry> {
+    Arc::new(SkillRegistry::empty())
+}
+
+fn agent_with_profile(profile: Option<ToolProfile>) -> (Agent, Arc<MockProvider>) {
+    let mock = Arc::new(MockProvider::new(128_000));
+    let mut tools = ToolRegistry::new();
+    if let Some(p) = profile {
+        tools.apply_profile(&p);
+    }
+    let agent = Agent::for_test(
+        Box::new(ProviderHandle(mock.clone())),
+        tools,
+        HookRegistry::new(),
+        empty_skills(),
+    );
+    (agent, mock)
+}
+```
+
+**Location:**
+- Shared integration helpers live in `tests/support/mod.rs`, especially `vulcan_command()` and binary-build fallback logic for process tests.
+- Agent mock and generated benchmark provider live in `src/provider/mock.rs`.
+- Test-local factories stay inside their suite when they are specific to one behavior, such as `agent_with_mock` in `src/agent/tests.rs` and `agent_with_profile` in `tests/contracts.rs`.
+- Snapshot baselines live in `src/snapshots/`; inline snapshots are also used in `src/tui/rendering.rs`.
+
+## Coverage
+
+**Requirements:** No hard coverage threshold is configured.
+
+**View Coverage:**
+```bash
+cargo llvm-cov nextest --all-features --workspace --lcov --output-path lcov.info
+cargo llvm-cov report --summary-only
+```
+
+- Coverage runs only on pushes in `.github/workflows/ci.yml`, not as a PR gate.
+- CI uploads `lcov.info` as `coverage-lcov` with 14-day retention.
+- The repository currently has broad unit/integration coverage: root exploration found 949 `#[test]` entries and 362 `#[tokio::test]` entries under `src`, `tests`, and `vulcan-*` Rust files.
+
+## Test Types
+
+**Unit Tests:**
+- Scope pure parsing, formatting, validation, state transitions, and small helpers in the owning module.
+- Examples: `src/extensions/manifest.rs` validates manifest parsing; `src/tools/fs_sandbox.rs` validates sandbox decisions; `src/tui/state/tests.rs` validates UI state transitions; `src/provider/openai.rs` contains provider parsing/retry helper tests.
+
+**Integration Tests:**
+- Scope public agent, daemon, client, gateway, contract, and extension behavior.
+- Examples: `tests/agent_loop.rs` covers agent lifecycle/run records; `tests/contracts.rs` pins high-level tool profile contracts; `tests/daemon_e2e.rs` exercises the real `vulcan` binary; `tests/frontend_extensions.rs` covers extension/frontend contracts; `vulcan-ext-todo/tests/todo_e2e.rs` covers extension replay across session end/start.
+
+**E2E Tests:**
+- CLI/daemon E2E uses `assert_cmd` and a real built `vulcan` binary through `tests/support/mod.rs`.
+- Extension E2E uses real registries, hooks, tools, and in-memory session storage in `vulcan-ext-todo/tests/todo_e2e.rs`.
+- No browser/UI E2E framework detected.
+
+**Benchmark Tests:**
+- Divan benchmark targets are declared in `Cargo.toml` and implemented in `benches/tui_render.rs` and `benches/agent_core.rs`.
+- The soak binary is declared as `[[bin]] vulcan-soak` in `Cargo.toml` and implemented in `benches/soak.rs`.
+- Benchmark CI runs median-of-3 measurement and informational baseline diffing in `.github/workflows/bench.yml`.
+
+## Common Patterns
+
+**Async Testing:**
+```rust
+#[tokio::test]
+async fn todo_details_survive_session_end_then_session_start_replay() {
+    let memory = Arc::new(SessionStore::in_memory());
+    let hooks = HookRegistry::new();
+    let mut tools = ToolRegistry::new();
+    // Wire real registry/hooks/tools, execute, then assert persisted replay.
+}
+```
+
+**Error Testing:**
+```rust
+let err = ExtensionManifest::from_toml_str(raw).unwrap_err();
+match err {
+    ManifestError::InvalidField { field, .. } => assert_eq!(field, "id"),
+    other => panic!("expected InvalidField, got {other:?}"),
+}
+```
+
+**Process Testing:**
+```rust
+vulcan_with_home(dir.path())
+    .args(["daemon", "status"])
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("pid"))
+    .stdout(predicate::str::contains("uptime_secs"));
+```
+
+**Snapshot Testing:**
+```rust
+insta::assert_snapshot!("system_prompt_default_registry", normalized);
+```
+
+## CI Quality Gates
+
+- Formatting: `.github/workflows/ci.yml` runs `cargo fmt --all -- --check`.
+- Linting: `.github/workflows/ci.yml` runs `cargo clippy --all-targets --all-features`; it is currently `continue-on-error` because of an existing baseline.
+- Build coverage: CI builds default features and `--features gateway` with `cargo build --all-targets`.
+- Test execution: CI runs nextest for default and gateway feature sets and uploads `target/nextest/ci/junit.xml`.
+- Doc tests: CI runs `cargo test --doc` and `cargo test --doc --features gateway`.
+- Feature coverage: push workflow runs `cargo hack check --feature-powerset --no-dev-deps --exclude-features bench-soak`.
+- Supply-chain/dependency checks: CI runs `cargo deny check` using `deny.toml` and cargo-machete for unused dependencies.
+
+---
+
+*Testing analysis: 2026-05-03*
