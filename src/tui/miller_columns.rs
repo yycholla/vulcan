@@ -259,7 +259,7 @@ fn draw_column(
 
     let visible = inner.height as usize;
     let active = selection.min(entries.len().saturating_sub(1));
-    let start = active.saturating_sub(visible.saturating_sub(1) / 2);
+    let start = visible_window_start(active, visible, entries.len());
     let end = (start + visible).min(entries.len());
 
     let mut lines: Vec<Line<'static>> = Vec::new();
@@ -276,22 +276,16 @@ fn draw_column(
             &entry.label,
             (inner.width as usize).saturating_sub(reserved),
         );
-        let base_style = if is_active {
-            // mini.files-style cursor row: full-width REVERSED block.
-            if is_focused {
-                Style::default().add_modifier(Modifier::REVERSED | Modifier::BOLD)
-            } else {
-                Style::default().add_modifier(Modifier::BOLD)
-            }
+        let active_style = if is_active {
+            Some(active_row_style(is_focused))
         } else {
-            Style::default()
+            None
         };
-        // Pad to column width so the REVERSED row fills the visible
-        // line — matches the mini.files cursor block.
+        // Pad to column width so the active row fills the visible line.
         let row_width = icon.chars().count() + label.chars().count() + arrow.chars().count();
         let pad = (inner.width as usize).saturating_sub(row_width);
-        let icon_style = merge_active(icon_style(&entry.icon, theme), base_style);
-        let label_style = merge_active(Style::default(), base_style);
+        let icon_style = active_style.unwrap_or_else(|| icon_style(&entry.icon, theme));
+        let label_style = active_style.unwrap_or_default();
         let mut spans = Vec::new();
         if !icon.is_empty() {
             spans.push(Span::styled(icon, icon_style));
@@ -300,7 +294,7 @@ fn draw_column(
         if !arrow.is_empty() {
             spans.push(Span::styled(
                 arrow.to_string(),
-                theme.muted.patch(base_style),
+                active_style.unwrap_or(theme.muted),
             ));
         }
         if pad > 0 {
@@ -374,6 +368,25 @@ fn luma(r: u8, g: u8, b: u8) -> u16 {
     ((r as u16 * 299) + (g as u16 * 587) + (b as u16 * 114)) / 1000
 }
 
+fn visible_window_start(active: usize, visible: usize, total: usize) -> usize {
+    if visible == 0 || total <= visible || active < visible {
+        0
+    } else {
+        active + 1 - visible
+    }
+}
+
+fn active_row_style(is_focused: bool) -> Style {
+    if is_focused {
+        Style::default()
+            .fg(Palette::PAPER)
+            .bg(Palette::BLUE)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().add_modifier(Modifier::BOLD)
+    }
+}
+
 fn icon_style(icon: &str, theme: &Theme) -> Style {
     match icon {
         "✦" => theme.success.add_modifier(Modifier::BOLD),
@@ -381,10 +394,6 @@ fn icon_style(icon: &str, theme: &Theme) -> Style {
         "◆" => theme.tool_call.add_modifier(Modifier::BOLD),
         _ => theme.muted,
     }
-}
-
-fn merge_active(base: Style, active: Style) -> Style {
-    base.patch(active)
 }
 
 fn union_rect(current: Option<Rect>, next: Rect) -> Option<Rect> {
@@ -415,6 +424,7 @@ fn trim_to_width(s: &str, width: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ratatui::{Terminal, backend::TestBackend};
 
     struct FakeSource;
     impl MillerSource for FakeSource {
@@ -488,5 +498,51 @@ mod tests {
         // Now at depth 1 looking at leaves; drilling further should bail.
         assert!(!drill(&mut state, &src));
         assert_eq!(state.focus, 1);
+    }
+
+    #[test]
+    fn visible_window_stays_fixed_until_selection_leaves_view() {
+        assert_eq!(visible_window_start(0, 5, 20), 0);
+        assert_eq!(visible_window_start(4, 5, 20), 0);
+        assert_eq!(visible_window_start(5, 5, 20), 1);
+        assert_eq!(visible_window_start(7, 5, 20), 3);
+        assert_eq!(visible_window_start(7, 10, 8), 0);
+    }
+
+    #[test]
+    fn focused_active_row_uses_one_style_across_symbols_label_and_padding() {
+        let backend = TestBackend::new(24, 6);
+        let mut terminal = Terminal::new(backend).expect("test terminal");
+        let theme = Theme::system();
+        let entries = vec![
+            MillerEntry {
+                label: "free-lab".into(),
+                icon: "✦".into(),
+                has_children: true,
+            },
+            MillerEntry {
+                label: "paid-lab".into(),
+                icon: "◆".into(),
+                has_children: false,
+            },
+        ];
+
+        terminal
+            .draw(|f| {
+                draw_column(f, f.area(), "providers", &entries, 0, true, &theme);
+            })
+            .expect("draw miller column");
+
+        let buffer = terminal.backend().buffer();
+        let active_y = 1;
+        for x in 1..23 {
+            let cell = &buffer[(x, active_y)];
+            assert_eq!(cell.fg, Palette::PAPER, "fg mismatch at x={x}");
+            assert_eq!(cell.bg, Palette::BLUE, "bg mismatch at x={x}");
+            assert!(
+                cell.modifier.contains(Modifier::BOLD),
+                "bold missing at x={x}"
+            );
+        }
     }
 }
