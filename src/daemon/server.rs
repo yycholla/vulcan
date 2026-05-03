@@ -10,6 +10,7 @@ use std::sync::Arc;
 
 use tokio::net::UnixStream;
 use tokio::sync::mpsc;
+use tracing::Instrument;
 
 use crate::daemon::dispatch::{DispatchResult, Dispatcher};
 use crate::daemon::lifecycle::SocketBinder;
@@ -17,6 +18,7 @@ use crate::daemon::protocol::{
     Response, parse_request_strict, read_frame_bytes, write_frame_bytes,
 };
 use crate::daemon::state::DaemonState;
+use crate::observability;
 
 /// Long-lived daemon server. Holds the bound socket and per-process
 /// state for the lifetime of a single `vulcan daemon` process.
@@ -96,48 +98,73 @@ async fn handle_connection(stream: UnixStream, dispatcher: Arc<Dispatcher>) {
             }
         };
 
-        let response = match parse_request_strict(&body) {
+        match parse_request_strict(&body) {
             Ok(req) => {
                 let dispatcher = Arc::clone(&dispatcher);
                 let write_tx = write_tx.clone();
-                tokio::spawn(async move {
-                    let response = dispatcher.dispatch(req).await;
-                    write_dispatch_result(write_tx, response).await;
-                });
-                continue;
+                let span = observability::daemon_request_span(&req.method, &req.session, &req.id);
+                let record_span = span.clone();
+                tokio::spawn(
+                    async move {
+                        let response = dispatcher.dispatch(req).await;
+                        write_dispatch_result(write_tx, response, &record_span).await;
+                    }
+                    .instrument(span),
+                );
             }
             Err(proto_err) => {
-                DispatchResult::Response(Response::error("unknown".into(), proto_err))
+                let span =
+                    observability::daemon_request_span("parse_request", "unknown", "unknown");
+                let response =
+                    DispatchResult::Response(Response::error("unknown".into(), proto_err));
+                write_dispatch_result(write_tx.clone(), response, &span).await;
             }
-        };
-
-        write_dispatch_result(write_tx.clone(), response).await;
+        }
     }
 
     drop(write_tx);
     writer.abort();
 }
 
-async fn write_dispatch_result(write_tx: mpsc::Sender<Vec<u8>>, response: DispatchResult) {
+async fn write_dispatch_result(
+    write_tx: mpsc::Sender<Vec<u8>>,
+    response: DispatchResult,
+    span: &tracing::Span,
+) {
     match response {
         DispatchResult::Response(resp) => {
+            record_response_outcome(span, &resp);
             send_body(&write_tx, &resp, "response").await;
         }
         DispatchResult::Stream { mut frames, done } => {
             while let Some(frame) = frames.recv().await {
                 if !send_body(&write_tx, &frame, "stream frame").await {
+                    span.record(observability::attr::OUTCOME, "error");
+                    span.record(observability::attr::ERROR_KIND, "client_disconnected");
                     return;
                 }
             }
             match done.await {
                 Ok(resp) => {
+                    record_response_outcome(span, &resp);
                     send_body(&write_tx, &resp, "final response").await;
                 }
                 Err(_) => {
+                    span.record(observability::attr::OUTCOME, "error");
+                    span.record(observability::attr::ERROR_KIND, "stream_done_dropped");
                     tracing::warn!("daemon: stream completion sender dropped without result");
                 }
             }
         }
+    }
+}
+
+fn record_response_outcome(span: &tracing::Span, response: &Response) {
+    if let Some(error) = &response.error {
+        span.record(observability::attr::OUTCOME, "error");
+        span.record(observability::attr::ERROR_KIND, error.code.as_str());
+    } else {
+        span.record(observability::attr::OUTCOME, "ok");
     }
 }
 
