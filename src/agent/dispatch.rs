@@ -70,6 +70,7 @@ impl Agent {
         };
 
         let tool_span = observability::tool_call_span(name);
+        let mut metric_error_kind: Option<&'static str> = None;
         let raw_result: ToolResult = if let Some(reason) = blocked.clone() {
             tool_span.record(observability::attr::OUTCOME, "blocked");
             // YYC-179: record the block before failing the tool
@@ -90,6 +91,7 @@ impl Agent {
             {
                 Ok(r) => {
                     if r.is_error {
+                        metric_error_kind = Some("tool_error");
                         tool_span.record(observability::attr::OUTCOME, "error");
                         tool_span.record(observability::attr::ERROR_KIND, "tool_error");
                     } else {
@@ -98,6 +100,7 @@ impl Agent {
                     r
                 }
                 Err(e) => {
+                    metric_error_kind = Some("dispatch_error");
                     tool_span.record(observability::attr::OUTCOME, "error");
                     tool_span.record(observability::attr::ERROR_KIND, "dispatch_error");
                     ToolResult::err(format!("Error: {e}"))
@@ -122,8 +125,11 @@ impl Agent {
             None => raw_result,
         };
         if final_result.is_error {
-            tool_span.record(observability::attr::OUTCOME, "error");
-            tool_span.record(observability::attr::ERROR_KIND, "tool_error");
+            if blocked.is_none() {
+                metric_error_kind.get_or_insert("tool_error");
+                tool_span.record(observability::attr::OUTCOME, "error");
+                tool_span.record(observability::attr::ERROR_KIND, "tool_error");
+            }
         } else if blocked.is_none() {
             tool_span.record(observability::attr::OUTCOME, "ok");
         }
@@ -131,6 +137,19 @@ impl Agent {
         // YYC-179: emit one ToolCall event per dispatch with the
         // duration, approval surface, and structured error flag.
         let duration_ms = started.elapsed().as_millis().min(u64::MAX as u128) as u64;
+        let metric_outcome = if blocked.is_some() {
+            "blocked"
+        } else if final_result.is_error {
+            "error"
+        } else {
+            "ok"
+        };
+        observability::record_tool_call_metrics(
+            name,
+            started.elapsed(),
+            metric_outcome,
+            metric_error_kind,
+        );
         let approval = if blocked.is_some() {
             Some("blocked".to_string())
         } else {

@@ -4,10 +4,14 @@
 //! subscriber initialization, and snapshot shapes used by daemon, CLI, TUI,
 //! gateway, hooks, tools, providers, and Symphony.
 
-use std::time::Duration;
+use std::{sync::LazyLock, time::Duration};
 
 use anyhow::{Context, Result};
-use opentelemetry::trace::TracerProvider as _;
+use opentelemetry::{
+    KeyValue, global,
+    metrics::{Counter, Histogram},
+    trace::TracerProvider as _,
+};
 use opentelemetry_otlp::WithExportConfig;
 use opentelemetry_sdk::{
     Resource,
@@ -124,6 +128,72 @@ pub mod metric {
     ];
 }
 
+struct RuntimeMetricInstruments {
+    daemon_request_duration_ms: Histogram<f64>,
+    provider_request_duration_ms: Histogram<f64>,
+    tool_call_duration_ms: Histogram<f64>,
+    hook_event_duration_ms: Histogram<f64>,
+    tokens_input: Counter<u64>,
+    tokens_output: Counter<u64>,
+    tokens_total: Counter<u64>,
+    errors_total: Counter<u64>,
+    hook_errors: Counter<u64>,
+    hook_timeouts: Counter<u64>,
+}
+
+static RUNTIME_METRICS: LazyLock<RuntimeMetricInstruments> = LazyLock::new(|| {
+    let meter = global::meter("vulcan");
+    RuntimeMetricInstruments {
+        daemon_request_duration_ms: meter
+            .f64_histogram(metric::DAEMON_REQUEST_DURATION_MS)
+            .with_unit("ms")
+            .with_description("Daemon request latency.")
+            .build(),
+        provider_request_duration_ms: meter
+            .f64_histogram(metric::PROVIDER_REQUEST_DURATION_MS)
+            .with_unit("ms")
+            .with_description("Provider request latency.")
+            .build(),
+        tool_call_duration_ms: meter
+            .f64_histogram(metric::TOOL_CALL_DURATION_MS)
+            .with_unit("ms")
+            .with_description("Tool call latency.")
+            .build(),
+        hook_event_duration_ms: meter
+            .f64_histogram(metric::HOOK_EVENT_DURATION_MS)
+            .with_unit("ms")
+            .with_description("Hook handler event latency.")
+            .build(),
+        tokens_input: meter
+            .u64_counter(metric::TOKENS_INPUT)
+            .with_unit("tokens")
+            .with_description("Provider prompt tokens.")
+            .build(),
+        tokens_output: meter
+            .u64_counter(metric::TOKENS_OUTPUT)
+            .with_unit("tokens")
+            .with_description("Provider completion tokens.")
+            .build(),
+        tokens_total: meter
+            .u64_counter(metric::TOKENS_TOTAL)
+            .with_unit("tokens")
+            .with_description("Provider total tokens.")
+            .build(),
+        errors_total: meter
+            .u64_counter(metric::ERRORS_TOTAL)
+            .with_description("Runtime errors by surface and kind.")
+            .build(),
+        hook_errors: meter
+            .u64_counter(metric::HOOK_ERRORS)
+            .with_description("Hook handler errors.")
+            .build(),
+        hook_timeouts: meter
+            .u64_counter(metric::HOOK_TIMEOUTS)
+            .with_description("Hook handler timeouts.")
+            .build(),
+    }
+});
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProviderSpanMode {
     Buffered,
@@ -216,6 +286,154 @@ pub fn provider_request_span(
         ProviderSpanMode::Compaction => span!(span::PROVIDER_COMPACTION),
         ProviderSpanMode::Streaming => span!(span::PROVIDER_STREAMING),
     }
+}
+
+fn duration_millis(duration: Duration) -> f64 {
+    duration.as_secs_f64() * 1000.0
+}
+
+fn outcome_metric_attrs(
+    surface: &'static str,
+    outcome: &str,
+    error_kind: Option<&str>,
+) -> Vec<KeyValue> {
+    let mut attrs = vec![
+        KeyValue::new(attr::SURFACE, surface),
+        KeyValue::new(attr::OUTCOME, outcome.to_string()),
+    ];
+    if let Some(kind) = error_kind {
+        attrs.push(KeyValue::new(attr::ERROR_KIND, kind.to_string()));
+    }
+    attrs
+}
+
+fn push_outcome_attrs(attrs: &mut Vec<KeyValue>, outcome: &str, error_kind: Option<&str>) {
+    attrs.push(KeyValue::new(attr::OUTCOME, outcome.to_string()));
+    if let Some(kind) = error_kind {
+        attrs.push(KeyValue::new(attr::ERROR_KIND, kind.to_string()));
+    }
+}
+
+fn provider_metric_attrs(provider: &str, model: &str, mode: ProviderSpanMode) -> Vec<KeyValue> {
+    vec![
+        KeyValue::new(attr::SURFACE, "provider"),
+        KeyValue::new(attr::PROVIDER, provider.to_string()),
+        KeyValue::new(attr::MODEL, model.to_string()),
+        KeyValue::new(attr::PROVIDER_MODE, mode.as_str()),
+        KeyValue::new(attr::STREAMING, mode.streaming()),
+    ]
+}
+
+pub fn record_provider_request_metrics(
+    provider: &str,
+    model: &str,
+    mode: ProviderSpanMode,
+    duration: Duration,
+    outcome: &str,
+    error_kind: Option<&str>,
+) {
+    let mut attrs = provider_metric_attrs(provider, model, mode);
+    push_outcome_attrs(&mut attrs, outcome, error_kind);
+    RUNTIME_METRICS
+        .provider_request_duration_ms
+        .record(duration_millis(duration), &attrs);
+    if let Some(kind) = error_kind {
+        record_error_metric("provider", kind);
+    }
+}
+
+pub fn record_provider_token_metrics(
+    provider: &str,
+    model: &str,
+    mode: ProviderSpanMode,
+    prompt_tokens: usize,
+    completion_tokens: usize,
+    total_tokens: usize,
+) {
+    let attrs = provider_metric_attrs(provider, model, mode);
+    RUNTIME_METRICS
+        .tokens_input
+        .add(prompt_tokens as u64, &attrs);
+    RUNTIME_METRICS
+        .tokens_output
+        .add(completion_tokens as u64, &attrs);
+    RUNTIME_METRICS
+        .tokens_total
+        .add(total_tokens as u64, &attrs);
+}
+
+pub fn record_tool_call_metrics(
+    tool_name: &str,
+    duration: Duration,
+    outcome: &str,
+    error_kind: Option<&str>,
+) {
+    let mut attrs = vec![
+        KeyValue::new(attr::SURFACE, "tools"),
+        KeyValue::new(attr::TOOL_NAME, tool_name.to_string()),
+    ];
+    push_outcome_attrs(&mut attrs, outcome, error_kind);
+    RUNTIME_METRICS
+        .tool_call_duration_ms
+        .record(duration_millis(duration), &attrs);
+    if let Some(kind) = error_kind {
+        record_error_metric("tools", kind);
+    }
+}
+
+pub fn record_hook_event_metrics(
+    event: &'static str,
+    handler: &str,
+    duration: Duration,
+    outcome: &str,
+    error_kind: Option<&str>,
+) {
+    let mut attrs = vec![
+        KeyValue::new(attr::SURFACE, "hooks"),
+        KeyValue::new(attr::HOOK_EVENT, event),
+        KeyValue::new(attr::HOOK_HANDLER, handler.to_string()),
+    ];
+    push_outcome_attrs(&mut attrs, outcome, error_kind);
+    RUNTIME_METRICS
+        .hook_event_duration_ms
+        .record(duration_millis(duration), &attrs);
+    match error_kind {
+        Some("handler_timeout") => {
+            RUNTIME_METRICS.hook_timeouts.add(1, &attrs);
+            record_error_metric("hooks", "handler_timeout");
+        }
+        Some(kind) => {
+            RUNTIME_METRICS.hook_errors.add(1, &attrs);
+            record_error_metric("hooks", kind);
+        }
+        None => {}
+    }
+}
+
+pub fn record_daemon_request_metrics(
+    method: &str,
+    duration: Duration,
+    outcome: &str,
+    error_kind: Option<&str>,
+) {
+    let operation = daemon_request_operation(method);
+    let mut attrs = vec![
+        KeyValue::new(attr::SURFACE, "daemon"),
+        KeyValue::new(attr::RPC_METHOD, method.to_string()),
+        KeyValue::new(attr::OPERATION, operation),
+    ];
+    push_outcome_attrs(&mut attrs, outcome, error_kind);
+    RUNTIME_METRICS
+        .daemon_request_duration_ms
+        .record(duration_millis(duration), &attrs);
+    if let Some(kind) = error_kind {
+        record_error_metric("daemon", kind);
+    }
+}
+
+pub fn record_error_metric(surface: &'static str, error_kind: &str) {
+    let attrs = outcome_metric_attrs(surface, "error", Some(error_kind));
+    RUNTIME_METRICS.errors_total.add(1, &attrs);
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -340,6 +558,7 @@ where
 
     let (otel_metrics_layer, meter_provider) = if config.metrics {
         let provider = init_meter_provider(config)?;
+        global::set_meter_provider(provider.clone());
         (
             Some(tracing_opentelemetry::MetricsLayer::new(provider.clone()).boxed()),
             Some(provider),
@@ -503,6 +722,42 @@ mod tests {
         assert_eq!(
             metric::PROCESS_MEMORY_RSS_BYTES,
             "vulcan.process.memory.rss_bytes"
+        );
+    }
+
+    #[test]
+    fn provider_metric_attributes_stay_low_cardinality() {
+        let attrs = provider_metric_attrs("openai", "gpt-5.4", ProviderSpanMode::Streaming);
+        assert!(attrs.iter().any(|kv| kv.key.as_str() == attr::SURFACE));
+        assert!(attrs.iter().any(|kv| kv.key.as_str() == attr::PROVIDER));
+        assert!(
+            attrs
+                .iter()
+                .any(|kv| kv.key.as_str() == attr::PROVIDER_MODE)
+        );
+        assert!(attrs.iter().any(|kv| kv.key.as_str() == attr::STREAMING));
+        assert!(
+            attrs.iter().all(
+                |kv| kv.key.as_str() != attr::REQUEST_ID && kv.key.as_str() != attr::SESSION_ID
+            )
+        );
+    }
+
+    #[test]
+    fn outcome_metric_attributes_include_error_kind_only_for_errors() {
+        let ok_attrs = outcome_metric_attrs("tools", "ok", None);
+        assert!(ok_attrs.iter().any(|kv| kv.key.as_str() == attr::OUTCOME));
+        assert!(
+            !ok_attrs
+                .iter()
+                .any(|kv| kv.key.as_str() == attr::ERROR_KIND)
+        );
+
+        let error_attrs = outcome_metric_attrs("provider", "error", Some("provider_error"));
+        assert!(
+            error_attrs
+                .iter()
+                .any(|kv| kv.key.as_str() == attr::ERROR_KIND)
         );
     }
 

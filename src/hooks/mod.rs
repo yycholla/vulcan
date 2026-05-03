@@ -1091,21 +1091,47 @@ impl HookRegistry {
         for h in self.handlers_snapshot() {
             // Each handler gets its own timeout window. session_X are observe-
             // only so we don't care about return values.
-            let span = hook_span("session_start", h.name());
+            let handler_name = h.name();
+            let span = hook_span("session_start", handler_name);
+            let started = std::time::Instant::now();
             let result = timeout(self.handler_timeout, h.session_start(session_id))
                 .instrument(span.clone())
                 .await;
             record_unit_hook_result(&span, &result, self.handler_timeout);
+            observability::record_hook_event_metrics(
+                "session_start",
+                handler_name,
+                started.elapsed(),
+                if result.is_ok() {
+                    "continue"
+                } else {
+                    "timeout"
+                },
+                result.err().map(|_| "handler_timeout"),
+            );
         }
     }
 
     pub async fn session_end(&self, session_id: &str, total_turns: u32) {
         for h in self.handlers_snapshot() {
-            let span = hook_span("session_end", h.name());
+            let handler_name = h.name();
+            let span = hook_span("session_end", handler_name);
+            let started = std::time::Instant::now();
             let result = timeout(self.handler_timeout, h.session_end(session_id, total_turns))
                 .instrument(span.clone())
                 .await;
             record_unit_hook_result(&span, &result, self.handler_timeout);
+            observability::record_hook_event_metrics(
+                "session_end",
+                handler_name,
+                started.elapsed(),
+                if result.is_ok() {
+                    "continue"
+                } else {
+                    "timeout"
+                },
+                result.err().map(|_| "handler_timeout"),
+            );
         }
     }
 
@@ -1119,12 +1145,21 @@ impl HookRegistry {
         F: std::future::Future<Output = Result<HookOutcome>>,
     {
         let span = hook_span(event, h.name());
+        let started = std::time::Instant::now();
         match timeout(self.handler_timeout, fut)
             .instrument(span.clone())
             .await
         {
             Ok(Ok(o)) => {
-                span.record(observability::attr::OUTCOME, hook_outcome_name(&o));
+                let outcome = hook_outcome_name(&o);
+                span.record(observability::attr::OUTCOME, outcome);
+                observability::record_hook_event_metrics(
+                    event,
+                    h.name(),
+                    started.elapsed(),
+                    outcome,
+                    None,
+                );
                 Some(o)
             }
             Ok(Err(e)) => {
@@ -1137,6 +1172,13 @@ impl HookRegistry {
                 self.failure_metrics.errors.fetch_add(1, Ordering::Relaxed);
                 span.record(observability::attr::OUTCOME, "error");
                 span.record(observability::attr::ERROR_KIND, "handler_error");
+                observability::record_hook_event_metrics(
+                    event,
+                    h.name(),
+                    started.elapsed(),
+                    "error",
+                    Some("handler_error"),
+                );
                 tracing::warn!(
                     handler = h.name(),
                     hook_event = event,
@@ -1152,6 +1194,13 @@ impl HookRegistry {
                     .fetch_add(1, Ordering::Relaxed);
                 span.record(observability::attr::OUTCOME, "timeout");
                 span.record(observability::attr::ERROR_KIND, "handler_timeout");
+                observability::record_hook_event_metrics(
+                    event,
+                    h.name(),
+                    started.elapsed(),
+                    "timeout",
+                    Some("handler_timeout"),
+                );
                 tracing::warn!(
                     handler = h.name(),
                     hook_event = event,
