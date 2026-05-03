@@ -844,7 +844,10 @@ mod tests {
         app.show_diagnostics = true;
         app.prompt_tokens_last = 32_000;
         app.queue.push_back("queued".into());
-        app.note_frame_draw(std::time::Duration::from_micros(2_500));
+        app.note_frame_draw(
+            std::time::Duration::from_micros(2_500),
+            std::time::Duration::from_millis(20),
+        );
 
         terminal
             .draw(|f| {

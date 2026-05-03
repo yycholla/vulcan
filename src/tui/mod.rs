@@ -353,7 +353,7 @@ pub async fn run_tui(
 
     let mut exit = false;
     let mut pending_quit = false;
-    let mut last_draw: Instant;
+    let mut last_draw = Instant::now();
     let mut last_motion_frame = Instant::now();
 
     while !exit {
@@ -425,8 +425,12 @@ pub async fn run_tui(
             rendering::draw_surface_overlays(f, area, &app);
             rendering::draw_diagnostics(f, area, &app);
         })?;
-        app.note_frame_draw(draw_started.elapsed());
-        last_draw = Instant::now();
+        let frame_finished = Instant::now();
+        app.note_frame_draw(
+            draw_started.elapsed(),
+            frame_finished.saturating_duration_since(last_draw),
+        );
+        last_draw = frame_finished;
         if app.finish_chat_clear_if_idle() {
             continue;
         }
