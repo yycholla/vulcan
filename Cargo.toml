@@ -146,6 +146,8 @@ opentelemetry = "0.31"
 opentelemetry_sdk = "0.31"
 opentelemetry-otlp = { version = "0.31.1", default-features = false, features = ["http-proto", "reqwest-blocking-client", "trace", "metrics"] }
 tracing-opentelemetry = "0.32.1"
+# Low-overhead process RSS/CPU/thread sampling for OpenTelemetry runtime metrics.
+sysinfo = { version = "0.38.4", default-features = false, features = ["system"] }
 
 # Error handling
 anyhow = "1"

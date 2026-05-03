@@ -144,6 +144,9 @@ struct RuntimeMetricInstruments {
     tui_frames_total: Counter<u64>,
     tui_fps: Gauge<f64>,
     tui_surface_count: Gauge<u64>,
+    process_memory_rss_bytes: Gauge<u64>,
+    process_cpu_percent: Gauge<f64>,
+    process_threads: Gauge<u64>,
 }
 
 static RUNTIME_METRICS: LazyLock<RuntimeMetricInstruments> = LazyLock::new(|| {
@@ -217,6 +220,20 @@ static RUNTIME_METRICS: LazyLock<RuntimeMetricInstruments> = LazyLock::new(|| {
         tui_surface_count: meter
             .u64_gauge(metric::TUI_SURFACE_COUNT)
             .with_description("TUI active frontend surface count.")
+            .build(),
+        process_memory_rss_bytes: meter
+            .u64_gauge(metric::PROCESS_MEMORY_RSS_BYTES)
+            .with_unit("By")
+            .with_description("Current process resident memory.")
+            .build(),
+        process_cpu_percent: meter
+            .f64_gauge(metric::PROCESS_CPU_PERCENT)
+            .with_unit("%")
+            .with_description("Current process CPU utilization.")
+            .build(),
+        process_threads: meter
+            .u64_gauge(metric::PROCESS_THREADS)
+            .with_description("Current process thread count when available.")
             .build(),
     }
 });
@@ -484,6 +501,63 @@ pub fn record_tui_frame_metrics(
         .record(surface_count as u64, &attrs);
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ProcessResourceSnapshot {
+    pub rss_bytes: u64,
+    pub cpu_percent: f64,
+    pub thread_count: Option<u64>,
+}
+
+pub fn record_process_resource_metrics(snapshot: ProcessResourceSnapshot) {
+    let attrs = [KeyValue::new(attr::SURFACE, "process")];
+    RUNTIME_METRICS
+        .process_memory_rss_bytes
+        .record(snapshot.rss_bytes, &attrs);
+    RUNTIME_METRICS
+        .process_cpu_percent
+        .record(snapshot.cpu_percent, &attrs);
+    if let Some(thread_count) = snapshot.thread_count {
+        RUNTIME_METRICS.process_threads.record(thread_count, &attrs);
+    }
+}
+
+fn process_sampler_interval(config: &ObservabilityConfig) -> Duration {
+    Duration::from_secs(config.export_interval_secs.max(1))
+}
+
+fn collect_process_resource_snapshot(
+    system: &mut sysinfo::System,
+    pid: sysinfo::Pid,
+) -> Option<ProcessResourceSnapshot> {
+    system.refresh_processes(sysinfo::ProcessesToUpdate::Some(&[pid]), true);
+    let process = system.process(pid)?;
+    Some(ProcessResourceSnapshot {
+        rss_bytes: process.memory(),
+        cpu_percent: process.cpu_usage() as f64,
+        thread_count: process.tasks().map(|tasks| tasks.len() as u64),
+    })
+}
+
+fn spawn_process_resource_sampler(
+    config: &ObservabilityConfig,
+) -> Option<tokio::task::JoinHandle<()>> {
+    let handle = tokio::runtime::Handle::try_current().ok()?;
+    let interval = process_sampler_interval(config);
+    Some(handle.spawn(async move {
+        let pid = sysinfo::Pid::from_u32(std::process::id());
+        let mut system = sysinfo::System::new();
+        let mut ticker = tokio::time::interval(interval);
+        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
+        loop {
+            ticker.tick().await;
+            if let Some(snapshot) = collect_process_resource_snapshot(&mut system, pid) {
+                record_process_resource_metrics(snapshot);
+            }
+        }
+    }))
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct HookHealthSnapshot {
     pub handler_count: usize,
@@ -509,6 +583,7 @@ impl HookHealthSnapshot {
 pub struct ObservabilityGuard {
     tracer_provider: Option<SdkTracerProvider>,
     meter_provider: Option<SdkMeterProvider>,
+    process_sampler: Option<tokio::task::JoinHandle<()>>,
 }
 
 impl ObservabilityGuard {
@@ -516,6 +591,7 @@ impl ObservabilityGuard {
         Self {
             tracer_provider: None,
             meter_provider: None,
+            process_sampler: None,
         }
     }
 
@@ -526,6 +602,9 @@ impl ObservabilityGuard {
 
 impl Drop for ObservabilityGuard {
     fn drop(&mut self) {
+        if let Some(handle) = self.process_sampler.take() {
+            handle.abort();
+        }
         if let Some(provider) = self.tracer_provider.take()
             && let Err(err) = provider.shutdown()
         {
@@ -604,15 +683,16 @@ where
         (None, None)
     };
 
-    let (otel_metrics_layer, meter_provider) = if config.metrics {
+    let (otel_metrics_layer, meter_provider, process_sampler) = if config.metrics {
         let provider = init_meter_provider(config)?;
         global::set_meter_provider(provider.clone());
         (
             Some(tracing_opentelemetry::MetricsLayer::new(provider.clone()).boxed()),
             Some(provider),
+            spawn_process_resource_sampler(config),
         )
     } else {
-        (None, None)
+        (None, None, None)
     };
 
     tracing_subscriber::registry()
@@ -626,6 +706,7 @@ where
     Ok(ObservabilityGuard {
         tracer_provider,
         meter_provider,
+        process_sampler,
     })
 }
 
@@ -807,6 +888,21 @@ mod tests {
                 .iter()
                 .any(|kv| kv.key.as_str() == attr::ERROR_KIND)
         );
+    }
+
+    #[test]
+    fn process_sampler_interval_is_bounded_to_at_least_one_second() {
+        let config = ObservabilityConfig {
+            export_interval_secs: 0,
+            ..ObservabilityConfig::default()
+        };
+        assert_eq!(process_sampler_interval(&config), Duration::from_secs(1));
+
+        let config = ObservabilityConfig {
+            export_interval_secs: 7,
+            ..ObservabilityConfig::default()
+        };
+        assert_eq!(process_sampler_interval(&config), Duration::from_secs(7));
     }
 
     #[test]
