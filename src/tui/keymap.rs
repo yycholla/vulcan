@@ -84,6 +84,11 @@ pub(super) const SLASH_COMMANDS: &[SlashCommand] = &[
         mid_turn_safe: true,
     },
     SlashCommand {
+        name: "diagnostics",
+        description: "Toggle frame/runtime diagnostics overlay",
+        mid_turn_safe: true,
+    },
+    SlashCommand {
         name: "queue",
         description: "Queue prompt for after current turn: /queue <text>",
         mid_turn_safe: true,

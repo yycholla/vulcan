@@ -176,6 +176,14 @@ enum ChatClearPhase {
     Revealing,
 }
 
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct TuiDiagnostics {
+    pub frame_count: u64,
+    pub last_draw_ms: f64,
+    pub surface_count: usize,
+    pub active_surface: Option<String>,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CancelScope {
     Turn,
@@ -225,6 +233,8 @@ pub struct AppState {
     /// has flushed.
     pub deferred_queue: VecDeque<String>,
     pub show_reasoning: bool,
+    pub show_diagnostics: bool,
+    pub diagnostics: TuiDiagnostics,
     pub session_label: String,
 
     pub sessions: Vec<SessionState>,
@@ -361,6 +371,8 @@ impl AppState {
             queue: VecDeque::new(),
             deferred_queue: VecDeque::new(),
             show_reasoning: true,
+            show_diagnostics: false,
+            diagnostics: TuiDiagnostics::default(),
             session_label: "new session".into(),
 
             sessions: Vec::new(),
@@ -594,6 +606,17 @@ impl AppState {
         self.ui_runtime.open_text_surface(surface);
     }
 
+    pub fn update_frontend_surface(
+        &mut self,
+        update: vulcan_frontend_api::FrontendSurfaceUpdate,
+    ) -> bool {
+        self.ui_runtime.update_text_surface(update)
+    }
+
+    pub fn close_frontend_surface(&mut self, id: impl Into<String>) -> bool {
+        self.ui_runtime.close_surface(id.into())
+    }
+
     pub fn install_tick_request(&mut self, request: vulcan_frontend_api::TickRequest) {
         self.active_ticks.push(ActiveTick {
             rate: request.rate,
@@ -609,6 +632,22 @@ impl AppState {
 
     pub fn active_surface_frame(&self) -> Option<SurfaceFrame> {
         self.ui_runtime.active_frame()
+    }
+
+    pub fn surface_frames(&self) -> Vec<SurfaceFrame> {
+        self.ui_runtime.frames()
+    }
+
+    pub fn toggle_diagnostics(&mut self) {
+        self.show_diagnostics = !self.show_diagnostics;
+    }
+
+    pub fn note_frame_draw(&mut self, elapsed: Duration) {
+        self.diagnostics.frame_count = self.diagnostics.frame_count.saturating_add(1);
+        self.diagnostics.last_draw_ms = elapsed.as_secs_f64() * 1000.0;
+        self.diagnostics.surface_count = self.ui_runtime.surface_count();
+        self.diagnostics.active_surface =
+            self.ui_runtime.active_surface_title().map(str::to_string);
     }
 
     pub fn open_session_picker(&mut self, selection: usize) {
@@ -745,6 +784,10 @@ impl AppState {
         self.ui_runtime.handle_canvas_key(key)
     }
 
+    pub fn handle_surface_key(&mut self, key: vulcan_frontend_api::CanvasKey) -> bool {
+        self.ui_runtime.handle_canvas_key(key)
+    }
+
     pub fn pump_frontend_ticks(&mut self) {
         let now = Instant::now();
         for tick in &mut self.active_ticks {
@@ -838,7 +881,7 @@ impl AppState {
         if self.thinking {
             stack.push(CancelScope::Turn);
         }
-        if self.has_pause_prompt() || self.has_diff_scrubber() || self.has_text_surface() {
+        if self.ui_runtime.has_modal_blocking_surface() {
             stack.push(CancelScope::Dialog);
         }
         if self.ui_runtime.has_canvas() {

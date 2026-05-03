@@ -22,8 +22,9 @@ use crate::config::Config;
 use super::keymap::SlashCommand;
 use super::miller_columns;
 use super::state::{AppState, SessionStatus};
-use super::surface::{SurfacePlacement, resolve_surface_area};
+use super::surface::{SurfaceFrame, SurfacePlacement, resolve_surface_area};
 use super::theme::Theme;
+use super::widgets::ProviderPickerWidget;
 use super::{body, short_id};
 
 pub(super) fn draw_palette(
@@ -104,6 +105,11 @@ pub(super) fn draw_session_picker(f: &mut Frame, area: Rect, app: &AppState) {
     if box_area.height < 4 {
         return;
     }
+    f.render_widget(Clear, box_area);
+    f.render_widget(
+        Paragraph::new("").style(Style::default().bg(theme.body_bg)),
+        box_area,
+    );
 
     // Title bar
     let bar = Rect {
@@ -246,21 +252,103 @@ pub(super) fn draw_model_picker(f: &mut Frame, area: Rect, app: &AppState) {
     );
 }
 
+pub(super) fn draw_surface_overlays(f: &mut Frame, area: Rect, app: &AppState) {
+    for frame in app.surface_frames() {
+        match frame {
+            SurfaceFrame::FullscreenCanvas(_) => {}
+            SurfaceFrame::SessionPicker { .. } => draw_session_picker(f, area, app),
+            SurfaceFrame::ModelPicker => draw_model_picker(f, area, app),
+            SurfaceFrame::ProviderPicker { items, selection } => {
+                f.render_widget(
+                    ProviderPickerWidget {
+                        theme: &app.theme,
+                        items: &items,
+                        selection,
+                    },
+                    area,
+                );
+            }
+            SurfaceFrame::DiffScrubber => draw_diff_scrubber(f, area, app),
+            SurfaceFrame::PausePrompt => {}
+            SurfaceFrame::TextSurface {
+                title,
+                body,
+                placement,
+            } => draw_text_surface(f, area, &title, &body, placement, app),
+        }
+    }
+}
+
+pub(super) fn draw_diagnostics(f: &mut Frame, area: Rect, app: &AppState) {
+    if !app.show_diagnostics || area.width < 28 || area.height < 7 {
+        return;
+    }
+
+    let width = area.width.min(54);
+    let height = 7;
+    let box_area = Rect {
+        x: area.x + area.width.saturating_sub(width),
+        y: area.y,
+        width,
+        height,
+    };
+    f.render_widget(Clear, box_area);
+    f.render_widget(
+        Paragraph::new("").style(Style::default().bg(app.theme.body_bg)),
+        box_area,
+    );
+
+    let active = app.diagnostics.active_surface.as_deref().unwrap_or("none");
+    let pending = app.queue.len() + app.deferred_queue.len();
+    let token_ratio = app.context_ratio() * 100.0;
+    let lines = vec![
+        Line::from(Span::styled(
+            " diagnostics",
+            app.theme.accent.add_modifier(Modifier::BOLD),
+        )),
+        Line::from(format!(
+            " frame {:>6} · draw {:>5.1}ms",
+            app.diagnostics.frame_count, app.diagnostics.last_draw_ms
+        )),
+        Line::from(format!(
+            " surfaces {:>2} · active {active}",
+            app.diagnostics.surface_count
+        )),
+        Line::from(format!(
+            " chat {:>4} · queue {:>2}",
+            app.messages.len(),
+            pending
+        )),
+        Line::from(format!(
+            " tokens {} / {} · {:>3.0}%",
+            crate::tui::state::format_thousands(app.prompt_tokens_last),
+            crate::tui::state::format_thousands(app.token_max),
+            token_ratio
+        )),
+    ];
+    let inner = Rect {
+        x: box_area.x + 2,
+        y: box_area.y + 1,
+        width: box_area.width.saturating_sub(4),
+        height: box_area.height.saturating_sub(2),
+    };
+    f.render_widget(
+        Paragraph::new(lines).style(Style::default().bg(app.theme.body_bg)),
+        inner,
+    );
+    draw_picker_border(f, box_area, &app.theme);
+}
+
 pub(super) fn draw_text_surface(
     f: &mut Frame,
     area: Rect,
     title: &str,
     body_lines: &[String],
+    placement: SurfacePlacement,
     app: &AppState,
 ) {
-    let width = area.width.min(88);
-    let max_height = area.height.saturating_sub(2);
-    if max_height < 4 {
-        return;
-    }
-    let content_height = body_lines.len() as u16;
-    let height = (content_height + 5).max(8).min(max_height);
-    let box_area = resolve_surface_area(area, SurfacePlacement::Modal { width, height });
+    let placement = compact_text_surface_placement(area, body_lines.len(), placement);
+    let box_area = resolve_surface_area(area, placement);
     if box_area.height < 4 {
         return;
     }
@@ -315,6 +403,31 @@ pub(super) fn draw_text_surface(
         hint,
     );
     draw_picker_border(f, box_area, &app.theme);
+}
+
+fn compact_text_surface_placement(
+    area: Rect,
+    body_line_count: usize,
+    placement: SurfacePlacement,
+) -> SurfacePlacement {
+    match placement {
+        SurfacePlacement::Modal { width, height } => {
+            let max_height = area.height.saturating_sub(2);
+            let natural_height = (body_line_count as u16 + 5).max(8);
+            SurfacePlacement::Modal {
+                width: width.min(area.width),
+                height: natural_height.min(height).min(max_height),
+            }
+        }
+        SurfacePlacement::Drawer { edge, size } => SurfacePlacement::Drawer {
+            edge,
+            size: size.min(match edge {
+                super::surface::DrawerEdge::Left | super::surface::DrawerEdge::Right => area.width,
+                super::surface::DrawerEdge::Top | super::surface::DrawerEdge::Bottom => area.height,
+            }),
+        },
+        SurfacePlacement::Fullscreen => SurfacePlacement::Fullscreen,
+    }
 }
 
 pub(super) async fn open_unified_picker(
@@ -493,6 +606,11 @@ pub(super) fn draw_diff_scrubber(f: &mut Frame, area: Rect, app: &AppState) {
     if box_area.height < 6 {
         return;
     }
+    f.render_widget(Clear, box_area);
+    f.render_widget(
+        Paragraph::new("").style(Style::default().bg(theme.body_bg)),
+        box_area,
+    );
 
     let bar = Rect {
         x: box_area.x,
@@ -566,7 +684,10 @@ pub(super) fn draw_diff_scrubber(f: &mut Frame, area: Rect, app: &AppState) {
     let hint = "  ↑↓ navigate · y/n toggle · Y all · N none · Enter apply · Esc cancel  ";
     lines.push(Line::from(Span::styled(hint, theme.muted)));
 
-    f.render_widget(Paragraph::new(lines), list_area);
+    f.render_widget(
+        Paragraph::new(lines).style(Style::default().bg(theme.body_bg)),
+        list_area,
+    );
     draw_picker_border(f, box_area, theme);
 }
 
@@ -625,5 +746,165 @@ fn draw_picker_border(f: &mut Frame, r: Rect, theme: &Theme) {
                 height: r.height - 2,
             },
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tui::surface::DrawerEdge;
+    use ratatui::{
+        Terminal,
+        backend::{Backend, TestBackend},
+    };
+
+    #[test]
+    fn snapshot_text_surface_modal_uses_compact_centered_chrome() {
+        let body = render_text_surface_snapshot(
+            Rect::new(0, 0, 48, 14),
+            SurfacePlacement::Modal {
+                width: 30,
+                height: 12,
+            },
+        );
+
+        insta::assert_snapshot!(body, @r"
+        ////////////////////////////////////////////////
+        ////////////////////////////////////////////////
+        ////////////////////////////////////////////////
+        /////////──────────────────────────────/////////
+        /////////│                            │/////////
+        /////////│ alpha                      │/////////
+        /////////│ beta                       │/////////
+        /////////│ gamma                      │/////////
+        /////////│                            │/////////
+        /////////│ Esc/Ctrl+C close           │/////////
+        /////////──────────────────────────────/////////
+        ////////////////////////////////////////////////
+        ////////////////////////////////////////////////
+        ////////////////////////////////////////////////
+        ");
+    }
+
+    #[test]
+    fn snapshot_text_surface_right_drawer_is_opaque_and_edge_aligned() {
+        let body = render_text_surface_snapshot(
+            Rect::new(0, 0, 48, 10),
+            SurfacePlacement::Drawer {
+                edge: DrawerEdge::Right,
+                size: 22,
+            },
+        );
+
+        insta::assert_snapshot!(body, @r"
+        //////////////////////////──────────────────────
+        //////////////////////////│                    │
+        //////////////////////////│ alpha              │
+        //////////////////////////│ beta               │
+        //////////////////////////│ gamma              │
+        //////////////////////////│                    │
+        //////////////////////////│                    │
+        //////////////////////////│                    │
+        //////////////////////////│ Esc/Ctrl+C close   │
+        //////////////////////////──────────────────────
+        ");
+    }
+
+    #[test]
+    fn snapshot_text_surface_bottom_drawer_is_opaque_and_bottom_aligned() {
+        let body = render_text_surface_snapshot(
+            Rect::new(0, 0, 48, 12),
+            SurfacePlacement::Drawer {
+                edge: DrawerEdge::Bottom,
+                size: 8,
+            },
+        );
+
+        insta::assert_snapshot!(body, @r"
+        ////////////////////////////////////////////////
+        ////////////////////////////////////////////////
+        ////////////////////////////////////////////////
+        ////////////////////////////////////////////////
+        ────────────────────────────────────────────────
+        │                                              │
+        │ alpha                                        │
+        │ beta                                         │
+        │ gamma                                        │
+        │                                              │
+        │ Esc/Ctrl+C close                             │
+        ────────────────────────────────────────────────
+        ");
+    }
+
+    #[test]
+    fn snapshot_diagnostics_overlay_is_top_right_and_opaque() {
+        let backend = TestBackend::new(64, 10);
+        let mut terminal = Terminal::new(backend).expect("test terminal");
+        let mut app = AppState::new("test-model".into(), 128_000);
+        app.show_diagnostics = true;
+        app.prompt_tokens_last = 32_000;
+        app.queue.push_back("queued".into());
+        app.note_frame_draw(std::time::Duration::from_micros(2_500));
+
+        terminal
+            .draw(|f| {
+                let area = f.area();
+                let background = (0..area.height)
+                    .map(|_| Line::from("/".repeat(area.width as usize)))
+                    .collect::<Vec<_>>();
+                f.render_widget(Paragraph::new(background), area);
+                draw_diagnostics(f, area, &app);
+            })
+            .expect("draw diagnostics");
+
+        insta::assert_snapshot!(terminal_buffer_text(terminal.backend()), @r"
+        //////////──────────────────────────────────────────────────────
+        //////////│  diagnostics                                       │
+        //////////│  frame      1 · draw   2.5ms                       │
+        //////////│  surfaces  0 · active none                         │
+        //////////│  chat    0 · queue  1                              │
+        //////////│  tokens 32,000 / 128,000 ·  25%                    │
+        //////////──────────────────────────────────────────────────────
+        ////////////////////////////////////////////////////////////////
+        ////////////////////////////////////////////////////////////////
+        ////////////////////////////////////////////////////////////////
+        ");
+    }
+
+    fn render_text_surface_snapshot(area: Rect, placement: SurfacePlacement) -> String {
+        let backend = TestBackend::new(area.width, area.height);
+        let mut terminal = Terminal::new(backend).expect("test terminal");
+        let app = AppState::new("test-model".into(), 128_000);
+        let body_lines = vec!["alpha".to_string(), "beta".to_string(), "gamma".to_string()];
+
+        terminal
+            .draw(|f| {
+                let background = (0..area.height)
+                    .map(|_| Line::from("/".repeat(area.width as usize)))
+                    .collect::<Vec<_>>();
+                f.render_widget(
+                    Paragraph::new(background).style(Style::default().bg(app.theme.body_bg)),
+                    area,
+                );
+                draw_text_surface(f, area, "Surface Lab", &body_lines, placement, &app);
+            })
+            .expect("draw text surface");
+
+        terminal_buffer_text(terminal.backend())
+    }
+
+    fn terminal_buffer_text(backend: &TestBackend) -> String {
+        let area = backend.size().expect("backend size");
+        let buffer = backend.buffer();
+        let mut out = String::new();
+        for y in 0..area.height {
+            for x in 0..area.width {
+                out.push_str(buffer[(x, y)].symbol());
+            }
+            if y + 1 < area.height {
+                out.push('\n');
+            }
+        }
+        out
     }
 }

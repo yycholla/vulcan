@@ -72,7 +72,6 @@ use state::{AppState, CancelPop, ChatMessage, ChatRole, PromptEnterIntent, Promp
 use theme::{Theme, body};
 use views::{View, render_view};
 use vulcan_frontend_api::{CanvasKey, FrontendCommandAction};
-use widgets::ProviderPickerWidget;
 
 use self::input::{TuiInputEvent, TuiKeyCode, TuiKeyEvent, TuiKeyModifiers, TuiMouseEventKind};
 
@@ -112,6 +111,12 @@ fn apply_frontend_command_action(app: &mut AppState, action: FrontendCommandActi
         FrontendCommandAction::OpenSurface(surface) => {
             app.open_frontend_surface(surface);
         }
+        FrontendCommandAction::UpdateSurface(update) => {
+            app.update_frontend_surface(update);
+        }
+        FrontendCommandAction::CloseSurface { id } => {
+            app.close_frontend_surface(id);
+        }
         FrontendCommandAction::OpenView { id, title, body } => {
             app.open_frontend_surface(vulcan_frontend_api::FrontendSurface::modal(id, title, body));
         }
@@ -125,6 +130,15 @@ fn apply_frontend_dispatch(app: &mut AppState, dispatch: frontend::FrontendComma
     }
     for request in dispatch.tick_requests {
         app.install_tick_request(request);
+    }
+    for surface in dispatch.surface_requests {
+        app.open_frontend_surface(surface);
+    }
+    for update in dispatch.surface_updates {
+        app.update_frontend_surface(update);
+    }
+    for id in dispatch.surface_closes {
+        app.close_frontend_surface(id);
     }
     for request in dispatch.canvas_requests {
         app.install_canvas_request(request);
@@ -371,6 +385,7 @@ pub async fn run_tui(
             app.scroll = app.chat_max_scroll.get();
         }
 
+        let draw_started = Instant::now();
         terminal.draw(|f| {
             let area = f.area();
             let (main_area, palette_area) = if let Some(ref pal) = palette {
@@ -407,36 +422,10 @@ pub async fn run_tui(
                 rendering::draw_palette(f, area, pal, app.slash_menu_selection, &app.theme);
             }
 
-            // YYC-86: session picker overlay (--resume flag).
-            if app.has_session_picker() {
-                rendering::draw_session_picker(f, area, &app);
-            }
-            // YYC-97: model / provider picker overlays.
-            if app.has_model_picker() {
-                rendering::draw_model_picker(f, area, &app);
-            }
-            if let Some(surface::SurfaceFrame::ProviderPicker { items, selection }) =
-                app.active_surface_frame()
-            {
-                f.render_widget(
-                    ProviderPickerWidget {
-                        theme: &app.theme,
-                        items: &items,
-                        selection,
-                    },
-                    area,
-                );
-            }
-            if let Some(surface::SurfaceFrame::TextSurface { title, body }) =
-                app.active_surface_frame()
-            {
-                rendering::draw_text_surface(f, area, &title, &body, &app);
-            }
-            // YYC-75: diff scrubber overlay.
-            if app.has_diff_scrubber() {
-                rendering::draw_diff_scrubber(f, area, &app);
-            }
+            rendering::draw_surface_overlays(f, area, &app);
+            rendering::draw_diagnostics(f, area, &app);
         })?;
+        app.note_frame_draw(draw_started.elapsed());
         last_draw = Instant::now();
         if app.finish_chat_clear_if_idle() {
             continue;
@@ -460,15 +449,9 @@ pub async fn run_tui(
 
         if app.has_text_surface() {
             match key_rx.recv().await {
-                Some(KeyEv::Press(TuiInputEvent::Key(key))) => match key.code {
-                    TuiKeyCode::Esc => {
-                        app.close_text_surface();
-                    }
-                    TuiKeyCode::Char('c') if key.modifiers.contains(TuiKeyModifiers::CONTROL) => {
-                        app.close_text_surface();
-                    }
-                    _ => {}
-                },
+                Some(KeyEv::Press(TuiInputEvent::Key(key))) => {
+                    app.handle_surface_key(canvas_key_from_event(key));
+                }
                 Some(KeyEv::Press(_)) => {}
                 Some(KeyEv::Error(e)) => {
                     tracing::error!("Terminal input error (frontend surface): {e}");
@@ -976,6 +959,18 @@ pub async fn run_tui(
                                                         });
                                                         continue;
                                                     }
+                                                    "diagnostics" => {
+                                                        app.toggle_diagnostics();
+                                                        app.messages.push(ChatMessage {
+                                                            role: ChatRole::System,
+                                                            content: format!(
+                                                                "Diagnostics overlay: {}",
+                                                                if app.show_diagnostics { "on" } else { "off" }
+                                                            ),
+                                                            ..Default::default()
+                                                        });
+                                                        continue;
+                                                    }
                                                     s if s.starts_with("search ") => {
                                                         let query = s[7..].trim();
                                                         if query.is_empty() {
@@ -1286,13 +1281,15 @@ pub async fn run_tui(
             frontend_event = frontend_event_rx.recv() => {
                 match frontend_event {
                     Ok(event) => {
-                        let updates = app.frontend.handle_extension_event(&serde_json::json!({
+                        let dispatch = app.frontend.handle_extension_event(&serde_json::json!({
                             "kind": "extension_event",
                             "session_id": event.session_id,
                             "extension_id": event.extension_id,
                             "payload": event.payload,
                         }));
-                        app.apply_widget_updates(updates);
+                        if let Some(dispatch) = dispatch {
+                            apply_frontend_dispatch(&mut app, dispatch);
+                        }
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Closed) => {}
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}

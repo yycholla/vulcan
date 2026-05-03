@@ -4,8 +4,8 @@ use serde_json::json;
 use vulcan::tools::ToolResult;
 use vulcan::tui::frontend::TuiFrontend;
 use vulcan_frontend_api::{
-    FrontendCodeExtension, FrontendCommand, FrontendCommandAction, FrontendCtx, MessageRenderer,
-    RenderedMessage, ToolResultView, WidgetContent,
+    FrontendCodeExtension, FrontendCommand, FrontendCommandAction, FrontendCtx, FrontendSurface,
+    MessageRenderer, RenderedMessage, ToolResultView, WidgetContent,
 };
 
 struct TestRenderer(&'static str);
@@ -36,11 +36,11 @@ impl FrontendCommand for TestCommand {
     }
 
     fn run(&self, _ctx: &mut FrontendCtx) -> FrontendCommandAction {
-        FrontendCommandAction::OpenView {
-            id: "todo".into(),
-            title: "Todos".into(),
-            body: vec!["Todo view opened.".into()],
-        }
+        FrontendCommandAction::OpenSurface(FrontendSurface::modal(
+            "todo",
+            "Todos",
+            vec!["Todo view opened.".into()],
+        ))
     }
 }
 
@@ -107,7 +107,7 @@ fn tui_frontend_uses_last_renderer_and_dispatches_frontend_commands() {
     );
     assert!(matches!(
         action.action,
-        FrontendCommandAction::OpenView { ref id, .. } if id == "todo"
+        FrontendCommandAction::OpenSurface(FrontendSurface { ref id, .. }) if id == "todo"
     ));
 }
 
@@ -140,16 +140,18 @@ fn frontend_event_dispatches_to_matching_extension_widget_updates() {
         renderer_label: "todo",
     })]);
 
-    let updates = frontend.handle_extension_event(&json!({
-        "kind": "extension_event",
-        "extension_id": "todo",
-        "payload": { "message": "synced" }
-    }));
+    let dispatch = frontend
+        .handle_extension_event(&json!({
+            "kind": "extension_event",
+            "extension_id": "todo",
+            "payload": { "message": "synced" }
+        }))
+        .expect("dispatch");
 
-    assert_eq!(updates.len(), 1);
-    assert_eq!(updates[0].id, "status");
+    assert_eq!(dispatch.widget_updates.len(), 1);
+    assert_eq!(dispatch.widget_updates[0].id, "status");
     assert_eq!(
-        updates[0].content,
+        dispatch.widget_updates[0].content,
         Some(WidgetContent::Text("synced".into()))
     );
 }
@@ -161,13 +163,13 @@ fn unknown_frontend_extension_event_is_dropped() {
         renderer_label: "todo",
     })]);
 
-    let updates = frontend.handle_extension_event(&json!({
+    let dispatch = frontend.handle_extension_event(&json!({
         "kind": "extension_event",
         "extension_id": "missing",
         "payload": { "message": "ignored" }
     }));
 
-    assert!(updates.is_empty());
+    assert!(dispatch.is_none());
 }
 
 #[test]

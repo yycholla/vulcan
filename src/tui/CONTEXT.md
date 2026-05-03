@@ -18,6 +18,10 @@ _Avoid_: page, screen, canvas unless specifically referring to extension canvase
 The resolved rectangle policy for a Surface, such as fullscreen, centered modal, or edge drawer. Renderers ask for placement instead of hand-calculating coordinates.
 _Avoid_: inline rect math, overlay dimensions
 
+**Frontend Surface**:
+The extension-facing surface descriptor in `vulcan-frontend-api`. `OpenSurface`, `UpdateSurface`, and `CloseSurface` are the supported lifecycle actions; legacy `OpenView` is only a compatibility adapter.
+_Avoid_: adding new extension UI by pushing system chat messages
+
 **View**:
 A built-in persistent TUI layout such as single stack, split sessions, tiled mesh, tree of thought, or trading floor. Views are not transient surfaces and remain selected behind any active Surface.
 _Avoid_: surface, frontend extension

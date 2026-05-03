@@ -4,7 +4,8 @@ use std::sync::Arc;
 use serde_json::Value;
 use vulcan_frontend_api::{
     CanvasRequest, FrontendCodeExtension, FrontendCommand, FrontendCommandAction, FrontendCtx,
-    MessageRenderer, TickRequest, ToolResultView, WidgetUpdate,
+    FrontendSurface, FrontendSurfaceUpdate, MessageRenderer, TickRequest, ToolResultView,
+    WidgetUpdate,
 };
 
 #[derive(Default)]
@@ -111,25 +112,28 @@ impl TuiFrontend {
             action,
             canvas_requests: ctx.ui.drain_canvas_requests(),
             tick_requests: ctx.ui.drain_tick_requests(),
+            surface_requests: ctx.ui.drain_surface_requests(),
+            surface_updates: ctx.ui.drain_surface_updates(),
+            surface_closes: ctx.ui.drain_surface_closes(),
             widget_updates: ctx.ui.drain_widget_updates(),
         })
     }
 
-    pub fn handle_extension_event(&self, data: &Value) -> Vec<WidgetUpdate> {
+    pub fn handle_extension_event(&self, data: &Value) -> Option<FrontendCommandDispatch> {
         if data.get("kind").and_then(Value::as_str) != Some("extension_event") {
             tracing::warn!("frontend extension event missing extension_event kind");
-            return Vec::new();
+            return None;
         }
         let Some(extension_id) = data.get("extension_id").and_then(Value::as_str) else {
             tracing::warn!("frontend extension event missing extension_id");
-            return Vec::new();
+            return None;
         };
         let Some(extension) = self.extensions.get(extension_id) else {
             tracing::warn!(
                 extension_id,
                 "frontend extension event for unknown extension"
             );
-            return Vec::new();
+            return None;
         };
 
         let mut ctx = FrontendCtx {
@@ -141,7 +145,15 @@ impl TuiFrontend {
             ..FrontendCtx::default()
         };
         extension.on_event(data.get("payload").unwrap_or(&Value::Null), &mut ctx);
-        ctx.ui.drain_widget_updates()
+        Some(FrontendCommandDispatch {
+            action: FrontendCommandAction::Noop,
+            canvas_requests: ctx.ui.drain_canvas_requests(),
+            tick_requests: ctx.ui.drain_tick_requests(),
+            surface_requests: ctx.ui.drain_surface_requests(),
+            surface_updates: ctx.ui.drain_surface_updates(),
+            surface_closes: ctx.ui.drain_surface_closes(),
+            widget_updates: ctx.ui.drain_widget_updates(),
+        })
     }
 
     pub fn command_specs(&self) -> Vec<FrontendCommandSpec> {
@@ -177,6 +189,9 @@ pub struct FrontendCommandDispatch {
     pub action: FrontendCommandAction,
     pub canvas_requests: Vec<CanvasRequest>,
     pub tick_requests: Vec<TickRequest>,
+    pub surface_requests: Vec<FrontendSurface>,
+    pub surface_updates: Vec<FrontendSurfaceUpdate>,
+    pub surface_closes: Vec<String>,
     pub widget_updates: Vec<WidgetUpdate>,
 }
 
@@ -189,7 +204,7 @@ mod tests {
     use serde_json::json;
     use vulcan_frontend_api::{
         FrontendCodeExtension, FrontendCommand, FrontendCommandAction, FrontendCtx,
-        MessageRenderer, RenderedMessage, ToolResultView, WidgetContent,
+        FrontendSurface, MessageRenderer, RenderedMessage, ToolResultView, WidgetContent,
     };
 
     struct Renderer(&'static str);
@@ -220,11 +235,11 @@ mod tests {
         }
 
         fn run(&self, _ctx: &mut FrontendCtx) -> FrontendCommandAction {
-            FrontendCommandAction::OpenView {
-                id: "todo".into(),
-                title: "Todos".into(),
-                body: vec!["body".into()],
-            }
+            FrontendCommandAction::OpenSurface(FrontendSurface::modal(
+                "todo",
+                "Todos",
+                vec!["body".into()],
+            ))
         }
     }
 
@@ -258,6 +273,25 @@ mod tests {
             if let Some(label) = payload.get("spinner").and_then(Value::as_str) {
                 ctx.ui
                     .set_widget("job", Some(WidgetContent::Spinner(label.to_string())));
+            }
+            if payload.get("open_surface").and_then(Value::as_bool) == Some(true) {
+                ctx.ui.open_surface(FrontendSurface::modal(
+                    "event-surface",
+                    "Event Surface",
+                    vec!["opened".into()],
+                ));
+            }
+            if payload.get("update_surface").and_then(Value::as_bool) == Some(true) {
+                ctx.ui
+                    .update_surface(vulcan_frontend_api::FrontendSurfaceUpdate {
+                        id: "event-surface".into(),
+                        title: Some("Updated Surface".into()),
+                        body: Some(vec!["updated".into()]),
+                        placement: None,
+                    });
+            }
+            if payload.get("close_surface").and_then(Value::as_bool) == Some(true) {
+                ctx.ui.close_surface("event-surface");
             }
         }
     }
@@ -293,7 +327,7 @@ mod tests {
 
         assert!(matches!(
             dispatch.action,
-            FrontendCommandAction::OpenView { ref id, .. } if id == "todo"
+            FrontendCommandAction::OpenSurface(FrontendSurface { ref id, .. }) if id == "todo"
         ));
     }
 
@@ -323,29 +357,76 @@ mod tests {
             renderer: "todo",
         })]);
 
-        let updates = frontend.handle_extension_event(&json!({
-            "kind": "extension_event",
-            "session_id": "main",
-            "extension_id": "spinner",
-            "payload": { "spinner": "working" }
-        }));
+        let dispatch = frontend
+            .handle_extension_event(&json!({
+                "kind": "extension_event",
+                "session_id": "main",
+                "extension_id": "spinner",
+                "payload": { "spinner": "working" }
+            }))
+            .expect("dispatch");
 
-        assert_eq!(updates.len(), 1);
-        assert_eq!(updates[0].id, "job");
+        assert_eq!(dispatch.widget_updates.len(), 1);
+        assert_eq!(dispatch.widget_updates[0].id, "job");
         assert_eq!(
-            updates[0].content,
+            dispatch.widget_updates[0].content,
             Some(WidgetContent::Spinner("working".into()))
         );
     }
 
     #[test]
+    fn frontend_event_dispatches_surface_requests() {
+        let frontend = TuiFrontend::from_extensions(vec![Arc::new(Extension {
+            id: "surface",
+            renderer: "todo",
+        })]);
+
+        let dispatch = frontend
+            .handle_extension_event(&json!({
+                "kind": "extension_event",
+                "session_id": "main",
+                "extension_id": "surface",
+                "payload": { "open_surface": true }
+            }))
+            .expect("dispatch");
+
+        assert!(matches!(dispatch.action, FrontendCommandAction::Noop));
+        assert_eq!(dispatch.surface_requests.len(), 1);
+        assert_eq!(dispatch.surface_requests[0].id, "event-surface");
+    }
+
+    #[test]
+    fn frontend_event_dispatches_surface_updates_and_closes() {
+        let frontend = TuiFrontend::from_extensions(vec![Arc::new(Extension {
+            id: "surface",
+            renderer: "todo",
+        })]);
+
+        let dispatch = frontend
+            .handle_extension_event(&json!({
+                "kind": "extension_event",
+                "session_id": "main",
+                "extension_id": "surface",
+                "payload": {
+                    "update_surface": true,
+                    "close_surface": true
+                }
+            }))
+            .expect("dispatch");
+
+        assert_eq!(dispatch.surface_updates.len(), 1);
+        assert_eq!(dispatch.surface_updates[0].id, "event-surface");
+        assert_eq!(dispatch.surface_closes, vec!["event-surface".to_string()]);
+    }
+
+    #[test]
     fn frontend_event_for_unknown_extension_is_dropped() {
         let frontend = TuiFrontend::default();
-        let updates = frontend.handle_extension_event(&json!({
+        let dispatch = frontend.handle_extension_event(&json!({
             "kind": "extension_event",
             "extension_id": "missing",
             "payload": { "spinner": "working" }
         }));
-        assert!(updates.is_empty());
+        assert!(dispatch.is_none());
     }
 }
