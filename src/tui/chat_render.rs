@@ -301,25 +301,22 @@ impl ChatRenderStore {
 fn push_markdown_body(
     lines: &mut Vec<Line<'static>>,
     text: &str,
-    accent: ratatui::style::Color,
+    _accent: ratatui::style::Color,
     theme: &Theme,
     width: u16,
 ) {
-    // YYC-104: pre-wrap each rendered markdown line so the `▎` accent
-    // bar stays on every visual row. Letting Paragraph::wrap handle it
-    // breaks the bar after the first row.
+    // Pre-wrap markdown so transcript rows stay stable without adding
+    // copy-hostile rail characters to every visual row.
     // Trim trailing whitespace/newlines so models that emit `\n\n`
-    // suffixes don't leave empty `▎` rails after the body.
+    // suffixes don't leave empty rows after the body.
     let trimmed = text.trim_end_matches(['\n', '\r', ' ', '\t']);
     if trimmed.is_empty() {
         return;
     }
-    let inner_width = width.saturating_sub(2).max(1) as usize;
+    let inner_width = width.max(1) as usize;
     for line in render_markdown(trimmed, theme) {
         for row in wrap_spans(line.spans, inner_width) {
-            let mut spans = vec![Span::styled("▎ ", Style::default().fg(accent))];
-            spans.extend(row.into_iter());
-            lines.push(Line::from(spans));
+            lines.push(Line::from(row));
         }
     }
 }
@@ -367,9 +364,9 @@ fn wrap_spans(spans: Vec<Span<'static>>, width: usize) -> Vec<Vec<Span<'static>>
 
 fn agent_placeholder(has_reasoning: bool, muted: Style) -> Line<'static> {
     let label = if has_reasoning {
-        "▎ Answering…"
+        "Answering…"
     } else {
-        "▎ Thinking…"
+        "Thinking…"
     };
     Line::from(Span::styled(
         label,
@@ -710,7 +707,8 @@ mod tests {
 
         assert!(rendered.iter().any(|line| line.contains("YOU")));
         assert!(rendered.iter().any(|line| line.contains("hello")));
-        assert!(rendered.iter().any(|line| line.starts_with("▎ ")));
+        assert!(rendered.iter().any(|line| line.starts_with("hello")));
+        assert!(!rendered.iter().any(|line| line.starts_with("▎ ")));
     }
 
     #[test]

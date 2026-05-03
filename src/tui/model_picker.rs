@@ -5,10 +5,105 @@
 //! helper module — render and key dispatch live in `tui::mod`.
 
 use crate::provider::catalog::ModelInfo;
+use crate::tui::input::{TuiKeyCode, TuiKeyEvent};
 use crate::tui::miller_columns::{MillerEntry, MillerPreview, MillerSource};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
+
+#[derive(Debug, Clone, Default)]
+pub struct ModelPickerState {
+    /// Display labels for column 0, parallel to `provider_keys`.
+    pub provider_labels: Vec<String>,
+    /// Cache keys per column-0 row. `None` = legacy `[provider]` block.
+    pub provider_keys: Vec<Option<String>>,
+    /// Catalog cache keyed by provider key (`"default"` for legacy).
+    pub items_by_key: HashMap<String, Vec<ModelInfo>>,
+    /// Tree cache keyed by provider key.
+    pub trees_by_key: HashMap<String, ModelTree>,
+    /// Selection index per drilled column.
+    pub path: Vec<usize>,
+    /// Which column currently has focus (0 = column 0, etc.).
+    pub focus: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ModelPickerOutcome {
+    Continue,
+    Close,
+    Commit {
+        profile: Option<String>,
+        model_id: String,
+    },
+}
+
+impl ModelPickerState {
+    pub fn source(&self) -> UnifiedPickerSource<'_> {
+        UnifiedPickerSource {
+            provider_labels: &self.provider_labels,
+            provider_keys: &self.provider_keys,
+            items_by_key: &self.items_by_key,
+            trees_by_key: &self.trees_by_key,
+        }
+    }
+
+    pub fn miller_state(&self) -> crate::tui::miller_columns::MillerState {
+        crate::tui::miller_columns::MillerState {
+            path: self.path.clone(),
+            focus: self.focus,
+        }
+    }
+
+    pub fn handle_key(&mut self, key: TuiKeyEvent) -> ModelPickerOutcome {
+        let mut state = self.miller_state();
+        let mut close = false;
+        let mut commit = false;
+        {
+            let source = self.source();
+            match key.code {
+                TuiKeyCode::Up | TuiKeyCode::Char('k') => {
+                    crate::tui::miller_columns::move_cursor(&mut state, &source, -1);
+                }
+                TuiKeyCode::Down | TuiKeyCode::Char('j') => {
+                    crate::tui::miller_columns::move_cursor(&mut state, &source, 1);
+                }
+                TuiKeyCode::Left | TuiKeyCode::Char('h') | TuiKeyCode::Char('H') => {
+                    if !crate::tui::miller_columns::ascend(&mut state) {
+                        close = true;
+                    }
+                }
+                TuiKeyCode::Right | TuiKeyCode::Char('l') => {
+                    if !crate::tui::miller_columns::drill(&mut state, &source) {
+                        commit = true;
+                    }
+                }
+                TuiKeyCode::Char('L') => {
+                    crate::tui::miller_columns::drill(&mut state, &source);
+                    commit = true;
+                }
+                TuiKeyCode::Enter => {
+                    commit = true;
+                }
+                TuiKeyCode::Esc | TuiKeyCode::Char('q') => close = true,
+                _ => {}
+            }
+        }
+        self.path = state.path;
+        self.focus = state.focus;
+
+        if commit && let Some((key, model_id)) = self.source().leaf_at(&self.path) {
+            return ModelPickerOutcome::Commit {
+                profile: if key == "default" { None } else { Some(key) },
+                model_id,
+            };
+        }
+        if close {
+            ModelPickerOutcome::Close
+        } else {
+            ModelPickerOutcome::Continue
+        }
+    }
+}
 
 /// One node in the model tree. Leaves point at a `ModelInfo` index in
 /// the source catalog so the caller can resolve full metadata when the
@@ -198,9 +293,9 @@ pub struct UnifiedPickerSource<'a> {
     /// Cache keys per column-0 row. `None` ↔ legacy `[provider]`.
     pub provider_keys: &'a [Option<String>],
     /// Per-provider catalog (already fetched).
-    pub items_by_key: &'a std::collections::HashMap<String, Vec<ModelInfo>>,
+    pub items_by_key: &'a HashMap<String, Vec<ModelInfo>>,
     /// Per-provider model tree built from the catalog.
-    pub trees_by_key: &'a std::collections::HashMap<String, ModelTree>,
+    pub trees_by_key: &'a HashMap<String, ModelTree>,
 }
 
 impl<'a> UnifiedPickerSource<'a> {
@@ -294,7 +389,12 @@ impl<'a> MillerSource for UnifiedPickerSource<'a> {
                 .enumerate()
                 .map(|(i, label)| MillerEntry {
                     label: label.clone(),
-                    icon: "▸".into(),
+                    icon: if provider_has_free_model(self.tree_for(i), self.items_for(i)) {
+                        "✦"
+                    } else {
+                        "▸"
+                    }
+                    .into(),
                     has_children: self
                         .tree_for(i)
                         .map(|t| !t.labs.is_empty())
@@ -309,10 +409,14 @@ impl<'a> MillerSource for UnifiedPickerSource<'a> {
             .iter()
             .map(|node| MillerEntry {
                 label: node.label.clone(),
-                icon: if node.children.is_empty() {
+                icon: if node_is_free_model(node, self.items_for(*path.first().unwrap_or(&0))) {
+                    "◆"
+                } else if node_has_free_model(node, self.items_for(*path.first().unwrap_or(&0))) {
+                    "✦"
+                } else if node.children.is_empty() {
                     "·"
                 } else {
-                    "▸"
+                    "◈"
                 }
                 .to_string(),
                 has_children: !node.children.is_empty(),
@@ -446,10 +550,14 @@ impl<'a> MillerSource for ModelPickerSource<'a> {
             .iter()
             .map(|node| MillerEntry {
                 label: node.label.clone(),
-                icon: if node.children.is_empty() {
+                icon: if node_is_free_model(node, Some(self.items)) {
+                    "◆"
+                } else if node_has_free_model(node, Some(self.items)) {
+                    "✦"
+                } else if node.children.is_empty() {
                     "·"
                 } else {
-                    "▸"
+                    "◈"
                 }
                 .to_string(),
                 has_children: !node.children.is_empty(),
@@ -512,10 +620,45 @@ fn tokenize(rest: &str) -> Vec<String> {
         .collect()
 }
 
+fn provider_has_free_model(tree: Option<&ModelTree>, items: Option<&[ModelInfo]>) -> bool {
+    let Some(tree) = tree else {
+        return false;
+    };
+    tree.labs
+        .iter()
+        .any(|node| node_has_free_model(node, items))
+}
+
+fn node_has_free_model(node: &TreeNode, items: Option<&[ModelInfo]>) -> bool {
+    node_is_free_model(node, items)
+        || node
+            .children
+            .iter()
+            .any(|child| node_has_free_model(child, items))
+}
+
+fn node_is_free_model(node: &TreeNode, items: Option<&[ModelInfo]>) -> bool {
+    let Some(items) = items else {
+        return false;
+    };
+    let Some(index) = node.model_index else {
+        return false;
+    };
+    items.get(index).is_some_and(model_is_free)
+}
+
+fn model_is_free(model: &ModelInfo) -> bool {
+    let zero_price = model
+        .pricing
+        .as_ref()
+        .is_some_and(|pricing| pricing.input_per_token == 0.0 && pricing.output_per_token == 0.0);
+    zero_price || model.id.ends_with(":free") || model.display_name.ends_with(":free")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::provider::catalog::{ModelFeatures, ModelInfo};
+    use crate::provider::catalog::{ModelFeatures, ModelInfo, Pricing};
 
     fn mi(id: &str) -> ModelInfo {
         ModelInfo {
@@ -525,6 +668,16 @@ mod tests {
             pricing: None,
             features: ModelFeatures::default(),
             top_provider: None,
+        }
+    }
+
+    fn free_mi(id: &str) -> ModelInfo {
+        ModelInfo {
+            pricing: Some(Pricing {
+                input_per_token: 0.0,
+                output_per_token: 0.0,
+            }),
+            ..mi(id)
         }
     }
 
@@ -591,5 +744,49 @@ mod tests {
         // Column 2: versions under moonshot/kimi.
         let versions = tree.column_at(2, &[0, 0]);
         assert!(!versions.is_empty());
+    }
+
+    #[test]
+    fn free_models_mark_lab_family_and_leaf() {
+        let models = vec![free_mi("inclusionai/ling-2.6-1t:free")];
+        let tree = build_model_tree("openrouter", &models);
+        let source = ModelPickerSource::new(&tree, &models, "openrouter".into());
+
+        let labs = source.entries(&[]);
+        assert_eq!(labs[0].icon, "✦");
+
+        let families = source.entries(&[0]);
+        assert_eq!(families[0].icon, "✦");
+
+        let versions = source.entries(&[0, 0]);
+        assert_eq!(versions[0].icon, "◆");
+    }
+
+    #[test]
+    fn picker_state_commits_selected_leaf() {
+        let models = vec![mi("anthropic/claude-opus-4-7")];
+        let mut items_by_key = HashMap::new();
+        items_by_key.insert("paid".into(), models.clone());
+        let mut trees_by_key = HashMap::new();
+        trees_by_key.insert("paid".into(), build_model_tree("openrouter", &models));
+        let mut state = ModelPickerState {
+            provider_labels: vec!["paid".into()],
+            provider_keys: vec![Some("paid".into())],
+            items_by_key,
+            trees_by_key,
+            path: vec![0, 0, 0, 0],
+            focus: 3,
+        };
+
+        assert_eq!(
+            state.handle_key(TuiKeyEvent::new(
+                TuiKeyCode::Enter,
+                crate::tui::input::TuiKeyModifiers::NONE,
+            )),
+            ModelPickerOutcome::Commit {
+                profile: Some("paid".into()),
+                model_id: "anthropic/claude-opus-4-7".into(),
+            }
+        );
     }
 }

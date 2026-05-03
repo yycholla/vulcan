@@ -6,18 +6,17 @@
 
 use std::str::FromStr;
 
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-
 use crate::config::KeybindsConfig;
+use crate::tui::input::{TuiKeyCode, TuiKeyEvent, TuiKeyModifiers};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct KeyBinding {
-    pub code: KeyCode,
-    pub mods: KeyModifiers,
+    pub code: TuiKeyCode,
+    pub mods: TuiKeyModifiers,
 }
 
 impl KeyBinding {
-    pub fn matches(&self, ev: &KeyEvent) -> bool {
+    pub fn matches(&self, ev: &TuiKeyEvent) -> bool {
         ev.code == self.code && ev.modifiers == self.mods
     }
 
@@ -27,26 +26,26 @@ impl KeyBinding {
     /// fonts.
     pub fn label(&self) -> String {
         let mut out = String::new();
-        if self.mods.contains(KeyModifiers::CONTROL) {
+        if self.mods.contains(TuiKeyModifiers::CONTROL) {
             out.push_str("Ctrl+");
         }
-        if self.mods.contains(KeyModifiers::ALT) {
+        if self.mods.contains(TuiKeyModifiers::ALT) {
             out.push_str("Alt+");
         }
-        if self.mods.contains(KeyModifiers::SHIFT) {
+        if self.mods.contains(TuiKeyModifiers::SHIFT) {
             out.push_str("Shift+");
         }
         match self.code {
-            KeyCode::Char(c) => out.push(c.to_ascii_uppercase()),
-            KeyCode::F(n) => out.push_str(&format!("F{n}")),
-            KeyCode::Esc => out.push_str("Esc"),
-            KeyCode::Enter => out.push_str("Enter"),
-            KeyCode::Tab => out.push_str("Tab"),
-            KeyCode::Backspace => out.push_str("Bksp"),
-            KeyCode::Up => out.push_str("Up"),
-            KeyCode::Down => out.push_str("Down"),
-            KeyCode::Left => out.push_str("Left"),
-            KeyCode::Right => out.push_str("Right"),
+            TuiKeyCode::Char(c) => out.push(c.to_ascii_uppercase()),
+            TuiKeyCode::F(n) => out.push_str(&format!("F{n}")),
+            TuiKeyCode::Esc => out.push_str("Esc"),
+            TuiKeyCode::Enter => out.push_str("Enter"),
+            TuiKeyCode::Tab => out.push_str("Tab"),
+            TuiKeyCode::Backspace => out.push_str("Bksp"),
+            TuiKeyCode::Up => out.push_str("Up"),
+            TuiKeyCode::Down => out.push_str("Down"),
+            TuiKeyCode::Left => out.push_str("Left"),
+            TuiKeyCode::Right => out.push_str("Right"),
             other => out.push_str(&format!("{other:?}")),
         }
         out
@@ -73,16 +72,16 @@ impl FromStr for KeyBinding {
             return Err(KeyParseError(s.to_string()));
         }
 
-        let mut mods = KeyModifiers::NONE;
+        let mut mods = TuiKeyModifiers::NONE;
         let mut rest = trimmed.to_string();
 
         loop {
             // Caret-style sigils first (⌃, ⌥, ⇧).
             let mut consumed = false;
             for (sigil, modifier) in [
-                ('⌃', KeyModifiers::CONTROL),
-                ('⌥', KeyModifiers::ALT),
-                ('⇧', KeyModifiers::SHIFT),
+                ('⌃', TuiKeyModifiers::CONTROL),
+                ('⌥', TuiKeyModifiers::ALT),
+                ('⇧', TuiKeyModifiers::SHIFT),
             ] {
                 if let Some(stripped) = rest.strip_prefix(sigil) {
                     mods.insert(modifier);
@@ -98,17 +97,17 @@ impl FromStr for KeyBinding {
             // `Ctrl+`, `Alt+`, `Shift+` prefixes (case-insensitive).
             let lower = rest.to_ascii_lowercase();
             if let Some(after) = lower.strip_prefix("ctrl+") {
-                mods.insert(KeyModifiers::CONTROL);
+                mods.insert(TuiKeyModifiers::CONTROL);
                 rest = rest[rest.len() - after.len()..].to_string();
                 continue;
             }
             if let Some(after) = lower.strip_prefix("alt+") {
-                mods.insert(KeyModifiers::ALT);
+                mods.insert(TuiKeyModifiers::ALT);
                 rest = rest[rest.len() - after.len()..].to_string();
                 continue;
             }
             if let Some(after) = lower.strip_prefix("shift+") {
-                mods.insert(KeyModifiers::SHIFT);
+                mods.insert(TuiKeyModifiers::SHIFT);
                 rest = rest[rest.len() - after.len()..].to_string();
                 continue;
             }
@@ -120,14 +119,14 @@ impl FromStr for KeyBinding {
         }
 
         let code = match rest.as_str() {
-            "Esc" | "esc" | "ESC" => KeyCode::Esc,
-            "Enter" | "enter" | "Return" | "return" | "↵" => KeyCode::Enter,
-            "Tab" | "tab" => KeyCode::Tab,
-            "Backspace" | "backspace" | "⌫" => KeyCode::Backspace,
-            "Up" | "up" | "↑" => KeyCode::Up,
-            "Down" | "down" | "↓" => KeyCode::Down,
-            "Left" | "left" | "←" => KeyCode::Left,
-            "Right" | "right" | "→" => KeyCode::Right,
+            "Esc" | "esc" | "ESC" => TuiKeyCode::Esc,
+            "Enter" | "enter" | "Return" | "return" | "↵" => TuiKeyCode::Enter,
+            "Tab" | "tab" => TuiKeyCode::Tab,
+            "Backspace" | "backspace" | "⌫" => TuiKeyCode::Backspace,
+            "Up" | "up" | "↑" => TuiKeyCode::Up,
+            "Down" | "down" | "↓" => TuiKeyCode::Down,
+            "Left" | "left" | "←" => TuiKeyCode::Left,
+            "Right" | "right" | "→" => TuiKeyCode::Right,
             other => {
                 if let Some(n) = other
                     .strip_prefix('F')
@@ -135,7 +134,7 @@ impl FromStr for KeyBinding {
                     .and_then(|d| d.parse::<u8>().ok())
                 {
                     if (1..=24).contains(&n) {
-                        KeyCode::F(n)
+                        TuiKeyCode::F(n)
                     } else {
                         return Err(KeyParseError(s.to_string()));
                     }
@@ -146,12 +145,12 @@ impl FromStr for KeyBinding {
                         return Err(KeyParseError(s.to_string()));
                     }
                     // Ctrl-shorthand keys are conventionally lowercased.
-                    let ch = if mods.contains(KeyModifiers::CONTROL) {
+                    let ch = if mods.contains(TuiKeyModifiers::CONTROL) {
                         first.to_ascii_lowercase()
                     } else {
                         first
                     };
-                    KeyCode::Char(ch)
+                    TuiKeyCode::Char(ch)
                 }
             }
         };
@@ -212,24 +211,24 @@ impl Keybinds {
     pub fn defaults() -> Self {
         Self {
             toggle_sessions: KeyBinding {
-                code: KeyCode::Char('k'),
-                mods: KeyModifiers::CONTROL,
+                code: TuiKeyCode::Char('k'),
+                mods: TuiKeyModifiers::CONTROL,
             },
             toggle_tools: KeyBinding {
-                code: KeyCode::Char('t'),
-                mods: KeyModifiers::CONTROL,
+                code: TuiKeyCode::Char('t'),
+                mods: TuiKeyModifiers::CONTROL,
             },
             toggle_reasoning: KeyBinding {
-                code: KeyCode::Char('r'),
-                mods: KeyModifiers::CONTROL,
+                code: TuiKeyCode::Char('r'),
+                mods: TuiKeyModifiers::CONTROL,
             },
             cancel: KeyBinding {
-                code: KeyCode::Char('c'),
-                mods: KeyModifiers::CONTROL,
+                code: TuiKeyCode::Char('c'),
+                mods: TuiKeyModifiers::CONTROL,
             },
             queue_drop: KeyBinding {
-                code: KeyCode::Backspace,
-                mods: KeyModifiers::CONTROL,
+                code: TuiKeyCode::Backspace,
+                mods: TuiKeyModifiers::CONTROL,
             },
         }
     }
@@ -248,39 +247,39 @@ mod tests {
     #[test]
     fn parses_ctrl_plus_letter() {
         let b: KeyBinding = "Ctrl+K".parse().unwrap();
-        assert_eq!(b.code, KeyCode::Char('k'));
-        assert!(b.mods.contains(KeyModifiers::CONTROL));
+        assert_eq!(b.code, TuiKeyCode::Char('k'));
+        assert!(b.mods.contains(TuiKeyModifiers::CONTROL));
     }
 
     #[test]
     fn parses_caret_sigil() {
         let b: KeyBinding = "⌃K".parse().unwrap();
-        assert_eq!(b.code, KeyCode::Char('k'));
-        assert!(b.mods.contains(KeyModifiers::CONTROL));
+        assert_eq!(b.code, TuiKeyCode::Char('k'));
+        assert!(b.mods.contains(TuiKeyModifiers::CONTROL));
     }
 
     #[test]
     fn parses_function_key() {
         let b: KeyBinding = "F2".parse().unwrap();
-        assert_eq!(b.code, KeyCode::F(2));
+        assert_eq!(b.code, TuiKeyCode::F(2));
         assert!(b.mods.is_empty());
     }
 
     #[test]
     fn parses_named_keys() {
-        assert_eq!("Esc".parse::<KeyBinding>().unwrap().code, KeyCode::Esc);
-        assert_eq!("Tab".parse::<KeyBinding>().unwrap().code, KeyCode::Tab);
+        assert_eq!("Esc".parse::<KeyBinding>().unwrap().code, TuiKeyCode::Esc);
+        assert_eq!("Tab".parse::<KeyBinding>().unwrap().code, TuiKeyCode::Tab);
         assert_eq!(
             "Backspace".parse::<KeyBinding>().unwrap().code,
-            KeyCode::Backspace
+            TuiKeyCode::Backspace
         );
     }
 
     #[test]
     fn parses_ctrl_backspace() {
         let b: KeyBinding = "Ctrl+Backspace".parse().unwrap();
-        assert_eq!(b.code, KeyCode::Backspace);
-        assert!(b.mods.contains(KeyModifiers::CONTROL));
+        assert_eq!(b.code, TuiKeyCode::Backspace);
+        assert!(b.mods.contains(TuiKeyModifiers::CONTROL));
     }
 
     #[test]
@@ -294,8 +293,8 @@ mod tests {
     #[test]
     fn label_uses_ascii_for_ctrl_letters() {
         let b = KeyBinding {
-            code: KeyCode::Char('k'),
-            mods: KeyModifiers::CONTROL,
+            code: TuiKeyCode::Char('k'),
+            mods: TuiKeyModifiers::CONTROL,
         };
         assert_eq!(b.label(), "Ctrl+K");
     }
@@ -303,13 +302,13 @@ mod tests {
     #[test]
     fn label_function_and_esc() {
         let b = KeyBinding {
-            code: KeyCode::F(2),
-            mods: KeyModifiers::NONE,
+            code: TuiKeyCode::F(2),
+            mods: TuiKeyModifiers::NONE,
         };
         assert_eq!(b.label(), "F2");
         let b = KeyBinding {
-            code: KeyCode::Esc,
-            mods: KeyModifiers::NONE,
+            code: TuiKeyCode::Esc,
+            mods: TuiKeyModifiers::NONE,
         };
         assert_eq!(b.label(), "Esc");
     }
@@ -317,9 +316,9 @@ mod tests {
     #[test]
     fn matches_key_event() {
         let b: KeyBinding = "Ctrl+T".parse().unwrap();
-        let ev = KeyEvent::new(KeyCode::Char('t'), KeyModifiers::CONTROL);
+        let ev = TuiKeyEvent::new(TuiKeyCode::Char('t'), TuiKeyModifiers::CONTROL);
         assert!(b.matches(&ev));
-        let ev = KeyEvent::new(KeyCode::Char('t'), KeyModifiers::NONE);
+        let ev = TuiKeyEvent::new(TuiKeyCode::Char('t'), TuiKeyModifiers::NONE);
         assert!(!b.matches(&ev));
     }
 
@@ -336,7 +335,7 @@ mod tests {
         let mut cfg = KeybindsConfig::default();
         cfg.toggle_tools = "F2".into();
         let kb = Keybinds::from_config(&cfg);
-        assert_eq!(kb.toggle_tools.code, KeyCode::F(2));
+        assert_eq!(kb.toggle_tools.code, TuiKeyCode::F(2));
         assert!(kb.toggle_tools.mods.is_empty());
     }
 }

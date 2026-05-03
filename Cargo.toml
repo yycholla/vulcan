@@ -131,8 +131,10 @@ clap_complete = "4.6"
 # password input + confirm modals. Optional dep — only the auth flow
 # uses it, but cheap enough to leave in default deps.
 dialoguer = { version = "0.12", features = ["fuzzy-select", "password"] }
-ratatui = "0.30"
-crossterm = "0.29"
+ratatui = { version = "0.30", default-features = false, features = ["termwiz", "underline-color", "all-widgets", "macros", "layout-cache"] }
+termwiz = "0.23.3"
+figlet-rs = "1.0.0"
+tui-textarea = { version = "0.10.2", package = "tui-textarea-2", default-features = false, features = ["no-backend"] }
 # YYC-287: lightweight ANSI terminal colors for styled CLI output
 # (config list/show/get, doctor, trust, etc.). Zero transitive deps.
 owo-colors = "4"
@@ -250,6 +252,8 @@ notify = { version = "8.2.0", optional = true }
 # detection, signal handling. fs feature pulls in flock() if we end up
 # needing it for advisory locking beyond what redb already does.
 nix = { version = "0.31.2", optional = true, features = ["fs", "process", "signal"] }
+throbber-widgets-tui = "0.11.0"
+tachyonfx = "0.25.0"
 
 # Workspace lint baseline (YYC-121). Conservative defaults that bias
 # toward forward-leaning warnings without forcing a sprawling cleanup

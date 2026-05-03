@@ -1,3 +1,4 @@
+use super::super::input::{TuiKeyCode, TuiKeyEvent, TuiKeyModifiers};
 use super::*;
 use crate::memory::SessionSummary;
 use vulcan_frontend_api::{WidgetContent, WidgetUpdate};
@@ -198,6 +199,65 @@ fn app_state_applies_status_widget_updates() {
     assert!(!app.model_status().contains("working"));
 }
 
+#[test]
+fn activity_motion_tracks_busy_queue_widgets_and_tool_segments() {
+    let mut app = AppState::new("test-model".into(), 128_000);
+    assert!(!app.activity_motion_active());
+
+    app.thinking = true;
+    assert!(app.activity_motion_active());
+    app.thinking = false;
+
+    app.queue.push_back("steer".into());
+    assert!(app.activity_motion_active());
+    app.queue.clear();
+
+    app.apply_widget_updates(vec![WidgetUpdate {
+        id: "sync".into(),
+        content: Some(WidgetContent::progress("sync", 0.5)),
+    }]);
+    assert!(app.activity_motion_active());
+    app.apply_widget_updates(vec![WidgetUpdate {
+        id: "sync".into(),
+        content: Some(WidgetContent::Text("done".into())),
+    }]);
+    assert!(!app.activity_motion_active());
+
+    let mut message = ChatMessage::new(ChatRole::Agent, "");
+    message.push_tool_start("bash");
+    app.messages.push(message);
+    assert!(app.activity_motion_active());
+}
+
+#[test]
+fn activity_motion_advances_throbber_only_while_active() {
+    let mut app = AppState::new("test-model".into(), 128_000);
+    app.advance_activity_motion();
+    assert_eq!(app.activity_throbber.index(), 0);
+    assert_eq!(app.effects.prompt_border_phase(), 0);
+
+    app.thinking = true;
+    app.advance_activity_motion();
+    assert_eq!(app.activity_throbber.index(), 1);
+    assert_eq!(app.effects.prompt_border_phase(), 1);
+}
+
+#[test]
+fn chat_clear_phases_clear_then_reveal_welcome() {
+    let mut app = AppState::new("test-model".into(), 128_000);
+    app.messages
+        .push(ChatMessage::new(ChatRole::User, "clear me"));
+    app.chat_clear_phase.set(ChatClearPhase::Exploding);
+
+    assert!(app.finish_chat_clear_if_idle());
+    assert!(app.messages.is_empty());
+    assert_eq!(app.chat_clear_phase.get(), ChatClearPhase::RevealRequested);
+
+    app.chat_clear_phase.set(ChatClearPhase::Revealing);
+    assert!(app.finish_chat_clear_if_idle());
+    assert_eq!(app.chat_clear_phase.get(), ChatClearPhase::Idle);
+}
+
 struct TestCanvas;
 
 impl vulcan_frontend_api::Canvas for TestCanvas {
@@ -226,7 +286,7 @@ fn canvas_request_installs_and_exits_on_default_escape() {
     );
 
     assert!(app.handle_canvas_key(vulcan_frontend_api::CanvasKey::Esc));
-    assert!(app.active_canvas.is_none());
+    assert!(!app.has_active_canvas());
 }
 
 #[test]
@@ -248,7 +308,7 @@ fn cancel_stack_pops_canvas_before_turn() {
         app.pop_cancel_scope(),
         CancelPop::Popped(CancelScope::Canvas)
     );
-    assert!(app.active_canvas.is_none());
+    assert!(!app.has_active_canvas());
     assert_eq!(app.pop_cancel_scope(), CancelPop::CancelTurn);
 }
 
@@ -316,12 +376,12 @@ fn prompt_hints_default_keybinds_match_ascii_labels() {
 
 #[test]
 fn prompt_hints_reflect_overridden_keybind() {
+    use super::super::input::{TuiKeyCode, TuiKeyModifiers};
     use super::super::keybinds::{KeyBinding, Keybinds};
-    use crossterm::event::{KeyCode, KeyModifiers};
     let mut kb = Keybinds::defaults();
     kb.toggle_tools = KeyBinding {
-        code: KeyCode::F(2),
-        mods: KeyModifiers::NONE,
+        code: TuiKeyCode::F(2),
+        mods: TuiKeyModifiers::NONE,
     };
     let app = AppState::new("test".into(), 100).with_keybinds(kb);
     let pairs: Vec<(String, String)> = app.prompt_hints().to_vec();
@@ -523,6 +583,37 @@ fn delegated_worker_count_filters_terminal_records() {
     let mut app = AppState::new("test-model".into(), 128_000);
     app.orchestration_store = Some(store);
     assert_eq!(app.delegated_worker_count(), 1);
+}
+
+#[test]
+fn prompt_editor_uses_shift_enter_for_multiline_insert_mode() {
+    let mut app = AppState::new("test-model".into(), 128_000);
+    app.prompt_insert_str("first");
+    app.prompt_handle_key(TuiKeyEvent::new(TuiKeyCode::Enter, TuiKeyModifiers::NONE));
+    assert_eq!(app.input, "first");
+
+    app.prompt_handle_key(TuiKeyEvent::new(TuiKeyCode::Enter, TuiKeyModifiers::SHIFT));
+    app.prompt_insert_str("second");
+
+    assert_eq!(app.input, "first\nsecond");
+    assert_eq!(app.prompt_editor.mode(), PromptEditMode::Insert);
+}
+
+#[test]
+fn prompt_editor_esc_enters_vim_normal_mode_and_i_returns_to_insert() {
+    let mut app = AppState::new("test-model".into(), 128_000);
+    app.prompt_insert_str("hello");
+
+    app.prompt_handle_key(TuiKeyEvent::new(TuiKeyCode::Esc, TuiKeyModifiers::NONE));
+    assert_eq!(app.prompt_editor.mode(), PromptEditMode::Normal);
+    assert_eq!(app.mode_label(), "NORMAL");
+
+    app.prompt_handle_key(TuiKeyEvent::new(
+        TuiKeyCode::Char('i'),
+        TuiKeyModifiers::NONE,
+    ));
+    assert_eq!(app.prompt_editor.mode(), PromptEditMode::Insert);
+    assert_eq!(app.mode_label(), "INSERT");
 }
 
 #[test]

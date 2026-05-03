@@ -176,6 +176,9 @@ pub struct ExtensionUi {
     updates: Vec<WidgetUpdate>,
     canvas_requests: Vec<CanvasRequest>,
     tick_requests: Vec<TickRequest>,
+    surface_requests: Vec<FrontendSurface>,
+    surface_updates: Vec<FrontendSurfaceUpdate>,
+    surface_closes: Vec<String>,
 }
 
 impl ExtensionUi {
@@ -220,6 +223,18 @@ impl ExtensionUi {
         });
     }
 
+    pub fn open_surface(&mut self, surface: FrontendSurface) {
+        self.surface_requests.push(surface);
+    }
+
+    pub fn update_surface(&mut self, update: FrontendSurfaceUpdate) {
+        self.surface_updates.push(update);
+    }
+
+    pub fn close_surface(&mut self, id: impl Into<String>) {
+        self.surface_closes.push(id.into());
+    }
+
     pub fn drain_widget_updates(&mut self) -> Vec<WidgetUpdate> {
         self.updates.drain(..).collect()
     }
@@ -230,6 +245,18 @@ impl ExtensionUi {
 
     pub fn drain_tick_requests(&mut self) -> Vec<TickRequest> {
         std::mem::take(&mut self.tick_requests)
+    }
+
+    pub fn drain_surface_requests(&mut self) -> Vec<FrontendSurface> {
+        std::mem::take(&mut self.surface_requests)
+    }
+
+    pub fn drain_surface_updates(&mut self) -> Vec<FrontendSurfaceUpdate> {
+        std::mem::take(&mut self.surface_updates)
+    }
+
+    pub fn drain_surface_closes(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.surface_closes)
     }
 }
 
@@ -253,6 +280,18 @@ impl HeadlessUi {
     where
         F: Fn(&TickHandle) + Send + Sync + 'static,
     {
+        Err(UiError::NoUi)
+    }
+
+    pub fn open_surface(&self, _surface: FrontendSurface) -> UiResult<()> {
+        Err(UiError::NoUi)
+    }
+
+    pub fn update_surface(&self, _update: FrontendSurfaceUpdate) -> UiResult<()> {
+        Err(UiError::NoUi)
+    }
+
+    pub fn close_surface(&self, _id: impl Into<String>) -> UiResult<()> {
         Err(UiError::NoUi)
     }
 }
@@ -311,9 +350,49 @@ pub trait MessageRenderer: Send + Sync {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub enum FrontendSurfacePlacement {
+    Modal,
+    Fullscreen,
+    RightDrawer,
+    BottomDrawer,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FrontendSurface {
+    pub id: String,
+    pub title: String,
+    pub body: Vec<String>,
+    pub placement: FrontendSurfacePlacement,
+}
+
+impl FrontendSurface {
+    pub fn modal(id: impl Into<String>, title: impl Into<String>, body: Vec<String>) -> Self {
+        Self {
+            id: id.into(),
+            title: title.into(),
+            body,
+            placement: FrontendSurfacePlacement::Modal,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct FrontendSurfaceUpdate {
+    pub id: String,
+    pub title: Option<String>,
+    pub body: Option<Vec<String>>,
+    pub placement: Option<FrontendSurfacePlacement>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum FrontendCommandAction {
     Noop,
     SystemMessage(String),
+    OpenSurface(FrontendSurface),
+    UpdateSurface(FrontendSurfaceUpdate),
+    CloseSurface {
+        id: String,
+    },
     OpenView {
         id: String,
         title: String,
@@ -422,7 +501,7 @@ mod tests {
     }
 
     #[test]
-    fn extension_ui_records_canvas_and_tick_requests() {
+    fn extension_ui_records_canvas_tick_and_surface_requests() {
         let mut ui = ExtensionUi::default();
 
         let canvas = ui
@@ -431,11 +510,33 @@ mod tests {
         let tick = ui
             .set_tick(TickRate::Tick30Hz, |_| {})
             .expect("tick handle");
+        ui.open_surface(FrontendSurface::modal(
+            "todos",
+            "Todos",
+            vec!["body".into()],
+        ));
+        ui.update_surface(FrontendSurfaceUpdate {
+            id: "todos".into(),
+            title: Some("Todos updated".into()),
+            body: None,
+            placement: None,
+        });
+        ui.close_surface("todos");
 
         assert!(!canvas.has_exited());
         assert!(!tick.is_stopped());
         assert_eq!(ui.drain_canvas_requests().len(), 1);
         assert_eq!(ui.drain_tick_requests().len(), 1);
+        assert_eq!(
+            ui.drain_surface_requests(),
+            vec![FrontendSurface::modal(
+                "todos",
+                "Todos",
+                vec!["body".into()]
+            )]
+        );
+        assert_eq!(ui.drain_surface_updates().len(), 1);
+        assert_eq!(ui.drain_surface_closes(), vec!["todos".to_string()]);
     }
 
     #[test]
@@ -454,6 +555,18 @@ mod tests {
             ui.set_tick(TickRate::Tick60Hz, |_| {}).map(|_| ()),
             Err(UiError::NoUi)
         );
+        assert_eq!(
+            ui.open_surface(FrontendSurface::modal("x", "X", Vec::new())),
+            Err(UiError::NoUi)
+        );
+        assert_eq!(
+            ui.update_surface(FrontendSurfaceUpdate {
+                id: "x".into(),
+                ..FrontendSurfaceUpdate::default()
+            }),
+            Err(UiError::NoUi)
+        );
+        assert_eq!(ui.close_surface("x"), Err(UiError::NoUi));
     }
 
     #[test]
