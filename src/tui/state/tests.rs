@@ -74,6 +74,20 @@ fn hydrate_sessions_retains_lineage_and_activity_fields() {
 }
 
 #[test]
+fn note_frame_draw_tracks_interval_and_fps() {
+    let mut app = AppState::new("test-model".into(), 128_000);
+    app.note_frame_draw(
+        std::time::Duration::from_micros(2_500),
+        std::time::Duration::from_millis(20),
+    );
+
+    assert_eq!(app.diagnostics.frame_count, 1);
+    assert_eq!(app.diagnostics.last_draw_ms, 2.5);
+    assert_eq!(app.diagnostics.last_frame_interval_ms, 20.0);
+    assert_eq!(app.diagnostics.fps, 50.0);
+}
+
+#[test]
 fn segments_interleave_reasoning_tool_text_in_arrival_order() {
     // Simulates the exact YYC-71 sequence: think → tool → think → answer.
     let mut m = ChatMessage::new(ChatRole::Agent, "");

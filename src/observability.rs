@@ -9,7 +9,7 @@ use std::{sync::LazyLock, time::Duration};
 use anyhow::{Context, Result};
 use opentelemetry::{
     KeyValue, global,
-    metrics::{Counter, Histogram},
+    metrics::{Counter, Gauge, Histogram},
     trace::TracerProvider as _,
 };
 use opentelemetry_otlp::WithExportConfig;
@@ -139,6 +139,11 @@ struct RuntimeMetricInstruments {
     errors_total: Counter<u64>,
     hook_errors: Counter<u64>,
     hook_timeouts: Counter<u64>,
+    tui_frame_draw_ms: Histogram<f64>,
+    tui_frame_interval_ms: Histogram<f64>,
+    tui_frames_total: Counter<u64>,
+    tui_fps: Gauge<f64>,
+    tui_surface_count: Gauge<u64>,
 }
 
 static RUNTIME_METRICS: LazyLock<RuntimeMetricInstruments> = LazyLock::new(|| {
@@ -190,6 +195,28 @@ static RUNTIME_METRICS: LazyLock<RuntimeMetricInstruments> = LazyLock::new(|| {
         hook_timeouts: meter
             .u64_counter(metric::HOOK_TIMEOUTS)
             .with_description("Hook handler timeouts.")
+            .build(),
+        tui_frame_draw_ms: meter
+            .f64_histogram(metric::TUI_FRAME_DRAW_MS)
+            .with_unit("ms")
+            .with_description("TUI frame draw duration.")
+            .build(),
+        tui_frame_interval_ms: meter
+            .f64_histogram(metric::TUI_FRAME_INTERVAL_MS)
+            .with_unit("ms")
+            .with_description("TUI interval between completed frames.")
+            .build(),
+        tui_frames_total: meter
+            .u64_counter(metric::TUI_FRAMES_TOTAL)
+            .with_description("TUI frames drawn.")
+            .build(),
+        tui_fps: meter
+            .f64_gauge(metric::TUI_FPS)
+            .with_description("TUI instantaneous frames per second.")
+            .build(),
+        tui_surface_count: meter
+            .u64_gauge(metric::TUI_SURFACE_COUNT)
+            .with_description("TUI active frontend surface count.")
             .build(),
     }
 });
@@ -434,6 +461,27 @@ pub fn record_daemon_request_metrics(
 pub fn record_error_metric(surface: &'static str, error_kind: &str) {
     let attrs = outcome_metric_attrs(surface, "error", Some(error_kind));
     RUNTIME_METRICS.errors_total.add(1, &attrs);
+}
+
+pub fn record_tui_frame_metrics(
+    draw_duration: Duration,
+    frame_interval: Duration,
+    _frame_count: u64,
+    fps: f64,
+    surface_count: usize,
+) {
+    let attrs = [KeyValue::new(attr::SURFACE, "tui")];
+    RUNTIME_METRICS
+        .tui_frame_draw_ms
+        .record(duration_millis(draw_duration), &attrs);
+    RUNTIME_METRICS
+        .tui_frame_interval_ms
+        .record(duration_millis(frame_interval), &attrs);
+    RUNTIME_METRICS.tui_frames_total.add(1, &attrs);
+    RUNTIME_METRICS.tui_fps.record(fps, &attrs);
+    RUNTIME_METRICS
+        .tui_surface_count
+        .record(surface_count as u64, &attrs);
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]

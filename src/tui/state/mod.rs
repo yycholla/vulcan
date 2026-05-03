@@ -55,6 +55,7 @@ use throbber_widgets_tui::ThrobberState;
 
 use crate::hooks::audit::{AuditBuffer, AuditKind};
 use crate::memory::SessionSummary;
+use crate::observability;
 
 // Re-export the types pulled into sibling submodules in YYC-110 so the
 // legacy `tui::state::*` import paths used across the TUI still resolve.
@@ -180,6 +181,8 @@ enum ChatClearPhase {
 pub struct TuiDiagnostics {
     pub frame_count: u64,
     pub last_draw_ms: f64,
+    pub last_frame_interval_ms: f64,
+    pub fps: f64,
     pub surface_count: usize,
     pub active_surface: Option<String>,
 }
@@ -642,12 +645,25 @@ impl AppState {
         self.show_diagnostics = !self.show_diagnostics;
     }
 
-    pub fn note_frame_draw(&mut self, elapsed: Duration) {
+    pub fn note_frame_draw(&mut self, elapsed: Duration, frame_interval: Duration) {
         self.diagnostics.frame_count = self.diagnostics.frame_count.saturating_add(1);
         self.diagnostics.last_draw_ms = elapsed.as_secs_f64() * 1000.0;
+        self.diagnostics.last_frame_interval_ms = frame_interval.as_secs_f64() * 1000.0;
+        self.diagnostics.fps = if frame_interval.is_zero() {
+            0.0
+        } else {
+            1.0 / frame_interval.as_secs_f64()
+        };
         self.diagnostics.surface_count = self.ui_runtime.surface_count();
         self.diagnostics.active_surface =
             self.ui_runtime.active_surface_title().map(str::to_string);
+        observability::record_tui_frame_metrics(
+            elapsed,
+            frame_interval,
+            self.diagnostics.frame_count,
+            self.diagnostics.fps,
+            self.diagnostics.surface_count,
+        );
     }
 
     pub fn open_session_picker(&mut self, selection: usize) {
