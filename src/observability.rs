@@ -22,6 +22,7 @@ use crate::hooks::{HookFailureCounts, HookRegistry};
 
 pub mod attr {
     pub const OPERATION: &str = "operation";
+    pub const REQUEST_ID: &str = "request_id";
     pub const SESSION_ID: &str = "session_id";
     pub const RUN_ID: &str = "run_id";
     pub const TASK_ID: &str = "task_id";
@@ -29,6 +30,7 @@ pub mod attr {
     pub const TOOL_NAME: &str = "tool_name";
     pub const PROVIDER: &str = "provider";
     pub const PROVIDER_MODE: &str = "provider_mode";
+    pub const RPC_METHOD: &str = "rpc_method";
     pub const MODEL: &str = "model";
     pub const STREAMING: &str = "streaming";
     pub const MESSAGE_COUNT: &str = "message_count";
@@ -116,6 +118,24 @@ impl ProviderSpanMode {
     pub fn streaming(self) -> bool {
         matches!(self, Self::Streaming)
     }
+}
+
+pub fn daemon_request_operation(method: &str) -> String {
+    format!("request.{method}")
+}
+
+pub fn daemon_request_span(method: &str, session_id: &str, request_id: &str) -> tracing::Span {
+    let operation = daemon_request_operation(method);
+    tracing::info_span!(
+        span::DAEMON_REQUEST,
+        surface = "daemon",
+        operation = operation.as_str(),
+        rpc_method = method,
+        session_id,
+        request_id,
+        outcome = tracing::field::Empty,
+        error_kind = tracing::field::Empty
+    )
 }
 
 pub fn tool_call_span(tool_name: &str) -> tracing::Span {
@@ -391,6 +411,7 @@ mod tests {
     fn stable_attribute_and_span_names_cover_runtime_surfaces() {
         let attrs = [
             attr::OPERATION,
+            attr::REQUEST_ID,
             attr::SESSION_ID,
             attr::RUN_ID,
             attr::TASK_ID,
@@ -398,6 +419,7 @@ mod tests {
             attr::TOOL_NAME,
             attr::PROVIDER,
             attr::PROVIDER_MODE,
+            attr::RPC_METHOD,
             attr::MODEL,
             attr::STREAMING,
             attr::MESSAGE_COUNT,
@@ -421,6 +443,7 @@ mod tests {
             "vulcan.hook.on_before_provider_request"
         );
         assert_eq!(span::TOOL_CALL, "vulcan.tool.call");
+        assert_eq!(span::DAEMON_REQUEST, "vulcan.daemon.request");
         assert_eq!(span::PROVIDER_BUFFERED, "vulcan.provider.buffered");
         assert_eq!(span::PROVIDER_COMPACTION, "vulcan.provider.compaction");
         assert_eq!(span::PROVIDER_STREAMING, "vulcan.provider.streaming");
@@ -446,6 +469,18 @@ mod tests {
             "provider.streaming"
         );
         assert!(ProviderSpanMode::Streaming.streaming());
+    }
+
+    #[test]
+    fn daemon_request_operations_are_stable_for_explorer_grouping() {
+        assert_eq!(
+            daemon_request_operation("prompt.stream"),
+            "request.prompt.stream"
+        );
+        assert_eq!(
+            daemon_request_operation("daemon.status"),
+            "request.daemon.status"
+        );
     }
 
     #[test]
