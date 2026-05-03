@@ -625,6 +625,7 @@ impl Agent {
             request.len(),
             0,
         );
+        let provider_started = std::time::Instant::now();
         let response = match self
             .provider
             .chat(&request, &[], cancel.clone())
@@ -633,14 +634,38 @@ impl Agent {
         {
             Ok(r) => {
                 provider_span.record(observability::attr::OUTCOME, "ok");
+                observability::record_provider_request_metrics(
+                    &self.provider_config.r#type,
+                    &self.provider_config.model,
+                    observability::ProviderSpanMode::Compaction,
+                    provider_started.elapsed(),
+                    "ok",
+                    None,
+                );
                 if let Some(usage) = &r.usage {
                     record_provider_usage(&provider_span, usage);
+                    observability::record_provider_token_metrics(
+                        &self.provider_config.r#type,
+                        &self.provider_config.model,
+                        observability::ProviderSpanMode::Compaction,
+                        usage.prompt_tokens,
+                        usage.completion_tokens,
+                        usage.total_tokens,
+                    );
                 }
                 r
             }
             Err(e) => {
                 provider_span.record(observability::attr::OUTCOME, "error");
                 provider_span.record(observability::attr::ERROR_KIND, "provider_error");
+                observability::record_provider_request_metrics(
+                    &self.provider_config.r#type,
+                    &self.provider_config.model,
+                    observability::ProviderSpanMode::Compaction,
+                    provider_started.elapsed(),
+                    "error",
+                    Some("provider_error"),
+                );
                 tracing::warn!("compaction summarizer call failed: {e}");
                 return false;
             }
@@ -796,6 +821,7 @@ impl Agent {
             outgoing.len(),
             tool_defs.len(),
         );
+        let provider_started = std::time::Instant::now();
         if let Err(e) = self
             .provider
             .chat_stream(outgoing, tool_defs, inner_tx, cancel.clone())
@@ -804,6 +830,14 @@ impl Agent {
         {
             provider_span.record(observability::attr::OUTCOME, "error");
             provider_span.record(observability::attr::ERROR_KIND, "provider_error");
+            observability::record_provider_request_metrics(
+                &self.provider_config.r#type,
+                &self.provider_config.model,
+                observability::ProviderSpanMode::Streaming,
+                provider_started.elapsed(),
+                "error",
+                Some("provider_error"),
+            );
             // Surface provider failures to the TUI rather than dropping
             // the channel silently. ProviderError carries actionable hints
             // via its Display impl; if the error chain has one (most
@@ -837,6 +871,14 @@ impl Agent {
             return Err(e);
         }
         provider_span.record(observability::attr::OUTCOME, "ok");
+        observability::record_provider_request_metrics(
+            &self.provider_config.r#type,
+            &self.provider_config.model,
+            observability::ProviderSpanMode::Streaming,
+            provider_started.elapsed(),
+            "ok",
+            None,
+        );
 
         let mut final_response: Option<ChatResponse> = None;
         while let Some(event) = priv_rx.recv().await {
@@ -844,6 +886,14 @@ impl Agent {
                 TurnEvent::ProviderDone { response } => {
                     if let Some(usage) = &response.usage {
                         record_provider_usage(&provider_span, usage);
+                        observability::record_provider_token_metrics(
+                            &self.provider_config.r#type,
+                            &self.provider_config.model,
+                            observability::ProviderSpanMode::Streaming,
+                            usage.prompt_tokens,
+                            usage.completion_tokens,
+                            usage.total_tokens,
+                        );
                     }
                     final_response = Some(response);
                     break;
@@ -1155,6 +1205,7 @@ impl TurnRunnerMut<'_> {
                         outgoing.len(),
                         tool_defs.len(),
                     );
+                    let provider_started = std::time::Instant::now();
                     let resp = match self
                         .agent
                         .provider
@@ -1164,14 +1215,38 @@ impl TurnRunnerMut<'_> {
                     {
                         Ok(r) => {
                             provider_span.record(observability::attr::OUTCOME, "ok");
+                            observability::record_provider_request_metrics(
+                                &self.agent.provider_config.r#type,
+                                &self.agent.provider_config.model,
+                                observability::ProviderSpanMode::Buffered,
+                                provider_started.elapsed(),
+                                "ok",
+                                None,
+                            );
                             if let Some(usage) = &r.usage {
                                 record_provider_usage(&provider_span, usage);
+                                observability::record_provider_token_metrics(
+                                    &self.agent.provider_config.r#type,
+                                    &self.agent.provider_config.model,
+                                    observability::ProviderSpanMode::Buffered,
+                                    usage.prompt_tokens,
+                                    usage.completion_tokens,
+                                    usage.total_tokens,
+                                );
                             }
                             r
                         }
                         Err(e) => {
                             provider_span.record(observability::attr::OUTCOME, "error");
                             provider_span.record(observability::attr::ERROR_KIND, "provider_error");
+                            observability::record_provider_request_metrics(
+                                &self.agent.provider_config.r#type,
+                                &self.agent.provider_config.model,
+                                observability::ProviderSpanMode::Buffered,
+                                provider_started.elapsed(),
+                                "error",
+                                Some("provider_error"),
+                            );
                             self.agent.record_run_event(RunEvent::ProviderError {
                                 message: e.to_string(),
                                 retryable: false,

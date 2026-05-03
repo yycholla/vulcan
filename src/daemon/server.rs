@@ -98,16 +98,25 @@ async fn handle_connection(stream: UnixStream, dispatcher: Arc<Dispatcher>) {
             }
         };
 
+        let request_started = std::time::Instant::now();
         match parse_request_strict(&body) {
             Ok(req) => {
                 let dispatcher = Arc::clone(&dispatcher);
                 let write_tx = write_tx.clone();
                 let span = observability::daemon_request_span(&req.method, &req.session, &req.id);
                 let record_span = span.clone();
+                let method = req.method.clone();
                 tokio::spawn(
                     async move {
                         let response = dispatcher.dispatch(req).await;
-                        write_dispatch_result(write_tx, response, &record_span).await;
+                        write_dispatch_result(
+                            write_tx,
+                            response,
+                            &record_span,
+                            &method,
+                            request_started,
+                        )
+                        .await;
                     }
                     .instrument(span),
                 );
@@ -117,7 +126,14 @@ async fn handle_connection(stream: UnixStream, dispatcher: Arc<Dispatcher>) {
                     observability::daemon_request_span("parse_request", "unknown", "unknown");
                 let response =
                     DispatchResult::Response(Response::error("unknown".into(), proto_err));
-                write_dispatch_result(write_tx.clone(), response, &span).await;
+                write_dispatch_result(
+                    write_tx.clone(),
+                    response,
+                    &span,
+                    "parse_request",
+                    request_started,
+                )
+                .await;
             }
         }
     }
@@ -130,10 +146,18 @@ async fn write_dispatch_result(
     write_tx: mpsc::Sender<Vec<u8>>,
     response: DispatchResult,
     span: &tracing::Span,
+    method: &str,
+    started: std::time::Instant,
 ) {
     match response {
         DispatchResult::Response(resp) => {
-            record_response_outcome(span, &resp);
+            let (outcome, error_kind) = record_response_outcome(span, &resp);
+            observability::record_daemon_request_metrics(
+                method,
+                started.elapsed(),
+                outcome,
+                error_kind,
+            );
             send_body(&write_tx, &resp, "response").await;
         }
         DispatchResult::Stream { mut frames, done } => {
@@ -141,17 +165,35 @@ async fn write_dispatch_result(
                 if !send_body(&write_tx, &frame, "stream frame").await {
                     span.record(observability::attr::OUTCOME, "error");
                     span.record(observability::attr::ERROR_KIND, "client_disconnected");
+                    observability::record_daemon_request_metrics(
+                        method,
+                        started.elapsed(),
+                        "error",
+                        Some("client_disconnected"),
+                    );
                     return;
                 }
             }
             match done.await {
                 Ok(resp) => {
-                    record_response_outcome(span, &resp);
+                    let (outcome, error_kind) = record_response_outcome(span, &resp);
+                    observability::record_daemon_request_metrics(
+                        method,
+                        started.elapsed(),
+                        outcome,
+                        error_kind,
+                    );
                     send_body(&write_tx, &resp, "final response").await;
                 }
                 Err(_) => {
                     span.record(observability::attr::OUTCOME, "error");
                     span.record(observability::attr::ERROR_KIND, "stream_done_dropped");
+                    observability::record_daemon_request_metrics(
+                        method,
+                        started.elapsed(),
+                        "error",
+                        Some("stream_done_dropped"),
+                    );
                     tracing::warn!("daemon: stream completion sender dropped without result");
                 }
             }
@@ -159,12 +201,17 @@ async fn write_dispatch_result(
     }
 }
 
-fn record_response_outcome(span: &tracing::Span, response: &Response) {
+fn record_response_outcome<'a>(
+    span: &tracing::Span,
+    response: &'a Response,
+) -> (&'static str, Option<&'a str>) {
     if let Some(error) = &response.error {
         span.record(observability::attr::OUTCOME, "error");
         span.record(observability::attr::ERROR_KIND, error.code.as_str());
+        ("error", Some(error.code.as_str()))
     } else {
         span.record(observability::attr::OUTCOME, "ok");
+        ("ok", None)
     }
 }
 
