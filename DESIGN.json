@@ -1,0 +1,112 @@
+{
+  "schemaVersion": 2,
+  "generatedAt": "2026-05-02T09:18:11-06:00",
+  "title": "Design System: Vulcan TUI",
+  "extensions": {
+    "colorMeta": {
+      "ink": {
+        "role": "neutral",
+        "displayName": "Ink",
+        "canonical": "#15130f",
+        "usage": "Default-light foreground and role labels."
+      },
+      "paper": {
+        "role": "neutral",
+        "displayName": "Paper",
+        "canonical": "#f2eee5",
+        "usage": "Historical Bauhaus canvas reference. Current TUI surfaces normally inherit terminal background."
+      },
+      "muted": {
+        "role": "neutral",
+        "displayName": "Muted Ash",
+        "canonical": "#8a8478",
+        "usage": "Borders, secondary labels, inactive metadata, timestamps, and dimmed separators."
+      },
+      "faint": {
+        "role": "neutral",
+        "displayName": "Faint Ash",
+        "canonical": "#e2dccd",
+        "usage": "Inset trace tint and low-emphasis reasoning surfaces."
+      },
+      "slate": {
+        "role": "neutral",
+        "displayName": "Tool Slate",
+        "canonical": "#c8c2b5",
+        "usage": "Historical tool-card chrome reference."
+      },
+      "red": {
+        "role": "primary",
+        "displayName": "Forge Red",
+        "canonical": "#d63b2f",
+        "usage": "Primary accent, prompt caret, ticker label, destructive choices, and errors."
+      },
+      "yellow": {
+        "role": "tertiary",
+        "displayName": "Tool Yellow",
+        "canonical": "#e8b43c",
+        "usage": "Running tools, warning capacity state, and active work indicators."
+      },
+      "blue": {
+        "role": "secondary",
+        "displayName": "Blueprint Blue",
+        "canonical": "#2b4fa8",
+        "usage": "System messages, primary safety choices, and informational emphasis."
+      },
+      "green": {
+        "role": "tertiary",
+        "displayName": "Result Green",
+        "canonical": "#3f7a4f",
+        "usage": "Successful tool results and completed work indicators."
+      }
+    },
+    "typographyMeta": {
+      "display": {
+        "displayName": "Display",
+        "purpose": "Rare ASCII titles and future web UI terminal artifacts."
+      },
+      "title": {
+        "displayName": "Title",
+        "purpose": "Frame title bars, section headers, palette titles, and tool names."
+      },
+      "body": {
+        "displayName": "Body",
+        "purpose": "Chat, markdown, tool args, previews, and queue entries."
+      },
+      "label": {
+        "displayName": "Label",
+        "purpose": "Status pills, mode labels, keyboard hints, and semantic state."
+      }
+    },
+    "componentMeta": {
+      "frame": {
+        "source": "src/tui/widgets.rs::frame",
+        "structure": "Thick border, title bar with `▓▓`, uppercase title, optional right status."
+      },
+      "prompt-row": {
+        "source": "src/tui/widgets.rs::prompt_row",
+        "structure": "Divider row, wrapped input row with mode pill and caret, hint/status row."
+      },
+      "tool-card": {
+        "source": "src/tui/widgets.rs::tool_card",
+        "structure": "Border-only tool record with name, params, status glyph, elapsed time, metadata, and preview."
+      },
+      "markdown-renderer": {
+        "source": "src/tui/markdown.rs",
+        "structure": "Markdown rendered as text primitives: markers, rails, bullets, code prefixes, and role styles."
+      }
+    },
+    "motion": {
+      "cursor-thinking": {
+        "token": "SLOW_BLINK",
+        "usage": "Only for thinking cursor state."
+      }
+    },
+    "rules": [
+      "Inherit terminal background by default.",
+      "Use semantic color for state, not decoration.",
+      "Use glyphs, rails, brackets, and box drawing as interface primitives.",
+      "Keep busy layouts secondary to the focused main view.",
+      "Avoid neon hacker styling, SaaS admin styling, and toy chatbot affordances."
+    ]
+  }
+}
