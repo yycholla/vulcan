@@ -83,12 +83,45 @@ pub mod span {
 }
 
 pub mod metric {
+    pub const DAEMON_REQUEST_DURATION_MS: &str = "vulcan.daemon.request.duration_ms";
+    pub const PROVIDER_REQUEST_DURATION_MS: &str = "vulcan.provider.request.duration_ms";
+    pub const TOOL_CALL_DURATION_MS: &str = "vulcan.tool.call.duration_ms";
+    pub const HOOK_EVENT_DURATION_MS: &str = "vulcan.hook.event.duration_ms";
     pub const HOOK_ERRORS: &str = "vulcan.hooks.errors";
     pub const HOOK_TIMEOUTS: &str = "vulcan.hooks.timeouts";
     pub const HOOK_HANDLERS: &str = "vulcan.hooks.handlers";
     pub const TOKENS_INPUT: &str = "vulcan.tokens.input";
     pub const TOKENS_OUTPUT: &str = "vulcan.tokens.output";
+    pub const TOKENS_TOTAL: &str = "vulcan.tokens.total";
+    pub const ERRORS_TOTAL: &str = "vulcan.errors.total";
+    pub const TUI_FRAME_DRAW_MS: &str = "vulcan.tui.frame.draw_ms";
+    pub const TUI_FRAME_INTERVAL_MS: &str = "vulcan.tui.frame.interval_ms";
+    pub const TUI_FRAMES_TOTAL: &str = "vulcan.tui.frames.total";
+    pub const TUI_FPS: &str = "vulcan.tui.fps";
+    pub const TUI_SURFACE_COUNT: &str = "vulcan.tui.surface.count";
+    pub const PROCESS_MEMORY_RSS_BYTES: &str = "vulcan.process.memory.rss_bytes";
+    pub const PROCESS_CPU_PERCENT: &str = "vulcan.process.cpu.percent";
+    pub const PROCESS_THREADS: &str = "vulcan.process.threads";
     pub const RUNTIME_SECONDS: &str = "vulcan.runtime.seconds";
+
+    pub const RUNTIME_PERFORMANCE: &[&str] = &[
+        DAEMON_REQUEST_DURATION_MS,
+        PROVIDER_REQUEST_DURATION_MS,
+        TOOL_CALL_DURATION_MS,
+        HOOK_EVENT_DURATION_MS,
+        TOKENS_INPUT,
+        TOKENS_OUTPUT,
+        TOKENS_TOTAL,
+        ERRORS_TOTAL,
+        TUI_FRAME_DRAW_MS,
+        TUI_FRAME_INTERVAL_MS,
+        TUI_FRAMES_TOTAL,
+        TUI_FPS,
+        TUI_SURFACE_COUNT,
+        PROCESS_MEMORY_RSS_BYTES,
+        PROCESS_CPU_PERCENT,
+        PROCESS_THREADS,
+    ];
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -448,6 +481,29 @@ mod tests {
         assert_eq!(span::PROVIDER_COMPACTION, "vulcan.provider.compaction");
         assert_eq!(span::PROVIDER_STREAMING, "vulcan.provider.streaming");
         assert_eq!(span::TASK_ORCHESTRATION, "vulcan.task.orchestration");
+    }
+
+    #[test]
+    fn stable_metric_names_cover_runtime_performance() {
+        assert!(
+            metric::RUNTIME_PERFORMANCE
+                .iter()
+                .all(|name| name.starts_with("vulcan."))
+        );
+        assert!(
+            metric::RUNTIME_PERFORMANCE
+                .iter()
+                .all(|name| !name.is_empty())
+        );
+        assert_eq!(
+            metric::DAEMON_REQUEST_DURATION_MS,
+            "vulcan.daemon.request.duration_ms"
+        );
+        assert_eq!(metric::TUI_FRAME_DRAW_MS, "vulcan.tui.frame.draw_ms");
+        assert_eq!(
+            metric::PROCESS_MEMORY_RSS_BYTES,
+            "vulcan.process.memory.rss_bytes"
+        );
     }
 
     #[test]
