@@ -41,6 +41,7 @@ pub mod attr {
     pub const OUTCOME: &str = "outcome";
     pub const ERROR_KIND: &str = "error_kind";
     pub const SURFACE: &str = "surface";
+    pub const RPC_METHOD: &str = "rpc_method";
 }
 
 pub mod span {
@@ -127,6 +128,18 @@ pub fn tool_call_span(tool_name: &str) -> tracing::Span {
         tool_name,
         outcome = tracing::field::Empty,
         error_kind = tracing::field::Empty
+    )
+}
+
+pub fn daemon_request_span(rpc_method: &str) -> tracing::Span {
+    let operation = format!("daemon.{rpc_method}");
+    tracing::info_span!(
+        span::DAEMON_REQUEST,
+        surface = "daemon",
+        operation = operation.as_str(),
+        rpc_method,
+        outcome = tracing::field::Empty,
+        error_kind = tracing::field::Empty,
     )
 }
 
@@ -410,6 +423,7 @@ mod tests {
             attr::OUTCOME,
             attr::ERROR_KIND,
             attr::SURFACE,
+            attr::RPC_METHOD,
         ];
         assert!(attrs.iter().all(|name| !name.is_empty()));
         assert!(attrs.iter().all(|name| !name.contains('.')));
@@ -424,7 +438,17 @@ mod tests {
         assert_eq!(span::PROVIDER_BUFFERED, "vulcan.provider.buffered");
         assert_eq!(span::PROVIDER_COMPACTION, "vulcan.provider.compaction");
         assert_eq!(span::PROVIDER_STREAMING, "vulcan.provider.streaming");
+        assert_eq!(span::DAEMON_REQUEST, "vulcan.daemon.request");
         assert_eq!(span::TASK_ORCHESTRATION, "vulcan.task.orchestration");
+    }
+
+    #[test]
+    fn daemon_request_span_carries_low_cardinality_vocab() {
+        // Span itself is constructed only — fields are recorded by the
+        // dispatcher when the response is known. We assert it doesn't panic
+        // and exposes the vocabulary callers grep for in dashboards.
+        let _span = daemon_request_span("agent.status");
+        assert_eq!(attr::RPC_METHOD, "rpc_method");
     }
 
     #[test]

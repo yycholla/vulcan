@@ -5,11 +5,13 @@
 use std::sync::Arc;
 
 use tokio::sync::{mpsc, oneshot};
+use tracing::Instrument;
 
 use crate::daemon::handlers::{agent, approval, cortex, daemon_ops, extension, prompt, session};
 use crate::daemon::protocol::{ProtocolError, Request, Response, StreamFrame};
 use crate::daemon::state::DaemonState;
 use crate::extensions::FrontendCapability;
+use crate::observability;
 
 /// Result of dispatching a request -- either a single response or a
 /// streaming response with incremental frames and a final result.
@@ -31,6 +33,12 @@ impl Dispatcher {
     }
 
     pub async fn dispatch(&self, req: Request) -> DispatchResult {
+        let span = observability::daemon_request_span(&req.method);
+        let result = self.dispatch_inner(req).instrument(span.clone()).await;
+        finalize_span(&span, result)
+    }
+
+    async fn dispatch_inner(&self, req: Request) -> DispatchResult {
         match req.method.as_str() {
             #[cfg(test)]
             "test.slow_stream" => {
@@ -375,6 +383,59 @@ impl Dispatcher {
     }
 }
 
+fn finalize_span(span: &tracing::Span, result: DispatchResult) -> DispatchResult {
+    match result {
+        DispatchResult::Response(resp) => {
+            record_response_outcome(span, &resp);
+            DispatchResult::Response(resp)
+        }
+        DispatchResult::Stream { frames, done } => {
+            // Stream outcome is decided when the spawned task drives the
+            // turn to completion and writes the final response on `done`.
+            // Hold a clone of the request span alive across the wait so its
+            // outcome attribute is recorded before the OTel span closes;
+            // child agent/provider/tool spans nest under it because the
+            // streaming handler instruments its tasks `.in_current_span()`.
+            let span_clone = span.clone();
+            let (final_tx, final_rx) = oneshot::channel();
+            tokio::spawn(async move {
+                match done.await {
+                    Ok(resp) => {
+                        record_response_outcome(&span_clone, &resp);
+                        let _ = final_tx.send(resp);
+                    }
+                    Err(_) => {
+                        span_clone.record(observability::attr::OUTCOME, "cancelled");
+                    }
+                }
+            });
+            DispatchResult::Stream {
+                frames,
+                done: final_rx,
+            }
+        }
+    }
+}
+
+fn record_response_outcome(span: &tracing::Span, resp: &Response) {
+    let (outcome, error_kind) = response_outcome(resp);
+    span.record(observability::attr::OUTCOME, outcome);
+    if let Some(kind) = error_kind {
+        span.record(observability::attr::ERROR_KIND, kind);
+    }
+}
+
+/// Pure mapping from a daemon `Response` to the
+/// `(outcome, error_kind)` pair recorded on the request span.
+/// Extracted so the recorded vocabulary is unit-testable without
+/// having to install a tracing subscriber.
+fn response_outcome(resp: &Response) -> (&'static str, Option<&str>) {
+    match &resp.error {
+        Some(err) => ("error", Some(err.code.as_str())),
+        None => ("ok", None),
+    }
+}
+
 fn frontend_options_from_params(
     params: &serde_json::Value,
 ) -> crate::daemon::session_agent::SessionAgentOptions {
@@ -676,6 +737,64 @@ mod tests {
                 assert_eq!(err.code, "AGENT_BUILD_FAILED");
             }
             DispatchResult::Stream { .. } => panic!("prompt.run should not stream"),
+        }
+    }
+
+    // --- #628 daemon request span vocabulary ---
+    //
+    // Span recording is verified two ways:
+    // 1. Pure logic: `response_outcome` maps a `Response` to the
+    //    `(outcome, error_kind)` pair the dispatcher records on the
+    //    request span. Subscriber-free, deterministic.
+    // 2. Smoke: `dispatch()` keeps returning the expected response
+    //    shape under the new instrumentation wrapper.
+    //
+    // A subscriber-capture test against `tracing_subscriber::fmt`'s
+    // `FmtSpan::CLOSE` formatter was tried first but proved flaky under
+    // cargo's parallel worker threads — span CLOSE output was
+    // intermittently empty when other lib tests installed their own
+    // thread-local subscribers concurrently. The vocabulary
+    // construction is also already covered by
+    // `observability::tests::daemon_request_span_carries_low_cardinality_vocab`.
+
+    #[test]
+    fn ok_response_maps_to_ok_outcome_with_no_error_kind() {
+        let resp = Response::ok("r1".into(), serde_json::json!({"pong": true}));
+        assert_eq!(response_outcome(&resp), ("ok", None));
+    }
+
+    #[test]
+    fn error_response_maps_to_error_outcome_carrying_error_code() {
+        let resp = Response::error(
+            "r1".into(),
+            ProtocolError {
+                code: "UNKNOWN_METHOD".into(),
+                message: "bad".into(),
+                retryable: false,
+            },
+        );
+        assert_eq!(response_outcome(&resp), ("error", Some("UNKNOWN_METHOD")));
+    }
+
+    #[tokio::test]
+    async fn dispatch_emits_request_span_for_sync_paths_without_panicking() {
+        let dispatcher = Dispatcher::new(Arc::new(
+            crate::daemon::state::DaemonState::for_tests_minimal(),
+        ));
+
+        match dispatcher.dispatch(req("daemon.ping")).await {
+            DispatchResult::Response(resp) => {
+                assert!(resp.error.is_none(), "ping must succeed under span wrap");
+            }
+            DispatchResult::Stream { .. } => panic!("ping should not stream"),
+        }
+
+        match dispatcher.dispatch(req("does.not.exist")).await {
+            DispatchResult::Response(resp) => {
+                let err = resp.error.expect("unknown method must error");
+                assert_eq!(err.code, "UNKNOWN_METHOD");
+            }
+            DispatchResult::Stream { .. } => panic!("unknown method should not stream"),
         }
     }
 }

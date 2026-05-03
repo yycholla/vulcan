@@ -11,6 +11,7 @@ use std::sync::Arc;
 
 use serde_json::json;
 use tokio::sync::{mpsc, oneshot};
+use tracing::Instrument;
 
 use crate::daemon::protocol::{ProtocolError, Response, StreamFrame};
 use crate::daemon::session::SessionState;
@@ -211,139 +212,153 @@ pub fn stream(
     let sess_for_task = sess.clone();
     let assembler = state.session_agent_assembler();
     let state_for_runner = Arc::clone(&state);
-    tokio::spawn(async move {
-        let (frontend_tx, mut frontend_rx) = tokio::sync::broadcast::channel(32);
-        let frontend_capabilities = options.frontend_capabilities();
-        let frontend_extensions = options.frontend_extensions();
-        let options = options.with_frontend_context(
-            frontend_capabilities,
-            frontend_extensions,
-            FrontendEventSink::new(frontend_tx),
-        );
-        // Lazy-build the per-session Agent. Failure surfaces on the
-        // done channel as AGENT_BUILD_FAILED; in_flight is cleared
-        // before returning so daemon.status doesn't get stuck.
-        let agent_arc = match sess_for_task
-            .ensure_agent_with_options(&assembler, options)
-            .await
-        {
-            Ok(a) => a,
-            Err(e) => {
-                *sess_for_task.in_flight.lock() = false;
-                sess_for_task.touch();
-                let _ = done_tx.send(Response::error(
-                    rid.clone(),
-                    ProtocolError {
-                        code: "AGENT_BUILD_FAILED".into(),
-                        message: format!(
-                            "agent build for session '{}' failed: {e}",
-                            sess_for_task.id
-                        ),
-                        retryable: true,
-                    },
-                ));
-                return;
-            }
-        };
-
-        let (event_tx, mut event_rx) = mpsc::channel::<StreamEvent>(32);
-        let cancel_token = tokio_util::sync::CancellationToken::new();
-        sess_for_task.set_agent_cancel(cancel_token.clone());
-
-        // GH issue #557: run `on_input` interception before spawning
-        // the streaming task. Block short-circuits with INPUT_BLOCKED;
-        // Replace swaps the input forwarded to `run_prompt_stream_with_cancel`.
-        let effective_input: String = {
-            let agent = agent_arc.lock().await;
-            match agent.apply_on_input(&input).await {
-                crate::hooks::InputDecision::Continue => input.clone(),
-                crate::hooks::InputDecision::Replace(rewrite) => rewrite,
-                crate::hooks::InputDecision::Block(reason) => {
-                    drop(agent);
+    // Capture the request span so agent/provider/tool spans created inside
+    // the streaming task nest under `vulcan.daemon.request`.
+    let request_span = tracing::Span::current();
+    let prompt_task_span = request_span.clone();
+    tokio::spawn(
+        async move {
+            let (frontend_tx, mut frontend_rx) = tokio::sync::broadcast::channel(32);
+            let frontend_capabilities = options.frontend_capabilities();
+            let frontend_extensions = options.frontend_extensions();
+            let options = options.with_frontend_context(
+                frontend_capabilities,
+                frontend_extensions,
+                FrontendEventSink::new(frontend_tx),
+            );
+            // Lazy-build the per-session Agent. Failure surfaces on the
+            // done channel as AGENT_BUILD_FAILED; in_flight is cleared
+            // before returning so daemon.status doesn't get stuck.
+            let agent_arc = match sess_for_task
+                .ensure_agent_with_options(&assembler, options)
+                .await
+            {
+                Ok(a) => a,
+                Err(e) => {
                     *sess_for_task.in_flight.lock() = false;
                     sess_for_task.touch();
                     let _ = done_tx.send(Response::error(
                         rid.clone(),
                         ProtocolError {
-                            code: "INPUT_BLOCKED".into(),
-                            message: format!("input blocked by extension: {reason}"),
-                            retryable: false,
+                            code: "AGENT_BUILD_FAILED".into(),
+                            message: format!(
+                                "agent build for session '{}' failed: {e}",
+                                sess_for_task.id
+                            ),
+                            retryable: true,
                         },
                     ));
                     return;
                 }
-            }
-        };
+            };
 
-        // Clone the Arc for the prompt task so the guard lives inside it.
-        let agent_arc2 = agent_arc.clone();
-        let input2 = effective_input;
-        let cancel2 = cancel_token.clone();
-        let session_id_for_runner = session_id.clone();
-        let prompt_task = tokio::spawn(async move {
-            let mut agent = agent_arc2.lock().await;
-            install_daemon_subagent_runner(&mut agent, state_for_runner, &session_id_for_runner);
-            agent
-                .run_prompt_stream_with_cancel(&input2, event_tx, cancel2)
-                .await
-        });
+            let (event_tx, mut event_rx) = mpsc::channel::<StreamEvent>(32);
+            let cancel_token = tokio_util::sync::CancellationToken::new();
+            sess_for_task.set_agent_cancel(cancel_token.clone());
 
-        // Forward events as StreamFrames.
-        loop {
-            tokio::select! {
-                ev = event_rx.recv() => {
-                    let Some(ev) = ev else {
-                        break;
-                    };
-                    if let Some(frame) = stream_event_to_frame(&rid, ev) {
-                        if frame_tx.send(frame).await.is_err() {
-                            // TUI disconnected -- cancel the turn.
-                            cancel_token.cancel();
-                            break;
-                        }
+            // GH issue #557: run `on_input` interception before spawning
+            // the streaming task. Block short-circuits with INPUT_BLOCKED;
+            // Replace swaps the input forwarded to `run_prompt_stream_with_cancel`.
+            let effective_input: String = {
+                let agent = agent_arc.lock().await;
+                match agent.apply_on_input(&input).await {
+                    crate::hooks::InputDecision::Continue => input.clone(),
+                    crate::hooks::InputDecision::Replace(rewrite) => rewrite,
+                    crate::hooks::InputDecision::Block(reason) => {
+                        drop(agent);
+                        *sess_for_task.in_flight.lock() = false;
+                        sess_for_task.touch();
+                        let _ = done_tx.send(Response::error(
+                            rid.clone(),
+                            ProtocolError {
+                                code: "INPUT_BLOCKED".into(),
+                                message: format!("input blocked by extension: {reason}"),
+                                retryable: false,
+                            },
+                        ));
+                        return;
                     }
                 }
-                event = frontend_rx.recv() => {
-                    match event {
-                        Ok(event) => {
-                            if frame_tx.send(frontend_event_to_frame(event)).await.is_err() {
+            };
+
+            // Clone the Arc for the prompt task so the guard lives inside it.
+            let agent_arc2 = agent_arc.clone();
+            let input2 = effective_input;
+            let cancel2 = cancel_token.clone();
+            let session_id_for_runner = session_id.clone();
+            let prompt_task = tokio::spawn(
+                async move {
+                    let mut agent = agent_arc2.lock().await;
+                    install_daemon_subagent_runner(
+                        &mut agent,
+                        state_for_runner,
+                        &session_id_for_runner,
+                    );
+                    agent
+                        .run_prompt_stream_with_cancel(&input2, event_tx, cancel2)
+                        .await
+                }
+                .instrument(prompt_task_span),
+            );
+
+            // Forward events as StreamFrames.
+            loop {
+                tokio::select! {
+                    ev = event_rx.recv() => {
+                        let Some(ev) = ev else {
+                            break;
+                        };
+                        if let Some(frame) = stream_event_to_frame(&rid, ev) {
+                            if frame_tx.send(frame).await.is_err() {
+                                // TUI disconnected -- cancel the turn.
                                 cancel_token.cancel();
                                 break;
                             }
                         }
-                        Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
-                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                    }
+                    event = frontend_rx.recv() => {
+                        match event {
+                            Ok(event) => {
+                                if frame_tx.send(frontend_event_to_frame(event)).await.is_err() {
+                                    cancel_token.cancel();
+                                    break;
+                                }
+                            }
+                            Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                            Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                        }
                     }
                 }
             }
+
+            // Await final turn result (Result<String> — just text).
+            let final_response = match prompt_task.await {
+                Ok(Ok(final_text)) => Response::ok(rid.clone(), json!({ "text": final_text })),
+                Ok(Err(e)) => Response::error(
+                    rid.clone(),
+                    ProtocolError {
+                        code: "PROMPT_RUN_FAILED".into(),
+                        message: format!("{e}"),
+                        retryable: false,
+                    },
+                ),
+                Err(join_err) => Response::error(
+                    rid.clone(),
+                    ProtocolError {
+                        code: "JOIN_ERROR".into(),
+                        message: format!("{join_err}"),
+                        retryable: false,
+                    },
+                ),
+            };
+
+            // Clear in_flight in all 3 completion paths before signalling done.
+            *sess_for_task.in_flight.lock() = false;
+            sess_for_task.touch();
+            let _ = done_tx.send(final_response);
         }
-
-        // Await final turn result (Result<String> — just text).
-        let final_response = match prompt_task.await {
-            Ok(Ok(final_text)) => Response::ok(rid.clone(), json!({ "text": final_text })),
-            Ok(Err(e)) => Response::error(
-                rid.clone(),
-                ProtocolError {
-                    code: "PROMPT_RUN_FAILED".into(),
-                    message: format!("{e}"),
-                    retryable: false,
-                },
-            ),
-            Err(join_err) => Response::error(
-                rid.clone(),
-                ProtocolError {
-                    code: "JOIN_ERROR".into(),
-                    message: format!("{join_err}"),
-                    retryable: false,
-                },
-            ),
-        };
-
-        // Clear in_flight in all 3 completion paths before signalling done.
-        *sess_for_task.in_flight.lock() = false;
-        sess_for_task.touch();
-        let _ = done_tx.send(final_response);
-    });
+        .instrument(request_span),
+    );
 
     (frame_rx, done_rx)
 }
