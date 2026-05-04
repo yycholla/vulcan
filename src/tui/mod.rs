@@ -59,6 +59,7 @@ pub mod pause_prompt;
 pub mod picker_state;
 pub mod prompt;
 pub mod provider_picker;
+pub mod render_ir;
 mod rendering;
 pub mod state;
 mod surface;
