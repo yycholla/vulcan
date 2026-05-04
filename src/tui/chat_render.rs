@@ -686,6 +686,33 @@ mod tests {
         assert_rows_fit(&rows, 8);
     }
 
+    #[test]
+    fn wrapped_typst_blocks_preserve_source_rail() {
+        let theme = Theme::system();
+        let rows = render_markdown("```typst\nabcdef gh\n```", &theme)
+            .into_iter()
+            .flat_map(|line| wrap_spans(line.spans, 10))
+            .collect::<Vec<_>>();
+
+        let rendered: Vec<String> = rows.iter().map(|row| row_text(row)).collect();
+        assert_eq!(
+            rendered,
+            vec![
+                " ```typst",
+                " │abcdef",
+                " │gh",
+                " typst",
+                "preview",
+                "unavailabl",
+                "e; source",
+                "shown"
+            ]
+        );
+        assert_eq!(rows[2][0].content.as_ref(), " │");
+        assert_eq!(rows[2][0].style, theme.code_block);
+        assert_rows_fit(&rows, 10);
+    }
+
     // YYC-144: insertions past the cap must drop the oldest entry
     // and keep the store at exactly RENDER_BLOCK_CACHE_CAP. Renders
     // CAP+1 distinct user messages — each gets its own cache key
