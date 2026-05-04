@@ -7561,6 +7561,7 @@ dependencies = [
  "tree-sitter-rust",
  "tree-sitter-typescript",
  "tui-textarea-2",
+ "unicode-width",
  "url",
  "uuid",
  "vulcan-frontend-api",
