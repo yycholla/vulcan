@@ -1,4 +1,5 @@
 pub mod catalog;
+pub mod codex;
 pub mod factory;
 pub mod openai;
 pub mod redact;

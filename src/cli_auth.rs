@@ -88,7 +88,12 @@ async fn run_preset(
         .validate_with(validate_profile_name)
         .interact_text()?;
 
-    let api_key_opt = prompt_api_key(theme, preset.base_url, preset.auth_hint)?;
+    let api_key_opt = if preset.auth_source == Some("codex") {
+        ensure_codex_login_hint();
+        None
+    } else {
+        prompt_api_key(theme, preset.base_url, preset.auth_hint)?
+    };
 
     let model = pick_or_input_model(
         theme,
@@ -221,6 +226,21 @@ fn validate_profile_name(input: &String) -> Result<(), &'static str> {
         Err("name required")
     } else {
         Ok(())
+    }
+}
+
+fn ensure_codex_login_hint() {
+    if std::env::var_os("CODEX_HOME")
+        .map(std::path::PathBuf::from)
+        .or_else(|| {
+            std::env::var_os("HOME").map(|home| std::path::PathBuf::from(home).join(".codex"))
+        })
+        .map(|home| home.join("auth.json").exists())
+        .unwrap_or(false)
+    {
+        println!("  codex auth   : found local Codex auth cache");
+    } else {
+        println!("  codex auth   : run `codex login` first; Vulcan will reuse that login cache");
     }
 }
 

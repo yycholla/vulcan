@@ -50,6 +50,56 @@ model = "speedy"
 }
 
 #[test]
+fn provider_codex_auth_source_parses() {
+    let cfg: Config = toml::from_str(
+        r#"
+[provider]
+type = "openai-compat"
+base_url = "https://api.openai.com/v1"
+model = "gpt-5"
+auth_source = "codex"
+"#,
+    )
+    .expect("parses");
+
+    assert_eq!(cfg.provider.auth_source.as_deref(), Some("codex"));
+}
+
+#[test]
+fn codex_auth_token_from_file_prefers_api_key_then_access_token() {
+    let dir = tempfile::tempdir().unwrap();
+    let auth = dir.path().join("auth.json");
+    std::fs::write(
+        &auth,
+        r#"{
+          "OPENAI_API_KEY": "sk-file-key",
+          "auth_mode": "api",
+          "tokens": { "access_token": "access-token" }
+        }"#,
+    )
+    .unwrap();
+
+    assert_eq!(
+        codex_auth_token_from_file(&auth).as_deref(),
+        Some("sk-file-key")
+    );
+
+    std::fs::write(
+        &auth,
+        r#"{
+          "auth_mode": "chatgpt",
+          "tokens": { "access_token": "access-token" }
+        }"#,
+    )
+    .unwrap();
+
+    assert_eq!(
+        codex_auth_token_from_file(&auth).as_deref(),
+        Some("access-token")
+    );
+}
+
+#[test]
 fn active_profile_pointing_at_missing_falls_back_to_legacy() {
     let cfg: Config = toml::from_str(
         r#"

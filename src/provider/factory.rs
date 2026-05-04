@@ -8,6 +8,7 @@
 use anyhow::{Context, Result};
 
 use super::LLMProvider;
+use super::codex::ResponsesProvider;
 use super::openai::OpenAIProvider;
 use crate::config::ProviderConfig;
 
@@ -53,8 +54,20 @@ impl ProviderFactory for DefaultProviderFactory {
                 )
                 .context("Failed to initialize LLM provider")?,
             )),
+            "openai-responses" => Ok(Box::new(
+                ResponsesProvider::new(
+                    &cfg.base_url,
+                    api_key,
+                    &cfg.model,
+                    max_context,
+                    cfg.max_retries,
+                    cfg.max_output_tokens,
+                    cfg.debug,
+                )
+                .context("Failed to initialize OpenAI Responses provider")?,
+            )),
             other => Err(anyhow::anyhow!(
-                "Unknown provider type '{other}'. Supported: openai, openai-compat. \
+                "Unknown provider type '{other}'. Supported: openai, openai-compat, openai-responses. \
                  Set [provider].type in ~/.vulcan/config.toml."
             )),
         }
@@ -110,5 +123,13 @@ mod tests {
             msg.contains("openai"),
             "should list supported types: {msg:?}"
         );
+    }
+
+    #[test]
+    fn default_factory_accepts_openai_responses() {
+        let cfg = cfg_with_type("openai-responses");
+        DefaultProviderFactory
+            .build(&cfg, "token", 128_000, false)
+            .expect("'openai-responses' type should build Responses provider");
     }
 }
