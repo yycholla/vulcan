@@ -7,6 +7,12 @@ use ratatui::{
 
 use super::theme::Theme;
 
+// Renderer parser decision record (GH #585):
+// use pulldown-cmark's low-overhead event stream as Vulcan's first real
+// parser behind the owned Render IR. Avoid tui-markdown as the production path
+// because chat_render must keep control of accent rails, wrapping, caching, and
+// theme roles. Keep comrak deferred until Vulcan needs AST-heavy transforms.
+
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct RenderDocument {
     pub blocks: Vec<RenderBlock>,
@@ -69,6 +75,9 @@ pub trait MarkdownParser {
 
 #[derive(Clone, Copy, Debug, Default)]
 pub struct LegacyMarkdownParser;
+
+#[derive(Clone, Copy, Debug, Default)]
+pub struct PulldownMarkdownParser;
 
 impl MarkdownParser for LegacyMarkdownParser {
     fn parse(&self, text: &str) -> RenderDocument {
@@ -169,6 +178,12 @@ impl MarkdownParser for LegacyMarkdownParser {
     }
 }
 
+impl MarkdownParser for PulldownMarkdownParser {
+    fn parse(&self, text: &str) -> RenderDocument {
+        parse_pulldown(text)
+    }
+}
+
 pub fn render_tui(document: &RenderDocument, theme: &Theme) -> Vec<Line<'static>> {
     let mut lines = Vec::new();
     for block in &document.blocks {
@@ -232,14 +247,53 @@ fn render_block_tui(block: &RenderBlock, theme: &Theme, lines: &mut Vec<Line<'st
             "─".repeat(50),
             theme.muted.add_modifier(Modifier::DIM),
         ))),
-        RenderBlock::Table { .. }
-        | RenderBlock::Math { .. }
-        | RenderBlock::Typst { .. }
-        | RenderBlock::Media { .. } => lines.push(Line::from(Span::styled(
-            "[unsupported render block]",
-            theme.muted.add_modifier(Modifier::DIM),
-        ))),
+        RenderBlock::Table { headers, rows } => render_table_tui(headers, rows, theme, lines),
+        RenderBlock::Math { .. } | RenderBlock::Typst { .. } | RenderBlock::Media { .. } => lines
+            .push(Line::from(Span::styled(
+                "[unsupported render block]",
+                theme.muted.add_modifier(Modifier::DIM),
+            ))),
     }
+}
+
+fn render_table_tui(
+    headers: &[Vec<Inline>],
+    rows: &[Vec<Vec<Inline>>],
+    theme: &Theme,
+    lines: &mut Vec<Line<'static>>,
+) {
+    if headers.is_empty() && rows.is_empty() {
+        return;
+    }
+    if !headers.is_empty() {
+        lines.push(Line::from(Span::styled(
+            render_table_row(headers),
+            theme.body_fg,
+        )));
+        lines.push(Line::from(Span::styled(
+            render_table_separator(headers.len()),
+            theme.muted.add_modifier(Modifier::DIM),
+        )));
+    }
+    for row in rows {
+        lines.push(Line::from(Span::styled(
+            render_table_row(row),
+            theme.body_fg,
+        )));
+    }
+}
+
+fn render_table_row(cells: &[Vec<Inline>]) -> String {
+    let rendered = cells
+        .iter()
+        .map(|cell| flatten_inlines(cell))
+        .collect::<Vec<_>>();
+    format!("| {} |", rendered.join(" | "))
+}
+
+fn render_table_separator(width: usize) -> String {
+    let cells = (0..width).map(|_| "---").collect::<Vec<_>>();
+    format!("| {} |", cells.join(" | "))
 }
 
 fn render_list_item_tui(
@@ -447,12 +501,359 @@ fn parse_inline(text: &str) -> Vec<Inline> {
     spans
 }
 
+fn parse_pulldown(text: &str) -> RenderDocument {
+    use pulldown_cmark::{Options, Parser};
+
+    let mut options = Options::empty();
+    options.insert(Options::ENABLE_TABLES);
+    options.insert(Options::ENABLE_STRIKETHROUGH);
+    options.insert(Options::ENABLE_TASKLISTS);
+
+    let mut events = Parser::new_ext(text, options).peekable();
+    RenderDocument {
+        blocks: parse_pulldown_blocks(&mut events, None),
+    }
+}
+
+fn parse_pulldown_blocks<'a, I>(
+    events: &mut std::iter::Peekable<I>,
+    end: Option<pulldown_cmark::TagEnd>,
+) -> Vec<RenderBlock>
+where
+    I: Iterator<Item = pulldown_cmark::Event<'a>>,
+{
+    use pulldown_cmark::{Event, Tag, TagEnd};
+
+    let mut blocks = Vec::new();
+    while let Some(event) = events.next() {
+        match event {
+            Event::End(tag_end) if Some(tag_end) == end => break,
+            Event::Start(Tag::Paragraph) => {
+                blocks.push(RenderBlock::Paragraph(parse_pulldown_inlines(
+                    events,
+                    TagEnd::Paragraph,
+                )));
+            }
+            Event::Start(Tag::Heading { level, .. }) => {
+                blocks.push(RenderBlock::Heading {
+                    level: heading_level_to_u8(level),
+                    content: parse_pulldown_inlines(events, TagEnd::Heading(level)),
+                });
+            }
+            Event::Start(Tag::BlockQuote(kind)) => {
+                blocks.push(RenderBlock::Quote(parse_pulldown_blocks(
+                    events,
+                    Some(TagEnd::BlockQuote(kind)),
+                )));
+            }
+            Event::Start(Tag::CodeBlock(kind)) => {
+                blocks.push(parse_pulldown_code_block(events, kind));
+            }
+            Event::Start(Tag::List(first_number)) => {
+                blocks.push(parse_pulldown_list(events, first_number));
+            }
+            Event::Start(Tag::Table(_)) => {
+                blocks.push(parse_pulldown_table(events));
+            }
+            Event::Rule => blocks.push(RenderBlock::Rule),
+            Event::TaskListMarker(checked) => {
+                let mut inlines = vec![Inline::Text(
+                    if checked { "[x] " } else { "[ ] " }.to_string(),
+                )];
+                collect_task_list_item_inlines(events, end, &mut inlines);
+                blocks.push(RenderBlock::Paragraph(inlines));
+                if end == Some(TagEnd::Item) {
+                    return blocks;
+                }
+            }
+            Event::DisplayMath(tex) => blocks.push(RenderBlock::Math {
+                display: true,
+                tex: tex.to_string(),
+            }),
+            Event::Text(text) if !text.is_empty() => {
+                blocks.push(RenderBlock::Paragraph(vec![Inline::Text(text.to_string())]));
+            }
+            Event::Code(code) => {
+                blocks.push(RenderBlock::Paragraph(vec![Inline::Code(code.to_string())]))
+            }
+            Event::SoftBreak | Event::HardBreak => blocks.push(RenderBlock::BlankLine),
+            Event::Html(html) | Event::InlineHtml(html) => {
+                blocks.push(RenderBlock::Paragraph(vec![Inline::Text(html.to_string())]));
+            }
+            Event::End(_) => {}
+            _ => {}
+        }
+    }
+    blocks
+}
+
+fn collect_task_list_item_inlines<'a, I>(
+    events: &mut std::iter::Peekable<I>,
+    block_end: Option<pulldown_cmark::TagEnd>,
+    inlines: &mut Vec<Inline>,
+) where
+    I: Iterator<Item = pulldown_cmark::Event<'a>>,
+{
+    use pulldown_cmark::{Event, Tag, TagEnd};
+
+    while let Some(event) = events.next() {
+        match event {
+            Event::End(tag_end) if Some(tag_end) == block_end => break,
+            Event::End(TagEnd::Paragraph) => break,
+            Event::Text(text) => inlines.push(Inline::Text(text.to_string())),
+            Event::Code(code) => inlines.push(Inline::Code(code.to_string())),
+            Event::SoftBreak | Event::HardBreak => inlines.push(Inline::Text(" ".to_string())),
+            Event::Html(html) | Event::InlineHtml(html) => {
+                inlines.push(Inline::Text(html.to_string()));
+            }
+            Event::Start(Tag::Emphasis) => {
+                inlines.push(Inline::Emphasis(parse_pulldown_inlines(
+                    events,
+                    TagEnd::Emphasis,
+                )));
+            }
+            Event::Start(Tag::Strong) => {
+                inlines.push(Inline::Strong(parse_pulldown_inlines(
+                    events,
+                    TagEnd::Strong,
+                )));
+            }
+            Event::Start(Tag::Strikethrough) => {
+                inlines.push(Inline::Strike(parse_pulldown_inlines(
+                    events,
+                    TagEnd::Strikethrough,
+                )));
+            }
+            Event::Start(Tag::Link {
+                dest_url, title: _, ..
+            }) => {
+                inlines.push(Inline::Link {
+                    text: parse_pulldown_inlines(events, TagEnd::Link),
+                    target: dest_url.to_string(),
+                });
+            }
+            _ => {}
+        }
+    }
+}
+
+fn parse_pulldown_inlines<'a, I>(
+    events: &mut std::iter::Peekable<I>,
+    end: pulldown_cmark::TagEnd,
+) -> Vec<Inline>
+where
+    I: Iterator<Item = pulldown_cmark::Event<'a>>,
+{
+    use pulldown_cmark::{Event, Tag, TagEnd};
+
+    let mut inlines = Vec::new();
+    while let Some(event) = events.next() {
+        match event {
+            Event::End(tag_end) if tag_end == end => break,
+            Event::Text(text) => inlines.push(Inline::Text(text.to_string())),
+            Event::Code(code) => inlines.push(Inline::Code(code.to_string())),
+            Event::InlineMath(tex) => inlines.push(Inline::Text(format!("${tex}$"))),
+            Event::DisplayMath(tex) => inlines.push(Inline::Text(format!("$${tex}$$"))),
+            Event::SoftBreak | Event::HardBreak => inlines.push(Inline::Text(" ".to_string())),
+            Event::Html(html) | Event::InlineHtml(html) => {
+                inlines.push(Inline::Text(html.to_string()));
+            }
+            Event::TaskListMarker(checked) => {
+                inlines.push(Inline::Text(
+                    if checked { "[x] " } else { "[ ] " }.to_string(),
+                ));
+            }
+            Event::Start(Tag::Emphasis) => {
+                inlines.push(Inline::Emphasis(parse_pulldown_inlines(
+                    events,
+                    TagEnd::Emphasis,
+                )));
+            }
+            Event::Start(Tag::Strong) => {
+                inlines.push(Inline::Strong(parse_pulldown_inlines(
+                    events,
+                    TagEnd::Strong,
+                )));
+            }
+            Event::Start(Tag::Strikethrough) => {
+                inlines.push(Inline::Strike(parse_pulldown_inlines(
+                    events,
+                    TagEnd::Strikethrough,
+                )));
+            }
+            Event::Start(Tag::Link {
+                dest_url, title: _, ..
+            }) => {
+                inlines.push(Inline::Link {
+                    text: parse_pulldown_inlines(events, TagEnd::Link),
+                    target: dest_url.to_string(),
+                });
+            }
+            Event::Start(Tag::Image {
+                dest_url, title: _, ..
+            }) => {
+                let alt = flatten_inlines(&parse_pulldown_inlines(events, TagEnd::Image));
+                inlines.push(Inline::Text(format!("![{alt}]({dest_url})")));
+            }
+            Event::Start(_) => {}
+            Event::End(_) => {}
+            Event::Rule | Event::FootnoteReference(_) => {}
+        }
+    }
+    inlines
+}
+
+fn parse_pulldown_code_block<'a, I>(
+    events: &mut std::iter::Peekable<I>,
+    kind: pulldown_cmark::CodeBlockKind<'a>,
+) -> RenderBlock
+where
+    I: Iterator<Item = pulldown_cmark::Event<'a>>,
+{
+    use pulldown_cmark::{CodeBlockKind, Event, TagEnd};
+
+    let lang = match kind {
+        CodeBlockKind::Fenced(info) => info
+            .split_whitespace()
+            .next()
+            .filter(|lang| !lang.is_empty())
+            .map(str::to_string),
+        CodeBlockKind::Indented => None,
+    };
+    let mut code = String::new();
+    for event in events.by_ref() {
+        match event {
+            Event::End(TagEnd::CodeBlock) => break,
+            Event::Text(text) | Event::Code(text) => code.push_str(&text),
+            Event::SoftBreak | Event::HardBreak => code.push('\n'),
+            _ => {}
+        }
+    }
+    RenderBlock::CodeBlock {
+        lang,
+        lines: code_to_lines(&code),
+    }
+}
+
+fn parse_pulldown_list<'a, I>(
+    events: &mut std::iter::Peekable<I>,
+    first_number: Option<u64>,
+) -> RenderBlock
+where
+    I: Iterator<Item = pulldown_cmark::Event<'a>>,
+{
+    use pulldown_cmark::{Event, Tag, TagEnd};
+
+    let ordered = first_number.is_some();
+    let mut next_number = first_number.unwrap_or(1);
+    let mut items = Vec::new();
+    while let Some(event) = events.next() {
+        match event {
+            Event::End(TagEnd::List(_)) => break,
+            Event::Start(Tag::Item) => {
+                let number = ordered.then(|| {
+                    let current = next_number.to_string();
+                    next_number = next_number.saturating_add(1);
+                    current
+                });
+                items.push(ListItem {
+                    number,
+                    blocks: parse_pulldown_blocks(events, Some(TagEnd::Item)),
+                });
+            }
+            _ => {}
+        }
+    }
+
+    RenderBlock::List { ordered, items }
+}
+
+fn parse_pulldown_table<'a, I>(events: &mut std::iter::Peekable<I>) -> RenderBlock
+where
+    I: Iterator<Item = pulldown_cmark::Event<'a>>,
+{
+    use pulldown_cmark::{Event, Tag, TagEnd};
+
+    let mut headers = Vec::new();
+    let mut rows = Vec::new();
+    let mut in_head = false;
+    let mut current_row: Vec<Vec<Inline>> = Vec::new();
+
+    while let Some(event) = events.next() {
+        match event {
+            Event::End(TagEnd::Table) => break,
+            Event::Start(Tag::TableHead) => in_head = true,
+            Event::End(TagEnd::TableHead) => {
+                if !current_row.is_empty() {
+                    headers = current_row.clone();
+                    current_row.clear();
+                }
+                in_head = false;
+            }
+            Event::Start(Tag::TableRow) => current_row.clear(),
+            Event::End(TagEnd::TableRow) => {
+                if in_head {
+                    headers = current_row.clone();
+                } else {
+                    rows.push(current_row.clone());
+                }
+            }
+            Event::Start(Tag::TableCell) => {
+                current_row.push(parse_pulldown_inlines(events, TagEnd::TableCell));
+            }
+            _ => {}
+        }
+    }
+
+    RenderBlock::Table { headers, rows }
+}
+
+fn code_to_lines(code: &str) -> Vec<String> {
+    if code.is_empty() {
+        return Vec::new();
+    }
+    let mut lines = code.split('\n').map(str::to_string).collect::<Vec<_>>();
+    if lines.last().is_some_and(|line| line.is_empty()) {
+        lines.pop();
+    }
+    lines
+}
+
+fn heading_level_to_u8(level: pulldown_cmark::HeadingLevel) -> u8 {
+    match level {
+        pulldown_cmark::HeadingLevel::H1 => 1,
+        pulldown_cmark::HeadingLevel::H2 => 2,
+        pulldown_cmark::HeadingLevel::H3 => 3,
+        pulldown_cmark::HeadingLevel::H4 => 4,
+        pulldown_cmark::HeadingLevel::H5 => 5,
+        pulldown_cmark::HeadingLevel::H6 => 6,
+    }
+}
+
+fn flatten_inlines(inlines: &[Inline]) -> String {
+    let mut text = String::new();
+    for inline in inlines {
+        match inline {
+            Inline::Text(value) | Inline::Code(value) => text.push_str(value),
+            Inline::Emphasis(children) | Inline::Strong(children) | Inline::Strike(children) => {
+                text.push_str(&flatten_inlines(children));
+            }
+            Inline::Link { text: children, .. } => text.push_str(&flatten_inlines(children)),
+        }
+    }
+    text
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn parse(text: &str) -> RenderDocument {
         LegacyMarkdownParser.parse(text)
+    }
+
+    fn parse_commonmark(text: &str) -> RenderDocument {
+        PulldownMarkdownParser.parse(text)
     }
 
     fn line_text(line: &Line<'static>) -> String {
@@ -558,5 +959,71 @@ mod tests {
         };
 
         assert_eq!(doc.blocks.len(), 4);
+    }
+
+    #[test]
+    fn pulldown_parser_maps_commonmark_blocks_to_ir() {
+        let doc = parse_commonmark(
+            "# Title\n\n> quote\n\n1. first\n2. second\n\n```rust\nfn main() {}\n```",
+        );
+
+        assert!(matches!(
+            doc.blocks[0],
+            RenderBlock::Heading { level: 1, .. }
+        ));
+        assert!(matches!(doc.blocks[1], RenderBlock::Quote(_)));
+        assert!(matches!(
+            doc.blocks[2],
+            RenderBlock::List { ordered: true, .. }
+        ));
+        assert!(matches!(
+            doc.blocks[3],
+            RenderBlock::CodeBlock {
+                lang: Some(ref lang),
+                ..
+            } if lang == "rust"
+        ));
+    }
+
+    #[test]
+    fn pulldown_parser_maps_gfm_tables_and_task_lists() {
+        let doc = parse_commonmark("- [x] done\n- [ ] todo\n\n| a | b |\n|---|---|\n| c | d |");
+
+        let RenderBlock::List { items, .. } = &doc.blocks[0] else {
+            panic!("expected task list");
+        };
+        let first = flatten_inlines(match &items[0].blocks[0] {
+            RenderBlock::Paragraph(inlines) => inlines,
+            _ => panic!("expected task item paragraph"),
+        });
+        assert_eq!(first, "[x] done");
+
+        let RenderBlock::Table { headers, rows } = &doc.blocks[1] else {
+            panic!("expected table");
+        };
+        assert_eq!(headers.len(), 2);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(flatten_inlines(&rows[0][1]), "d");
+    }
+
+    #[test]
+    fn pulldown_renderer_outputs_conservative_table_rows() {
+        let theme = Theme::system();
+        let doc = parse_commonmark("| a | b |\n|---|---|\n| c | d |");
+        let rendered = render_tui(&doc, &theme)
+            .iter()
+            .map(line_text)
+            .collect::<Vec<_>>();
+
+        assert_eq!(rendered, vec!["| a | b |", "| --- | --- |", "| c | d |"]);
+    }
+
+    #[test]
+    fn legacy_parser_remains_available_as_fallback() {
+        let legacy = LegacyMarkdownParser.parse("[not a link]");
+        let pulldown = PulldownMarkdownParser.parse("[not a link]");
+
+        assert_eq!(render_tui(&legacy, &Theme::system()).len(), 1);
+        assert_eq!(render_tui(&pulldown, &Theme::system()).len(), 1);
     }
 }
