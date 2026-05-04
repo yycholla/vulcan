@@ -4,6 +4,7 @@ use ratatui::{
     style::{Modifier, Style},
     text::{Line, Span},
 };
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use super::theme::Theme;
 
@@ -217,7 +218,9 @@ fn render_block_tui(block: &RenderBlock, theme: &Theme, lines: &mut Vec<Line<'st
             spans.extend(render_inlines(content, theme));
             lines.push(Line::from(spans));
         }
-        RenderBlock::CodeBlock { lines: code, .. } => render_code_block_tui(code, theme, lines),
+        RenderBlock::CodeBlock { lang, lines: code } => {
+            render_code_block_tui(lang.as_deref(), code, theme, lines)
+        }
         RenderBlock::Quote(blocks) => {
             if blocks.is_empty() {
                 lines.push(Line::from(Span::styled("▎", theme.blockquote)));
@@ -235,12 +238,17 @@ fn render_block_tui(block: &RenderBlock, theme: &Theme, lines: &mut Vec<Line<'st
         }
         RenderBlock::List { ordered, items } => {
             for item in items {
-                let marker = if *ordered {
-                    format!("{}. ", item.number.as_deref().unwrap_or("1"))
+                let (marker, strip_task_marker) = if *ordered {
+                    (
+                        format!("{}. ", item.number.as_deref().unwrap_or("1")),
+                        false,
+                    )
+                } else if let Some(marker) = task_list_marker(item) {
+                    (marker.to_string(), true)
                 } else {
-                    "• ".to_string()
+                    ("• ".to_string(), false)
                 };
-                render_list_item_tui(&marker, item, theme, lines);
+                render_list_item_tui(&marker, item, theme, lines, strip_task_marker);
             }
         }
         RenderBlock::Rule => lines.push(Line::from(Span::styled(
@@ -266,34 +274,137 @@ fn render_table_tui(
         return;
     }
     if !headers.is_empty() {
-        lines.push(Line::from(Span::styled(
-            render_table_row(headers),
-            theme.body_fg,
-        )));
-        lines.push(Line::from(Span::styled(
-            render_table_separator(headers.len()),
-            theme.muted.add_modifier(Modifier::DIM),
-        )));
+        let widths = table_column_widths(headers, rows);
+        lines.push(render_table_row(headers, &widths, theme));
+        lines.push(render_table_separator(&widths, theme));
+        for row in rows {
+            lines.push(render_table_row(row, &widths, theme));
+        }
+        return;
+    }
+    let widths = table_column_widths(&[], rows);
+    for row in rows {
+        lines.push(render_table_row(row, &widths, theme));
+    }
+}
+
+fn table_column_widths(headers: &[Vec<Inline>], rows: &[Vec<Vec<Inline>>]) -> Vec<usize> {
+    const MAX_CELL_WIDTH: usize = 32;
+
+    let columns = headers
+        .len()
+        .max(rows.iter().map(Vec::len).max().unwrap_or(0));
+    let mut widths = vec![3usize; columns];
+    for (idx, cell) in headers.iter().enumerate() {
+        widths[idx] = widths[idx].max(display_width(&flatten_inlines(cell)).min(MAX_CELL_WIDTH));
     }
     for row in rows {
-        lines.push(Line::from(Span::styled(
-            render_table_row(row),
-            theme.body_fg,
-        )));
+        for (idx, cell) in row.iter().enumerate() {
+            widths[idx] =
+                widths[idx].max(display_width(&flatten_inlines(cell)).min(MAX_CELL_WIDTH));
+        }
+    }
+    widths
+}
+
+fn render_table_row(cells: &[Vec<Inline>], widths: &[usize], theme: &Theme) -> Line<'static> {
+    let mut spans = Vec::new();
+    spans.push(Span::styled("|", theme.muted));
+    for (idx, width) in widths.iter().enumerate() {
+        let cell = cells
+            .get(idx)
+            .map(|cell| flatten_inlines(cell))
+            .unwrap_or_default();
+        spans.push(Span::raw(" "));
+        spans.push(Span::styled(
+            pad_cell(&cell, *width),
+            Style::default().fg(theme.body_fg),
+        ));
+        spans.push(Span::raw(" "));
+        spans.push(Span::styled("|", theme.muted));
+    }
+    Line::from(spans)
+}
+
+fn render_table_separator(widths: &[usize], theme: &Theme) -> Line<'static> {
+    let mut spans = Vec::new();
+    spans.push(Span::styled("|", theme.muted));
+    for width in widths {
+        spans.push(Span::styled(
+            format!(" {} ", "-".repeat(*width)),
+            theme.muted.add_modifier(Modifier::DIM),
+        ));
+        spans.push(Span::styled("|", theme.muted));
+    }
+    Line::from(spans)
+}
+
+fn pad_cell(cell: &str, width: usize) -> String {
+    let value = truncate_display(cell, width);
+    let padding = width.saturating_sub(display_width(&value));
+    format!("{value}{}", " ".repeat(padding))
+}
+
+fn truncate_display(text: &str, max_width: usize) -> String {
+    if display_width(text) <= max_width {
+        return text.to_string();
+    }
+    if max_width <= 3 {
+        return ".".repeat(max_width);
+    }
+    let mut out = String::new();
+    let mut used = 0usize;
+    for ch in text.chars() {
+        let width = ch.width().unwrap_or(0);
+        if used + width > max_width - 3 {
+            break;
+        }
+        out.push(ch);
+        used += width;
+    }
+    out.push_str("...");
+    out
+}
+
+fn display_width(text: &str) -> usize {
+    UnicodeWidthStr::width(text)
+}
+
+fn task_list_marker(item: &ListItem) -> Option<&'static str> {
+    let first = item.blocks.first()?;
+    let RenderBlock::Paragraph(inlines) = first else {
+        return None;
+    };
+    let first_text = match inlines.first()? {
+        Inline::Text(text) => text,
+        _ => return None,
+    };
+    if first_text.starts_with("[x] ") || first_text.starts_with("[X] ") {
+        Some("☑ ")
+    } else if first_text.starts_with("[ ] ") {
+        Some("☐ ")
+    } else {
+        None
     }
 }
 
-fn render_table_row(cells: &[Vec<Inline>]) -> String {
-    let rendered = cells
-        .iter()
-        .map(|cell| flatten_inlines(cell))
-        .collect::<Vec<_>>();
-    format!("| {} |", rendered.join(" | "))
-}
-
-fn render_table_separator(width: usize) -> String {
-    let cells = (0..width).map(|_| "---").collect::<Vec<_>>();
-    format!("| {} |", cells.join(" | "))
+fn strip_task_list_prefix(spans: Vec<Span<'static>>) -> Vec<Span<'static>> {
+    let mut spans = spans;
+    if let Some(first) = spans.first_mut() {
+        for prefix in ["[x] ", "[X] ", "[ ] "] {
+            if let Some(rest) = first.content.as_ref().strip_prefix(prefix) {
+                first.content = rest.to_string().into();
+                break;
+            }
+        }
+    }
+    if spans
+        .first()
+        .is_some_and(|span| span.content.as_ref().is_empty())
+    {
+        spans.remove(0);
+    }
+    spans
 }
 
 fn render_list_item_tui(
@@ -301,6 +412,7 @@ fn render_list_item_tui(
     item: &ListItem,
     theme: &Theme,
     lines: &mut Vec<Line<'static>>,
+    strip_task_marker: bool,
 ) {
     let mut first = true;
     for block in &item.blocks {
@@ -309,17 +421,35 @@ fn render_list_item_tui(
         for line in item_lines {
             if first {
                 let mut spans = vec![Span::styled(marker.to_string(), theme.list_marker)];
-                spans.extend(line.spans);
+                let item_spans = if strip_task_marker {
+                    strip_task_list_prefix(line.spans)
+                } else {
+                    line.spans
+                };
+                spans.extend(item_spans);
                 lines.push(Line::from(spans));
                 first = false;
             } else {
-                lines.push(line);
+                let mut spans = vec![Span::raw(" ".repeat(display_width(marker)))];
+                spans.extend(line.spans);
+                lines.push(Line::from(spans));
             }
         }
     }
 }
 
-fn render_code_block_tui(code: &[String], theme: &Theme, lines: &mut Vec<Line<'static>>) {
+fn render_code_block_tui(
+    lang: Option<&str>,
+    code: &[String],
+    theme: &Theme,
+    lines: &mut Vec<Line<'static>>,
+) {
+    if let Some(lang) = lang.filter(|lang| !lang.is_empty()) {
+        lines.push(Line::from(Span::styled(
+            format!(" ```{lang}"),
+            theme.code_block.add_modifier(Modifier::DIM),
+        )));
+    }
     if code.is_empty() {
         lines.push(Line::from(Span::styled(
             " ```",
@@ -329,11 +459,160 @@ fn render_code_block_tui(code: &[String], theme: &Theme, lines: &mut Vec<Line<'s
     }
 
     for line in code {
-        lines.push(Line::from(Span::styled(
-            format!(" │{}", line),
-            theme.code_block,
-        )));
+        let mut spans = vec![Span::styled(" │", theme.code_block)];
+        spans.extend(highlight_code_line(lang, line, theme));
+        lines.push(Line::from(spans));
     }
+}
+
+fn highlight_code_line(lang: Option<&str>, line: &str, theme: &Theme) -> Vec<Span<'static>> {
+    let Some(lang) = lang
+        .map(normalize_code_lang)
+        .filter(|lang| !lang.is_empty())
+    else {
+        return vec![Span::styled(line.to_string(), theme.code_block)];
+    };
+    if !matches!(lang, "rust" | "toml" | "json") {
+        return vec![Span::styled(line.to_string(), theme.code_block)];
+    }
+
+    let mut spans = Vec::new();
+    let mut chars = line.char_indices().peekable();
+    let mut expect_toml_key = lang == "toml";
+    while let Some((start, ch)) = chars.next() {
+        if lang == "rust" && line[start..].starts_with("//") {
+            spans.push(Span::styled(line[start..].to_string(), theme.muted));
+            break;
+        }
+        if lang == "toml" && ch == '#' {
+            spans.push(Span::styled(line[start..].to_string(), theme.muted));
+            break;
+        }
+        if ch == '"' {
+            let end = consume_quoted_string(line, &mut chars);
+            spans.push(Span::styled(
+                line[start..end].to_string(),
+                theme.inline_code,
+            ));
+            continue;
+        }
+        if ch.is_ascii_digit()
+            || (ch == '-' && chars.peek().is_some_and(|(_, next)| next.is_ascii_digit()))
+        {
+            let end = consume_while(line, &mut chars, |next| {
+                next.is_ascii_alphanumeric() || matches!(next, '.' | '_' | '-')
+            });
+            spans.push(Span::styled(line[start..end].to_string(), theme.accent));
+            continue;
+        }
+        if ch.is_ascii_alphabetic() || ch == '_' {
+            let end = consume_while(line, &mut chars, |next| {
+                next.is_ascii_alphanumeric() || next == '_'
+            });
+            let token = &line[start..end];
+            let style = if lang == "rust" && is_rust_keyword(token) {
+                theme.link.add_modifier(Modifier::BOLD)
+            } else if lang == "json" && matches!(token, "true" | "false" | "null") {
+                theme.accent
+            } else if lang == "toml" && expect_toml_key {
+                theme.link.add_modifier(Modifier::BOLD)
+            } else {
+                theme.code_block
+            };
+            spans.push(Span::styled(token.to_string(), style));
+            expect_toml_key = false;
+            continue;
+        }
+        if lang == "toml" && ch == '=' {
+            expect_toml_key = false;
+        }
+        spans.push(Span::styled(ch.to_string(), theme.code_block));
+    }
+    spans
+}
+
+fn normalize_code_lang(lang: &str) -> &str {
+    match lang.trim().to_ascii_lowercase().as_str() {
+        "rs" | "rust" => "rust",
+        "toml" => "toml",
+        "json" | "jsonc" => "json",
+        _ => "",
+    }
+}
+
+fn consume_quoted_string<I>(line: &str, chars: &mut std::iter::Peekable<I>) -> usize
+where
+    I: Iterator<Item = (usize, char)>,
+{
+    let mut escaped = false;
+    for (idx, ch) in chars.by_ref() {
+        if escaped {
+            escaped = false;
+        } else if ch == '\\' {
+            escaped = true;
+        } else if ch == '"' {
+            return idx + ch.len_utf8();
+        }
+    }
+    line.len()
+}
+
+fn consume_while<I>(
+    line: &str,
+    chars: &mut std::iter::Peekable<I>,
+    mut keep: impl FnMut(char) -> bool,
+) -> usize
+where
+    I: Iterator<Item = (usize, char)>,
+{
+    while let Some((_, ch)) = chars.peek() {
+        if !keep(*ch) {
+            break;
+        }
+        chars.next();
+    }
+    chars.peek().map(|(idx, _)| *idx).unwrap_or(line.len())
+}
+
+fn is_rust_keyword(token: &str) -> bool {
+    matches!(
+        token,
+        "as" | "async"
+            | "await"
+            | "break"
+            | "const"
+            | "continue"
+            | "crate"
+            | "else"
+            | "enum"
+            | "false"
+            | "fn"
+            | "for"
+            | "if"
+            | "impl"
+            | "in"
+            | "let"
+            | "loop"
+            | "match"
+            | "mod"
+            | "move"
+            | "mut"
+            | "pub"
+            | "ref"
+            | "return"
+            | "self"
+            | "Self"
+            | "static"
+            | "struct"
+            | "super"
+            | "trait"
+            | "true"
+            | "type"
+            | "unsafe"
+            | "use"
+            | "where"
+            | "while"
+    )
 }
 
 fn render_inlines(inlines: &[Inline], theme: &Theme) -> Vec<Span<'static>> {
@@ -1007,7 +1286,7 @@ mod tests {
     }
 
     #[test]
-    fn pulldown_renderer_outputs_conservative_table_rows() {
+    fn pulldown_renderer_outputs_aligned_table_rows() {
         let theme = Theme::system();
         let doc = parse_commonmark("| a | b |\n|---|---|\n| c | d |");
         let rendered = render_tui(&doc, &theme)
@@ -1015,7 +1294,69 @@ mod tests {
             .map(line_text)
             .collect::<Vec<_>>();
 
-        assert_eq!(rendered, vec!["| a | b |", "| --- | --- |", "| c | d |"]);
+        assert_eq!(
+            rendered,
+            vec!["| a   | b   |", "| --- | --- |", "| c   | d   |"]
+        );
+    }
+
+    #[test]
+    fn table_renderer_caps_long_cells_for_narrow_fallback() {
+        let theme = Theme::system();
+        let doc = parse_commonmark(
+            "| column | value |\n|---|---|\n| a very long value that should cap | ok |",
+        );
+        let rendered = render_tui(&doc, &theme)
+            .iter()
+            .map(line_text)
+            .collect::<Vec<_>>();
+
+        assert!(rendered[2].contains("a very long value that should..."));
+    }
+
+    #[test]
+    fn task_lists_render_checkbox_markers() {
+        let theme = Theme::system();
+        let doc = parse_commonmark("- [x] done\n- [ ] todo");
+        let rendered = render_tui(&doc, &theme)
+            .iter()
+            .map(line_text)
+            .collect::<Vec<_>>();
+
+        assert_eq!(rendered, vec!["☑ done", "☐ todo"]);
+    }
+
+    #[test]
+    fn code_fences_render_language_header_and_highlight_tokens() {
+        let theme = Theme::system();
+        let doc = parse_commonmark("```rust\nfn main() { let answer = 42; }\n```");
+        let rendered = render_tui(&doc, &theme);
+
+        assert_eq!(line_text(&rendered[0]), " ```rust");
+        assert_eq!(line_text(&rendered[1]), " │fn main() { let answer = 42; }");
+        assert!(
+            rendered[1]
+                .spans
+                .iter()
+                .any(|span| span.style == theme.link.add_modifier(Modifier::BOLD)
+                    && span.content == "fn")
+        );
+        assert!(
+            rendered[1]
+                .spans
+                .iter()
+                .any(|span| span.style == theme.accent && span.content == "42")
+        );
+    }
+
+    #[test]
+    fn unknown_code_fence_languages_fall_back_to_plain_code_style() {
+        let theme = Theme::system();
+        let doc = parse_commonmark("```unknown\nsome words 123\n```");
+        let rendered = render_tui(&doc, &theme);
+
+        assert_eq!(line_text(&rendered[1]), " │some words 123");
+        assert_eq!(rendered[1].spans[1].style, theme.code_block);
     }
 
     #[test]
