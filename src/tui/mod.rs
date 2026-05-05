@@ -924,6 +924,35 @@ pub async fn run_tui(
                                                         });
                                                         continue;
                                                     }
+                                                    "extensions" => {
+                                                        let body = match crate::extensions::install_state::SqliteInstallStateStore::try_new() {
+                                                            Ok(install) => {
+                                                                let registry = crate::extensions::ExtensionRegistry::new();
+                                                                crate::extensions::api::wire_inventory_into_registry(&registry);
+                                                                let home = crate::config::vulcan_home();
+                                                                match std::env::current_dir() {
+                                                                    Ok(cwd) => {
+                                                                        let (loaded_ok, broken) = registry.load_from_store_and_workspace(
+                                                                            &home,
+                                                                            &cwd,
+                                                                            &install,
+                                                                            &install,
+                                                                        );
+                                                                        let rows = registry.inventory_rows(&install);
+                                                                        keymap::format_extension_inventory(&rows, loaded_ok, broken)
+                                                                    }
+                                                                    Err(err) => format!("Extension inventory failed: {err}"),
+                                                                }
+                                                            }
+                                                            Err(err) => format!("Extension inventory failed: {err}"),
+                                                        };
+                                                        app.messages.push(ChatMessage {
+                                                            role: ChatRole::System,
+                                                            content: body,
+                                                            ..Default::default()
+                                                        });
+                                                        continue;
+                                                    }
                                                     "queue" => {
                                                         app.messages.push(ChatMessage {
                                                             role: ChatRole::System,
@@ -1388,6 +1417,78 @@ mod tests {
 
         assert!(!command.mid_turn_safe);
         assert_eq!(keymap::filter_commands("prov")[0].name, "provider");
+    }
+
+    #[test]
+    fn extensions_command_is_available_mid_turn_safe() {
+        let extensions = keymap::SLASH_COMMANDS
+            .iter()
+            .find(|cmd| cmd.name == "extensions")
+            .expect("extensions slash command");
+        assert!(extensions.mid_turn_safe);
+        assert_eq!(keymap::filter_commands("ext")[0].name, "extensions");
+    }
+
+    #[test]
+    fn format_extension_inventory_empty_state_has_no_demo_rows() {
+        let report = keymap::format_extension_inventory(&[], 0, 0);
+
+        assert!(report.contains("No extensions installed."));
+        assert!(!report.contains("demo"));
+    }
+
+    #[test]
+    fn format_extension_inventory_distinguishes_disabled_and_broken() {
+        let rows = vec![
+            crate::extensions::ExtensionInventoryRow {
+                id: "core-skills".into(),
+                name: "Core Skills".into(),
+                version: "0.1.0".into(),
+                status: crate::extensions::ExtensionStatus::Active,
+                source: crate::extensions::ExtensionSource::Builtin,
+                core: true,
+                permissions_summary: None,
+                broken_reason: None,
+                enabled: None,
+                last_load_error: None,
+            },
+            crate::extensions::ExtensionInventoryRow {
+                id: "todo".into(),
+                name: "Todo".into(),
+                version: "0.2.0".into(),
+                status: crate::extensions::ExtensionStatus::Inactive,
+                source: crate::extensions::ExtensionSource::LocalManifest,
+                core: false,
+                permissions_summary: Some("filesystem_read".into()),
+                broken_reason: None,
+                enabled: Some(false),
+                last_load_error: None,
+            },
+            crate::extensions::ExtensionInventoryRow {
+                id: "bad".into(),
+                name: "Bad".into(),
+                version: "0.0.0".into(),
+                status: crate::extensions::ExtensionStatus::Broken,
+                source: crate::extensions::ExtensionSource::LocalManifest,
+                core: false,
+                permissions_summary: None,
+                broken_reason: Some("manifest parse failed".into()),
+                enabled: Some(true),
+                last_load_error: Some("bad toml".into()),
+            },
+        ];
+
+        let report = keymap::format_extension_inventory(&rows, 2, 1);
+
+        assert!(report.contains("Extensions (3 total, 2 loaded, 1 broken):"));
+        assert!(report.contains("core-skills"));
+        assert!(report.contains("core"));
+        assert!(report.contains("todo"));
+        assert!(report.contains("inactive"));
+        assert!(report.contains("no"));
+        assert!(report.contains("bad"));
+        assert!(report.contains("broken"));
+        assert!(report.contains("manifest parse failed"));
     }
 
     #[test]
