@@ -1,5 +1,6 @@
 use anyhow::{Context, Result};
 use serde::Deserialize;
+use serde_json::Value as JsonValue;
 use std::collections::HashMap;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -995,6 +996,10 @@ pub struct ProviderConfig {
     pub base_url: String,
     /// API key — can also be set via VULCAN_API_KEY env var
     pub api_key: Option<String>,
+    /// Optional auth source. "codex" reuses the local Codex CLI login
+    /// cache instead of storing a key in Vulcan config.
+    #[serde(default)]
+    pub auth_source: Option<String>,
     /// Model name (e.g. "anthropic/claude-sonnet-4", "gpt-4o")
     #[serde(default = "default_model")]
     pub model: String,
@@ -1249,6 +1254,7 @@ impl Default for ProviderConfig {
             r#type: default_provider_type(),
             base_url: default_base_url(),
             api_key: None,
+            auth_source: None,
             model: default_model(),
             max_context: default_max_context(),
             max_retries: default_max_retries(),
@@ -1634,7 +1640,7 @@ impl Config {
         Ok(report)
     }
 
-    /// Resolve the API key: env var > active provider > compile-time warning.
+    /// Resolve the API key: env var > active provider > external auth source.
     /// YYC-239: pulls the key from the active provider profile (via
     /// `active_provider_config`) instead of always the legacy
     /// `[provider]` block.
@@ -1643,13 +1649,47 @@ impl Config {
     }
 
     /// Resolve the API key for a provider profile: env var wins, then the
-    /// profile-local key. Named providers intentionally use the same global
-    /// env override so one-off shells can redirect auth without editing TOML.
+    /// profile-local key, then configured external auth. Named providers
+    /// intentionally use the same global env override so one-off shells can
+    /// redirect auth without editing TOML.
     pub fn api_key_for(&self, provider: &ProviderConfig) -> Option<String> {
         std::env::var("VULCAN_API_KEY")
             .ok()
             .or_else(|| provider.api_key.clone())
+            .or_else(|| auth_source_token(provider.auth_source.as_deref()))
     }
+}
+
+fn auth_source_token(auth_source: Option<&str>) -> Option<String> {
+    match auth_source {
+        Some(source) if source.eq_ignore_ascii_case("codex") => codex_auth_token(),
+        _ => None,
+    }
+}
+
+fn codex_auth_token() -> Option<String> {
+    let codex_home = std::env::var_os("CODEX_HOME")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".codex")))?;
+    codex_auth_token_from_file(&codex_home.join("auth.json"))
+}
+
+fn codex_auth_token_from_file(path: &Path) -> Option<String> {
+    let raw = std::fs::read_to_string(path).ok()?;
+    let value: JsonValue = serde_json::from_str(&raw).ok()?;
+    value
+        .get("OPENAI_API_KEY")
+        .and_then(JsonValue::as_str)
+        .filter(|token| !token.trim().is_empty())
+        .map(ToString::to_string)
+        .or_else(|| {
+            value
+                .get("tokens")
+                .and_then(|tokens| tokens.get("access_token"))
+                .and_then(JsonValue::as_str)
+                .filter(|token| !token.trim().is_empty())
+                .map(ToString::to_string)
+        })
 }
 
 // YYC-265: tests live in their own file so the main config module

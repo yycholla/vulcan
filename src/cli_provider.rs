@@ -84,9 +84,11 @@ pub struct RemoveArgs {
 pub struct Preset {
     pub key: &'static str,
     pub display: &'static str,
+    pub provider_type: &'static str,
     pub base_url: &'static str,
     pub model: &'static str,
     pub auth_hint: &'static str,
+    pub auth_source: Option<&'static str>,
     pub disable_catalog: bool,
     pub notes: &'static str,
 }
@@ -96,72 +98,99 @@ pub fn presets() -> &'static [Preset] {
         Preset {
             key: "openrouter",
             display: "OpenRouter",
+            provider_type: "openai-compat",
             base_url: "https://openrouter.ai/api/v1",
             model: "deepseek/deepseek-v4-flash",
             auth_hint: "VULCAN_API_KEY (sk-or-...)",
+            auth_source: None,
             disable_catalog: false,
             notes: "Aggregator — most models routable through one endpoint.",
         },
         Preset {
             key: "openai",
             display: "OpenAI",
+            provider_type: "openai-compat",
             base_url: "https://api.openai.com/v1",
             model: "gpt-5",
             auth_hint: "OPENAI_API_KEY or VULCAN_API_KEY",
+            auth_source: None,
             disable_catalog: false,
             notes: "First-party endpoint; supports tools, structured output, vision.",
         },
         Preset {
+            key: "openai-codex",
+            display: "OpenAI (Codex OAuth)",
+            provider_type: "openai-responses",
+            base_url: "https://chatgpt.com/backend-api/codex",
+            model: "gpt-5.5",
+            auth_hint: "~/.codex/auth.json from `codex login`",
+            auth_source: Some("codex"),
+            disable_catalog: true,
+            notes: "Reuses Codex CLI ChatGPT login cache via the Codex backend; no token is copied into providers.toml.",
+        },
+        Preset {
             key: "anthropic",
             display: "Anthropic",
+            provider_type: "openai-compat",
             base_url: "https://api.anthropic.com/v1",
             model: "claude-opus-4-7",
             auth_hint: "ANTHROPIC_API_KEY or VULCAN_API_KEY",
+            auth_source: None,
             disable_catalog: false,
             notes: "Claude family. Native API; OpenAI-compat path may need explicit headers.",
         },
         Preset {
             key: "deepseek",
             display: "DeepSeek (direct)",
+            provider_type: "openai-compat",
             base_url: "https://api.deepseek.com/v1",
             model: "deepseek-chat",
             auth_hint: "DEEPSEEK_API_KEY or VULCAN_API_KEY",
+            auth_source: None,
             disable_catalog: false,
             notes: "Direct route — bypasses OpenRouter when you want lower latency / no markup.",
         },
         Preset {
             key: "groq",
             display: "Groq",
+            provider_type: "openai-compat",
             base_url: "https://api.groq.com/openai/v1",
             model: "llama-3.3-70b-versatile",
             auth_hint: "GROQ_API_KEY or VULCAN_API_KEY",
+            auth_source: None,
             disable_catalog: false,
             notes: "Hosted LPU inference; Llama / Mixtral / Qwen at very high tok/s.",
         },
         Preset {
             key: "together",
             display: "Together AI",
+            provider_type: "openai-compat",
             base_url: "https://api.together.xyz/v1",
             model: "meta-llama/Llama-3.3-70B-Instruct-Turbo",
             auth_hint: "TOGETHER_API_KEY or VULCAN_API_KEY",
+            auth_source: None,
             disable_catalog: false,
             notes: "Wide open-weights selection.",
         },
         Preset {
             key: "fireworks",
             display: "Fireworks AI",
+            provider_type: "openai-compat",
             base_url: "https://api.fireworks.ai/inference/v1",
             model: "accounts/fireworks/models/qwen2p5-coder-32b-instruct",
             auth_hint: "FIREWORKS_API_KEY or VULCAN_API_KEY",
+            auth_source: None,
             disable_catalog: false,
             notes: "Fast hosted inference; strong coder models.",
         },
         Preset {
             key: "ollama",
             display: "Ollama (local)",
+            provider_type: "openai-compat",
             base_url: "http://localhost:11434/v1",
             model: "qwen2.5-coder:latest",
             auth_hint: "no auth required (set api_key = \"ollama\" if your build expects it)",
+            auth_source: None,
             disable_catalog: true,
             notes: "Local self-hosted; catalog disabled because it doesn't publish an OpenAI-shape `/models`.",
         },
@@ -397,6 +426,8 @@ pub fn add(args: AddArgs, dir: &Path) -> Result<()> {
     let mut base_url = args.base_url.clone();
     let mut model = args.model.clone();
     let mut disable_catalog = args.disable_catalog;
+    let mut provider_type = "openai-compat";
+    let mut auth_source = None;
     if let Some(preset_key) = &args.preset {
         let preset = lookup_preset(preset_key).ok_or_else(|| {
             anyhow!(
@@ -405,6 +436,8 @@ pub fn add(args: AddArgs, dir: &Path) -> Result<()> {
         })?;
         base_url.get_or_insert_with(|| preset.base_url.to_string());
         model.get_or_insert_with(|| preset.model.to_string());
+        provider_type = preset.provider_type;
+        auth_source = preset.auth_source;
         if !disable_catalog {
             disable_catalog = preset.disable_catalog;
         }
@@ -427,11 +460,14 @@ pub fn add(args: AddArgs, dir: &Path) -> Result<()> {
 
     let mut entry = Table::new();
     entry.set_implicit(false);
-    entry.insert("type", value("openai-compat"));
+    entry.insert("type", value(provider_type));
     entry.insert("base_url", value(base_url));
     entry.insert("model", value(model));
     if let Some(key) = args.api_key {
         entry.insert("api_key", value(key));
+    }
+    if let Some(source) = auth_source {
+        entry.insert("auth_source", value(source));
     }
     if let Some(max_ctx) = args.max_context {
         entry.insert("max_context", value(max_ctx as i64));
@@ -570,6 +606,7 @@ mod tests {
         for must in [
             "openrouter",
             "openai",
+            "openai-codex",
             "anthropic",
             "ollama",
             "groq",
@@ -750,6 +787,40 @@ mod tests {
         let cfg = crate::config::Config::load_from_dir(dir.path()).unwrap();
         assert_eq!(cfg.providers["or"].model, "anthropic/claude-opus-4-7");
         assert_eq!(cfg.providers["or"].base_url, "https://openrouter.ai/api/v1");
+    }
+
+    #[test]
+    fn add_openai_codex_preset_writes_auth_source_not_token() {
+        let dir = tempdir().unwrap();
+        add(
+            AddArgs {
+                name: "codex".into(),
+                preset: Some("openai-codex".into()),
+                base_url: None,
+                model: None,
+                api_key: None,
+                max_context: None,
+                disable_catalog: false,
+                force: false,
+            },
+            dir.path(),
+        )
+        .unwrap();
+
+        let providers_raw = std::fs::read_to_string(dir.path().join("providers.toml")).unwrap();
+        assert!(providers_raw.contains("[codex]"));
+        assert!(providers_raw.contains("auth_source = \"codex\""));
+        assert!(!providers_raw.contains("access_token"));
+
+        let cfg = crate::config::Config::load_from_dir(dir.path()).unwrap();
+        assert_eq!(cfg.providers["codex"].r#type, "openai-responses");
+        assert_eq!(
+            cfg.providers["codex"].base_url,
+            "https://chatgpt.com/backend-api/codex"
+        );
+        assert!(cfg.providers["codex"].disable_catalog);
+        assert_eq!(cfg.providers["codex"].auth_source.as_deref(), Some("codex"));
+        assert!(cfg.providers["codex"].api_key.is_none());
     }
 
     #[test]
