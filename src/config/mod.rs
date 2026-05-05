@@ -167,6 +167,11 @@ pub struct Config {
     #[serde(default)]
     pub mcp_servers: Vec<crate::mcp::McpServerConfig>,
 
+    /// User-configured subprocess hook handlers. Hooks are inert unless each
+    /// entry is explicitly enabled and policy-allowed.
+    #[serde(default)]
+    pub hooks: Vec<crate::hooks::external::ExternalHookConfig>,
+
     #[serde(default = "default_skills_dir")]
     pub skills_dir: PathBuf,
 
@@ -1290,6 +1295,7 @@ impl Default for Config {
             providers: HashMap::new(),
             tools: ToolsConfig::default(),
             mcp_servers: Vec::new(),
+            hooks: Vec::new(),
             skills_dir: default_skills_dir(),
             auto_create_skills: false,
             compaction: CompactionConfig::default(),
@@ -1384,6 +1390,7 @@ impl Config {
             "providers",
             "tools",
             "mcp_servers",
+            "hooks",
             "skills_dir",
             "auto_create_skills",
             "compaction",

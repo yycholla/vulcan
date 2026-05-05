@@ -235,6 +235,41 @@ async fn builder_accepts_hooks_pause_channel_and_max_iterations() {
 }
 
 #[tokio::test]
+async fn builder_wires_enabled_external_hooks_from_config() {
+    let mut config = Config::default();
+    config.provider.disable_catalog = true;
+    config
+        .hooks
+        .push(crate::hooks::external::ExternalHookConfig {
+            id: "config-blocker".to_string(),
+            event: crate::hooks::external::ExternalHookEvent::BeforeToolCall,
+            match_rule: crate::hooks::external::ExternalHookMatch {
+                tool: Some("bash".to_string()),
+            },
+            command: "sh".to_string(),
+            args: vec![
+                "-c".to_string(),
+                "cat >/dev/null; printf '%s' '{\"Block\":{\"reason\":\"blocked by config\"}}'"
+                    .to_string(),
+            ],
+            enabled: true,
+            policy: crate::hooks::external::ExternalHookPolicy::Allow,
+            ..Default::default()
+        });
+
+    let agent = Agent::builder(&config).build().await.unwrap();
+    let decision = agent
+        .hooks
+        .before_tool_call("bash", &serde_json::json!({}), CancellationToken::new())
+        .await;
+
+    assert!(matches!(
+        decision,
+        crate::hooks::ToolCallDecision::Block(reason) if reason == "blocked by config"
+    ));
+}
+
+#[tokio::test]
 async fn single_turn_text_response() {
     let (mut agent, mock) = agent_with_mock();
     mock.enqueue_text("Hello there");

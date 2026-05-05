@@ -583,6 +583,18 @@ impl Agent {
             );
         }
 
+        let external_hooks =
+            crate::hooks::external::configured_handlers(&config.hooks, hooks.audit_log());
+        for hook in &external_hooks {
+            hooks.register(hook.clone());
+        }
+        if !external_hooks.is_empty() {
+            tracing::info!(
+                external_hooks = external_hooks.len(),
+                "Agent: wired configured subprocess hooks"
+            );
+        }
+
         let mcp_servers =
             crate::mcp::connect_configured_servers(&config.mcp_servers, &mut tools).await;
         if !mcp_servers.is_empty() {

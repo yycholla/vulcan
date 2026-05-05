@@ -94,6 +94,21 @@ quota_per_session = 5
 # expose_as = "disabled" # auto | manual | disabled
 # timeout_secs = 30
 
+# Subprocess hooks receive a single JSON event on stdin and may return a JSON
+# HookOutcome on stdout. They are inert unless enabled and policy-allowed.
+# If `command` contains a path separator it must be an absolute file path.
+# [[hooks]]
+# id = "audit-bash"
+# event = "before_tool_call" # before_tool_call | after_tool_call
+# match = { tool = "bash" }
+# command = "/home/user/scripts/audit-hook"
+# args = []
+# env = {}
+# enabled = false
+# policy = "deny" # allow | deny | require_approval
+# priority = 60
+# timeout_secs = 10
+
 # YYC-42: auto-recall relevant past-session context on the first turn
 # of a fresh session. Off by default — enable after reviewing the
 # privacy tradeoff (recalled snippets land in the system prompt and
