@@ -79,6 +79,11 @@ pub(super) const SLASH_COMMANDS: &[SlashCommand] = &[
         mid_turn_safe: true,
     },
     SlashCommand {
+        name: "extensions",
+        description: "Show extension inventory and load status",
+        mid_turn_safe: true,
+    },
+    SlashCommand {
         name: "status",
         description: "Show session token usage + active provider",
         mid_turn_safe: true,
@@ -160,6 +165,59 @@ pub(super) fn build_provider_picker_entries(
             base_url: cfg.base_url.clone(),
         });
     }
+    out
+}
+
+pub(super) fn format_extension_inventory(
+    rows: &[crate::extensions::ExtensionInventoryRow],
+    loaded_ok: usize,
+    broken_count: usize,
+) -> String {
+    if rows.is_empty() {
+        return "No extensions installed.\nDrop manifests under ~/.vulcan/extensions/<id>/.".into();
+    }
+
+    let mut out = format!(
+        "Extensions ({} total, {} loaded, {} broken):",
+        rows.len(),
+        loaded_ok,
+        broken_count
+    );
+    out.push_str(
+        "\n  id                       status     enabled  source    version    permissions",
+    );
+    for row in rows {
+        let source = match row.source {
+            crate::extensions::ExtensionSource::Builtin => "builtin",
+            crate::extensions::ExtensionSource::LocalManifest => "local",
+            crate::extensions::ExtensionSource::UntrustedSource => "workspace",
+            crate::extensions::ExtensionSource::SkillDraft => "skill",
+        };
+        let enabled = match row.enabled {
+            Some(true) => "yes",
+            Some(false) => "no",
+            None if row.core => "core",
+            None => "-",
+        };
+        let permissions = row.permissions_summary.as_deref().unwrap_or("-");
+        out.push_str(&format!(
+            "\n  {:<24} {:<10} {:<8} {:<9} {:<10} {}",
+            row.id,
+            row.status.as_str(),
+            enabled,
+            source,
+            row.version,
+            permissions.replace('\n', " ")
+        ));
+        if let Some(reason) = row
+            .broken_reason
+            .as_deref()
+            .or(row.last_load_error.as_deref())
+        {
+            out.push_str(&format!("\n    ! {reason}"));
+        }
+    }
+    out.push_str("\n\nUse `vulcan extension enable|disable|show <id>` for lifecycle changes.");
     out
 }
 

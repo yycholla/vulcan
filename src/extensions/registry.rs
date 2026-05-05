@@ -16,6 +16,20 @@ use super::{
 use crate::hooks::{HookHandler, HookRegistry};
 use crate::tools::ToolRegistry;
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExtensionInventoryRow {
+    pub id: String,
+    pub name: String,
+    pub version: String,
+    pub status: ExtensionStatus,
+    pub source: ExtensionSource,
+    pub core: bool,
+    pub permissions_summary: Option<String>,
+    pub broken_reason: Option<String>,
+    pub enabled: Option<bool>,
+    pub last_load_error: Option<String>,
+}
+
 /// YYC-227 (YYC-165 PR-4): trait an in-process, code-backed
 /// extension implements. Implementors live alongside the
 /// [`ExtensionMetadata`] in the registry; only `Active`
@@ -97,6 +111,35 @@ impl ExtensionRegistry {
     /// order: priority asc, then id asc.
     pub fn list(&self) -> Vec<ExtensionMetadata> {
         self.inner.read().clone()
+    }
+
+    pub fn inventory_rows(
+        &self,
+        install_state: &dyn super::install_state::InstallStateStore,
+    ) -> Vec<ExtensionInventoryRow> {
+        self.list()
+            .into_iter()
+            .map(|meta| {
+                let state = install_state.get(&meta.id);
+                let (enabled, last_load_error) = match state {
+                    Ok(Some(state)) => (Some(state.enabled), state.last_load_error),
+                    Ok(None) => (None, None),
+                    Err(err) => (None, Some(format!("install state unavailable: {err}"))),
+                };
+                ExtensionInventoryRow {
+                    id: meta.id,
+                    name: meta.name,
+                    version: meta.version,
+                    status: meta.status,
+                    source: meta.source,
+                    core: meta.core,
+                    permissions_summary: meta.permissions_summary,
+                    broken_reason: meta.broken_reason,
+                    enabled,
+                    last_load_error,
+                }
+            })
+            .collect()
     }
 
     pub fn get(&self, id: &str) -> Option<ExtensionMetadata> {
@@ -565,6 +608,61 @@ mod tests {
         updated.description = "updated body".into();
         assert!(reg.upsert(updated));
         assert_eq!(reg.get("alpha").unwrap().description, "updated body");
+    }
+
+    #[test]
+    fn inventory_rows_include_install_state_and_load_errors() {
+        let reg = ExtensionRegistry::new();
+        let mut active = meta("active", 10);
+        active.status = ExtensionStatus::Active;
+        active.permissions_summary = Some("network".into());
+        reg.upsert(active);
+        let mut broken = meta("broken", 20);
+        broken.status = ExtensionStatus::Broken;
+        broken.broken_reason = Some("manifest parse failed".into());
+        reg.upsert(broken);
+        let install =
+            crate::extensions::install_state::SqliteInstallStateStore::try_open_in_memory()
+                .unwrap();
+        crate::extensions::install_state::InstallStateStore::upsert(
+            &install,
+            &crate::extensions::install_state::InstallState {
+                id: "active".into(),
+                version: "0.1.0".into(),
+                enabled: true,
+                installed_at: chrono::Utc::now(),
+                last_load_error: None,
+            },
+        )
+        .unwrap();
+        crate::extensions::install_state::InstallStateStore::upsert(
+            &install,
+            &crate::extensions::install_state::InstallState {
+                id: "broken".into(),
+                version: "0.1.0".into(),
+                enabled: true,
+                installed_at: chrono::Utc::now(),
+                last_load_error: None,
+            },
+        )
+        .unwrap();
+        crate::extensions::install_state::InstallStateStore::record_load_error(
+            &install, "broken", "bad toml",
+        )
+        .unwrap();
+
+        let rows = reg.inventory_rows(&install);
+
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].id, "active");
+        assert_eq!(rows[0].enabled, Some(true));
+        assert_eq!(rows[0].permissions_summary.as_deref(), Some("network"));
+        assert_eq!(rows[1].id, "broken");
+        assert_eq!(
+            rows[1].broken_reason.as_deref(),
+            Some("manifest parse failed")
+        );
+        assert_eq!(rows[1].last_load_error.as_deref(), Some("bad toml"));
     }
 
     #[test]

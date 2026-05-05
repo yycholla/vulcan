@@ -38,7 +38,7 @@ pub use draft::parse_skill_extension;
 pub use install_state::{InstallState, InstallStateStore, SqliteInstallStateStore};
 pub use manifest::{EntryKind, ExtensionManifest, ManifestError};
 pub use policy::{ExtensionPermission, ExtensionPolicyEngine, PolicyDecision};
-pub use registry::{CodeExtension, ExtensionRegistry};
+pub use registry::{CodeExtension, ExtensionInventoryRow, ExtensionRegistry};
 pub use state::{
     CheckpointInfo, CheckpointRecord, ExtensionStateScope, ExtensionStateStore,
     SqliteExtensionStateStore,
