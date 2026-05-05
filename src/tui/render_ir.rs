@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use ratatui::{
     style::{Modifier, Style},
@@ -7,6 +7,8 @@ use ratatui::{
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use super::theme::Theme;
+
+const TYPST_PREVIEW_CACHE_VERSION: &str = "renderer-typst-preview-v1";
 
 // Renderer parser decision record (GH #585):
 // use pulldown-cmark's low-overhead event stream as Vulcan's first real
@@ -71,6 +73,23 @@ pub enum Inline {
     Link { text: Vec<Inline>, target: String },
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TypstPreviewFormat {
+    Svg,
+    Png,
+    Pdf,
+}
+
+impl TypstPreviewFormat {
+    fn extension(self) -> &'static str {
+        match self {
+            Self::Svg => "svg",
+            Self::Png => "png",
+            Self::Pdf => "pdf",
+        }
+    }
+}
+
 pub trait MarkdownParser {
     fn parse(&self, text: &str) -> RenderDocument;
 }
@@ -92,10 +111,10 @@ impl MarkdownParser for LegacyMarkdownParser {
             let trimmed_start = raw_line.trim_start();
             if let Some(info) = trimmed_start.strip_prefix("```") {
                 if in_code_block {
-                    blocks.push(RenderBlock::CodeBlock {
-                        lang: code_lang.take(),
-                        lines: code_block_content.clone(),
-                    });
+                    blocks.push(code_lines_to_block(
+                        code_lang.take(),
+                        code_block_content.clone(),
+                    ));
                     code_block_content.clear();
                     in_code_block = false;
                 } else {
@@ -170,10 +189,7 @@ impl MarkdownParser for LegacyMarkdownParser {
         }
 
         if in_code_block {
-            blocks.push(RenderBlock::CodeBlock {
-                lang: code_lang,
-                lines: code_block_content,
-            });
+            blocks.push(code_lines_to_block(code_lang, code_block_content));
         }
 
         RenderDocument { blocks }
@@ -258,13 +274,59 @@ fn render_block_tui(block: &RenderBlock, theme: &Theme, lines: &mut Vec<Line<'st
         ))),
         RenderBlock::Table { headers, rows } => render_table_tui(headers, rows, theme, lines),
         RenderBlock::Math { display, tex } => render_math_block_tui(*display, tex, theme, lines),
-        RenderBlock::Typst { .. } | RenderBlock::Media { .. } => {
-            lines.push(Line::from(Span::styled(
-                "[unsupported render block]",
-                theme.muted.add_modifier(Modifier::DIM),
-            )))
+        RenderBlock::Typst { source } => render_typst_block_tui(source, theme, lines),
+        RenderBlock::Media { .. } => lines.push(Line::from(Span::styled(
+            "[unsupported render block]",
+            theme.muted.add_modifier(Modifier::DIM),
+        ))),
+    }
+}
+
+pub fn typst_preview_cache_dir() -> PathBuf {
+    crate::config::vulcan_home().join("render-cache/typst")
+}
+
+pub fn typst_preview_cache_path(
+    vulcan_home: &Path,
+    key: &str,
+    format: TypstPreviewFormat,
+) -> PathBuf {
+    vulcan_home
+        .join("render-cache/typst")
+        .join(format!("{}.{}", key, format.extension()))
+}
+
+pub fn typst_preview_cache_key(source: &str, format: TypstPreviewFormat) -> String {
+    let mut hash = 0xcbf29ce484222325u64;
+    fn update(hash: &mut u64, bytes: &[u8]) {
+        for byte in bytes {
+            *hash ^= u64::from(*byte);
+            *hash = hash.wrapping_mul(0x100000001b3);
         }
     }
+    update(&mut hash, TYPST_PREVIEW_CACHE_VERSION.as_bytes());
+    update(&mut hash, b"\0");
+    update(&mut hash, format.extension().as_bytes());
+    update(&mut hash, b"\0");
+    update(&mut hash, source.as_bytes());
+    format!("{hash:016x}")
+}
+
+fn render_typst_block_tui(source: &str, theme: &Theme, lines: &mut Vec<Line<'static>>) {
+    lines.push(Line::from(Span::styled(
+        " ```typst",
+        theme.code_block.add_modifier(Modifier::DIM),
+    )));
+    for line in code_to_lines(source) {
+        lines.push(Line::from(vec![
+            Span::styled(" │", theme.code_block),
+            Span::styled(line, theme.code_block),
+        ]));
+    }
+    lines.push(Line::from(Span::styled(
+        " typst preview unavailable; source shown",
+        theme.muted.add_modifier(Modifier::DIM),
+    )));
 }
 
 fn render_math_block_tui(display: bool, tex: &str, theme: &Theme, lines: &mut Vec<Line<'static>>) {
@@ -1043,9 +1105,15 @@ where
             _ => {}
         }
     }
-    RenderBlock::CodeBlock {
-        lang,
-        lines: code_to_lines(&code),
+    if is_typst_lang(lang.as_deref()) {
+        RenderBlock::Typst {
+            source: code_to_source(&code),
+        }
+    } else {
+        RenderBlock::CodeBlock {
+            lang,
+            lines: code_to_lines(&code),
+        }
     }
 }
 
@@ -1131,6 +1199,27 @@ fn code_to_lines(code: &str) -> Vec<String> {
         lines.pop();
     }
     lines
+}
+
+fn code_lines_to_block(lang: Option<String>, lines: Vec<String>) -> RenderBlock {
+    if is_typst_lang(lang.as_deref()) {
+        RenderBlock::Typst {
+            source: lines.join("\n"),
+        }
+    } else {
+        RenderBlock::CodeBlock { lang, lines }
+    }
+}
+
+fn code_to_source(code: &str) -> String {
+    code.strip_suffix('\n').unwrap_or(code).to_string()
+}
+
+fn is_typst_lang(lang: Option<&str>) -> bool {
+    matches!(
+        lang.map(|lang| lang.trim().to_ascii_lowercase()),
+        Some(lang) if matches!(lang.as_str(), "typst" | "typ")
+    )
 }
 
 fn heading_level_to_u8(level: pulldown_cmark::HeadingLevel) -> u8 {
@@ -1475,6 +1564,101 @@ mod tests {
             .collect::<Vec<_>>();
 
         assert_eq!(rendered, vec!["This $math never closes."]);
+    }
+
+    #[test]
+    fn typst_fence_maps_to_typst_ir() {
+        let doc = parse_commonmark("```typst\n#set text(size: 12pt)\nHello\n```");
+
+        assert!(matches!(
+            &doc.blocks[0],
+            RenderBlock::Typst { source } if source == "#set text(size: 12pt)\nHello"
+        ));
+    }
+
+    #[test]
+    fn typ_alias_fence_maps_to_typst_ir() {
+        let doc = parse_commonmark("```typ\n= Title\n```");
+
+        assert!(matches!(
+            &doc.blocks[0],
+            RenderBlock::Typst { source } if source == "= Title"
+        ));
+    }
+
+    #[test]
+    fn unknown_language_fence_remains_code_block() {
+        let doc = parse_commonmark("```diagram\nnode -> edge\n```");
+
+        assert!(matches!(
+            &doc.blocks[0],
+            RenderBlock::CodeBlock {
+                lang: Some(lang),
+                lines
+            } if lang == "diagram" && lines == &vec!["node -> edge".to_string()]
+        ));
+    }
+
+    #[test]
+    fn unterminated_typst_fence_maps_to_typst_ir() {
+        let doc = parse_commonmark("```typst\n#import \"x.typ\": thing");
+
+        assert!(matches!(
+            &doc.blocks[0],
+            RenderBlock::Typst { source } if source == "#import \"x.typ\": thing"
+        ));
+    }
+
+    #[test]
+    fn typst_source_fallback_renders_header_hint_and_source() {
+        let theme = Theme::system();
+        let doc = parse_commonmark("```typst\n= Report\n$ x^2 $\n```");
+        let rendered = render_tui(&doc, &theme)
+            .iter()
+            .map(line_text)
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            rendered,
+            vec![
+                " ```typst",
+                " │= Report",
+                " │$ x^2 $",
+                " typst preview unavailable; source shown"
+            ]
+        );
+    }
+
+    #[test]
+    fn typst_preview_cache_path_uses_vulcan_render_cache_typst() {
+        let path = typst_preview_cache_path(
+            PathBuf::from("/tmp/vulcan-home").as_path(),
+            "abc123",
+            TypstPreviewFormat::Svg,
+        );
+
+        assert_eq!(
+            path,
+            PathBuf::from("/tmp/vulcan-home/render-cache/typst/abc123.svg")
+        );
+    }
+
+    #[test]
+    fn typst_preview_cache_key_is_stable_and_source_sensitive() {
+        let key = typst_preview_cache_key("= Report", TypstPreviewFormat::Svg);
+
+        assert_eq!(
+            key,
+            typst_preview_cache_key("= Report", TypstPreviewFormat::Svg)
+        );
+        assert_ne!(
+            key,
+            typst_preview_cache_key("= Other", TypstPreviewFormat::Svg)
+        );
+        assert_ne!(
+            key,
+            typst_preview_cache_key("= Report", TypstPreviewFormat::Png)
+        );
     }
 
     #[test]

@@ -67,6 +67,12 @@ gateway = [
 # Telegram connector (YYC-18 PR-3). Gated separately from `gateway` so
 # operators who only need Discord don't pay the teloxide-core dep cost.
 telegram = ["gateway", "dep:teloxide-core"]
+# Renderer preview hooks are intentionally dependency-free placeholders
+# until Typst compilation and terminal image widgets are wired behind them.
+render-typst = []
+render-images = []
+render-typst-preview = ["render-typst"]
+render-typst-image-preview = ["render-typst-preview", "render-images"]
 
 [dependencies]
 # Async runtime
