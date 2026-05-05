@@ -45,6 +45,7 @@ pub mod approval;
 pub mod cortex_capture;
 pub mod cortex_recall;
 pub mod diagnostics;
+pub mod external;
 pub mod prefer_native;
 pub mod recall;
 pub mod rtk;
@@ -403,6 +404,10 @@ impl HookRegistry {
     pub fn with_audit_log(mut self, log: Arc<crate::extensions::ExtensionAuditLog>) -> Self {
         self.audit_log = Some(log);
         self
+    }
+
+    pub fn audit_log(&self) -> Option<Arc<crate::extensions::ExtensionAuditLog>> {
+        self.audit_log.clone()
     }
 
     pub fn with_input_rewrite_pause_channel(mut self, pause_tx: PauseSender) -> Self {

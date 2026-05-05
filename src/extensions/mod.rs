@@ -34,7 +34,8 @@ pub mod wasm;
 
 pub use audit::{
     CompactionAuditAction, CompactionAuditEvent, ExtensionAuditEvent, ExtensionAuditLog,
-    InputInterceptAction, InputInterceptEvent, PermissionAuditEvent, QuotaTracker,
+    ExternalHookAuditAction, ExternalHookAuditEvent, InputInterceptAction, InputInterceptEvent,
+    PermissionAuditEvent, QuotaTracker,
 };
 pub use config_field::{ExtensionConfigField, ExtensionFieldKind};
 pub use draft::parse_skill_extension;

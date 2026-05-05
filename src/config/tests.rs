@@ -111,6 +111,70 @@ timeout_secs = 3
 }
 
 #[test]
+fn external_hooks_parse_disabled_and_denied_by_default() {
+    let cfg: Config = toml::from_str(
+        r#"
+[[hooks]]
+id = "audit-bash"
+event = "before_tool_call"
+match = { tool = "bash" }
+command = "audit-hook"
+priority = 60
+"#,
+    )
+    .expect("parses");
+
+    assert_eq!(cfg.hooks.len(), 1);
+    let hook = &cfg.hooks[0];
+    assert_eq!(hook.id, "audit-bash");
+    assert_eq!(
+        hook.event,
+        crate::hooks::external::ExternalHookEvent::BeforeToolCall
+    );
+    assert_eq!(hook.match_rule.tool.as_deref(), Some("bash"));
+    assert_eq!(hook.command, "audit-hook");
+    assert_eq!(hook.priority, 60);
+    assert!(!hook.enabled);
+    assert_eq!(
+        hook.policy,
+        crate::hooks::external::ExternalHookPolicy::Deny
+    );
+}
+
+#[test]
+fn external_hook_validation_rejects_unsafe_command_path() {
+    let hook = crate::hooks::external::ExternalHookConfig {
+        id: "bad-path".to_string(),
+        event: crate::hooks::external::ExternalHookEvent::BeforeToolCall,
+        match_rule: crate::hooks::external::ExternalHookMatch {
+            tool: Some("bash".to_string()),
+        },
+        command: "relative/script.sh".to_string(),
+        enabled: true,
+        policy: crate::hooks::external::ExternalHookPolicy::Allow,
+        ..Default::default()
+    };
+
+    let err = hook.validate().expect_err("relative path is rejected");
+    assert!(err.to_string().contains("path"));
+}
+
+#[test]
+fn external_hook_config_rejects_unknown_event_names() {
+    let err = toml::from_str::<Config>(
+        r#"
+[[hooks]]
+id = "bad-event"
+event = "before_everything"
+command = "audit-hook"
+"#,
+    )
+    .expect_err("unknown event names should not deserialize");
+
+    assert!(err.to_string().contains("unknown variant"));
+}
+
+#[test]
 fn codex_auth_token_from_file_prefers_api_key_then_access_token() {
     let dir = tempfile::tempdir().unwrap();
     let auth = dir.path().join("auth.json");

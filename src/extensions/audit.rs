@@ -65,6 +65,24 @@ pub struct CompactionAuditEvent {
     pub occurred_at: chrono::DateTime<chrono::Utc>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "action")]
+pub enum ExternalHookAuditAction {
+    Ran { outcome: String },
+    Denied { reason: String },
+    ApprovalRequired { reason: String },
+    Failed { reason: String },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExternalHookAuditEvent {
+    pub extension_id: String,
+    pub event: String,
+    pub command: String,
+    pub action: ExternalHookAuditAction,
+    pub occurred_at: chrono::DateTime<chrono::Utc>,
+}
+
 /// Polymorphic audit row recorded into [`ExtensionAuditLog`]. Each
 /// variant carries the typed payload for one event class.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -73,6 +91,7 @@ pub enum ExtensionAuditEvent {
     Permission(PermissionAuditEvent),
     InputIntercept(InputInterceptEvent),
     Compaction(CompactionAuditEvent),
+    ExternalHook(ExternalHookAuditEvent),
 }
 
 impl ExtensionAuditEvent {
@@ -83,6 +102,7 @@ impl ExtensionAuditEvent {
             Self::Permission(p) => &p.extension_id,
             Self::InputIntercept(i) => &i.extension_id,
             Self::Compaction(c) => &c.extension_id,
+            Self::ExternalHook(e) => &e.extension_id,
         }
     }
 
@@ -93,6 +113,7 @@ impl ExtensionAuditEvent {
             Self::Permission(p) => p.occurred_at,
             Self::InputIntercept(i) => i.occurred_at,
             Self::Compaction(c) => c.occurred_at,
+            Self::ExternalHook(e) => e.occurred_at,
         }
     }
 }
