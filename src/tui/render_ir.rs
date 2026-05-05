@@ -67,6 +67,7 @@ pub enum Inline {
     Emphasis(Vec<Inline>),
     Strong(Vec<Inline>),
     Strike(Vec<Inline>),
+    Math { tex: String },
     Link { text: Vec<Inline>, target: String },
 }
 
@@ -256,12 +257,34 @@ fn render_block_tui(block: &RenderBlock, theme: &Theme, lines: &mut Vec<Line<'st
             theme.muted.add_modifier(Modifier::DIM),
         ))),
         RenderBlock::Table { headers, rows } => render_table_tui(headers, rows, theme, lines),
-        RenderBlock::Math { .. } | RenderBlock::Typst { .. } | RenderBlock::Media { .. } => lines
-            .push(Line::from(Span::styled(
+        RenderBlock::Math { display, tex } => render_math_block_tui(*display, tex, theme, lines),
+        RenderBlock::Typst { .. } | RenderBlock::Media { .. } => {
+            lines.push(Line::from(Span::styled(
                 "[unsupported render block]",
                 theme.muted.add_modifier(Modifier::DIM),
-            ))),
+            )))
+        }
     }
+}
+
+fn render_math_block_tui(display: bool, tex: &str, theme: &Theme, lines: &mut Vec<Line<'static>>) {
+    let style = math_style(theme);
+    if !display {
+        lines.push(Line::from(Span::styled(format!("${tex}$"), style)));
+        return;
+    }
+
+    lines.push(Line::from(Span::styled(
+        "$$",
+        style.add_modifier(Modifier::DIM),
+    )));
+    for line in tex.lines() {
+        lines.push(Line::from(Span::styled(format!("  {line}"), style)));
+    }
+    lines.push(Line::from(Span::styled(
+        "$$",
+        style.add_modifier(Modifier::DIM),
+    )));
 }
 
 fn render_table_tui(
@@ -627,6 +650,7 @@ fn render_inline(inline: &Inline, theme: &Theme, inherited: Style, spans: &mut V
     match inline {
         Inline::Text(text) => spans.push(Span::styled(text.clone(), inherited)),
         Inline::Code(code) => spans.push(Span::styled(code.clone(), theme.inline_code)),
+        Inline::Math { tex } => spans.push(Span::styled(format!("${tex}$"), math_style(theme))),
         Inline::Emphasis(children) => render_inline_children(
             children,
             theme,
@@ -787,6 +811,7 @@ fn parse_pulldown(text: &str) -> RenderDocument {
     options.insert(Options::ENABLE_TABLES);
     options.insert(Options::ENABLE_STRIKETHROUGH);
     options.insert(Options::ENABLE_TASKLISTS);
+    options.insert(Options::ENABLE_MATH);
 
     let mut events = Parser::new_ext(text, options).peekable();
     RenderDocument {
@@ -808,10 +833,12 @@ where
         match event {
             Event::End(tag_end) if Some(tag_end) == end => break,
             Event::Start(Tag::Paragraph) => {
-                blocks.push(RenderBlock::Paragraph(parse_pulldown_inlines(
-                    events,
-                    TagEnd::Paragraph,
-                )));
+                let inlines = parse_pulldown_inlines(events, TagEnd::Paragraph);
+                if let Some(tex) = display_math_from_literal(&inlines) {
+                    blocks.push(RenderBlock::Math { display: true, tex });
+                } else {
+                    blocks.push(RenderBlock::Paragraph(inlines));
+                }
             }
             Event::Start(Tag::Heading { level, .. }) => {
                 blocks.push(RenderBlock::Heading {
@@ -849,6 +876,9 @@ where
                 display: true,
                 tex: tex.to_string(),
             }),
+            Event::InlineMath(tex) => blocks.push(RenderBlock::Paragraph(vec![Inline::Math {
+                tex: tex.to_string(),
+            }])),
             Event::Text(text) if !text.is_empty() => {
                 blocks.push(RenderBlock::Paragraph(vec![Inline::Text(text.to_string())]));
             }
@@ -881,6 +911,9 @@ fn collect_task_list_item_inlines<'a, I>(
             Event::End(TagEnd::Paragraph) => break,
             Event::Text(text) => inlines.push(Inline::Text(text.to_string())),
             Event::Code(code) => inlines.push(Inline::Code(code.to_string())),
+            Event::InlineMath(tex) => inlines.push(Inline::Math {
+                tex: tex.to_string(),
+            }),
             Event::SoftBreak | Event::HardBreak => inlines.push(Inline::Text(" ".to_string())),
             Event::Html(html) | Event::InlineHtml(html) => {
                 inlines.push(Inline::Text(html.to_string()));
@@ -931,7 +964,9 @@ where
             Event::End(tag_end) if tag_end == end => break,
             Event::Text(text) => inlines.push(Inline::Text(text.to_string())),
             Event::Code(code) => inlines.push(Inline::Code(code.to_string())),
-            Event::InlineMath(tex) => inlines.push(Inline::Text(format!("${tex}$"))),
+            Event::InlineMath(tex) => inlines.push(Inline::Math {
+                tex: tex.to_string(),
+            }),
             Event::DisplayMath(tex) => inlines.push(Inline::Text(format!("$${tex}$$"))),
             Event::SoftBreak | Event::HardBreak => inlines.push(Inline::Text(" ".to_string())),
             Event::Html(html) | Event::InlineHtml(html) => {
@@ -1117,10 +1152,32 @@ fn flatten_inlines(inlines: &[Inline]) -> String {
             Inline::Emphasis(children) | Inline::Strong(children) | Inline::Strike(children) => {
                 text.push_str(&flatten_inlines(children));
             }
+            Inline::Math { tex } => {
+                text.push('$');
+                text.push_str(tex);
+                text.push('$');
+            }
             Inline::Link { text: children, .. } => text.push_str(&flatten_inlines(children)),
         }
     }
     text
+}
+
+fn math_style(theme: &Theme) -> Style {
+    theme.accent.add_modifier(Modifier::ITALIC)
+}
+
+fn display_math_from_literal(inlines: &[Inline]) -> Option<String> {
+    let text = flatten_inlines(inlines);
+    let lines = text.lines().collect::<Vec<_>>();
+    if lines.len() < 3 {
+        return None;
+    }
+    if lines.first()?.trim() != "$$" || lines.last()?.trim() != "$$" {
+        return None;
+    }
+    let body = lines[1..lines.len() - 1].join("\n");
+    (!body.trim().is_empty()).then_some(body)
 }
 
 #[cfg(test)]
@@ -1357,6 +1414,67 @@ mod tests {
 
         assert_eq!(line_text(&rendered[1]), " │some words 123");
         assert_eq!(rendered[1].spans[1].style, theme.code_block);
+    }
+
+    #[test]
+    fn pulldown_parser_maps_inline_math_to_ir() {
+        let doc = parse_commonmark("Area is $x^2$ today.");
+
+        let RenderBlock::Paragraph(inlines) = &doc.blocks[0] else {
+            panic!("expected paragraph");
+        };
+        assert!(
+            inlines
+                .iter()
+                .any(|inline| matches!(inline, Inline::Math { tex } if tex == "x^2"))
+        );
+    }
+
+    #[test]
+    fn pulldown_parser_maps_display_math_to_block_ir() {
+        let doc = parse_commonmark("$$\nx^2 + y^2 = z^2\n$$");
+
+        assert!(matches!(
+            &doc.blocks[0],
+            RenderBlock::Math {
+                display: true,
+                tex
+            } if tex == "x^2 + y^2 = z^2"
+        ));
+    }
+
+    #[test]
+    fn math_fallback_preserves_visible_delimiters() {
+        let theme = Theme::system();
+        let doc = parse_commonmark("Inline $x^2$.\n\n$$\ny = mx + b\n$$");
+        let rendered = render_tui(&doc, &theme)
+            .iter()
+            .map(line_text)
+            .collect::<Vec<_>>();
+
+        assert_eq!(rendered, vec!["Inline $x^2$.", "$$", "  y = mx + b", "$$"]);
+    }
+
+    #[test]
+    fn math_parser_keeps_escaped_dollars_and_money_literal() {
+        let doc = parse_commonmark(r"Escaped \$x$ and price $5 remain literal.");
+        let rendered = render_tui(&doc, &Theme::system())
+            .iter()
+            .map(line_text)
+            .collect::<Vec<_>>();
+
+        assert_eq!(rendered, vec![r"Escaped $x$ and price $5 remain literal."]);
+    }
+
+    #[test]
+    fn malformed_math_remains_literal_text() {
+        let doc = parse_commonmark("This $math never closes.");
+        let rendered = render_tui(&doc, &Theme::system())
+            .iter()
+            .map(line_text)
+            .collect::<Vec<_>>();
+
+        assert_eq!(rendered, vec!["This $math never closes."]);
     }
 
     #[test]
