@@ -13,6 +13,7 @@ use ratatui::{
     style::{Modifier, Style},
     text::{Line, Span},
 };
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use super::{
     markdown::render_markdown,
@@ -328,29 +329,21 @@ fn wrap_spans(spans: Vec<Span<'static>>, width: usize) -> Vec<Vec<Span<'static>>
     if width == 0 {
         return vec![spans];
     }
+    let continuation = continuation_prefix(&spans, width);
     let mut rows: Vec<Vec<Span<'static>>> = vec![Vec::new()];
     let mut col = 0usize;
-    for span in spans {
+    for span in coalesce_spans(spans) {
         let style = span.style;
-        let chars: Vec<char> = span.content.chars().collect();
-        let mut idx = 0usize;
-        while idx < chars.len() {
-            let remaining = width.saturating_sub(col);
-            if remaining == 0 {
-                rows.push(Vec::new());
-                col = 0;
-                continue;
-            }
-            let take = chars.len() - idx;
-            let take = take.min(remaining);
-            let chunk: String = chars[idx..idx + take].iter().collect();
-            rows.last_mut().unwrap().push(Span::styled(chunk, style));
-            col += take;
-            idx += take;
-            if col >= width {
-                rows.push(Vec::new());
-                col = 0;
-            }
+        for (segment, whitespace) in text_segments(span.content.as_ref()) {
+            push_wrapped_segment(
+                &mut rows,
+                &mut col,
+                segment,
+                whitespace,
+                style,
+                width,
+                continuation.as_ref(),
+            );
         }
     }
     if rows.last().is_some_and(|r| r.is_empty()) {
@@ -360,6 +353,194 @@ fn wrap_spans(spans: Vec<Span<'static>>, width: usize) -> Vec<Vec<Span<'static>>
         rows.push(Vec::new());
     }
     rows
+}
+
+#[derive(Clone, Debug)]
+struct ContinuationPrefix {
+    spans: Vec<Span<'static>>,
+    width: usize,
+}
+
+fn continuation_prefix(spans: &[Span<'static>], width: usize) -> Option<ContinuationPrefix> {
+    let first = spans.first()?;
+    let content = first.content.as_ref();
+    let prefix = if content == "▎ " || content == " │" {
+        Some(Span::styled(content.to_string(), first.style))
+    } else if content.starts_with(" │") {
+        Some(Span::styled(" │", first.style))
+    } else if content == "• " {
+        Some(Span::styled("  ", first.style))
+    } else if is_ordered_list_marker(content) {
+        Some(Span::styled(
+            " ".repeat(UnicodeWidthStr::width(content)),
+            first.style,
+        ))
+    } else {
+        None
+    }?;
+    let prefix_width = UnicodeWidthStr::width(prefix.content.as_ref());
+    (prefix_width < width).then_some(ContinuationPrefix {
+        spans: vec![prefix],
+        width: prefix_width,
+    })
+}
+
+fn is_ordered_list_marker(text: &str) -> bool {
+    let Some(number) = text.strip_suffix(". ") else {
+        return false;
+    };
+    !number.is_empty() && number.chars().all(|ch| ch.is_ascii_digit())
+}
+
+fn coalesce_spans(spans: Vec<Span<'static>>) -> Vec<Span<'static>> {
+    let mut coalesced: Vec<Span<'static>> = Vec::new();
+    for span in spans {
+        if let Some(previous) = coalesced.last_mut()
+            && previous.style == span.style
+        {
+            previous.content.to_mut().push_str(span.content.as_ref());
+            continue;
+        }
+        coalesced.push(span);
+    }
+    coalesced
+}
+
+fn text_segments(text: &str) -> impl Iterator<Item = (&str, bool)> {
+    let mut segments = Vec::new();
+    let mut start = 0usize;
+    let mut current_kind: Option<bool> = None;
+
+    for (idx, ch) in text.char_indices() {
+        let kind = ch.is_whitespace();
+        match current_kind {
+            Some(existing) if existing != kind => {
+                segments.push((&text[start..idx], existing));
+                start = idx;
+                current_kind = Some(kind);
+            }
+            None => current_kind = Some(kind),
+            _ => {}
+        }
+    }
+
+    if let Some(kind) = current_kind {
+        segments.push((&text[start..], kind));
+    }
+
+    segments.into_iter()
+}
+
+fn push_wrapped_segment(
+    rows: &mut Vec<Vec<Span<'static>>>,
+    col: &mut usize,
+    mut segment: &str,
+    whitespace: bool,
+    style: Style,
+    width: usize,
+    continuation: Option<&ContinuationPrefix>,
+) {
+    while !segment.is_empty() {
+        let prefix_width = continuation.map_or(0, |prefix| prefix.width);
+        let at_continuation_prefix = rows.len() > 1 && *col == prefix_width;
+        if whitespace && at_continuation_prefix {
+            return;
+        }
+
+        let remaining = width.saturating_sub(*col);
+        if remaining == 0 {
+            trim_trailing_whitespace(rows, col);
+            push_continuation_row(rows, col, continuation);
+            continue;
+        }
+
+        let segment_width = UnicodeWidthStr::width(segment);
+        if segment_width <= remaining {
+            rows.last_mut()
+                .expect("wrap rows are initialized")
+                .push(Span::styled(segment.to_string(), style));
+            *col = (*col).saturating_add(segment_width);
+            return;
+        }
+
+        if *col > 0 && !at_continuation_prefix {
+            trim_trailing_whitespace(rows, col);
+            push_continuation_row(rows, col, continuation);
+            if whitespace {
+                return;
+            }
+            continue;
+        }
+
+        let (chunk, rest, chunk_width) = split_display_width(segment, remaining);
+        rows.last_mut()
+            .expect("wrap rows are initialized")
+            .push(Span::styled(chunk.to_string(), style));
+        *col = (*col).saturating_add(chunk_width);
+        segment = rest;
+        if !segment.is_empty() {
+            push_continuation_row(rows, col, continuation);
+        }
+    }
+}
+
+fn push_continuation_row(
+    rows: &mut Vec<Vec<Span<'static>>>,
+    col: &mut usize,
+    continuation: Option<&ContinuationPrefix>,
+) {
+    let mut row = Vec::new();
+    *col = 0;
+    if let Some(prefix) = continuation {
+        row.extend(prefix.spans.iter().cloned());
+        *col = prefix.width;
+    }
+    rows.push(row);
+}
+
+fn trim_trailing_whitespace(rows: &mut [Vec<Span<'static>>], col: &mut usize) {
+    let Some(row) = rows.last_mut() else {
+        return;
+    };
+
+    while let Some(last) = row.last_mut() {
+        let content = last.content.as_ref();
+        let trimmed = content.trim_end_matches(char::is_whitespace);
+        if trimmed.len() == content.len() {
+            return;
+        }
+
+        let removed_width = UnicodeWidthStr::width(&content[trimmed.len()..]);
+        if trimmed.is_empty() {
+            row.pop();
+        } else {
+            last.content = trimmed.to_string().into();
+        }
+        *col = (*col).saturating_sub(removed_width);
+    }
+}
+
+fn split_display_width(text: &str, max_width: usize) -> (&str, &str, usize) {
+    let mut end = 0usize;
+    let mut width = 0usize;
+
+    for (idx, ch) in text.char_indices() {
+        let char_width = ch.width().unwrap_or(0);
+        if end > 0 && width.saturating_add(char_width) > max_width {
+            break;
+        }
+        end = idx + ch.len_utf8();
+        width = width.saturating_add(char_width);
+        if width >= max_width {
+            break;
+        }
+    }
+
+    if end == 0 {
+        return ("", text, 0);
+    }
+
+    (&text[..end], &text[end..], width)
 }
 
 fn agent_placeholder(has_reasoning: bool, muted: Style) -> Line<'static> {
@@ -384,6 +565,125 @@ mod tests {
             .iter()
             .map(|s| s.content.as_ref())
             .collect::<String>()
+    }
+
+    fn row_text(row: &[Span<'static>]) -> String {
+        row.iter().map(|s| s.content.as_ref()).collect::<String>()
+    }
+
+    fn assert_rows_fit(rows: &[Vec<Span<'static>>], width: usize) {
+        for row in rows {
+            let text = row_text(row);
+            assert!(
+                UnicodeWidthStr::width(text.as_str()) <= width,
+                "row {text:?} exceeded width {width}"
+            );
+        }
+    }
+
+    #[test]
+    fn wrap_spans_uses_display_width_for_emoji_cjk_and_symbols() {
+        let rows = wrap_spans(vec![Span::raw("ab😀中文─cd")], 6);
+
+        let rendered: Vec<String> = rows.iter().map(|row| row_text(row)).collect();
+        assert_eq!(rendered, vec!["ab😀中", "文─cd"]);
+        assert_rows_fit(&rows, 6);
+    }
+
+    #[test]
+    fn wrap_spans_prefers_word_boundaries() {
+        let rows = wrap_spans(vec![Span::raw("alpha beta gamma")], 10);
+
+        let rendered: Vec<String> = rows.iter().map(|row| row_text(row)).collect();
+        assert_eq!(rendered, vec!["alpha beta", "gamma"]);
+        assert_rows_fit(&rows, 10);
+    }
+
+    #[test]
+    fn wrap_spans_preserves_inline_code_and_styled_span_styles() {
+        let code_style = Style::default().add_modifier(Modifier::BOLD);
+        let plain_style = Style::default();
+        let rows = wrap_spans(
+            vec![
+                Span::styled("run ", plain_style),
+                Span::styled("cargo test --lib", code_style),
+            ],
+            10,
+        );
+
+        let rendered: Vec<String> = rows.iter().map(|row| row_text(row)).collect();
+        assert_eq!(rendered, vec!["run cargo", "test --lib"]);
+        assert_rows_fit(&rows, 10);
+        for chunk in ["cargo", "test", "--lib"] {
+            assert!(
+                rows.iter()
+                    .flatten()
+                    .any(|span| span.content.as_ref() == chunk && span.style == code_style),
+                "missing styled inline-code chunk {chunk:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn wrapped_blockquote_keeps_accent_rail_on_first_row() {
+        let theme = Theme::system();
+        let rows = render_markdown("> alpha beta gamma", &theme)
+            .into_iter()
+            .flat_map(|line| wrap_spans(line.spans, 10))
+            .collect::<Vec<_>>();
+
+        let rendered: Vec<String> = rows.iter().map(|row| row_text(row)).collect();
+        assert_eq!(rendered, vec!["▎ alpha", "▎ beta", "▎ gamma"]);
+        assert_eq!(rows[0][0].content.as_ref(), "▎");
+        assert_eq!(rows[0][0].style, theme.blockquote);
+        assert_eq!(rows[1][0].content.as_ref(), "▎ ");
+        assert_eq!(rows[1][0].style, theme.blockquote);
+        assert_rows_fit(&rows, 10);
+    }
+
+    #[test]
+    fn wrapped_lists_preserve_continuation_indent() {
+        let theme = Theme::system();
+        let rows = render_markdown("- alpha beta gamma", &theme)
+            .into_iter()
+            .flat_map(|line| wrap_spans(line.spans, 10))
+            .collect::<Vec<_>>();
+
+        let rendered: Vec<String> = rows.iter().map(|row| row_text(row)).collect();
+        assert_eq!(rendered, vec!["• alpha", "  beta", "  gamma"]);
+        assert_eq!(rows[1][0].content.as_ref(), "  ");
+        assert_eq!(rows[1][0].style, theme.list_marker);
+        assert_rows_fit(&rows, 10);
+    }
+
+    #[test]
+    fn wrapped_ordered_lists_preserve_continuation_indent() {
+        let theme = Theme::system();
+        let rows = render_markdown("12. alpha beta gamma", &theme)
+            .into_iter()
+            .flat_map(|line| wrap_spans(line.spans, 11))
+            .collect::<Vec<_>>();
+
+        let rendered: Vec<String> = rows.iter().map(|row| row_text(row)).collect();
+        assert_eq!(rendered, vec!["12. alpha", "    beta", "    gamma"]);
+        assert_eq!(rows[1][0].content.as_ref(), "    ");
+        assert_eq!(rows[1][0].style, theme.list_marker);
+        assert_rows_fit(&rows, 11);
+    }
+
+    #[test]
+    fn wrapped_code_blocks_preserve_code_rail() {
+        let theme = Theme::system();
+        let rows = render_markdown("```\nabcdef gh\n```", &theme)
+            .into_iter()
+            .flat_map(|line| wrap_spans(line.spans, 8))
+            .collect::<Vec<_>>();
+
+        let rendered: Vec<String> = rows.iter().map(|row| row_text(row)).collect();
+        assert_eq!(rendered, vec![" │abcdef", " │gh"]);
+        assert_eq!(rows[1][0].content.as_ref(), " │");
+        assert_eq!(rows[1][0].style, theme.code_block);
+        assert_rows_fit(&rows, 8);
     }
 
     // YYC-144: insertions past the cap must drop the oldest entry
