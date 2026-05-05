@@ -24,7 +24,9 @@ use std::path::PathBuf;
 use crate::artifact::{ArtifactStore, InMemoryArtifactStore, SqliteArtifactStore};
 use crate::code::lsp::LspManager;
 use crate::extensions::api::wire_inventory_into_registry;
-use crate::extensions::{ExtensionAuditLog, ExtensionRegistry};
+use crate::extensions::{
+    ExtensionAuditLog, ExtensionRegistry, ExtensionStateStore, SqliteExtensionStateStore,
+};
 use crate::memory::SessionStore;
 use crate::memory::cortex::CortexStore;
 use crate::orchestration::OrchestrationStore;
@@ -60,6 +62,9 @@ pub struct RuntimeResourcePool {
     /// `InputIntercept` outcomes here. `vulcan extension audit`
     /// reads from this same handle.
     extension_audit_log: Arc<ExtensionAuditLog>,
+    /// GH issue #270: daemon-owned extension state DB. Session
+    /// extensions receive scoped handles derived from this shared store.
+    extension_state_store: Arc<dyn ExtensionStateStore>,
 }
 
 impl RuntimeResourcePool {
@@ -108,6 +113,16 @@ impl RuntimeResourcePool {
         );
 
         let extension_audit_log = Arc::new(ExtensionAuditLog::default());
+        let extension_state_store: Arc<dyn ExtensionStateStore> =
+            match SqliteExtensionStateStore::try_new() {
+                Ok(store) => Arc::new(store),
+                Err(e) => {
+                    tracing::warn!(
+                        "RuntimeResourcePool: extension state store unavailable ({e}); using in-memory"
+                    );
+                    Arc::new(SqliteExtensionStateStore::try_open_in_memory()?)
+                }
+            };
 
         Ok(Self {
             session_store,
@@ -118,6 +133,7 @@ impl RuntimeResourcePool {
             cortex_store: None,
             extension_registry,
             extension_audit_log,
+            extension_state_store,
         })
     }
 
@@ -145,6 +161,10 @@ impl RuntimeResourcePool {
             cortex_store: None,
             extension_registry,
             extension_audit_log: Arc::new(ExtensionAuditLog::default()),
+            extension_state_store: Arc::new(
+                SqliteExtensionStateStore::try_open_in_memory()
+                    .expect("in-memory extension state store"),
+            ),
         }
     }
 
@@ -196,6 +216,12 @@ impl RuntimeResourcePool {
     /// can surface them across sessions.
     pub fn extension_audit_log(&self) -> Arc<ExtensionAuditLog> {
         Arc::clone(&self.extension_audit_log)
+    }
+
+    /// GH issue #270: cloneable handle to the daemon-owned
+    /// extension state store.
+    pub fn extension_state_store(&self) -> Arc<dyn ExtensionStateStore> {
+        Arc::clone(&self.extension_state_store)
     }
 }
 
@@ -261,6 +287,22 @@ mod tests {
         assert!(
             r1.daemon_extension_count() >= 1,
             "expected at least one inventory-registered extension"
+        );
+    }
+
+    #[test]
+    fn for_tests_shares_extension_state_store() {
+        let pool = RuntimeResourcePool::for_tests();
+        let store = pool.extension_state_store();
+        let alpha = store.scope("alpha").unwrap();
+        alpha
+            .put_json("k", &serde_json::json!({"persisted": true}))
+            .unwrap();
+
+        let same_store = pool.extension_state_store();
+        assert_eq!(
+            same_store.scope("alpha").unwrap().get_json("k").unwrap(),
+            Some(serde_json::json!({"persisted": true}))
         );
     }
 }

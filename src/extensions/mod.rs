@@ -25,6 +25,7 @@ pub mod install_state;
 pub mod manifest;
 pub mod policy;
 pub mod registry;
+pub mod state;
 pub mod store;
 pub mod verify;
 
@@ -38,6 +39,10 @@ pub use install_state::{InstallState, InstallStateStore, SqliteInstallStateStore
 pub use manifest::{EntryKind, ExtensionManifest, ManifestError};
 pub use policy::{ExtensionPermission, ExtensionPolicyEngine, PolicyDecision};
 pub use registry::{CodeExtension, ExtensionRegistry};
+pub use state::{
+    CheckpointInfo, CheckpointRecord, ExtensionStateScope, ExtensionStateStore,
+    SqliteExtensionStateStore,
+};
 pub use store::{DiscoveredExtension, discover};
 pub use verify::{VerificationError, verify_checksum_optional, verify_compatible};
 

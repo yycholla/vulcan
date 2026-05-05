@@ -515,6 +515,25 @@ impl Agent {
             crate::extensions::api::wire_inventory_into_registry(&registry);
             registry
         };
+        let extension_state_store: Option<Arc<dyn crate::extensions::ExtensionStateStore>> =
+            match pool.as_ref() {
+                Some(p) => Some(p.extension_state_store()),
+                None => match crate::extensions::SqliteExtensionStateStore::try_new() {
+                    Ok(store) => Some(Arc::new(store)),
+                    Err(e) => {
+                        tracing::warn!(
+                            "Agent: extension state store unavailable ({e}); using in-memory"
+                        );
+                        match crate::extensions::SqliteExtensionStateStore::try_open_in_memory() {
+                            Ok(store) => Some(Arc::new(store)),
+                            Err(e) => {
+                                tracing::warn!("Agent: extension state fallback unavailable ({e})");
+                                None
+                            }
+                        }
+                    }
+                },
+            };
         let dangerous_commands = if config.tools.yolo_mode {
             let mut cfg = config.tools.dangerous_commands;
             cfg.policy = crate::config::DangerousCommandPolicy::Allow;
@@ -532,6 +551,7 @@ impl Agent {
         .with_skills_dir(config.skills_dir.clone())
         .with_pause_channel(pause_tx.clone())
         .with_dangerous_commands(dangerous_commands);
+        let ctx = ctx.with_extension_state_store(extension_state_store.clone());
         let ctx = crate::extensions::api::SessionExtensionCtx {
             frontend_events: frontend_events.clone(),
             ..ctx
