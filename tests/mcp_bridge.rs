@@ -101,6 +101,7 @@ fn fake_server_config(enabled: bool, expose_as: McpExposeMode) -> McpServerConfi
         enabled,
         expose_as,
         timeout_secs: 5,
+        ..Default::default()
     }
 }
 
