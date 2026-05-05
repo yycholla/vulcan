@@ -570,6 +570,12 @@ impl Agent {
             }
             ext.activate().await;
         }
+        let orchestration_hooks = crate::orchestration::OrchestrationHookSet::new(
+            session_extensions
+                .iter()
+                .flat_map(|ext| ext.orchestration_hooks())
+                .collect(),
+        );
         if !session_extensions.is_empty() {
             tracing::info!(
                 daemon_extensions = session_extensions.len(),
@@ -709,7 +715,8 @@ impl Agent {
         )
         .with_artifact_store(Arc::clone(&artifact_store))
         .with_parent_session_id(session_id.clone())
-        .with_parent_run_handle(Arc::clone(&current_run_id));
+        .with_parent_run_handle(Arc::clone(&current_run_id))
+        .with_orchestration_hooks(orchestration_hooks);
         tools.register(Arc::new(spawn_tool));
 
         Ok(Self {

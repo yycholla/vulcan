@@ -35,7 +35,10 @@ use serde_json::{Value, json};
 use tokio_util::sync::CancellationToken;
 
 use crate::config::Config;
-use crate::orchestration::{ChildAgentId, OrchestrationStore};
+use crate::orchestration::{
+    ChildAgentId, DelegationBudget, DelegationDecision, DelegationEvent, DelegationRequest,
+    DelegationStage, OrchestrationHookSet, OrchestrationStore,
+};
 use crate::tools::{Tool, ToolResult, parse_tool_params};
 
 #[derive(Deserialize)]
@@ -142,6 +145,10 @@ pub struct SpawnSubagentTool {
     /// Slice 7: when present, delegate child execution to a daemon
     /// child-session runner instead of building a direct child Agent.
     subagent_runner: Option<Arc<dyn SubagentRunner>>,
+    /// GH issue #271: observer/blocking hooks contributed by active
+    /// session extensions. Planning hooks wait for the typed planner;
+    /// delegation can use today's typed subagent runtime objects.
+    orchestration_hooks: OrchestrationHookSet,
 }
 
 impl SpawnSubagentTool {
@@ -160,6 +167,7 @@ impl SpawnSubagentTool {
             parent_session_id: None,
             parent_run_handle: None,
             subagent_runner: None,
+            orchestration_hooks: OrchestrationHookSet::default(),
         }
     }
 
@@ -192,6 +200,11 @@ impl SpawnSubagentTool {
 
     pub fn with_subagent_runner(mut self, runner: Arc<dyn SubagentRunner>) -> Self {
         self.subagent_runner = Some(runner);
+        self
+    }
+
+    pub fn with_orchestration_hooks(mut self, hooks: OrchestrationHookSet) -> Self {
+        self.orchestration_hooks = hooks;
         self
     }
 }
@@ -306,6 +319,51 @@ impl Tool for SpawnSubagentTool {
         self.orchestration
             .update_status(child_id, crate::orchestration::ChildStatus::Running);
 
+        let delegation = DelegationRequest {
+            child_id,
+            parent_session_id: self.parent_session_id.clone(),
+            task: task.clone(),
+            allowed_tools: allowed.clone(),
+            profile_name: profile_name.clone(),
+            budget: DelegationBudget {
+                max_iterations: max_iter,
+                token_budget: None,
+            },
+        };
+        self.orchestration_hooks
+            .emit_delegation(
+                &DelegationEvent::requested(delegation.clone()),
+                cancel.clone(),
+            )
+            .await;
+        match self
+            .orchestration_hooks
+            .before_delegation(&delegation, cancel.clone())
+            .await?
+        {
+            DelegationDecision::Continue => {}
+            DelegationDecision::Block { reason } => {
+                self.orchestration.mark_blocked(child_id, reason.clone());
+                self.orchestration_hooks
+                    .emit_delegation(
+                        &DelegationEvent::blocked(delegation, reason.clone()),
+                        cancel.clone(),
+                    )
+                    .await;
+                let payload = json!({
+                    "status": "blocked",
+                    "child_id": child_id.to_string(),
+                    "summary": reason,
+                    "budget_used": {
+                        "iterations": 0,
+                        "max_iterations": max_iter,
+                    },
+                    "tools_granted": allowed.len(),
+                });
+                return Ok(ToolResult::ok(serde_json::to_string_pretty(&payload)?));
+            }
+        }
+
         // YYC-208: fork a child cancellation token from the parent's
         // so cancelling the parent turn aborts the child's loop.
         // `child_token` cancels when the parent's token cancels and
@@ -317,6 +375,12 @@ impl Tool for SpawnSubagentTool {
             .register_cancel_handle(child_id, child_cancel.clone());
         let parent_run_id = self.parent_run_handle.as_ref().and_then(|h| *h.lock());
         if let Some(runner) = &self.subagent_runner {
+            self.orchestration_hooks
+                .emit_delegation(
+                    &DelegationEvent::started(delegation.clone()),
+                    cancel.clone(),
+                )
+                .await;
             let request = SubagentRunRequest {
                 child_id,
                 parent_session_id: self.parent_session_id.clone(),
@@ -329,7 +393,7 @@ impl Tool for SpawnSubagentTool {
             let run_result = runner.run_subagent(request, child_cancel.clone()).await;
             self.orchestration.forget_cancel_handle(child_id);
             return self
-                .finish_child_result(child_id, task, allowed.len(), max_iter, run_result, cancel)
+                .finish_child_result(delegation, run_result, cancel)
                 .await;
         }
 
@@ -343,13 +407,14 @@ impl Tool for SpawnSubagentTool {
 impl SpawnSubagentTool {
     async fn finish_child_result(
         &self,
-        child_id: ChildAgentId,
-        task: String,
-        tools_granted: usize,
-        max_iter: u32,
+        delegation: DelegationRequest,
         run_result: Result<SubagentRunOutput>,
         cancel: CancellationToken,
     ) -> Result<ToolResult> {
+        let child_id = delegation.child_id;
+        let task = delegation.task.clone();
+        let tools_granted = delegation.tool_count();
+        let max_iter = delegation.budget.max_iterations;
         let (iterations, tokens_consumed) = match &run_result {
             Ok(out) => (out.iterations, out.tokens_consumed),
             Err(_) => (0, 0),
@@ -357,6 +422,19 @@ impl SpawnSubagentTool {
         self.orchestration.update_tokens(child_id, tokens_consumed);
         if cancel.is_cancelled() {
             self.orchestration.mark_cancelled(child_id);
+            self.orchestration_hooks
+                .emit_delegation(
+                    &DelegationEvent::terminal(
+                        delegation,
+                        DelegationStage::Cancelled,
+                        iterations,
+                        tokens_consumed,
+                        Some("child cancelled by parent".into()),
+                        None,
+                    ),
+                    cancel.clone(),
+                )
+                .await;
             let payload = json!({
                 "status": "cancelled",
                 "child_id": child_id.to_string(),
@@ -374,6 +452,19 @@ impl SpawnSubagentTool {
                 let final_text = out.final_text;
                 self.orchestration
                     .mark_completed(child_id, final_text.clone(), iterations);
+                self.orchestration_hooks
+                    .emit_delegation(
+                        &DelegationEvent::terminal(
+                            delegation,
+                            DelegationStage::Completed,
+                            iterations,
+                            tokens_consumed,
+                            Some(final_text.clone()),
+                            None,
+                        ),
+                        cancel.clone(),
+                    )
+                    .await;
                 // YYC-180: persist the child's final summary as a
                 // typed artifact when the parent shared its store.
                 // The artifact's `source` carries the child's id so
@@ -411,6 +502,19 @@ impl SpawnSubagentTool {
                 let err_msg = format!("child agent failed: {e}");
                 self.orchestration
                     .mark_failed(child_id, err_msg.clone(), iterations);
+                self.orchestration_hooks
+                    .emit_delegation(
+                        &DelegationEvent::terminal(
+                            delegation,
+                            DelegationStage::Failed,
+                            iterations,
+                            tokens_consumed,
+                            None,
+                            Some(err_msg.clone()),
+                        ),
+                        cancel.clone(),
+                    )
+                    .await;
                 let payload = json!({
                     "status": "error",
                     "child_id": child_id.to_string(),
@@ -431,6 +535,7 @@ impl SpawnSubagentTool {
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use tokio::sync::Mutex as AsyncMutex;
 
     #[test]
     fn default_allowed_tools_contains_read_only_set() {
@@ -495,10 +600,7 @@ mod tests {
         assert!(recent[0].ended_at.is_some());
     }
 
-    #[test]
-    fn iteration_cap_clamps_to_ceiling() {
-        assert!(SUBAGENT_MAX_ITERATIONS_CAP >= SUBAGENT_DEFAULT_ITERATIONS);
-    }
+    const _: () = assert!(SUBAGENT_MAX_ITERATIONS_CAP >= SUBAGENT_DEFAULT_ITERATIONS);
 
     // ── YYC-181: named profile narrowing for subagents ───────────────
 
@@ -609,5 +711,129 @@ mod tests {
         );
         assert_eq!(recent[0].iterations_used, 2);
         assert_eq!(recent[0].tokens_consumed, 11);
+    }
+
+    struct RecordingHook {
+        events: Arc<AsyncMutex<Vec<DelegationStage>>>,
+    }
+
+    #[async_trait]
+    impl crate::orchestration::OrchestrationHook for RecordingHook {
+        fn name(&self) -> &str {
+            "recording"
+        }
+
+        async fn on_delegation_event(
+            &self,
+            event: &DelegationEvent,
+            _cancel: CancellationToken,
+        ) -> Result<()> {
+            self.events.lock().await.push(event.stage.clone());
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn delegation_hooks_observe_typed_event_order() {
+        let cfg = Arc::new(Config::default());
+        let store = Arc::new(OrchestrationStore::new());
+        let calls = Arc::new(AtomicUsize::new(0));
+        let runner = Arc::new(FakeRunner {
+            calls: Arc::clone(&calls),
+        });
+        let events = Arc::new(AsyncMutex::new(Vec::new()));
+        let hook = Arc::new(RecordingHook {
+            events: Arc::clone(&events),
+        });
+        let tool = SpawnSubagentTool::with_store(cfg, store)
+            .with_parent_session_id("parent-session")
+            .with_subagent_runner(runner)
+            .with_orchestration_hooks(OrchestrationHookSet::new(vec![hook]));
+
+        let result = tool
+            .call(
+                json!({
+                    "task": "inspect daemon",
+                    "allowed_tools": ["read_file"],
+                    "max_iterations": 3
+                }),
+                CancellationToken::new(),
+                None,
+            )
+            .await
+            .expect("call ok");
+
+        assert!(!result.is_error);
+        assert_eq!(
+            *events.lock().await,
+            vec![
+                DelegationStage::Requested,
+                DelegationStage::Started,
+                DelegationStage::Completed
+            ]
+        );
+    }
+
+    struct BlockingHook;
+
+    #[async_trait]
+    impl crate::orchestration::OrchestrationHook for BlockingHook {
+        fn name(&self) -> &str {
+            "blocking"
+        }
+
+        fn priority(&self) -> i32 {
+            0
+        }
+
+        async fn before_delegation(
+            &self,
+            request: &DelegationRequest,
+            _cancel: CancellationToken,
+        ) -> Result<DelegationDecision> {
+            assert_eq!(request.parent_session_id.as_deref(), Some("parent-session"));
+            assert_eq!(request.budget.max_iterations, 3);
+            assert_eq!(request.budget.token_budget, None);
+            Ok(DelegationDecision::Block {
+                reason: "delegation disabled by extension".into(),
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn delegation_hook_can_block_before_runner_starts() {
+        let cfg = Arc::new(Config::default());
+        let store = Arc::new(OrchestrationStore::new());
+        let calls = Arc::new(AtomicUsize::new(0));
+        let runner = Arc::new(FakeRunner {
+            calls: Arc::clone(&calls),
+        });
+        let tool = SpawnSubagentTool::with_store(cfg, Arc::clone(&store))
+            .with_parent_session_id("parent-session")
+            .with_subagent_runner(runner)
+            .with_orchestration_hooks(OrchestrationHookSet::new(vec![Arc::new(BlockingHook)]));
+
+        let result = tool
+            .call(
+                json!({
+                    "task": "inspect daemon",
+                    "allowed_tools": ["read_file"],
+                    "max_iterations": 3
+                }),
+                CancellationToken::new(),
+                None,
+            )
+            .await
+            .expect("call ok");
+
+        assert!(!result.is_error);
+        assert!(result.output.contains("\"status\": \"blocked\""));
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        let recent = store.recent(1);
+        assert_eq!(recent[0].status, crate::orchestration::ChildStatus::Blocked);
+        assert_eq!(
+            recent[0].error.as_deref(),
+            Some("delegation disabled by extension")
+        );
     }
 }

@@ -26,6 +26,12 @@ use parking_lot::Mutex;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
+pub mod events;
+pub use events::{
+    DelegationBudget, DelegationDecision, DelegationEvent, DelegationRequest, DelegationStage,
+    OrchestrationHook, OrchestrationHookSet,
+};
+
 /// Cap on the number of records kept in the store. Old records
 /// fall off the front of the ring once the cap is exceeded — the
 /// TUI only wants recent activity. Tunable per-store via
@@ -73,9 +79,14 @@ pub enum ChildStatus {
 
 impl ChildStatus {
     /// Terminal statuses — once a record reaches one of these, no
-    /// further transitions are allowed.
+    /// further transitions are allowed. `Blocked` is terminal for
+    /// extension-denied delegations; future approval-wait states should
+    /// use a distinct status instead of reusing it.
     pub fn is_terminal(self) -> bool {
-        matches!(self, Self::Completed | Self::Failed | Self::Cancelled)
+        matches!(
+            self,
+            Self::Blocked | Self::Completed | Self::Failed | Self::Cancelled
+        )
     }
 }
 
@@ -282,6 +293,18 @@ impl OrchestrationStore {
             r.status = ChildStatus::Failed;
             r.error = Some(error);
             r.iterations_used = iterations;
+            r.ended_at = Some(Utc::now());
+        });
+    }
+
+    pub fn mark_blocked(&self, id: ChildAgentId, reason: impl Into<String>) {
+        let reason = reason.into();
+        self.with_mut(id, |r| {
+            if r.status.is_terminal() {
+                return;
+            }
+            r.status = ChildStatus::Blocked;
+            r.error = Some(reason);
             r.ended_at = Some(Utc::now());
         });
     }
