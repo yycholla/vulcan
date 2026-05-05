@@ -25,9 +25,12 @@ pub mod install_state;
 pub mod manifest;
 pub mod policy;
 pub mod registry;
+pub mod runtime;
 pub mod state;
 pub mod store;
 pub mod verify;
+#[cfg(feature = "extension-wasm")]
+pub mod wasm;
 
 pub use audit::{
     CompactionAuditAction, CompactionAuditEvent, ExtensionAuditEvent, ExtensionAuditLog,
@@ -35,10 +38,16 @@ pub use audit::{
 };
 pub use config_field::{ExtensionConfigField, ExtensionFieldKind};
 pub use draft::parse_skill_extension;
-pub use install_state::{InstallState, InstallStateStore, SqliteInstallStateStore};
+pub use install_state::{
+    InstallState, InstallStateStore, RuntimeAuditRecord, SqliteInstallStateStore,
+};
 pub use manifest::{EntryKind, ExtensionManifest, ManifestError};
 pub use policy::{ExtensionPermission, ExtensionPolicyEngine, PolicyDecision};
 pub use registry::{CodeExtension, ExtensionInventoryRow, ExtensionRegistry};
+pub use runtime::{
+    ExtensionRuntime, ExtensionRuntimeCapability, ExtensionRuntimeCtx, ExtensionRuntimeDecision,
+    ExtensionRuntimeError, ExtensionRuntimeInit, ExtensionRuntimeKind, ExtensionRuntimeLimits,
+};
 pub use state::{
     CheckpointInfo, CheckpointRecord, ExtensionStateScope, ExtensionStateStore,
     SqliteExtensionStateStore,

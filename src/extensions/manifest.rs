@@ -31,6 +31,10 @@ pub enum EntryKind {
     /// parser doesn't fail on a manifest pointing at one, but
     /// loading is explicitly out of scope for the YYC-166 epic.
     NativeLibrary { path: String },
+    /// Sandboxed WebAssembly extension module. Loading is handled by
+    /// the optional `extension-wasm` feature; manifest parsing remains
+    /// available in all builds so stores can render status consistently.
+    Wasm { path: String },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -115,7 +119,9 @@ impl ExtensionManifest {
             return Err(ManifestError::EmptyField { field: "version" });
         }
         match &self.entry {
-            EntryKind::LocalScript { path } | EntryKind::NativeLibrary { path } => {
+            EntryKind::LocalScript { path }
+            | EntryKind::NativeLibrary { path }
+            | EntryKind::Wasm { path } => {
                 if path.trim().is_empty() {
                     return Err(ManifestError::EmptyField {
                         field: "entry.path",
@@ -180,6 +186,24 @@ path = "./run.sh"
         match &m.entry {
             EntryKind::LocalScript { path } => assert_eq!(path, "./run.sh"),
             other => panic!("expected LocalScript, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_wasm_entry_kind() {
+        let raw = r#"
+id = "wasm-helper"
+name = "WASM Helper"
+version = "0.1.0"
+
+[entry]
+kind = "wasm"
+path = "./helper.wasm"
+"#;
+        let manifest = ExtensionManifest::from_toml_str(raw).unwrap();
+        match manifest.entry {
+            EntryKind::Wasm { path } => assert_eq!(path, "./helper.wasm"),
+            other => panic!("expected Wasm, got {other:?}"),
         }
     }
 
