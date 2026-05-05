@@ -82,6 +82,18 @@ default = "always"
 policy = "prompt"
 quota_per_session = 5
 
+# MCP servers are stdio-only in the first bridge slice. They are inert unless
+# both `enabled = true` and `expose_as = "auto"` are set. Exposed tools are
+# registered as `mcp_<server>_<tool>`.
+# [[mcp_servers]]
+# name = "filesystem"
+# command = "npx"
+# args = ["-y", "@modelcontextprotocol/server-filesystem", "/path/to/project"]
+# env = {}
+# enabled = false
+# expose_as = "disabled" # auto | manual | disabled
+# timeout_secs = 30
+
 # YYC-42: auto-recall relevant past-session context on the first turn
 # of a fresh session. Off by default — enable after reviewing the
 # privacy tradeoff (recalled snippets land in the system prompt and

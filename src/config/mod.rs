@@ -162,6 +162,11 @@ pub struct Config {
     #[serde(default)]
     pub tools: ToolsConfig,
 
+    /// Configured Model Context Protocol servers. Servers are inert unless
+    /// explicitly enabled and exposed.
+    #[serde(default)]
+    pub mcp_servers: Vec<crate::mcp::McpServerConfig>,
+
     #[serde(default = "default_skills_dir")]
     pub skills_dir: PathBuf,
 
@@ -1284,6 +1289,7 @@ impl Default for Config {
             provider: ProviderConfig::default(),
             providers: HashMap::new(),
             tools: ToolsConfig::default(),
+            mcp_servers: Vec::new(),
             skills_dir: default_skills_dir(),
             auto_create_skills: false,
             compaction: CompactionConfig::default(),
@@ -1377,6 +1383,7 @@ impl Config {
             "provider",
             "providers",
             "tools",
+            "mcp_servers",
             "skills_dir",
             "auto_create_skills",
             "compaction",

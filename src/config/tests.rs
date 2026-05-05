@@ -66,6 +66,51 @@ auth_source = "codex"
 }
 
 #[test]
+fn mcp_servers_parse_disabled_by_default() {
+    let cfg: Config = toml::from_str(
+        r#"
+[[mcp_servers]]
+name = "local"
+command = "mcp-server"
+args = ["--stdio"]
+env = { "TOKEN" = "secret" }
+"#,
+    )
+    .expect("parses");
+
+    assert_eq!(cfg.mcp_servers.len(), 1);
+    let server = &cfg.mcp_servers[0];
+    assert_eq!(server.name, "local");
+    assert_eq!(server.command, "mcp-server");
+    assert_eq!(server.args, vec!["--stdio"]);
+    assert_eq!(server.env.get("TOKEN").map(String::as_str), Some("secret"));
+    assert!(!server.enabled);
+    assert_eq!(server.expose_as, crate::mcp::McpExposeMode::Disabled);
+    assert!(!server.should_expose_tools());
+}
+
+#[test]
+fn mcp_servers_expose_only_when_enabled_and_auto() {
+    let cfg: Config = toml::from_str(
+        r#"
+[[mcp_servers]]
+name = "local"
+command = "mcp-server"
+enabled = true
+expose_as = "auto"
+timeout_secs = 3
+"#,
+    )
+    .expect("parses");
+
+    let server = &cfg.mcp_servers[0];
+    assert!(server.enabled);
+    assert_eq!(server.expose_as, crate::mcp::McpExposeMode::Auto);
+    assert_eq!(server.timeout(), std::time::Duration::from_secs(3));
+    assert!(server.should_expose_tools());
+}
+
+#[test]
 fn codex_auth_token_from_file_prefers_api_key_then_access_token() {
     let dir = tempfile::tempdir().unwrap();
     let auth = dir.path().join("auth.json");
