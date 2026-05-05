@@ -23,6 +23,7 @@ use super::state::{ExtensionStateScope, ExtensionStateStore};
 use crate::config::DangerousCommandsConfig;
 use crate::hooks::{HookHandler, HookOutcome};
 use crate::memory::SessionStore;
+use crate::orchestration::OrchestrationHook;
 use crate::pause::PauseSender;
 use crate::provider::factory::ProviderFactory;
 use crate::provider::{ChatResponse, LLMProvider, Message, StreamEvent, ToolCall};
@@ -228,6 +229,13 @@ pub trait SessionExtension: Send + Sync {
         Vec::new()
     }
 
+    /// Typed orchestration hooks this session extension contributes.
+    /// GH issue #271 only emits delegation events today because typed
+    /// plan/step runtime objects do not exist yet.
+    fn orchestration_hooks(&self) -> Vec<Arc<dyn OrchestrationHook>> {
+        Vec::new()
+    }
+
     /// Commands this session extension contributes.
     fn commands(&self) -> Vec<Arc<dyn ExtensionCommand>> {
         Vec::new()
@@ -310,6 +318,10 @@ impl SessionExtensionRuntime {
                 }) as Arc<dyn Tool>
             })
             .collect()
+    }
+
+    pub fn orchestration_hooks(&self) -> Vec<Arc<dyn OrchestrationHook>> {
+        self.extension.orchestration_hooks()
     }
 }
 
