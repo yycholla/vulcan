@@ -12,6 +12,8 @@ use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
+use super::policy::{ExtensionPermission, PolicyDecision};
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InstallState {
     pub id: String,
@@ -29,6 +31,16 @@ pub struct TrustMarker {
     pub trusted_at: chrono::DateTime<chrono::Utc>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RuntimeAuditRecord {
+    pub extension_id: String,
+    pub requested_permission: Option<ExtensionPermission>,
+    pub decision: PolicyDecision,
+    pub allowed: bool,
+    pub failure_reason: Option<String>,
+    pub occurred_at: chrono::DateTime<chrono::Utc>,
+}
+
 pub trait InstallStateStore: Send + Sync {
     fn upsert(&self, state: &InstallState) -> Result<()>;
     fn get(&self, id: &str) -> Result<Option<InstallState>>;
@@ -36,6 +48,8 @@ pub trait InstallStateStore: Send + Sync {
     fn set_enabled(&self, id: &str, enabled: bool) -> Result<bool>;
     fn record_load_error(&self, id: &str, error: &str) -> Result<bool>;
     fn clear_load_error(&self, id: &str) -> Result<bool>;
+    fn record_runtime_audit(&self, record: &RuntimeAuditRecord) -> Result<()>;
+    fn list_runtime_audit(&self, id: &str, limit: usize) -> Result<Vec<RuntimeAuditRecord>>;
     fn remove(&self, id: &str) -> Result<bool>;
 }
 
@@ -104,6 +118,19 @@ impl SqliteInstallStateStore {
                 trusted_at        TEXT NOT NULL,
                 PRIMARY KEY (workspace_hash, extension_id)
             );
+
+            CREATE TABLE IF NOT EXISTS extension_runtime_audit (
+                id                   INTEGER PRIMARY KEY AUTOINCREMENT,
+                extension_id         TEXT NOT NULL,
+                requested_permission TEXT,
+                decision_json        TEXT NOT NULL,
+                allowed              INTEGER NOT NULL,
+                failure_reason       TEXT,
+                occurred_at          TEXT NOT NULL
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_extension_runtime_audit_ext_time
+                ON extension_runtime_audit(extension_id, occurred_at DESC);
             "#,
         )?;
         Ok(())
@@ -306,6 +333,71 @@ impl InstallStateStore for SqliteInstallStateStore {
         Ok(n > 0)
     }
 
+    fn record_runtime_audit(&self, record: &RuntimeAuditRecord) -> Result<()> {
+        let conn = self.conn.lock();
+        conn.execute(
+            "INSERT INTO extension_runtime_audit
+                (extension_id, requested_permission, decision_json, allowed, failure_reason, occurred_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                record.extension_id,
+                record.requested_permission.map(|p| p.as_str().to_string()),
+                serde_json::to_string(&record.decision)?,
+                record.allowed as i64,
+                record.failure_reason,
+                record.occurred_at.to_rfc3339(),
+            ],
+        )?;
+        Ok(())
+    }
+
+    fn list_runtime_audit(&self, id: &str, limit: usize) -> Result<Vec<RuntimeAuditRecord>> {
+        let conn = self.conn.lock();
+        let mut stmt = conn.prepare(
+            "SELECT extension_id, requested_permission, decision_json, allowed, failure_reason, occurred_at
+             FROM extension_runtime_audit
+             WHERE extension_id = ?1
+             ORDER BY occurred_at DESC, rowid DESC
+             LIMIT ?2",
+        )?;
+        let rows: Vec<_> = stmt
+            .query_map(params![id, limit as i64], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, Option<String>>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, i64>(3)?,
+                    row.get::<_, Option<String>>(4)?,
+                    row.get::<_, String>(5)?,
+                ))
+            })?
+            .collect::<Result<_, _>>()?;
+        rows.into_iter()
+            .map(
+                |(
+                    extension_id,
+                    permission,
+                    decision_json,
+                    allowed,
+                    failure_reason,
+                    occurred_at,
+                )| {
+                    let requested_permission =
+                        permission.as_deref().and_then(ExtensionPermission::parse);
+                    Ok(RuntimeAuditRecord {
+                        extension_id,
+                        requested_permission,
+                        decision: serde_json::from_str(&decision_json)?,
+                        allowed: allowed != 0,
+                        failure_reason,
+                        occurred_at: chrono::DateTime::parse_from_rfc3339(&occurred_at)?
+                            .with_timezone(&chrono::Utc),
+                    })
+                },
+            )
+            .collect()
+    }
+
     fn remove(&self, id: &str) -> Result<bool> {
         let conn = self.conn.lock();
         let n = conn.execute("DELETE FROM install_state WHERE id = ?1", params![id])?;
@@ -367,7 +459,7 @@ mod tests {
         let s = fixture();
         store.upsert(&s).unwrap();
         assert!(store.set_enabled(&s.id, false).unwrap());
-        assert_eq!(store.get(&s.id).unwrap().unwrap().enabled, false);
+        assert!(!store.get(&s.id).unwrap().unwrap().enabled);
     }
 
     #[test]
@@ -387,6 +479,30 @@ mod tests {
         );
         assert!(store.clear_load_error(&s.id).unwrap());
         assert!(store.get(&s.id).unwrap().unwrap().last_load_error.is_none());
+    }
+
+    #[test]
+    fn runtime_audit_records_policy_decisions() {
+        let store = SqliteInstallStateStore::try_open_in_memory().unwrap();
+        let record = RuntimeAuditRecord {
+            extension_id: "tooler".into(),
+            requested_permission: Some(ExtensionPermission::ToolRegistration),
+            decision: PolicyDecision::Deny {
+                reason: "missing declaration".into(),
+            },
+            allowed: false,
+            failure_reason: Some("missing declaration".into()),
+            occurred_at: chrono::Utc::now(),
+        };
+        store.record_runtime_audit(&record).unwrap();
+        let listed = store.list_runtime_audit("tooler", 10).unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(
+            listed[0].requested_permission,
+            Some(ExtensionPermission::ToolRegistration)
+        );
+        assert!(!listed[0].allowed);
+        assert!(matches!(listed[0].decision, PolicyDecision::Deny { .. }));
     }
 
     #[test]

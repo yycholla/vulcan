@@ -23,6 +23,7 @@ pub enum ExtensionPermission {
     SecretAccess,
     McpLaunch,
     PersistentState,
+    ToolRegistration,
 }
 
 impl ExtensionPermission {
@@ -36,6 +37,7 @@ impl ExtensionPermission {
             ExtensionPermission::SecretAccess => "secret_access",
             ExtensionPermission::McpLaunch => "mcp_launch",
             ExtensionPermission::PersistentState => "persistent_state",
+            ExtensionPermission::ToolRegistration => "tool_registration",
         }
     }
 
@@ -49,6 +51,7 @@ impl ExtensionPermission {
             "secret_access" => Some(ExtensionPermission::SecretAccess),
             "mcp_launch" => Some(ExtensionPermission::McpLaunch),
             "persistent_state" => Some(ExtensionPermission::PersistentState),
+            "tool_registration" => Some(ExtensionPermission::ToolRegistration),
             _ => None,
         }
     }
@@ -66,6 +69,7 @@ impl ExtensionPermission {
                 | ExtensionPermission::ProcessSpawn
                 | ExtensionPermission::SecretAccess
                 | ExtensionPermission::McpLaunch
+                | ExtensionPermission::ToolRegistration
         )
     }
 }
@@ -261,6 +265,7 @@ mod tests {
             ExtensionPermission::SecretAccess,
             ExtensionPermission::McpLaunch,
             ExtensionPermission::PersistentState,
+            ExtensionPermission::ToolRegistration,
         ] {
             let s = p.as_str();
             assert_eq!(ExtensionPermission::parse(s), Some(p));

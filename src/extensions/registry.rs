@@ -197,6 +197,21 @@ impl ExtensionRegistry {
         }
     }
 
+    /// GH issue #273: sandbox runtime failures should disable only the
+    /// extension, record a visible load error, and keep the Vulcan
+    /// process alive.
+    pub fn record_runtime_failure(
+        &self,
+        id: &str,
+        reason: impl Into<String>,
+        install_state: &dyn super::install_state::InstallStateStore,
+    ) -> bool {
+        let reason = reason.into();
+        let marked = self.mark_broken(id, reason.clone());
+        let _ = install_state.record_load_error(id, &reason);
+        marked
+    }
+
     fn sort_in_place(items: &mut [ExtensionMetadata]) {
         items.sort_by(|a, b| {
             b.core
@@ -1137,6 +1152,41 @@ kind = "builtin"
             .unwrap()
             .unwrap();
         assert!(state.last_load_error.is_some());
+    }
+
+    #[test]
+    fn runtime_failure_marks_extension_broken_and_records_error() {
+        let install =
+            crate::extensions::install_state::SqliteInstallStateStore::try_open_in_memory()
+                .unwrap();
+        crate::extensions::install_state::InstallStateStore::upsert(
+            &install,
+            &crate::extensions::install_state::InstallState {
+                id: "wasm-helper".into(),
+                version: "0.1.0".into(),
+                enabled: true,
+                installed_at: chrono::Utc::now(),
+                last_load_error: None,
+            },
+        )
+        .unwrap();
+        let reg = ExtensionRegistry::new();
+        let mut metadata = meta("wasm-helper", 10);
+        metadata.status = ExtensionStatus::Active;
+        reg.upsert(metadata);
+
+        assert!(reg.record_runtime_failure("wasm-helper", "missing _vulcan_init", &install));
+        let got = reg.get("wasm-helper").unwrap();
+        assert_eq!(got.status, ExtensionStatus::Broken);
+        assert_eq!(got.broken_reason.as_deref(), Some("missing _vulcan_init"));
+        let state =
+            crate::extensions::install_state::InstallStateStore::get(&install, "wasm-helper")
+                .unwrap()
+                .unwrap();
+        assert_eq!(
+            state.last_load_error.as_deref(),
+            Some("missing _vulcan_init")
+        );
     }
 
     #[test]
