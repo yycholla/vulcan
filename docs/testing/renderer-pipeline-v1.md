@@ -44,6 +44,13 @@ the automated renderer tests pass.
 - [ ] Failed preview generation does not block normal chat rendering.
 - [ ] Media placeholders show useful alt text or path context.
 
+## LaTeX Decision
+
+- [ ] Inline and display math stay readable without requiring a full LaTeX engine.
+- [ ] Full `.tex` document rendering is not present in the default build.
+- [ ] The LaTeX decision note documents the deferred sidecar requirements.
+- [ ] No `render-latex` feature or LaTeX runtime dependency is required for Renderer Pipeline v1.
+
 ## CLI And Non-TUI Output
 
 - [ ] CLI output paths using rendered Markdown still produce readable plain/ANSI output.
