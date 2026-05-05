@@ -25,6 +25,7 @@ pub mod install_state;
 pub mod manifest;
 pub mod policy;
 pub mod registry;
+pub mod repository;
 pub mod runtime;
 pub mod state;
 pub mod store;
@@ -45,6 +46,12 @@ pub use install_state::{
 pub use manifest::{EntryKind, ExtensionManifest, ManifestError};
 pub use policy::{ExtensionPermission, ExtensionPolicyEngine, PolicyDecision};
 pub use registry::{CodeExtension, ExtensionInventoryRow, ExtensionRegistry};
+pub use repository::{
+    InstalledExtension, PublisherMetadata, RepositoryCacheFailure, RepositoryCacheSnapshot,
+    RepositoryCompatibility, RepositoryConfig, RepositoryError, RepositoryExtension,
+    RepositoryIndex, RepositoryMetadata, RepositorySearch, RepositorySearchResult,
+    RepositoryTrustMetadata, UpdatePlanEntry, UpdatePlanRequest, UpdateStatus, load_cached_indexes,
+};
 pub use runtime::{
     ExtensionRuntime, ExtensionRuntimeCapability, ExtensionRuntimeCtx, ExtensionRuntimeDecision,
     ExtensionRuntimeError, ExtensionRuntimeInit, ExtensionRuntimeKind, ExtensionRuntimeLimits,
