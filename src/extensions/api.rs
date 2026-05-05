@@ -19,6 +19,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use super::ExtensionMetadata;
 use super::FrontendCapability;
+use super::state::{ExtensionStateScope, ExtensionStateStore};
 use crate::config::DangerousCommandsConfig;
 use crate::hooks::{HookHandler, HookOutcome};
 use crate::memory::SessionStore;
@@ -73,6 +74,9 @@ pub struct SessionExtensionCtx {
     pub frontend_extensions: Vec<vulcan_frontend_api::FrontendExtensionDescriptor>,
     /// Push channel for daemon extensions to emit frontend events.
     pub frontend_events: FrontendEventSink,
+    /// Durable extension-owned state store. Extensions access it through
+    /// `state()` so all operations are scoped to their own extension id.
+    pub extension_state: Option<Arc<dyn ExtensionStateStore>>,
     /// The daemon extension id this context is currently scoped to.
     pub extension_id: Option<String>,
 }
@@ -89,6 +93,7 @@ impl SessionExtensionCtx {
             frontend_capabilities: FrontendCapability::text_only(),
             frontend_extensions: Vec::new(),
             frontend_events: FrontendEventSink::default(),
+            extension_state: None,
             extension_id: None,
         }
     }
@@ -125,6 +130,24 @@ impl SessionExtensionCtx {
     pub fn with_dangerous_commands(mut self, dangerous_commands: DangerousCommandsConfig) -> Self {
         self.dangerous_commands = dangerous_commands;
         self
+    }
+
+    pub fn with_extension_state_store(
+        mut self,
+        extension_state: Option<Arc<dyn ExtensionStateStore>>,
+    ) -> Self {
+        self.extension_state = extension_state;
+        self
+    }
+
+    pub fn state(&self) -> Result<ExtensionStateScope> {
+        let Some(extension_id) = &self.extension_id else {
+            anyhow::bail!("extension state requires extension-scoped context");
+        };
+        let Some(store) = &self.extension_state else {
+            anyhow::bail!("extension state store is unavailable");
+        };
+        store.scope(extension_id)
     }
 
     pub fn emit_frontend_event(&self, payload: Value) -> Result<()> {
@@ -715,6 +738,24 @@ mod tests {
         let captured = seen.read().clone().expect("instantiate ran");
         assert_eq!(captured.0, PathBuf::from("/tmp/example-session"));
         assert_eq!(captured.1, "sess-42");
+    }
+
+    #[test]
+    fn extension_state_requires_scoped_context_and_uses_extension_id() {
+        let store: Arc<dyn ExtensionStateStore> =
+            Arc::new(super::super::SqliteExtensionStateStore::try_open_in_memory().unwrap());
+        let ctx = test_ctx().with_extension_state_store(Some(store));
+        assert!(ctx.state().is_err());
+
+        let scoped = ctx.for_extension("stateful-ext").state().unwrap();
+        scoped
+            .put_json("draft", &serde_json::json!({"step": 2}))
+            .unwrap();
+        assert_eq!(
+            scoped.get_json("draft").unwrap(),
+            Some(serde_json::json!({"step": 2}))
+        );
+        assert_eq!(scoped.extension_id(), "stateful-ext");
     }
 
     #[test]
