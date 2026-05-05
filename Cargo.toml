@@ -136,6 +136,7 @@ termwiz = "0.23.3"
 figlet-rs = "1.0.0"
 tui-textarea = { version = "0.10.2", package = "tui-textarea-2", default-features = false, features = ["no-backend"] }
 unicode-width = "0.2"
+pulldown-cmark = "0.13.0"
 # YYC-287: lightweight ANSI terminal colors for styled CLI output
 # (config list/show/get, doctor, trust, etc.). Zero transitive deps.
 owo-colors = "4"
