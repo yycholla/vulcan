@@ -10,10 +10,20 @@ use serde::{Deserialize, Serialize};
 
 pub mod client;
 pub mod process;
+pub mod resources;
+pub mod sampling;
+pub mod supervisor;
 pub mod tool_adapter;
 
 pub use client::{McpClient, McpContent, McpTool, McpToolCallResult};
 pub use process::{McpServerHandle, connect_configured_servers};
+pub use resources::{McpResourceTemplate, SafeMcpResourceTemplate};
+pub use sampling::{
+    McpPolicyAuditRecord, McpSamplingDecision, McpSamplingPolicy, McpSamplingRequest,
+};
+pub use supervisor::{
+    McpRestartPolicy, McpServerHealth, McpSupervisorSnapshot, McpSupervisorState,
+};
 pub use tool_adapter::McpToolAdapter;
 
 fn default_timeout_secs() -> u64 {
@@ -36,9 +46,12 @@ pub struct McpServerConfig {
     pub command: String,
     pub args: Vec<String>,
     pub env: HashMap<String, String>,
+    pub managed: bool,
     pub enabled: bool,
     pub expose_as: McpExposeMode,
     pub timeout_secs: u64,
+    pub restart: McpRestartPolicy,
+    pub sampling: McpSamplingPolicy,
 }
 
 impl Default for McpServerConfig {
@@ -48,9 +61,12 @@ impl Default for McpServerConfig {
             command: String::new(),
             args: Vec::new(),
             env: HashMap::new(),
+            managed: false,
             enabled: false,
             expose_as: McpExposeMode::Disabled,
             timeout_secs: default_timeout_secs(),
+            restart: McpRestartPolicy::default(),
+            sampling: McpSamplingPolicy::default(),
         }
     }
 }
@@ -62,6 +78,10 @@ impl McpServerConfig {
 
     pub fn should_expose_tools(&self) -> bool {
         self.enabled && self.expose_as == McpExposeMode::Auto
+    }
+
+    pub fn should_supervise(&self) -> bool {
+        self.enabled && self.managed
     }
 
     pub fn validate(&self) -> anyhow::Result<()> {
@@ -121,5 +141,13 @@ mod tests {
             namespaced_tool_name("local-db", "query.table"),
             "mcp_local_db_query_table"
         );
+    }
+
+    #[test]
+    fn managed_server_defaults_are_inert() {
+        let config = McpServerConfig::default();
+        assert!(!config.should_supervise());
+        assert!(!config.sampling.enabled);
+        assert_eq!(config.restart.max_restarts, 3);
     }
 }

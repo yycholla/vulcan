@@ -5,6 +5,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
+use super::resources::McpResourceTemplate;
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct McpTool {
     pub name: String,
@@ -76,6 +78,18 @@ where
 
         let result: ToolsResult = self.request("tools/list", json!({})).await?;
         Ok(result.tools)
+    }
+
+    pub async fn list_resource_templates(&mut self) -> Result<Vec<McpResourceTemplate>> {
+        #[derive(Deserialize)]
+        struct ResourceTemplatesResult {
+            #[serde(default, rename = "resourceTemplates")]
+            resource_templates: Vec<McpResourceTemplate>,
+        }
+
+        let result: ResourceTemplatesResult =
+            self.request("resources/templates/list", json!({})).await?;
+        Ok(result.resource_templates)
     }
 
     pub async fn call_tool(&mut self, name: &str, arguments: Value) -> Result<McpToolCallResult> {
@@ -289,6 +303,41 @@ mod tests {
             .unwrap();
         assert!(!result.is_error);
         assert_eq!(result.content[0].text.as_deref(), Some("hello"));
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn client_lists_resource_templates() {
+        let (client_side, server_side) = duplex(4096);
+        let (client_read, client_write) = tokio::io::split(client_side);
+        let (server_read, mut server_write) = tokio::io::split(server_side);
+        let mut server_reader = BufReader::new(server_read);
+
+        let server = tokio::spawn(async move {
+            let list = read_frame(&mut server_reader).await.unwrap();
+            assert_eq!(list["method"], "resources/templates/list");
+            write_frame(
+                &mut server_write,
+                &json!({
+                    "jsonrpc": "2.0",
+                    "id": list["id"],
+                    "result": {
+                        "resourceTemplates": [{
+                            "uriTemplate": "file:///{path}",
+                            "name": "Files",
+                            "mimeType": "text/plain"
+                        }]
+                    }
+                }),
+            )
+            .await
+            .unwrap();
+        });
+
+        let mut client = McpClient::new(BufReader::new(client_read), client_write);
+        let templates = client.list_resource_templates().await.unwrap();
+        assert_eq!(templates.len(), 1);
+        assert_eq!(templates[0].uri_template, "file:///{path}");
         server.await.unwrap();
     }
 }

@@ -9,7 +9,9 @@ use crate::tools::{Tool, ToolRegistry};
 
 use super::client::McpClient;
 use super::tool_adapter::McpToolAdapter;
-use super::{McpServerConfig, McpTool};
+use super::{
+    McpResourceTemplate, McpServerConfig, McpSupervisorSnapshot, McpSupervisorState, McpTool,
+};
 
 type StdioClient = McpClient<BufReader<ChildStdout>, ChildStdin>;
 
@@ -17,6 +19,8 @@ pub struct McpServerHandle {
     name: String,
     client: Mutex<StdioClient>,
     tools: Vec<McpTool>,
+    resource_templates: Vec<McpResourceTemplate>,
+    supervisor: Mutex<McpSupervisorState>,
     _child: Child,
     timeout: std::time::Duration,
 }
@@ -24,6 +28,12 @@ pub struct McpServerHandle {
 impl McpServerHandle {
     pub async fn spawn(config: &McpServerConfig) -> Result<Self> {
         config.validate()?;
+        let mut supervisor = if config.should_supervise() {
+            McpSupervisorState::new(config.name.clone(), config.restart.clone())
+        } else {
+            McpSupervisorState::disabled(config.name.clone(), config.restart.clone())
+        };
+        supervisor.mark_starting();
         let mut command = Command::new(&config.command);
         command
             .args(&config.args)
@@ -52,11 +62,33 @@ impl McpServerHandle {
         let tools = tokio::time::timeout(config.timeout(), client.list_tools())
             .await
             .with_context(|| format!("MCP server `{}` tools/list timed out", config.name))??;
+        let resource_templates =
+            match tokio::time::timeout(config.timeout(), client.list_resource_templates()).await {
+                Ok(Ok(templates)) => templates,
+                Ok(Err(err)) => {
+                    tracing::debug!(
+                        server = config.name.as_str(),
+                        %err,
+                        "MCP server did not provide resource templates"
+                    );
+                    Vec::new()
+                }
+                Err(_) => {
+                    tracing::debug!(
+                        server = config.name.as_str(),
+                        "MCP server resource template discovery timed out"
+                    );
+                    Vec::new()
+                }
+            };
+        supervisor.mark_healthy();
 
         Ok(Self {
             name: config.name.clone(),
             client: Mutex::new(client),
             tools,
+            resource_templates,
+            supervisor: Mutex::new(supervisor),
             _child: child,
             timeout: config.timeout(),
         })
@@ -70,6 +102,14 @@ impl McpServerHandle {
         &self.tools
     }
 
+    pub fn resource_templates(&self) -> &[McpResourceTemplate] {
+        &self.resource_templates
+    }
+
+    pub async fn health(&self) -> McpSupervisorSnapshot {
+        self.supervisor.lock().await.snapshot()
+    }
+
     pub async fn call_tool(
         &self,
         tool_name: &str,
@@ -80,6 +120,10 @@ impl McpServerHandle {
             .await
             .with_context(|| format!("MCP tool `{}`.`{tool_name}` timed out", self.name))?
     }
+}
+
+pub fn disabled_supervisor_snapshot(config: &McpServerConfig) -> McpSupervisorSnapshot {
+    McpSupervisorState::disabled(config.name.clone(), config.restart.clone()).snapshot()
 }
 
 pub async fn connect_configured_servers(
@@ -123,7 +167,7 @@ pub async fn connect_configured_servers(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::mcp::McpExposeMode;
+    use crate::mcp::{McpExposeMode, McpRestartPolicy, McpSamplingPolicy, McpServerHealth};
     use std::collections::HashMap;
 
     #[tokio::test]
@@ -133,9 +177,12 @@ mod tests {
             command: "vulcan-missing-mcp-server-command-for-test".to_string(),
             args: Vec::new(),
             env: HashMap::new(),
+            managed: true,
             enabled: true,
             expose_as: McpExposeMode::Auto,
             timeout_secs: 1,
+            restart: McpRestartPolicy::default(),
+            sampling: McpSamplingPolicy::default(),
         };
 
         let err = match McpServerHandle::spawn(&config).await {
@@ -144,5 +191,24 @@ mod tests {
         };
         let msg = err.to_string();
         assert!(msg.contains("failed to start MCP server `missing`"));
+    }
+
+    #[test]
+    fn disabled_server_has_status_snapshot() {
+        let config = McpServerConfig {
+            name: "disabled".to_string(),
+            command: "mcp-server".to_string(),
+            args: Vec::new(),
+            env: HashMap::new(),
+            managed: true,
+            enabled: false,
+            expose_as: McpExposeMode::Disabled,
+            timeout_secs: 1,
+            restart: McpRestartPolicy::default(),
+            sampling: McpSamplingPolicy::default(),
+        };
+        let snapshot = disabled_supervisor_snapshot(&config);
+        assert_eq!(snapshot.health, McpServerHealth::Disabled);
+        assert_eq!(snapshot.server_id, "disabled");
     }
 }
