@@ -35,6 +35,7 @@ pub mod gateway;
 pub mod hooks;
 pub mod impact;
 pub mod knowledge;
+pub mod mcp;
 pub mod memory;
 pub mod observability;
 pub mod orchestration;

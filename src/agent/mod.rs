@@ -91,6 +91,7 @@ pub struct Agent {
     pub(in crate::agent) prompt_builder: PromptBuilder,
     pub(in crate::agent) hooks: Arc<HookRegistry>,
     pub(in crate::agent) session_extensions: Vec<crate::extensions::api::SessionExtensionRuntime>,
+    pub(in crate::agent) _mcp_servers: Vec<Arc<crate::mcp::McpServerHandle>>,
     pub(in crate::agent) session_id: String,
     pub(in crate::agent) turns: u32,
     /// Per-turn cancellation token. `cancel_current_turn()` fires it; the
@@ -556,6 +557,15 @@ impl Agent {
             );
         }
 
+        let mcp_servers =
+            crate::mcp::connect_configured_servers(&config.mcp_servers, &mut tools).await;
+        if !mcp_servers.is_empty() {
+            tracing::info!(
+                mcp_servers = mcp_servers.len(),
+                "Agent: connected configured MCP servers"
+            );
+        }
+
         // YYC-264: embedded cortex-memory-core graph memory. When enabled,
         // registers two hooks:
         //   1. CortexRecallHook — BeforePrompt: semantically searches the graph
@@ -691,6 +701,7 @@ impl Agent {
             prompt_builder: PromptBuilder,
             hooks: Arc::new(hooks),
             session_extensions,
+            _mcp_servers: mcp_servers,
             session_id,
             turns: 0,
             turn_cancel: CancellationToken::new(),
@@ -900,6 +911,7 @@ impl Agent {
             prompt_builder: PromptBuilder,
             hooks: Arc::new(hooks),
             session_extensions: Vec::new(),
+            _mcp_servers: Vec::new(),
             session_id: Uuid::new_v4().to_string(),
             turns: 0,
             turn_cancel: CancellationToken::new(),
