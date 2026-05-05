@@ -368,7 +368,7 @@ fn continuation_prefix(spans: &[Span<'static>], width: usize) -> Option<Continua
         Some(Span::styled(content.to_string(), first.style))
     } else if content.starts_with(" │") {
         Some(Span::styled(" │", first.style))
-    } else if content == "• " {
+    } else if matches!(content, "• " | "☑ " | "☐ ") {
         Some(Span::styled("  ", first.style))
     } else if is_ordered_list_marker(content) {
         Some(Span::styled(
