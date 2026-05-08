@@ -1,0 +1,85 @@
+when:
+  - event: ["push", "manual"]
+    branch: ["main"]
+  - event: ["pull_request"]
+    branch: ["main"]
+
+engine: "nixery"
+
+clone:
+  skip: false
+  depth: 1
+  submodules: false
+
+dependencies:
+  nixpkgs:
+    - bash
+    - coreutils
+    - findutils
+    - git
+    - gnugrep
+    - gnused
+    - cacert
+    - pkg-config
+    - openssl
+    - rustc
+    - cargo
+    - rustfmt
+    - clippy
+
+environment:
+  CARGO_TERM_COLOR: "always"
+  RUSTFLAGS: "-D warnings"
+
+steps:
+  - name: "Show Rust environment"
+    command: |
+      set -euo pipefail
+      rustc --version
+      cargo --version
+      cargo fmt --version
+      cargo clippy --version
+      echo "pipeline: ${TANGLED_PIPELINE_ID}"
+      echo "repo: ${TANGLED_REPO_URL}"
+      echo "sha: ${TANGLED_SHA:-manual-or-pr}"
+
+  - name: "Format check"
+    command: |
+      set -euo pipefail
+      cargo fmt --all -- --check
+
+  - name: "Build default features"
+    command: |
+      set -euo pipefail
+      cargo build --all-targets
+
+  - name: "Build gateway feature"
+    command: |
+      set -euo pipefail
+      cargo build --all-targets --features gateway
+
+  - name: "Test default features"
+    command: |
+      set -euo pipefail
+      cargo test --lib --bins --tests
+
+  - name: "Test gateway feature"
+    command: |
+      set -euo pipefail
+      cargo test --lib --bins --tests --features gateway
+
+  - name: "Doc tests"
+    command: |
+      set -euo pipefail
+      cargo test --doc
+      cargo test --doc --features gateway
+
+  - name: "Clippy informational"
+    command: |
+      set +e
+      cargo clippy --all-targets --all-features
+      code=$?
+      if [ "$code" -ne 0 ]; then
+        echo "clippy reported warnings/errors; keeping this informational to match GitHub CI baseline"
+      fi
+      exit 0
