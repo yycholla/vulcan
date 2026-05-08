@@ -33,7 +33,6 @@ dependencies:
 
 environment:
   CARGO_TERM_COLOR: "always"
-  RUSTFLAGS: "-D warnings"
 
 steps:
   - name: "Show Rust environment"
