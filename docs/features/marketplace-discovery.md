@@ -17,7 +17,7 @@ Make the extension store a living, self-sustaining ecosystem.
 ## Dependency Resolution
 
 - **Versioned deps**: Resolve extension-to-extension and library dependencies, warn on conflicts.
-- **Platform constraints**: Filter incompatible extensions by OS/architecture/runtime.
+- **Runtime-class filtering**: Show whether a package runs as `wasm`, `subprocess`, `mcp`, or `native_first_party`; marketplace listings must not imply arbitrary native third-party code is the default extension model.
 - **Semantic upgrades**: Safe minor/patch upgrades, semver-aware breaking-change warnings.
 
 ## Usage Analytics & Reputation (opt-in)
@@ -36,6 +36,7 @@ Make the extension store a living, self-sustaining ecosystem.
 - **Org/person verification**: Proof of ownership of GitHub repo or domain.
 - **Curated collections**: Official and community-curated lists (e.g., "Security", "Data engineering").
 - **Automated scans**: Display scan status (passed/failed) for each published extension.
+- **Capability and audit summary**: Display requested filesystem/network/process/MCP access, approval requirements, resource limits, and the latest activation/denial audit status before install or enable.
 
 ---
 
@@ -46,6 +47,13 @@ Make the extension store a living, self-sustaining ecosystem.
   "id": "memory@redis",
   "name": "Redis Memory Backend",
   "version": "1.0.2",
+  "runtime_class": "wasm",
+  "capabilities": {
+    "tools": ["memory_redis_query"],
+    "network": ["redis.internal:6379"],
+    "filesystem": "none",
+    "process": "none"
+  },
   "publisher": { "id": "acme", "verified": true },
   "downloads_last_30d": 3124,
   "rating": 4.7,

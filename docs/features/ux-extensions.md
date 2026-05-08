@@ -22,7 +22,7 @@ Extensions can render interactive terminal UI panels so users can inspect state 
 
 Optional companion web UI (served locally or remotely) to manage extensions.
 
-- **Inventory**: Installed extensions, versions, publishers, and signatures.
+- **Inventory**: Installed extensions, versions, runtime class, publishers, signatures, requested capabilities, and latest activation/audit status.
 - **Config editor**: Schema-driven forms for extension configuration.
 - **Usage & Logs**: Per-extension logs, token usage, event counts.
 - **Enable/disable & updates**: One-click enable/disable, version pinning, updates.

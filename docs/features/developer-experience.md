@@ -13,7 +13,7 @@ Make building, testing, and distributing extensions as easy as possible.
 
 A unified CLI for the extension lifecycle.
 
-- `vulcan extension new <name>` — Scaffold a new extension (choose language/target: rust/wasm/js/py). Generates manifest, stub trait impl, CI template, README.
+- `vulcan extension new <name>` — Scaffold a new extension (choose runtime class: wasm for third-party managed code, subprocess for local scripts/tools, mcp for protocol bridges, or native_first_party for trusted internal cargo-crate work). Generates manifest, stub runtime entry, CI template, README.
 - `vulcan extension build` — Build for selected target(s); produce `.vpk` packages.
 - `vulcan extension test` — Spin up an isolated sandbox agent and run integration tests against extension hooks.
 - `vulcan extension run` — Run extension in local dev agent with hot reload (watch and reload on changes).
@@ -31,8 +31,8 @@ A test harness that implements `ExtensionContext` for unit and integration testi
 ## Live Debugging & Hot Reload
 
 - **WASM**: Restart Wasmtime instance without restarting the host process; preserve minimal state across reloads.
-- **Native (dev mode)**: Allow loading debug `.so`/`.dylib` from `target/debug/` and auto-reload when file changes (on platforms that support it safely).
-- **Scripting**: Evaluate updated JS/Python modules in place.
+- **Native first-party (dev mode)**: Allow trusted internal cargo-crate extension debugging. Loading debug `.so`/`.dylib` from `target/debug/` remains an internal experiment only, not a marketplace or third-party path.
+- **Scripting**: Reload subprocess adapter commands or WASM components; generalized in-process JS/Python embedding is deferred.
 - **Attach debugger**: Debuginfo for native extensions; console + simple step-through UI for WASM.
 
 ## Templates & Starters

@@ -1,6 +1,6 @@
 # Extensions — Context
 
-Pi-mono–style extension system. Daemon-side and frontend-side extensions distribute as Cargo crates, register via `inventory`, instantiate per **Session** (daemon side) or per **Frontend** process (frontend side). The current registry (`src/extensions/registry.rs`) is the metadata and code-extension foundation; the daemon/frontend split, wide event bus, and lifecycle policy land via the PRD at GitHub issue #548.
+Pi-mono–style extension system. Daemon-side and frontend-side native extensions distribute as Cargo crates, register via `inventory`, instantiate per **Session** (daemon side) or per **Frontend** process (frontend side). This native cargo-crate model is the trusted first-party/internal rung of the [Extension Runtime Trust Ladder](../../docs/features/extension-runtime-trust-ladder.md), not the third-party sandbox or marketplace default. The current registry (`src/extensions/registry.rs`) is the metadata and code-extension foundation; the daemon/frontend split, wide event bus, and lifecycle policy land via the PRD at GitHub issue #548.
 
 ## Glossary
 
@@ -17,7 +17,7 @@ A per-**Frontend**-process registration that owns rendering, custom canvases, ra
 _Avoid_: TUI hook, daemon renderer
 
 **Extension Manifest**:
-A package-level metadata block (`[package.metadata.vulcan]`) declaring an extension's id, version, capabilities, and optional `daemon_entry` / `frontend_entry` registration symbols. Either entry may be absent for pure-daemon (e.g. auto-commit) or pure-frontend (e.g. DOOM) extensions.
+A package-level metadata block (`[package.metadata.vulcan]`) declaring an extension's id, version, runtime class, capabilities, requested external access, and optional `daemon_entry` / `frontend_entry` registration symbols. Either entry may be absent for pure-daemon (e.g. auto-commit) or pure-frontend (e.g. DOOM) extensions. Marketplace manifests must identify the runtime class (`wasm`, `subprocess`, `mcp`, or `native_first_party`) before install or activation.
 _Avoid_: extension config, package.json
 
 **Frontend Capability**:
