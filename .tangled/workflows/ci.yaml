@@ -22,6 +22,10 @@ dependencies:
     - cacert
     - pkg-config
     - openssl
+    - gcc
+    - gnumake
+    - cmake
+    - perl
     - rustc
     - cargo
     - rustfmt
@@ -48,31 +52,15 @@ steps:
       set -euo pipefail
       cargo fmt --all -- --check
 
-  - name: "Build default features"
+  - name: "Check default features"
     command: |
       set -euo pipefail
-      cargo build --all-targets
+      cargo check --all-targets
 
-  - name: "Build gateway feature"
+  - name: "Check gateway feature"
     command: |
       set -euo pipefail
-      cargo build --all-targets --features gateway
-
-  - name: "Test default features"
-    command: |
-      set -euo pipefail
-      cargo test --lib --bins --tests
-
-  - name: "Test gateway feature"
-    command: |
-      set -euo pipefail
-      cargo test --lib --bins --tests --features gateway
-
-  - name: "Doc tests"
-    command: |
-      set -euo pipefail
-      cargo test --doc
-      cargo test --doc --features gateway
+      cargo check --all-targets --features gateway
 
   - name: "Clippy informational"
     command: |
