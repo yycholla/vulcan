@@ -64,7 +64,7 @@ Extensions live in `~/.vulcan/extensions/`. The `ExtensionRegistry` mirrors `Ski
 
 ## Future: code-backed extensions
 
-The long-term vision (Phase 3 per the master plan) is for extensions to have compiled Rust hook handlers — either in-tree (built into the binary) or dynamically loaded. This mirrors the OpenClaw plugin architecture referenced in [`~/wiki/queries/rust-hermes-plan.md`](../../wiki/queries/rust-hermes-plan.md).
+The long-term vision (Phase 3 per the master plan) is for extensions to have compiled Rust hook handlers for trusted first-party/internal code. This native cargo-crate path is not a sandbox boundary and is not the default third-party marketplace runtime; see the [Extension Runtime Trust Ladder](./extension-runtime-trust-ladder.md). Third-party code that needs a Vulcan-managed runtime should target WASM/Wasmtime, while local scripts and external services should cross subprocess or MCP boundaries.
 
 ```rust
 // Future Extension trait sketch
@@ -91,6 +91,6 @@ Skills use the hook system indirectly via `SkillsHook`. Extensions use it direct
 
 ## Future: dynamic extension store
 
-The long-term vision for packaged, installable extensions with cryptographic signing, sandboxed runtimes (WASM, native dynamic libraries, scripting), and a remote repository index is documented separately in [`docs/features/extension-store.md`](./extension-store.md).
+The long-term vision for packaged, installable extensions with cryptographic signing, sandboxed WASM runtimes, subprocess/MCP adapters, runtime-class metadata, and a remote repository index is documented separately in [`docs/features/extension-store.md`](./extension-store.md). Native dynamic loading is restricted to trusted first-party/internal experiments and is not the default store path.
 
 The promotion path described here (skill→draft extension→code extension) feeds into that system: a promoted code extension is the same `Extension` trait that the store's dynamic loaders ultimately instantiate.

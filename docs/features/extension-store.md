@@ -1,6 +1,6 @@
 # Extension Store / Repository — Design & Implementation Plan
 
-This document describes how to add an extension store and repository system to Vulcan, enabling third-party extensions to be discovered, installed, verified, and loaded safely at runtime.
+This document describes how to add an extension store and repository system to Vulcan, enabling third-party extensions to be discovered, installed, verified, and loaded safely at runtime. Store and marketplace work follows the [Extension Runtime Trust Ladder](./extension-runtime-trust-ladder.md): first-party/internal code may use native cargo-crate extensions, third-party code defaults to WASM/Wasmtime, external tools cross subprocess or MCP boundaries, and inference/deployment stacks remain external backend endpoints.
 
 > **Prerequisite context:** See [`docs/features/extensions.md`](./extensions.md) for the lighter-weight skill→extension promotion path that feeds into this system. This document assumes extensions already exist as a concept and focuses on the packaging, distribution, and dynamic-loading infrastructure.
 
@@ -57,8 +57,8 @@ pub enum Capability {
 ```
 my-extension/
 ├── extension.toml          # Manifest (required)
-├── extension.wasm          # Or .so/.dylib/.dll (compiled)
-├── extension.js            # Or .py (scripted)
+├── extension.wasm          # Preferred third-party managed runtime
+├── adapter.sh              # Optional subprocess adapter for local tools/scripts
 ├── schema.json             # Tool/API schemas
 ├── README.md
 └── LICENSE
@@ -73,12 +73,25 @@ version = "1.0.0"
 description = "Store agent memory in Redis"
 author = "Jane Doe"
 license = "MIT"
-language = "rust"            # or "wasm", "js", "python"
-entry = "libmemory_redis.so" # or "extension.wasm"
+language = "wasm"                  # preferred third-party managed runtime
+runtime_class = "wasm"             # wasm | subprocess | mcp | native_first_party
+entry = "extension.wasm"
 signature = "sha256:abc123..."
+
+[trust]
+publisher = "verified-publisher-id"
+source = "marketplace"
+checksum = "sha256:abc123..."
 
 [capabilities]
 memory_backend = "redis"
+filesystem = "none"
+network = ["redis.internal:6379"]
+process = "none"
+
+[audit]
+record_activation = true
+record_denied_capabilities = true
 
 [dependencies]
 redis = "0.23"
@@ -112,6 +125,10 @@ pub struct ExtensionRecord {
     pub signature: String,            // GPG/ed25519 signature
     pub min_vulcan_version: Option<String>,
     pub max_vulcan_version: Option<String>,
+    pub runtime_class: RuntimeClass,       // wasm | subprocess | mcp | native_first_party
+    pub publisher_trust: PublisherTrust,
+    pub required_capabilities: Vec<Capability>,
+    pub audit_requirements: AuditRequirements,
 }
 ```
 
@@ -165,12 +182,12 @@ impl ExtensionStore {
     pub fn load(&self, id: &str) -> Result<()> {
         let manifest = self.read_manifest(id)?;
 
-        match manifest.language.as_str() {
-            "rust"  => self.load_native(id, &manifest),
-            "wasm"  => self.load_wasm(id, &manifest),
-            "js"    => self.load_javascript(id, &manifest),
-            "python" => self.load_python(id, &manifest),
-            _ => anyhow::bail!("Unsupported language"),
+        match manifest.runtime_class.as_str() {
+            "wasm" => self.load_wasm(id, &manifest),
+            "subprocess" => self.load_subprocess_adapter(id, &manifest),
+            "mcp" => self.configure_mcp_bridge(id, &manifest),
+            "native_first_party" => self.load_native_first_party(id, &manifest),
+            _ => anyhow::bail!("Unsupported runtime class"),
         }
     }
 }
@@ -180,83 +197,38 @@ impl ExtensionStore {
 
 ## 4. Runtime Loading Strategies
 
-### Strategy A: Native (Rust) — Dynamic Libraries
+Runtime loading follows the trust ladder instead of treating every package as eligible for arbitrary native loading.
 
-```rust
-impl ExtensionStore {
-    fn load_native(&self, id: &str, manifest: &Manifest) -> Result<()> {
-        let lib_path = self.install_dir.join(id).join(&manifest.entry);
+### Strategy A: WASM / Wasmtime — Default for Third-Party Managed Code
 
-        // SAFETY: Library signature was already verified.
-        // Loading untrusted code can still compromise the process.
-        // For stronger isolation, use WASM or a child process.
-        let lib = unsafe { libloading::Library::new(lib_path)? };
-
-        let factory: libloading::Symbol<
-            unsafe extern fn() -> *mut dyn Extension,
-        > = unsafe { lib.get(b"create_extension") }?;
-
-        let extension = unsafe { Box::from_raw(factory()) };
-        extension.initialize(&ExtensionContext::new(self.shared_state.clone()))?;
-
-        self.loaded_extensions
-            .write()
-            .insert(id.to_string(), extension);
-        Ok(())
-    }
-}
-```
-
-**Extension Crate** (published separately):
-
-```rust
-use vulcan_extension::{Extension, ExtensionMetadata};
-
-pub struct RedisMemory { client: redis::Client }
-
-impl Extension for RedisMemory {
-    fn metadata(&self) -> &ExtensionMetadata { /* ... */ }
-    fn initialize(&self, ctx: &ExtensionContext) -> Result<()> {
-        ctx.register_memory_backend("redis", Arc::new(self.clone()));
-        Ok(())
-    }
-}
-
-// Required export — dynamic library entry point
-#[no_mangle]
-pub unsafe extern fn create_extension() -> *mut dyn Extension {
-    Box::into_raw(Box::new(RedisMemory::new()))
-}
-```
-
-### Strategy B: WebAssembly — Sandboxed
+Use this for marketplace extensions that need to execute inside a Vulcan-managed runtime. Host imports are explicit, capability-gated, resource-limited, and auditable.
 
 ```rust
 fn load_wasm(&self, id: &str, manifest: &Manifest) -> Result<()> {
     use wasmtime::*;
 
+    self.policy.require_runtime_class(id, "wasm")?;
+    self.policy.check_capabilities(id, &manifest.capabilities)?;
+
     let engine = Engine::default();
     let module = Module::from_file(&engine, &manifest.entry)?;
-
     let mut linker = Linker::new(&engine);
 
-    // Provide safe host functions (capability-gated)
+    // Host functions are capability-gated and audited.
     linker.func_wrap("env", "log", |msg: String| {
         log::info!("[wasm ext {}]: {}", id, msg);
     })?;
     linker.func_wrap("env", "register_tool", ...)?;
 
-    let mut store = Store::new(&engine, ());
-    store.limiter(|_| &mut StoreLimiter {
-        memory_size: 1024 * 1024 * 10, // 10 MB cap
-        ..Default::default()
-    });
+    let mut store = Store::new(&engine, ExtensionHostState::new(id, manifest));
+    store.limiter(|state| &mut state.limits);
 
     let instance = linker.instantiate(&mut store, &module)?;
     let init = instance.get_typed_func::<(), ()>(&mut store, "init")
         .ok_or_else(|| anyhow!("Missing init export"))?;
 
     init.call(&mut store, ())?;
+    self.audit.record_activation(id, "wasm", &manifest.capabilities)?;
     Ok(())
 }
 ```
@@ -268,29 +240,59 @@ use wasm_bindgen::prelude::*;
 
 #[wasm_bindgen]
 pub fn init() {
+    // Host import succeeds only when the manifest requested and policy allowed it.
     register_tool("weather", WeatherTool {});
 }
 ```
 
-### Strategy C: Scripting (JavaScript / Python)
+### Strategy B: Subprocess Adapter — Local Scripts and Language-Specific Integrations
+
+Use subprocess adapters for user scripts, JS/Python/Ruby integrations, and local tools. The manifest declares the command, allowed arguments/environment, timeout, and capability scope; Vulcan sends JSON event payloads over stdin/stdout and records timeout, stderr, exit status, and denied capabilities.
 
 ```rust
-fn load_javascript(&self, id: &str, manifest: &Manifest) -> Result<()> {
-    use deno_core::*;
-
-    let mut runtime = JsRuntime::new(RuntimeOptions {
-        extensions: vec![Extension::builder()
-            .ops(vec![op_register_tool::<NotNeeded>])
-            .build()],
-        ..Default::default()
+fn load_subprocess_adapter(&self, id: &str, manifest: &Manifest) -> Result<()> {
+    self.policy.require_runtime_class(id, "subprocess")?;
+    self.policy.check_command_scope(&manifest.command, &manifest.env_allowlist)?;
+    self.subprocess_registry.insert(SubprocessAdapter {
+        id: id.to_string(),
+        command: manifest.command.clone(),
+        timeout: manifest.timeout,
+        capabilities: manifest.capabilities.clone(),
     });
-
-    let script = std::fs::read_to_string(&manifest.entry)?;
-    runtime.execute_script("<extension>", script)?;
+    self.audit.record_activation(id, "subprocess", &manifest.capabilities)?;
     Ok(())
 }
 ```
 
+### Strategy C: MCP Bridge — External Tools and Services
+
+Use MCP for tools/resources/prompts exposed through protocol boundaries. Servers are explicitly configured and selected; remote transport, sampling, and managed hosting stay disabled until their specific policy is accepted.
+
+```rust
+fn configure_mcp_bridge(&self, id: &str, manifest: &Manifest) -> Result<()> {
+    self.policy.require_runtime_class(id, "mcp")?;
+    self.policy.check_mcp_server(&manifest.mcp_server)?;
+    self.mcp_bridge.expose_selected_tools(&manifest.mcp_server, &manifest.allowed_tools)?;
+    self.audit.record_activation(id, "mcp", &manifest.capabilities)?;
+    Ok(())
+}
+```
+
+### Strategy D: Native First-Party Cargo Crates — Trusted/Internal Only
+
+Native in-process Rust code is the first-party/internal path. It is not a sandbox boundary and is not the marketplace default. Dynamic library loading through `dlopen`/`libloading` remains restricted to trusted internal experiments until signing, source trust, crash isolation, and update policy are mature.
+
+```rust
+fn load_native_first_party(&self, id: &str, manifest: &Manifest) -> Result<()> {
+    self.policy.require_runtime_class(id, "native_first_party")?;
+    self.policy.require_first_party_source(id, manifest)?;
+    // Trusted code is linked as a cargo-crate extension; arbitrary marketplace
+    // dylibs are rejected before this path.
+    self.first_party_registry.activate(id, manifest)?;
+    self.audit.record_activation(id, "native_first_party", &manifest.capabilities)?;
+    Ok(())
+}
+```
 ---
 
 ## 5. Security Model
@@ -321,10 +323,11 @@ environment = false        # allow env var access
 memory_limit = "64MB"
 ```
 
-3. **Sandboxing**
-   - **WASM**: Full memory isolation; only imported host functions are available.
-   - **Native**: Run untrusted extensions in a child process with seccomp-bpf (Linux) or sandbox-exec (macOS).
-   - **Scripts**: Restricted globals; deny `fs`, `child_process`, etc.
+3. **Sandboxing and boundaries**
+   - **WASM**: Default third-party runtime; memory isolation, resource limits, and explicit host imports only.
+   - **Subprocess**: OS process boundary for scripts/local tools; command, env, path, timeout, stderr, and process-tree policy are enforced.
+   - **MCP**: Protocol/process boundary for external tools and services; only explicitly configured and selected tools/resources are exposed.
+   - **Native first-party**: Trusted/internal cargo-crate extensions only. Native code is not a sandbox and is not the marketplace default.
 
 4. **Resource Limits** (WASM)
    - Max memory: 10–64 MB
@@ -567,8 +570,10 @@ impl EventHandler for MyLogger {
 
 ```rust
 pub struct ExtensionStore {
-    trusted_extensions: HashSet<String>, // IDs
-    trusted_signers: HashSet<PublicKey>,
+    pub trusted_extensions: HashSet<String>, // IDs plus accepted manifest checksum
+    pub trusted_signers: HashSet<PublicKey>,
+    pub allowed_runtime_classes: HashSet<RuntimeClass>,
+    pub denied_capabilities: Vec<DeniedCapability>,
 }
 ```
 
@@ -669,8 +674,8 @@ Vulcan now uses Redis for memory storage when configured.
 | **Package Format (.vpk)** | Bundled manifest + binary/assets |
 | **Repository Index** | JSON catalog of available extensions |
 | **Signature Verification** | GPG/Ed25519 signing & trust |
-| **Runtime Loaders** | Native (dylib) / WASM / Script (JS/Py) |
-| **Sandboxing** | Capability-based permissions & isolation |
+| **Runtime Loaders** | WASM / Subprocess / MCP bridge / trusted native first-party |
+| **Sandboxing** | Capability-based permissions, isolation boundaries, resource limits, and audit records |
 | **Extension Context** | Safe APIs for integration |
 | **CLI / Agent Commands** | Discover, install, manage extensions |
 

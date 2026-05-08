@@ -17,11 +17,11 @@ MCP provides a standardized way for LLM applications to expose and consume tools
 
 ### MCP Client (Built-in)
 
-Vulcan embeds an MCP client that can connect to one or more MCP servers on behalf of extensions or the agent itself.
+Vulcan embeds an MCP client that can connect to explicitly configured MCP servers on behalf of extensions or the agent itself. MCP belongs to the external tools/services rung of the [Extension Runtime Trust Ladder](./extension-runtime-trust-ladder.md): it is a protocol/process boundary, not an in-process extension sandbox.
 
-- **Transport**: stdio (default), SSE (Server-Sent Events), or in-process pipes for local servers
-- **Lifecycle**: Start/stop servers, monitor health, auto-restart on crash
-- **Security**: Per-server permission scopes, filesystem access limits, network allowlists/denylists
+- **Transport**: stdio first; SSE/remote transport is deferred until core MCP policy expands.
+- **Lifecycle**: Start/stop configured stdio servers, monitor health, and clean up child processes. Managed hosting/restart policy belongs to the later hosting slice.
+- **Security**: Per-server permission scopes, filesystem access limits, network allowlists/denylists, selected-tool exposure, and audit records.
 
 ### MCP ↔ Extension Bridge
 
@@ -38,7 +38,7 @@ Extensions can declare dependency on MCP capabilities. The bridge translates bet
 
 #### 1. Transparent Mode (Auto-Expose as Tools)
 
-MCP servers are started alongside the agent; all declared tools are automatically registered in the tool registry and appear to the agent as native capabilities.
+MCP servers are started alongside the agent only when explicitly configured and enabled. Selected declared tools are registered in the tool registry and appear to the agent as namespaced capabilities; nothing is exposed by default from an unconfigured server.
 
 ```toml
 # ~/.vulcan/config.toml
@@ -47,11 +47,11 @@ name = "postgres"
 command = "uvx"
 args = ["mcp-server-postgres", "--db-url", "postgres://localhost/mydb"]
 env = { "PGPASSWORD" = "vault://pg/password" }
-expose_as = "auto"          # register as native tools
+expose_as = "manual"        # expose selected tools after policy approval
 permissions = { network = "localhost:5432", filesystem = "none" }
 ```
 
-Result: `list_tables`, `query`, `describe_schema` appear as agent tools immediately.
+Result: selected tools such as `list_tables`, `query`, and `describe_schema` can be exposed after policy approval and appear as namespaced agent tools with audit logging.
 
 #### 2. Bridged Mode (Extension-Controlled)
 
@@ -173,16 +173,16 @@ impl Tool for SafeSelectTool {
 
 ## Comparison: Extensions vs MCP Servers
 
-| | Native Extensions | MCP Servers |
-|---|---|---|
-| Language | Rust (compiled) / WASM / Script | Any (Python, JS, Go, etc.) — anything that speaks MCP |
-| Performance | High | IPC overhead (stdio) / network (SSE) |
-| Isolation | Process/WASM/container boundary | Process boundary |
-| Integration depth | Full access to Vulcan APIs | Protocol-limited (tools, resources, prompts, sampling) |
-| Development effort | Higher (Rust, compiles) | Lower (rapid scripting) |
-| Security surface | Larger (native code) | Smaller (protocol boundary, easier auditing) |
+| | Native first-party extensions | WASM third-party extensions | MCP Servers |
+|---|---|---|---|
+| Language | Rust cargo crates linked into trusted Vulcan builds | Rust/other languages compiled to WASM components | Any (Python, JS, Go, etc.) — anything that speaks MCP |
+| Performance | Highest | Lower than native, usually acceptable for policy-limited extensions | IPC overhead (stdio) / network when later enabled |
+| Isolation | Same process; trusted code only | WASM memory/resource boundary with explicit host imports | Process/protocol boundary |
+| Integration depth | Full access to approved Vulcan APIs | Capability-gated host imports | Protocol-limited (tools, resources, prompts, sampling) |
+| Development effort | Higher (Rust, rebuild) | Medium (WASM ABI/tooling) | Lower (rapid scripting) |
+| Security surface | Largest; not a sandbox | Smaller; host imports deny by default | Smaller; protocol boundary, easier auditing |
 
-Use MCP for quick integrations and scripting-friendly capabilities; use native extensions for high-performance, deep platform features.
+Use MCP for quick integrations and scripting-friendly external capabilities; use WASM for third-party code that must run inside a Vulcan-managed runtime; use native first-party extensions only for trusted high-performance, deep platform features.
 
 ## Future
 

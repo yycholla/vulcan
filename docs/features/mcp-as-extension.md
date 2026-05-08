@@ -11,7 +11,7 @@ MCP integration can be promoted from a standalone protocol feature into a first-
 
 There are two complementary promotion paths:
 
-- **MCP Client/Bridge Extension** — the agent embeds a robust MCP client that discovers, connects to, and governs remote MCP servers; translates MCP primitives into native tools/resources; and enforces policy, caching, and retry semantics.
+- **MCP Client/Bridge Extension** — the agent embeds a robust stdio-first MCP client that discovers, connects to, and governs explicitly configured MCP servers; translates selected MCP primitives into native tools/resources; and enforces policy, caching, and retry semantics.
 - **MCP Server Hosting Extension** — the agent (or an extension) starts, stops, and monitors local MCP servers as managed child processes (or WASM hosts) and publishes their capabilities into the tool registry under policy controls.
 
 Both paths naturally follow the skill → draft extension → code extension promotion ladder.
@@ -82,8 +82,8 @@ depends:
 ---
 
 The MCP Bridge extension can:
-- Start MCP servers on demand (stdio) or connect to remote SSE endpoints.
-- Negotiate capabilities and validate them against policy before registering tools.
+- Start MCP servers on demand through stdio. Remote/SSE transport stays deferred until the core MCP policy explicitly expands it.
+- Negotiate capabilities and validate them against policy before registering selected tools.
 - Wrap MCP tools with retry, timeouts, and call logging.
 ```
 
@@ -93,7 +93,7 @@ This draft enables richer UI (server status, per-server enable/disable) and stru
 
 ## 3. Code Extension — Native MCP Bridge
 
-A code-backed `McpBridgeExtension` implements the client, lifecycle, and integration with Vulcan internals.
+A code-backed `McpBridgeExtension` implements the client, lifecycle, and integration with Vulcan internals. It inherits the trust ladder's MCP rung: MCP is an external tools/services protocol boundary, not a path for arbitrary native third-party code or inference-backend hosting.
 
 ### Responsibilities
 
@@ -136,7 +136,7 @@ impl Extension for McpBridgeExtension {
 
 impl McpBridgeExtension {
     fn start_and_register(&self, cfg: &McpServerConfig, ctx: &ExtensionContext) -> Result<()> {
-        // 1. Launch server (stdio) or connect (SSE)
+        // 1. Launch configured stdio server (remote/SSE deferred by policy)
         let server = self.client.spawn_stdio(&cfg.command, &cfg.args, &cfg.env)?;
 
         // 2. Negotiate capabilities
