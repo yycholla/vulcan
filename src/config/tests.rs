@@ -816,6 +816,19 @@ fn gateway_validate_rejects_discord_enabled_without_token() {
     assert!(err.to_string().contains("bot_token"), "msg: {err}");
 }
 
+#[cfg(not(feature = "discord"))]
+#[test]
+fn gateway_validate_rejects_discord_when_feature_disabled() {
+    let mut g = gateway_with_token("token");
+    g.discord.enabled = true;
+    g.discord.bot_token = "discord-token".into();
+    let err = g
+        .validate()
+        .expect_err("discord feature should be required when enabled");
+    assert!(err.to_string().contains("feature"), "msg: {err}");
+    assert!(err.to_string().contains("discord"), "msg: {err}");
+}
+
 #[test]
 fn gateway_validate_rejects_telegram_enabled_without_token() {
     let mut g = gateway_with_token("token");

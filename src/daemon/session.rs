@@ -17,7 +17,7 @@ use std::time::Instant;
 use parking_lot::{Mutex, RwLock};
 use tokio_util::sync::CancellationToken;
 
-use crate::daemon::session_agent::{SessionAgentAssembler, SessionAgentOptions};
+use crate::daemon::session_agent::{SessionAgentAssembler, SessionAgentOptions, SessionAgentSeed};
 
 /// Shared, async-locked handle to a per-session Agent. `Arc` so a
 /// single session can be locked from concurrent tasks (e.g. a
@@ -53,6 +53,10 @@ pub struct SessionState {
     /// Mutex; the tokio mutex here is required so we can hold the
     /// lock across the `await` for `Agent::builder.build()`.
     build_lock: tokio::sync::Mutex<()>,
+    /// Persistent build seed for this session's warm agent. Frontend
+    /// event sinks stay per-request, but the max-iterations / tool profile /
+    /// allowlist subset must survive config-driven rebuilds.
+    agent_seed: Mutex<SessionAgentSeed>,
 }
 
 impl SessionState {
@@ -77,6 +81,7 @@ impl SessionState {
             agent: Mutex::new(None),
             agent_cancel: Mutex::new(None),
             build_lock: tokio::sync::Mutex::new(()),
+            agent_seed: Mutex::new(SessionAgentSeed::default()),
         }
     }
 
@@ -165,9 +170,41 @@ impl SessionState {
             return Ok(handle);
         }
 
-        let agent = assembler.assemble(options).await?;
+        let agent = assembler.assemble(options.clone()).await?;
+        *self.agent_seed.lock() = options.seed();
         self.set_agent(agent);
         Ok(self.agent_arc().expect("just installed"))
+    }
+
+    /// Rebuild an already-warm agent using the session's stored build seed.
+    /// Preserves the prior durable session history when it exists.
+    pub async fn rebuild_agent(
+        self: &Arc<Self>,
+        assembler: &SessionAgentAssembler,
+    ) -> anyhow::Result<()> {
+        if self.agent_arc().is_none() {
+            return Ok(());
+        }
+
+        let _build_guard = self.build_lock.lock().await;
+        let Some(existing) = self.agent_arc() else {
+            return Ok(());
+        };
+
+        let (prior_session_id, seed) = {
+            let agent = existing.lock().await;
+            (
+                agent.session_id().to_string(),
+                self.agent_seed.lock().clone(),
+            )
+        };
+
+        let mut rebuilt = assembler.assemble(seed.into_options()).await?;
+        if rebuilt.memory().load_history(&prior_session_id)?.is_some() {
+            rebuilt.resume_session(&prior_session_id)?;
+        }
+        self.set_agent(rebuilt);
+        Ok(())
     }
 }
 
@@ -264,6 +301,11 @@ impl SessionMap {
     pub fn any_in_flight(&self) -> bool {
         let g = self.inner.read();
         g.values().any(|s| *s.in_flight.lock())
+    }
+
+    /// Snapshot all live sessions.
+    pub fn all(&self) -> Vec<Arc<SessionState>> {
+        self.inner.read().values().cloned().collect()
     }
 
     /// Count of sessions currently alive.

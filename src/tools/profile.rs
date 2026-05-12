@@ -102,6 +102,8 @@ fn coding_profile() -> ToolProfile {
             "write_file",
             "edit_file",
             "replace_function_body",
+            "add_method",
+            "add_import",
             "rename_symbol",
             "cargo_check",
             "index_code_graph",
@@ -211,6 +213,8 @@ mod tests {
             "spawn_subagent",
             "rename_symbol",
             "replace_function_body",
+            "add_method",
+            "add_import",
         ] {
             assert!(
                 !p.allows(forbidden),
@@ -237,6 +241,9 @@ mod tests {
         for must in [
             "write_file",
             "edit_file",
+            "replace_function_body",
+            "add_method",
+            "add_import",
             "cargo_check",
             "bash",
             "git_commit",

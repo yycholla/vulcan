@@ -261,7 +261,7 @@ impl SessionStore {
                 params![session_id],
                 |row| row.get(0),
             )
-            .unwrap_or(0);
+            .with_context(|| format!("determine next message position for session {session_id}"))?;
 
         for (offset, msg) in messages.iter().enumerate() {
             let (role, content, tool_call_id, tool_calls_json, reasoning_content) =

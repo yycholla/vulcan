@@ -288,6 +288,73 @@ async fn single_turn_text_response() {
 }
 
 #[tokio::test]
+async fn run_record_captures_before_prompt_injection_without_raw_payload() {
+    struct InjectHook;
+
+    #[async_trait::async_trait]
+    impl crate::hooks::HookHandler for InjectHook {
+        fn name(&self) -> &str {
+            "inject-fixture"
+        }
+
+        async fn before_prompt(
+            &self,
+            _messages: &[Message],
+            _cancel: CancellationToken,
+        ) -> Result<crate::hooks::HookOutcome> {
+            Ok(crate::hooks::HookOutcome::InjectMessages {
+                messages: vec![Message::System {
+                    content: "secret injected context".into(),
+                }],
+                position: crate::hooks::InjectPosition::Append,
+            })
+        }
+    }
+
+    let hooks = HookRegistry::new();
+    hooks.register(Arc::new(InjectHook));
+    let (mut agent, mock) = agent_with_mock_and_hooks(hooks);
+    mock.enqueue_text("ok");
+
+    let _ = agent.run_prompt("hi").await.unwrap();
+
+    let rec = agent
+        .run_store()
+        .recent(1)
+        .unwrap()
+        .into_iter()
+        .next()
+        .expect("run record");
+    let hook_events: Vec<_> = rec
+        .events
+        .iter()
+        .filter_map(|event| match event {
+            crate::run_record::RunEvent::HookDecision {
+                event,
+                handler,
+                outcome,
+                detail,
+            } => Some((
+                event.as_str(),
+                handler.as_str(),
+                outcome.as_str(),
+                detail.as_deref(),
+            )),
+            _ => None,
+        })
+        .collect();
+
+    assert!(hook_events.iter().any(|(event, handler, outcome, detail)| {
+        *event == "before_prompt"
+            && *handler == "apply_before_prompt"
+            && *outcome == "inject_messages"
+            && *detail == Some("added_messages=1")
+    }));
+    let encoded = serde_json::to_string(&rec.events).unwrap();
+    assert!(!encoded.contains("secret injected context"));
+}
+
+#[tokio::test]
 async fn multi_turn_with_tool_call() {
     let (mut agent, mock) = agent_with_mock();
     // Iter 0: tool call. Iter 1: final text response.

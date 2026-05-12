@@ -1,15 +1,31 @@
 ---
 title: Extensions — Feature Specification
-created: 2026-04-29
 type: feature
+status: proposed
+phase: Phase 3 planning spec
+created: 2026-04-29
+updated: 2026-05-08
+tracking: GitHub #265; Linear YYC-165 / YYC-212 historical refs
 tags: [extensions, promotion, lifecycle]
 ---
 
 # Extensions
 
-Extensions are the next tier above **skills**. While skills are flat markdown files that inject prompt text, extensions are structured components with richer metadata, configurable parameters, and — eventually — programmatic hook handlers compiled into or loaded by the agent.
+## Status
 
-An extension starts as a skill. After proving its utility across sessions, it can be promoted.
+| Field | Value |
+|---|---|
+| Status | Proposed Phase 3 spec |
+| Current implementation state | foundation only: skills and hooks are shipped; registry/metadata/draft-extension parsing/code-backed extension skeletons exist; dynamic loading/store marketplace remain proposed |
+| Tracking | GitHub #265; Linear YYC-165 / YYC-212 historical refs |
+| Dependencies / non-goals | Hook system, SkillsHook, and local extension registry foundations. This document does not claim the proposed behavior is currently available. |
+
+> Language note: sections below describe the target design. Unless the status table explicitly calls out a shipped foundation, read capability statements as proposed behavior.
+
+
+Proposed extensions are the next tier above the shipped **skills** foundation. While skills are flat markdown files that inject prompt text, extensions are structured components with richer metadata, configurable parameters, and — eventually — programmatic hook handlers compiled into or loaded by the agent.
+
+In the proposed promotion ladder, an extension starts as a skill. After proving its utility across sessions, it can be promoted.
 
 ## Skill → Extension promotion
 
@@ -25,7 +41,7 @@ See [`docs/features/skills.sh.md`](./skills.sh.md) for full promotion criteria a
 
 ### Draft extension stage
 
-Before writing Rust code, a skill can be promoted to a **draft extension** by adding extended frontmatter:
+Before writing Rust code, a skill could be promoted to a **draft extension** by adding extended frontmatter:
 
 ```markdown
 ---
@@ -56,11 +72,11 @@ This extended metadata allows the agent to:
 
 ## Extension registry
 
-Extensions live in `~/.vulcan/extensions/`. The `ExtensionRegistry` mirrors `SkillRegistry` but adds:
+In the proposed local lifecycle, extensions would live in `~/.vulcan/extensions/`. The `ExtensionRegistry` would mirror `SkillRegistry` but add:
 
 - **Config validation** — Each extension's `config_schema` is validated against user-provided settings in `~/.vulcan/config.toml`.
-- **Dependency checking** — The registry verifies that all `depends` tools are available before activating an extension.
-- **Priority ordering** — Extensions can declare a priority to control injection order (higher priority = closer to the system prompt).
+- **Dependency checking** — The registry would verify that all `depends` tools are available before activating an extension.
+- **Priority ordering** — Extensions could declare a priority to control injection order (higher priority = closer to the system prompt).
 
 ## Future: code-backed extensions
 

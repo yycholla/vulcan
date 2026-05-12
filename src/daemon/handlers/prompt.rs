@@ -217,6 +217,7 @@ pub fn stream(
             let (frontend_tx, mut frontend_rx) = tokio::sync::broadcast::channel(32);
             let frontend_capabilities = options.frontend_capabilities();
             let frontend_extensions = options.frontend_extensions();
+            let run_origin = options.run_origin();
             let options = options.with_frontend_context(
                 frontend_capabilities,
                 frontend_extensions,
@@ -290,9 +291,18 @@ pub fn stream(
                         state_for_runner,
                         &session_id_for_runner,
                     );
-                    agent
-                        .run_prompt_stream_with_cancel(&input2, event_tx, cancel2)
-                        .await
+                    match run_origin {
+                        Some(crate::run_record::RunOrigin::Gateway { lane }) => {
+                            agent
+                                .run_prompt_stream_for_gateway(&input2, event_tx, cancel2, lane)
+                                .await
+                        }
+                        _ => {
+                            agent
+                                .run_prompt_stream_with_cancel(&input2, event_tx, cancel2)
+                                .await
+                        }
+                    }
                 }
                 .instrument(tracing::Span::current()),
             );
@@ -367,11 +377,7 @@ fn install_daemon_subagent_runner(
     let runner = Arc::new(crate::daemon::subagent::DaemonSubagentRunner::new(
         Arc::clone(&state),
     ));
-    agent.install_subagent_runner(
-        Arc::new(state.config().clone()),
-        parent_session_id.to_string(),
-        runner,
-    );
+    agent.install_subagent_runner(state.config(), parent_session_id.to_string(), runner);
 }
 
 // -- prompt.cancel --

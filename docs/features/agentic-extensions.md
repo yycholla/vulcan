@@ -1,20 +1,36 @@
 ---
 title: Agentic & AI-Native Extensions
 type: feature
-created: 2026-05-14
+status: proposed
+phase: Phase 3 planning spec
+created: 2026-05-08
+updated: 2026-05-08
+tracking: GitHub #271; Linear YYC-82 / YYC-68 historical orchestration refs
 tags: [extensions, ai, agents, orchestration]
 ---
 
 # Agentic & AI-Native Extensions
 
+## Status
+
+| Field | Value |
+|---|---|
+| Status | Proposed Phase 3 spec |
+| Current implementation state | foundation only: orchestration stores and subagent records exist; extension-controlled planning/delegation hooks are proposed Phase 3 behavior |
+| Tracking | GitHub #271; Linear YYC-82 / YYC-68 historical orchestration refs |
+| Dependencies / non-goals | Extension foundation (#265), governance/policy (#269), and the orchestration runtime epic (#53). This document does not claim the proposed behavior is currently available. |
+
+> Language note: sections below describe the target design. Unless the status table explicitly calls out a shipped foundation, read capability statements as proposed behavior.
+
+
 Make extensions not just tools, but autonomous collaborators that participate in multi-agent workflows and reasoning loops.
 
 ## Agent-as-Extension
 
-Extensions can embed or spawn sub-agents that operate semi-autonomously within bounded contexts.
+Proposed extensions would be able to embed or spawn sub-agents that operate semi-autonomously within bounded contexts.
 
-- **Background agents**: A memory extension (`memory@redis`) can run a background agent that preloads relevant facts at session start and prunes stale entries after sessions end.
-- **Specialist agents**: Extensions can vend specialized agents (e.g., a SQL analyst agent, a log triage agent) that the main agent can delegate to via the orchestration layer.
+- **Background agents**: A proposed memory extension (`memory@redis`) could run a background agent that preloads relevant facts at session start and prunes stale entries after sessions end.
+- **Specialist agents**: Proposed extensions could vend specialized agents (e.g., a SQL analyst agent, a log triage agent) that the main agent could delegate to via the orchestration layer.
 
 ## Planning & Orchestration Hooks
 
@@ -57,7 +73,7 @@ Policy-driven selection of models/providers per task type.
 
 Extensions that turn external APIs into first-class tools at runtime.
 
-- **OpenAPI → Tool**: Given an API spec, generate a typed tool the agent can call immediately.
+- **OpenAPI → Tool**: Given an API spec, a proposed extension could generate a typed tool the agent can call immediately.
 - **Schema reflection**: Describe tool capabilities at runtime for UI rendering and planning.
 
 ---

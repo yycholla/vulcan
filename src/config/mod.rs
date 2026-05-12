@@ -205,6 +205,13 @@ pub struct Config {
     #[serde(default)]
     pub recall: RecallConfig,
 
+    /// Optional code-outline prompt assist. Off by default; when enabled,
+    /// a BeforePrompt hook injects Tree-sitter symbol outlines for
+    /// supported workspace files explicitly mentioned in the latest user
+    /// prompt, bounded by the limits below.
+    #[serde(default)]
+    pub code_outline_assist: CodeOutlineAssistConfig,
+
     /// YYC-264: self-organizing graph memory via cortex-memory-core.
     /// When enabled, Vulcan stores facts, decisions, and patterns in a
     /// temporal knowledge graph with HNSW vector search, auto-linking,
@@ -644,6 +651,41 @@ fn default_recall_max_chars() -> usize {
     400
 }
 
+/// Tree-sitter outline BeforePrompt assist. Off by default because it
+/// injects workspace-derived context into the model prompt.
+#[derive(Debug, Deserialize, Clone, Copy)]
+pub struct CodeOutlineAssistConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default = "default_code_outline_max_files")]
+    pub max_files: usize,
+    #[serde(default = "default_code_outline_max_symbols")]
+    pub max_symbols_per_file: usize,
+    #[serde(default = "default_code_outline_max_prompt_chars")]
+    pub max_prompt_chars: usize,
+}
+
+impl Default for CodeOutlineAssistConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            max_files: default_code_outline_max_files(),
+            max_symbols_per_file: default_code_outline_max_symbols(),
+            max_prompt_chars: default_code_outline_max_prompt_chars(),
+        }
+    }
+}
+
+fn default_code_outline_max_files() -> usize {
+    3
+}
+fn default_code_outline_max_symbols() -> usize {
+    80
+}
+fn default_code_outline_max_prompt_chars() -> usize {
+    4_000
+}
+
 /// YYC-264: configuration for embedded cortex-memory-core graph memory.
 #[derive(Debug, Deserialize, Clone)]
 pub struct CortexConfig {
@@ -812,6 +854,11 @@ impl GatewayConfig {
         if self.discord.enabled && self.discord.bot_token.trim().is_empty() {
             anyhow::bail!(
                 "[gateway.discord] enabled = true but bot_token is empty; set bot_token or disable"
+            );
+        }
+        if self.discord.enabled && !cfg!(feature = "discord") {
+            anyhow::bail!(
+                "[gateway.discord] enabled = true but this build was compiled without the discord feature; rebuild with --features discord or disable [gateway.discord]"
             );
         }
         if self.telegram.enabled {
@@ -1304,6 +1351,7 @@ impl Default for Config {
             gateway: None,
             keybinds: KeybindsConfig::default(),
             recall: RecallConfig::default(),
+            code_outline_assist: CodeOutlineAssistConfig::default(),
             cortex: CortexConfig::default(),
             scheduler: SchedulerConfig::default(),
             workspace_trust: crate::trust::WorkspaceTrustConfig::default(),

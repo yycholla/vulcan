@@ -1,17 +1,33 @@
 ---
 title: UX & Interaction Surface
 type: feature
-created: 2026-05-14
+status: proposed
+phase: Phase 3 planning spec
+created: 2026-05-08
+updated: 2026-05-08
+tracking: GitHub #272 plus #313/#560 for learning/dashboard/UI surfaces; Linear YYC-172 extension UX reference from issue audit
 tags: [extensions, ui, tui, human-in-the-loop]
 ---
 
 # UX & Interaction Surface
 
+## Status
+
+| Field | Value |
+|---|---|
+| Status | Proposed Phase 3 spec |
+| Current implementation state | foundation only: TUI, approval pauses, logs, and frontend extension slices exist; extension management views and companion web dashboard are proposed |
+| Tracking | GitHub #272 plus #313/#560 for learning/dashboard/UI surfaces; Linear YYC-172 extension UX reference from issue audit |
+| Dependencies / non-goals | Extension lifecycle (#556), UI/frontend extension surface (#555/#559/#560), and governance (#269). This document does not claim the proposed behavior is currently available. |
+
+> Language note: sections below describe the target design. Unless the status table explicitly calls out a shipped foundation, read capability statements as proposed behavior.
+
+
 Bring extensions into the human loop with rich interfaces, approvals, and visibility.
 
 ## In-Agent UI Extensions
 
-Extensions can render interactive terminal UI panels so users can inspect state and intervene.
+Proposed extensions would be able to render interactive terminal UI panels so users can inspect state and intervene.
 
 - **Panels**: File trees, memory summaries, active goals, recent tool calls.
 - **Dialogs**: Confirmations, forms, pickers.
@@ -29,11 +45,11 @@ Optional companion web UI (served locally or remotely) to manage extensions.
 
 ## Extension Chat
 
-A dedicated channel where extensions can communicate naturally with the user during sessions.
+A proposed dedicated channel would let extensions communicate naturally with the user during sessions.
 
 - `[@RedisMemory] Loaded 12 facts for session X`
 - `[@DeployCheck] Required checks passed: lint, tests, review`
-- Extensions can ask clarifying questions or report warnings inline.
+- Proposed extensions could ask clarifying questions or report warnings inline.
 
 ## Approval Workflow Hooks
 

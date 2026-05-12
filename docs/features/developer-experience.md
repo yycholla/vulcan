@@ -1,17 +1,33 @@
 ---
 title: Developer Experience (DX) & Tooling
 type: feature
-created: 2026-05-14
+status: proposed
+phase: Phase 3 planning spec
+created: 2026-05-08
+updated: 2026-05-08
+tracking: GitHub #267; Linear YYC-165 / YYC-166 / YYC-212 historical refs
 tags: [extensions, cli, testing, templates]
 ---
 
 # Developer Experience (DX) & Tooling
 
+## Status
+
+| Field | Value |
+|---|---|
+| Status | Proposed Phase 3 spec |
+| Current implementation state | foundation only: extension CLI surfaces such as list/show/enable/disable/new/validate/install are present; package publishing, hot reload, and full test harnesses remain proposed |
+| Tracking | GitHub #267; Linear YYC-165 / YYC-166 / YYC-212 historical refs |
+| Dependencies / non-goals | Local manifest/store semantics (#266) before publish/update flows. This document does not claim the proposed behavior is currently available. |
+
+> Language note: sections below describe the target design. Unless the status table explicitly calls out a shipped foundation, read capability statements as proposed behavior.
+
+
 Make building, testing, and distributing extensions as easy as possible.
 
 ## Extension CLI
 
-A unified CLI for the extension lifecycle.
+A proposed unified CLI for the full extension lifecycle.
 
 - `vulcan extension new <name>` — Scaffold a new extension (choose language/target: rust/wasm/js/py). Generates manifest, stub trait impl, CI template, README.
 - `vulcan extension build` — Build for selected target(s); produce `.vpk` packages.
@@ -22,7 +38,7 @@ A unified CLI for the extension lifecycle.
 
 ## Mock Agent Contexts (Testing Harness)
 
-A test harness that implements `ExtensionContext` for unit and integration testing.
+A proposed test harness would implement `ExtensionContext` for unit and integration testing.
 
 - Fake tool registry: mock tool implementations with programmable responses.
 - In-memory event bus: capture events and assert on them.

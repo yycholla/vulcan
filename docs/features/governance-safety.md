@@ -1,17 +1,33 @@
 ---
 title: Governance, Safety & Policy
 type: feature
-created: 2026-05-14
+status: proposed
+phase: Phase 3 planning spec
+created: 2026-05-08
+updated: 2026-05-08
+tracking: GitHub #269; Linear YYC-169 plus YYC-165 / YYC-166 historical refs
 tags: [extensions, safety, policy, audit]
 ---
 
 # Governance, Safety & Policy
 
+## Status
+
+| Field | Value |
+|---|---|
+| Status | Proposed Phase 3 spec |
+| Current implementation state | foundation only: SafetyHook, approval caches, audit logging, and extension policy primitives exist; organization policy engines, reputation, quotas, and rollback flows are proposed |
+| Tracking | GitHub #269; Linear YYC-169 plus YYC-165 / YYC-166 historical refs |
+| Dependencies / non-goals | Extension manifests (#266), policy engine foundations, and audit surfaces. This document does not claim the proposed behavior is currently available. |
+
+> Language note: sections below describe the target design. Unless the status table explicitly calls out a shipped foundation, read capability statements as proposed behavior.
+
+
 Strong, transparent controls for what agents and extensions are allowed to do.
 
 ## Policy Extensions
 
-Pluggable policy engines enforce org-specific rules before actions execute.
+Proposed pluggable policy engines would enforce org-specific rules before actions execute.
 
 - **OPA/Rego**: Define policies as code — allowed tools, allowed resources, time windows.
 - **Custom policies**: Extensions implement `PolicyProvider` trait to integrate proprietary engines.
@@ -19,7 +35,7 @@ Pluggable policy engines enforce org-specific rules before actions execute.
 
 ## Audit Logging Extensions
 
-Capture full provenance for compliance and forensics.
+The proposed audit slice would capture full provenance for compliance and forensics.
 
 - **Append-only logs**: Tamper-evident logs of prompts, tool calls, and results.
 - **SIEM integration**: Stream to Splunk, ELK, Datadog, or similar.

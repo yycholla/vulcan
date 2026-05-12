@@ -271,6 +271,24 @@ pub(in crate::agent) fn summarize_tool_args(name: &str, raw_args: &str) -> Optio
                 _ => None,
             }
         }
+        "add_method" => {
+            let p = s("path").map(|x| tail(x, 40));
+            let target = s("class_or_struct");
+            match (p, target) {
+                (Some(p), Some(target)) => Some(format!("{p}::{target}")),
+                (Some(p), None) => Some(p),
+                _ => None,
+            }
+        }
+        "add_import" => {
+            let p = s("path").map(|x| tail(x, 40));
+            let import = s("import_statement").map(|x| truncate(x, 40));
+            match (p, import) {
+                (Some(p), Some(import)) => Some(format!("{p} ← {import}")),
+                (Some(p), None) => Some(p),
+                _ => None,
+            }
+        }
         // Web tools.
         "web_search" | "code_search_semantic" => s("query").map(|q| truncate(q, 60)),
         "web_fetch" => s("url").map(|u| truncate(u, 60)),

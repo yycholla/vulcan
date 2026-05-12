@@ -59,11 +59,7 @@ impl SubagentRunner for DaemonSubagentRunner {
         sess.set_agent_cancel(cancel.clone());
         let mut child = agent_arc.lock().await;
         let nested_runner = Arc::new(DaemonSubagentRunner::new(Arc::clone(&self.state)));
-        child.install_subagent_runner(
-            Arc::new(self.state.config().clone()),
-            child_session_id.clone(),
-            nested_runner,
-        );
+        child.install_subagent_runner(self.state.config(), child_session_id.clone(), nested_runner);
         let run_result = match request.parent_run_id {
             Some(parent_run_id) => {
                 child

@@ -239,9 +239,9 @@ async fn main() -> anyhow::Result<()> {
             init_cli_observability!("replay");
             vulcan::cli_replay::run(cmd).await?;
         }
-        Some(Command::Impact { target, save }) => {
+        Some(Command::Impact { target, cmd, save }) => {
             init_cli_observability!("impact");
-            vulcan::cli_impact::run(&target, save).await?;
+            vulcan::cli_impact::run(target.as_deref(), cmd.as_ref(), save).await?;
         }
         Some(Command::Playbook { cmd }) => {
             init_cli_observability!("playbook");

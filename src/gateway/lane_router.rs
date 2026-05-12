@@ -10,6 +10,13 @@
 //! lane so reconnects map to the same daemon session — and so the
 //! daemon-side idle-eviction TTL lives between gateway processes.
 //!
+//! Bound: the in-process lane → session cache is capped by
+//! [`DEFAULT_LANE_SESSION_CACHE_CAPACITY`] and evicts least-recently-used
+//! entries. Evicting this gateway cache does not destroy daemon sessions;
+//! it only forces the next message for that lane to repeat the idempotent
+//! `session.create` handshake, while daemon-side idle eviction remains the
+//! lifecycle authority for warm Agents.
+//!
 //! Naming note: `crate::gateway::lane::LaneRouter<M>` already exists
 //! as a generic per-key serial dispatcher (one mpsc worker per
 //! `LaneKey`). To avoid a name collision we expose this struct as
@@ -22,6 +29,12 @@ use parking_lot::Mutex;
 
 use crate::client::{Client, ClientError};
 use crate::gateway::lane::LaneKey;
+
+/// Maximum number of lane → daemon-session mappings retained by one gateway
+/// process. A mapping is just a small string, but public gateway connectors can
+/// see unbounded chat ids over long uptimes. 1024 active/recent lanes keeps the
+/// hot path cached while bounding memory deterministically.
+pub const DEFAULT_LANE_SESSION_CACHE_CAPACITY: usize = 1024;
 
 #[derive(Debug, thiserror::Error)]
 pub enum LaneRouterError {
@@ -43,13 +56,30 @@ impl From<ClientError> for LaneRouterError {
 /// idempotent; the daemon's `session.create` rejects duplicate ids so
 /// the cache also serves as a write-through guard.
 pub struct DaemonLaneRouter {
-    sessions: Mutex<HashMap<LaneKey, String>>,
+    sessions: Mutex<LaneSessionCache>,
+    cache_capacity: usize,
+}
+
+#[derive(Default)]
+struct LaneSessionCache {
+    entries: HashMap<LaneKey, LaneSessionEntry>,
+    tick: u64,
+}
+
+struct LaneSessionEntry {
+    session_id: String,
+    last_used: u64,
 }
 
 impl DaemonLaneRouter {
     pub fn new() -> Self {
+        Self::with_cache_capacity(DEFAULT_LANE_SESSION_CACHE_CAPACITY)
+    }
+
+    pub fn with_cache_capacity(cache_capacity: usize) -> Self {
         Self {
-            sessions: Mutex::new(HashMap::new()),
+            sessions: Mutex::new(LaneSessionCache::default()),
+            cache_capacity,
         }
     }
 
@@ -69,7 +99,7 @@ impl DaemonLaneRouter {
         client: &Client,
     ) -> Result<String, LaneRouterError> {
         // Cache hit: skip the RPC entirely.
-        if let Some(sid) = self.sessions.lock().get(lane).cloned() {
+        if let Some(sid) = self.cached_session(lane) {
             return Ok(sid);
         }
 
@@ -87,13 +117,57 @@ impl DaemonLaneRouter {
             Err(e) => return Err(e.into()),
         }
 
-        self.sessions.lock().insert(lane.clone(), sid.clone());
+        self.remember_session(lane.clone(), sid.clone());
         Ok(sid)
+    }
+
+    fn cached_session(&self, lane: &LaneKey) -> Option<String> {
+        let mut cache = self.sessions.lock();
+        cache.tick = cache.tick.saturating_add(1);
+        let last_used = cache.tick;
+        let entry = cache.entries.get_mut(lane)?;
+        entry.last_used = last_used;
+        Some(entry.session_id.clone())
+    }
+
+    fn remember_session(&self, lane: LaneKey, session_id: String) {
+        let mut cache = self.sessions.lock();
+        if self.cache_capacity == 0 {
+            cache.entries.clear();
+            return;
+        }
+
+        cache.tick = cache.tick.saturating_add(1);
+        let last_used = cache.tick;
+        if let Some(entry) = cache.entries.get_mut(&lane) {
+            entry.session_id = session_id;
+            entry.last_used = last_used;
+            return;
+        }
+
+        if cache.entries.len() >= self.cache_capacity {
+            if let Some(victim) = cache
+                .entries
+                .iter()
+                .min_by_key(|(_, entry)| entry.last_used)
+                .map(|(key, _)| key.clone())
+            {
+                cache.entries.remove(&victim);
+            }
+        }
+
+        cache.entries.insert(
+            lane,
+            LaneSessionEntry {
+                session_id,
+                last_used,
+            },
+        );
     }
 
     /// Number of cached lanes (surface for /v1/lanes route).
     pub fn cached_lane_count(&self) -> usize {
-        self.sessions.lock().len()
+        self.sessions.lock().entries.len()
     }
 
     /// Remove the cache entry for this lane. The next call to
@@ -103,7 +177,7 @@ impl DaemonLaneRouter {
     /// without this, the stale session id would be reused and the
     /// next `prompt.stream` would fail with `SESSION_NOT_FOUND`.
     pub fn forget(&self, lane: &LaneKey) {
-        self.sessions.lock().remove(lane);
+        self.sessions.lock().entries.remove(lane);
     }
 
     /// Snapshot of the lane → session-id mapping for diagnostics.
@@ -112,11 +186,12 @@ impl DaemonLaneRouter {
     pub fn snapshot_cache(&self) -> Vec<LaneCacheEntry> {
         let g = self.sessions.lock();
         let mut out: Vec<LaneCacheEntry> = g
+            .entries
             .iter()
             .map(|(k, v)| LaneCacheEntry {
                 platform: k.platform.clone(),
                 chat_id: k.chat_id.clone(),
-                session_id: v.clone(),
+                session_id: v.session_id.clone(),
             })
             .collect();
         out.sort_by(|a, b| {
@@ -289,5 +364,37 @@ mod tests {
 
         state.signal_shutdown();
         let _ = tokio::time::timeout(Duration::from_secs(2), server_handle).await;
+    }
+
+    #[test]
+    fn lane_session_cache_evicts_least_recently_used_entry_at_capacity() {
+        let router = DaemonLaneRouter::with_cache_capacity(2);
+        let first = lane("discord", "111");
+        let second = lane("discord", "222");
+        let third = lane("telegram", "333");
+
+        router.remember_session(first.clone(), "gateway:discord:111".into());
+        router.remember_session(second.clone(), "gateway:discord:222".into());
+        assert_eq!(
+            router.cached_session(&first).as_deref(),
+            Some("gateway:discord:111"),
+            "cache hits refresh LRU position",
+        );
+
+        router.remember_session(third.clone(), "gateway:telegram:333".into());
+
+        assert_eq!(router.cached_lane_count(), 2, "cache must stay bounded");
+        assert_eq!(
+            router.cached_session(&first).as_deref(),
+            Some("gateway:discord:111")
+        );
+        assert!(
+            router.cached_session(&second).is_none(),
+            "least recently used lane mapping evicted",
+        );
+        assert_eq!(
+            router.cached_session(&third).as_deref(),
+            Some("gateway:telegram:333")
+        );
     }
 }

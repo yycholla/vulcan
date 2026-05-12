@@ -236,7 +236,11 @@ pub struct OutlineSymbol {
     pub end_line: usize,
 }
 
-fn outline(cache: &ParserCache, lang: Language, source: &str) -> Result<Vec<OutlineSymbol>> {
+pub(crate) fn outline(
+    cache: &ParserCache,
+    lang: Language,
+    source: &str,
+) -> Result<Vec<OutlineSymbol>> {
     let query_text = lang.outline_query();
     if query_text.is_empty() {
         return Ok(Vec::new());

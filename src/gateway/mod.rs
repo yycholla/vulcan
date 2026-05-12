@@ -5,6 +5,7 @@ use std::time::Duration;
 use crate::config::Config;
 use crate::gateway::commands::CommandDispatcher;
 use crate::gateway::daemon_client::GatewayDaemonClient;
+#[cfg(feature = "discord")]
 use crate::gateway::discord::DiscordPlatform;
 use crate::gateway::lane::{LaneKey, LaneRouter as PerLaneSerialRouter, from_closure};
 use crate::gateway::lane_router::DaemonLaneRouter;
@@ -20,6 +21,7 @@ use tokio::task::JoinHandle;
 
 pub mod commands;
 pub mod daemon_client;
+#[cfg(feature = "discord")]
 pub mod discord;
 pub mod lane;
 pub mod lane_router;
@@ -69,6 +71,7 @@ where
     let db = crate::memory::open_gateway_pool()?;
     let mut registry = PlatformRegistry::new();
     registry.register("loopback", Arc::new(LoopbackPlatform::default()));
+    #[cfg(feature = "discord")]
     if gateway.discord.enabled {
         registry.register(
             "discord",
@@ -155,6 +158,7 @@ where
         Arc::clone(&render_registry),
     )
     .spawn();
+    #[cfg(feature = "discord")]
     let discord_dispatcher = if gateway.discord.enabled {
         Some(DiscordPlatform::spawn_gateway_client(
             gateway.discord.bot_token.clone(),
@@ -182,16 +186,21 @@ where
     } else {
         None
     };
+    // YYC-17 PR-3/4: the runtime worker path, scheduler loop, and
+    // observability route all need the same scheduler_runs backing
+    // store. Build it once and clone the cheap handle instead of
+    // reconstructing it in three places.
+    let scheduler_store = if !scheduler_config.jobs.is_empty() {
+        Some(scheduler_store::SchedulerStore::new(db.clone()))
+    } else {
+        None
+    };
     // YYC-17 PR-2: spawn the cron scheduler once the inbound queue
     // exists. Validates jobs up front; configuration errors here
     // bubble out before the worker pipeline starts so a bad cron
     // expression can't slip past startup. The handle drops with
     // the function scope so the loop is reaped on shutdown.
-    let scheduler_handle = if !scheduler_config.jobs.is_empty() {
-        // YYC-17 PR-3: persist run history alongside the gateway
-        // queues so operator tooling can read `scheduler_runs`
-        // without coordinating two databases.
-        let store = scheduler_store::SchedulerStore::new(db.clone());
+    let scheduler_handle = if let Some(store) = scheduler_store.clone() {
         let scheduler = scheduler::Scheduler::from_config_with_store(
             &scheduler_config,
             Arc::clone(&inbound),
@@ -216,6 +225,7 @@ where
         Arc::clone(&daemon_client),
         Arc::clone(&render_registry),
         Arc::clone(&registry),
+        scheduler_store.clone(),
         Arc::clone(&commands),
     );
 
@@ -223,11 +233,7 @@ where
     // AppState so the /v1/scheduler observability route can answer
     // without going through the runtime.
     let scheduler_jobs = Arc::new(scheduler_config.jobs.clone());
-    let scheduler_store_for_route = if !scheduler_config.jobs.is_empty() {
-        Some(scheduler_store::SchedulerStore::new(db.clone()))
-    } else {
-        None
-    };
+    let scheduler_store_for_route = scheduler_store.clone();
     let app = build_router(AppState {
         api_token: Arc::new(gateway.api_token),
         inbound,
@@ -250,6 +256,7 @@ where
 
     inbound_dispatcher.abort();
     drop(scheduler_handle);
+    #[cfg(feature = "discord")]
     if let Some(handle) = discord_dispatcher {
         handle.abort();
     }
@@ -269,6 +276,7 @@ fn spawn_inbound_dispatcher(
     daemon_client: Arc<GatewayDaemonClient>,
     render_registry: Arc<crate::gateway::render_registry::RenderRegistry>,
     platform_registry: Arc<PlatformRegistry>,
+    scheduler_store: Option<scheduler_store::SchedulerStore>,
     commands: Arc<CommandDispatcher>,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
@@ -291,6 +299,7 @@ fn spawn_inbound_dispatcher(
             let render_registry = Arc::clone(&handler_render_registry);
             let platform_registry = Arc::clone(&handler_platform_registry);
             let commands = Arc::clone(&handler_commands);
+            let scheduler_store = scheduler_store.clone();
             async move {
                 // Pick capabilities from the registered platform; default
                 // (zero-feature) for an unknown platform name so the
@@ -308,6 +317,7 @@ fn spawn_inbound_dispatcher(
                     &outbound,
                     &render_registry,
                     caps,
+                    scheduler_store.as_ref(),
                     &commands,
                 )
                 .await

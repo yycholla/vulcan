@@ -2,7 +2,7 @@ use crate::provider::ToolDefinition;
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
@@ -445,6 +445,11 @@ pub struct ToolRegistry {
     /// applied via [`Self::apply_profile`]. `None` means the registry
     /// is unrestricted (the historical default).
     active_profile: Option<String>,
+    /// Allowed tool names from the active profile. Kept alongside the
+    /// profile name so tools registered after profile application (agent
+    /// construction wires some tools late) cannot reintroduce capabilities
+    /// the profile already removed.
+    active_profile_allowed: Option<HashSet<String>>,
 }
 
 impl Default for ToolRegistry {
@@ -485,6 +490,7 @@ impl ToolRegistry {
         let mut registry = Self {
             tools: HashMap::new(),
             active_profile: None,
+            active_profile_allowed: None,
         };
         registry.register(Arc::new(file::ReadFile));
         registry.register(Arc::new(file::WriteFile::new(sink.clone())));
@@ -522,15 +528,30 @@ impl ToolRegistry {
         registry.register(Arc::new(lsp::CodeActionTool::new(lsp_mgr.clone())));
         // YYC-49: AST-aware structural edits.
         registry.register(Arc::new(code_edit::ReplaceFunctionBodyTool));
-        registry.register(Arc::new(code_edit::RenameSymbolTool::new(lsp_mgr)));
+        registry.register(Arc::new(code_edit::AddMethodTool));
+        registry.register(Arc::new(code_edit::AddImportTool));
+        registry.register(Arc::new(code_edit::RenameSymbolTool::new(lsp_mgr.clone())));
         // YYC-50: workspace symbol index. Lazy — the agent has to run
         // `index_code_graph` once before `find_symbol` returns hits.
         if let Ok(graph) = crate::code::graph::CodeGraph::open(cwd, parser_cache.clone()) {
             let graph_arc = Arc::new(graph);
             registry.register(Arc::new(code_graph::IndexCodeGraphTool::new(
                 graph_arc.clone(),
+                Some(lsp_mgr),
             )));
-            registry.register(Arc::new(code_graph::FindSymbolTool::new(graph_arc)));
+            registry.register(Arc::new(code_graph::FindSymbolTool::new(graph_arc.clone())));
+            registry.register(Arc::new(code_graph::FindCallersTool::new(
+                graph_arc.clone(),
+            )));
+            registry.register(Arc::new(code_graph::FindCalleesTool::new(
+                graph_arc.clone(),
+            )));
+            registry.register(Arc::new(code_graph::TypeHierarchyTool::new(
+                graph_arc.clone(),
+            )));
+            registry.register(Arc::new(code_graph::GraphImpactAnalysisTool::new(
+                graph_arc,
+            )));
         }
         // YYC-36: native git tools — agent stops composing brittle
         // `git ...` shell strings through bash.
@@ -547,7 +568,11 @@ impl ToolRegistry {
     }
 
     pub fn register(&mut self, tool: Arc<dyn Tool>) {
-        self.tools.insert(tool.name().to_string(), tool);
+        let name = tool.name().to_string();
+        if !self.profile_allows(&name) {
+            return;
+        }
+        self.tools.insert(name, tool);
     }
 
     pub fn contains(&self, name: &str) -> bool {
@@ -562,6 +587,9 @@ impl ToolRegistry {
         let expected_prefix = format!("{extension_id}_");
         let wrapped = Arc::new(PrefixedExtensionTool::new(expected_prefix, tool)?) as Arc<dyn Tool>;
         let name = wrapped.name().to_string();
+        if !self.profile_allows(&name) {
+            return Ok(());
+        }
         if self.tools.contains_key(&name) {
             anyhow::bail!("extension tool `{name}` conflicts with an existing tool");
         }
@@ -578,6 +606,13 @@ impl ToolRegistry {
         let allowed: Vec<String> = profile.allowed.iter().map(|s| s.to_string()).collect();
         self.retain_only(&allowed);
         self.active_profile = Some(profile.name.to_string());
+        self.active_profile_allowed = Some(allowed.into_iter().collect());
+    }
+
+    fn profile_allows(&self, name: &str) -> bool {
+        self.active_profile_allowed
+            .as_ref()
+            .is_none_or(|allowed| allowed.contains(name))
     }
 
     /// YYC-181: name of the currently active capability profile, or
@@ -1226,6 +1261,48 @@ path = "src/primary.rs"
         assert!(
             msg.contains("Unknown tool: write_file"),
             "expected Unknown tool error, got {msg:?}"
+        );
+    }
+
+    struct DummySpawnTool;
+
+    #[async_trait::async_trait]
+    impl Tool for DummySpawnTool {
+        fn name(&self) -> &str {
+            "spawn_subagent"
+        }
+
+        fn description(&self) -> &str {
+            "dummy spawn tool"
+        }
+
+        fn schema(&self) -> serde_json::Value {
+            json!({"type": "object", "properties": {}})
+        }
+
+        async fn call(
+            &self,
+            _params: serde_json::Value,
+            _cancel: CancellationToken,
+            _progress: Option<ProgressSink>,
+        ) -> Result<ToolResult> {
+            Ok(ToolResult::ok("dummy"))
+        }
+    }
+
+    #[test]
+    fn active_profile_blocks_late_registered_disallowed_tools() {
+        // Agent construction wires some tools (notably spawn_subagent) after
+        // trust/profile resolution has already happened. The active profile
+        // must continue to guard late registrations so restricted sessions do
+        // not regain capabilities that were removed earlier.
+        let mut registry = ToolRegistry::new();
+        let profile = builtin_profile("readonly").unwrap();
+        registry.apply_profile(&profile);
+        registry.register(Arc::new(DummySpawnTool));
+        assert!(
+            !registry.contains("spawn_subagent"),
+            "readonly profile must reject late-registered spawn_subagent"
         );
     }
 

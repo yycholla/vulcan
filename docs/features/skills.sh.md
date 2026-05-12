@@ -1,11 +1,27 @@
 ---
 title: Skills — Feature Specification
-created: 2026-04-29
 type: feature
+status: proposed
+phase: Phase 3 planning spec
+created: 2026-04-29
+updated: 2026-05-08
+tracking: GitHub #265; Linear YYC-25 / YYC-29 and YYC-165 historical refs
 tags: [skills, installation, lifecycle]
 ---
 
 # Skills
+
+## Status
+
+| Field | Value |
+|---|---|
+| Status | Proposed Phase 3 spec |
+| Current implementation state | foundation shipped: bundled/user skill loading and SkillsHook prompt injection exist; automatic promotion into draft/code extensions is proposed |
+| Tracking | GitHub #265; Linear YYC-25 / YYC-29 and YYC-165 historical refs |
+| Dependencies / non-goals | Existing SkillRegistry/SkillsHook; extension foundation (#265) for promotion. This document does not claim the proposed behavior is currently available. |
+
+> Language note: sections below describe the target design. Unless the status table explicitly calls out a shipped foundation, read capability statements as proposed behavior.
+
 
 Skills are reusable, task-specific knowledge packages that the agent loads at boot and can reference during a session. They provide structured guidance for common workflows (debugging, code review, git commits, etc.)
 

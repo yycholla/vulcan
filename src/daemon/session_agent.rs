@@ -47,11 +47,30 @@ impl SessionAgentAssembler {
     }
 }
 
+#[derive(Clone, Debug, Default)]
+pub struct SessionAgentSeed {
+    max_iterations: Option<u32>,
+    tool_profile: Option<String>,
+    allowed_tools: Option<Vec<String>>,
+}
+
+impl SessionAgentSeed {
+    pub fn into_options(self) -> SessionAgentOptions {
+        SessionAgentOptions {
+            max_iterations: self.max_iterations,
+            tool_profile: self.tool_profile,
+            allowed_tools: self.allowed_tools,
+            ..SessionAgentOptions::default()
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct SessionAgentOptions {
     max_iterations: Option<u32>,
     tool_profile: Option<String>,
     allowed_tools: Option<Vec<String>>,
+    run_origin: Option<crate::run_record::RunOrigin>,
     frontend_capabilities: Vec<crate::extensions::FrontendCapability>,
     frontend_extensions: Vec<vulcan_frontend_api::FrontendExtensionDescriptor>,
     frontend_events: crate::extensions::api::FrontendEventSink,
@@ -63,6 +82,7 @@ impl Default for SessionAgentOptions {
             max_iterations: None,
             tool_profile: None,
             allowed_tools: None,
+            run_origin: None,
             frontend_capabilities: crate::extensions::FrontendCapability::text_only(),
             frontend_extensions: Vec::new(),
             frontend_events: crate::extensions::api::FrontendEventSink::default(),
@@ -71,6 +91,14 @@ impl Default for SessionAgentOptions {
 }
 
 impl SessionAgentOptions {
+    pub fn seed(&self) -> SessionAgentSeed {
+        SessionAgentSeed {
+            max_iterations: self.max_iterations,
+            tool_profile: self.tool_profile.clone(),
+            allowed_tools: self.allowed_tools.clone(),
+        }
+    }
+
     pub fn subagent(
         max_iterations: u32,
         tool_profile: Option<String>,
@@ -94,6 +122,15 @@ impl SessionAgentOptions {
         self.frontend_extensions = extensions;
         self.frontend_events = events;
         self
+    }
+
+    pub fn with_run_origin(mut self, origin: crate::run_record::RunOrigin) -> Self {
+        self.run_origin = Some(origin);
+        self
+    }
+
+    pub fn run_origin(&self) -> Option<crate::run_record::RunOrigin> {
+        self.run_origin.clone()
     }
 
     pub fn frontend_capabilities(&self) -> Vec<crate::extensions::FrontendCapability> {

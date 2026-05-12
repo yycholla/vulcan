@@ -409,6 +409,39 @@ fn append_messages_preserves_prior_row_ids() {
     );
 }
 
+// Runtime-reliability hardening: corrupted or partially migrated DBs
+// should report the failed append phase directly instead of silently
+// treating a failed position lookup as position 0 and surfacing a
+// later, less-actionable INSERT error.
+#[test]
+fn append_messages_reports_position_lookup_failures() {
+    let conn = Connection::open_in_memory().unwrap();
+    initialize_conn(&conn).unwrap();
+    conn.execute("DROP TABLE messages", []).unwrap();
+    let store = SessionStore {
+        conn: Mutex::new(conn),
+    };
+    let id = uuid::Uuid::new_v4().to_string();
+
+    let err = store
+        .append_messages(
+            &id,
+            &[Message::User {
+                content: "will fail before insert".into(),
+            }],
+        )
+        .expect_err("corrupt messages table should fail append");
+    let chain = format!("{err:#}");
+    assert!(
+        chain.contains("determine next message position"),
+        "error chain should identify the append phase, got: {chain}",
+    );
+    assert!(
+        chain.contains(id.as_str()),
+        "error chain should include the session id, got: {chain}",
+    );
+}
+
 // YYC-148: save_messages is the full-rewrite path and IS expected
 // to reissue row IDs (DELETE + re-INSERT). This test is a guard so
 // nobody quietly replaces save_messages with append-only semantics

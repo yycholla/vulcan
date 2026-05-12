@@ -415,6 +415,12 @@ impl SpawnSubagentTool {
         let task = delegation.task.clone();
         let tools_granted = delegation.tool_count();
         let max_iter = delegation.budget.max_iterations;
+        let capability_profile = delegation
+            .profile_name
+            .clone()
+            .unwrap_or_else(|| "inline-allowlist".to_string());
+        let policy_surface = "tools.profiles";
+        let replay_safety = "summary_only";
         let (iterations, tokens_consumed) = match &run_result {
             Ok(out) => (out.iterations, out.tokens_consumed),
             Err(_) => (0, 0),
@@ -444,6 +450,10 @@ impl SpawnSubagentTool {
                     "max_iterations": max_iter,
                     "tokens": tokens_consumed,
                 },
+                "capability_profile": capability_profile,
+                "policy_surface": policy_surface,
+                "replay_safety": replay_safety,
+                "tools_granted": tools_granted,
             });
             return Ok(ToolResult::ok(serde_json::to_string_pretty(&payload)?));
         }
@@ -494,6 +504,9 @@ impl SpawnSubagentTool {
                         "max_iterations": max_iter,
                         "tokens": tokens_consumed,
                     },
+                    "capability_profile": capability_profile,
+                    "policy_surface": policy_surface,
+                    "replay_safety": replay_safety,
                     "tools_granted": tools_granted,
                 });
                 Ok(ToolResult::ok(serde_json::to_string_pretty(&payload)?))
@@ -524,6 +537,10 @@ impl SpawnSubagentTool {
                         "max_iterations": max_iter,
                         "tokens": tokens_consumed,
                     },
+                    "capability_profile": capability_profile,
+                    "policy_surface": policy_surface,
+                    "replay_safety": replay_safety,
+                    "tools_granted": tools_granted,
                 });
                 Ok(ToolResult::ok(serde_json::to_string_pretty(&payload)?))
             }
@@ -704,6 +721,11 @@ mod tests {
         assert!(!result.is_error, "runner path should succeed");
         assert_eq!(calls.load(Ordering::SeqCst), 1);
         assert!(result.output.contains("\"summary\": \"runner summary\""));
+        let payload: serde_json::Value = serde_json::from_str(&result.output).unwrap();
+        assert_eq!(payload["capability_profile"], "inline-allowlist");
+        assert_eq!(payload["policy_surface"], "tools.profiles");
+        assert_eq!(payload["replay_safety"], "summary_only");
+        assert_eq!(payload["tools_granted"], 1);
         let recent = store.recent(1);
         assert_eq!(
             recent[0].status,

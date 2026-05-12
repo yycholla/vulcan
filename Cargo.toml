@@ -60,10 +60,13 @@ gateway = [
     "dep:tower",
     "dep:subtle",
     "dep:hmac",
-    "dep:serenity",
     "dep:r2d2",
     "dep:r2d2_sqlite",
 ]
+# Discord connector (YYC-19). Gated separately from `gateway` so
+# operators who only need the HTTP gateway / scheduler / loopback
+# pieces do not compile Serenity unless Discord support is enabled.
+discord = ["gateway", "dep:serenity"]
 # Telegram connector (YYC-18 PR-3). Gated separately from `gateway` so
 # operators who only need Discord don't pay the teloxide-core dep cost.
 telegram = ["gateway", "dep:teloxide-core"]

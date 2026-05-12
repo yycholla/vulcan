@@ -32,6 +32,7 @@ use anyhow::{Context, Result};
 use parking_lot::Mutex;
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::path::Path;
 use uuid::Uuid;
 
@@ -73,10 +74,22 @@ impl std::fmt::Display for ArtifactId {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ArtifactKind {
+    /// Plain text that is durable but not necessarily a full report.
+    Text,
     /// Implementation plan, phased spec, task breakdown.
     Plan,
-    /// Proposed or applied code change, patch summary, file set.
+    /// Proposed or applied code patch.
+    Patch,
+    /// Backward-compatible tag for existing diff artifacts.
     Diff,
+    /// Filesystem/object-store file reference.
+    File,
+    Image,
+    Audio,
+    Video,
+    Table,
+    Json,
+    Log,
     /// Review report, audit, diagnostic bundle, benchmark.
     Report,
     /// Structured output from a long-running or important tool call.
@@ -86,17 +99,136 @@ pub enum ArtifactKind {
     /// Bounded diagnostic excerpt; relies on `redaction` metadata
     /// to flag any sensitivity.
     LogExcerpt,
+    Other,
 }
 
 impl ArtifactKind {
     pub fn as_str(self) -> &'static str {
         match self {
+            ArtifactKind::Text => "text",
             ArtifactKind::Plan => "plan",
+            ArtifactKind::Patch => "patch",
             ArtifactKind::Diff => "diff",
+            ArtifactKind::File => "file",
+            ArtifactKind::Image => "image",
+            ArtifactKind::Audio => "audio",
+            ArtifactKind::Video => "video",
+            ArtifactKind::Table => "table",
+            ArtifactKind::Json => "json",
+            ArtifactKind::Log => "log",
             ArtifactKind::Report => "report",
             ArtifactKind::ToolOutput => "tool_output",
             ArtifactKind::SubagentSummary => "subagent_summary",
             ArtifactKind::LogExcerpt => "log_excerpt",
+            ArtifactKind::Other => "other",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ArtifactVisibility {
+    Conversation,
+    Workspace,
+    Private,
+    Sensitive,
+}
+
+impl Default for ArtifactVisibility {
+    fn default() -> Self {
+        Self::Conversation
+    }
+}
+
+impl ArtifactVisibility {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Conversation => "conversation",
+            Self::Workspace => "workspace",
+            Self::Private => "private",
+            Self::Sensitive => "sensitive",
+        }
+    }
+
+    fn from_str(raw: &str) -> Result<Self> {
+        match raw {
+            "conversation" => Ok(Self::Conversation),
+            "workspace" => Ok(Self::Workspace),
+            "private" => Ok(Self::Private),
+            "sensitive" => Ok(Self::Sensitive),
+            other => anyhow::bail!("unknown artifact visibility `{other}`"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ArtifactRetention {
+    Session,
+    Workspace,
+    Manual,
+    Ephemeral,
+}
+
+impl Default for ArtifactRetention {
+    fn default() -> Self {
+        Self::Session
+    }
+}
+
+impl ArtifactRetention {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Session => "session",
+            Self::Workspace => "workspace",
+            Self::Manual => "manual",
+            Self::Ephemeral => "ephemeral",
+        }
+    }
+
+    fn from_str(raw: &str) -> Result<Self> {
+        match raw {
+            "session" => Ok(Self::Session),
+            "workspace" => Ok(Self::Workspace),
+            "manual" => Ok(Self::Manual),
+            "ephemeral" => Ok(Self::Ephemeral),
+            other => anyhow::bail!("unknown artifact retention `{other}`"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ArtifactReplaySafety {
+    Safe,
+    SummaryOnly,
+    Unsafe,
+    Unknown,
+}
+
+impl Default for ArtifactReplaySafety {
+    fn default() -> Self {
+        Self::Unknown
+    }
+}
+
+impl ArtifactReplaySafety {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Safe => "safe",
+            Self::SummaryOnly => "summary_only",
+            Self::Unsafe => "unsafe",
+            Self::Unknown => "unknown",
+        }
+    }
+
+    fn from_str(raw: &str) -> Result<Self> {
+        match raw {
+            "safe" => Ok(Self::Safe),
+            "summary_only" => Ok(Self::SummaryOnly),
+            "unsafe" => Ok(Self::Unsafe),
+            "unknown" => Ok(Self::Unknown),
+            other => anyhow::bail!("unknown artifact replay safety `{other}`"),
         }
     }
 }
@@ -130,12 +262,28 @@ pub struct Artifact {
     pub created_at: chrono::DateTime<chrono::Utc>,
     /// Optional human-friendly label.
     pub title: Option<String>,
-    /// Inline payload. UTF-8 — non-text payloads should ride
-    /// `external_path` instead of being base64-stuffed here.
+    pub mime_type: Option<String>,
+    pub schema: Option<String>,
+    /// Durable pointer to the payload. This may be content-addressed,
+    /// a local artifact-store URI, or an external file path depending
+    /// on the producer. It is safe to store in run records and CLI/TUI
+    /// metadata because raw payload bytes stay out of this field.
+    pub storage_uri: Option<String>,
+    /// Hash of the payload before storage/redaction. Safe for equality
+    /// checks and replay diagnostics; never stores raw payload text.
+    pub content_hash: Option<String>,
+    pub size_bytes: Option<u64>,
+    pub provenance: Option<String>,
+    pub visibility: ArtifactVisibility,
+    pub retention: ArtifactRetention,
+    pub replay_safety: ArtifactReplaySafety,
+    /// Inline payload. UTF-8 — callers must opt into this explicitly;
+    /// use [`Artifact::metadata_from_payload`] when the content should
+    /// not be copied into durable metadata by default.
     pub content: Option<String>,
     /// Filesystem path to the payload (relative paths interpreted
-    /// against the cwd at read time). Reserved for when inline
-    /// would exceed `INLINE_MAX_BYTES`.
+    /// against the cwd at read time). Kept for compatibility with older
+    /// consumers; new code should prefer `storage_uri`.
     pub external_path: Option<String>,
     pub redaction: RedactionTag,
 }
@@ -157,7 +305,53 @@ impl Artifact {
             source: None,
             created_at: chrono::Utc::now(),
             title: None,
+            mime_type: Some("text/plain; charset=utf-8".into()),
+            schema: None,
+            storage_uri: None,
+            content_hash: None,
+            size_bytes: None,
+            provenance: None,
+            visibility: ArtifactVisibility::Conversation,
+            retention: ArtifactRetention::Session,
+            replay_safety: ArtifactReplaySafety::SummaryOnly,
             content: Some(content.into()),
+            external_path: None,
+            redaction: RedactionTag::default(),
+        }
+    }
+
+    pub fn metadata_from_payload(
+        kind: ArtifactKind,
+        payload: &[u8],
+        storage_uri: impl Into<String>,
+    ) -> Self {
+        let mut hasher = Sha256::new();
+        hasher.update(payload);
+        let digest = hasher.finalize();
+        let mut hash = String::with_capacity(7 + digest.len() * 2);
+        hash.push_str("sha256:");
+        for byte in digest.iter() {
+            hash.push_str(&format!("{:02x}", byte));
+        }
+        Self {
+            id: ArtifactId::new(),
+            kind,
+            run_id: None,
+            session_id: None,
+            parent_artifact_id: None,
+            source: None,
+            created_at: chrono::Utc::now(),
+            title: None,
+            mime_type: None,
+            schema: None,
+            storage_uri: Some(storage_uri.into()),
+            content_hash: Some(hash),
+            size_bytes: Some(payload.len() as u64),
+            provenance: None,
+            visibility: ArtifactVisibility::Conversation,
+            retention: ArtifactRetention::Session,
+            replay_safety: ArtifactReplaySafety::Unknown,
+            content: None,
             external_path: None,
             redaction: RedactionTag::default(),
         }
@@ -180,6 +374,41 @@ impl Artifact {
 
     pub fn with_title(mut self, title: impl Into<String>) -> Self {
         self.title = Some(title.into());
+        self
+    }
+
+    pub fn with_mime_type(mut self, mime_type: impl Into<String>) -> Self {
+        self.mime_type = Some(mime_type.into());
+        self
+    }
+
+    pub fn with_schema(mut self, schema: impl Into<String>) -> Self {
+        self.schema = Some(schema.into());
+        self
+    }
+
+    pub fn with_storage_uri(mut self, storage_uri: impl Into<String>) -> Self {
+        self.storage_uri = Some(storage_uri.into());
+        self
+    }
+
+    pub fn with_provenance(mut self, provenance: impl Into<String>) -> Self {
+        self.provenance = Some(provenance.into());
+        self
+    }
+
+    pub fn with_visibility(mut self, visibility: ArtifactVisibility) -> Self {
+        self.visibility = visibility;
+        self
+    }
+
+    pub fn with_retention(mut self, retention: ArtifactRetention) -> Self {
+        self.retention = retention;
+        self
+    }
+
+    pub fn with_replay_safety(mut self, replay_safety: ArtifactReplaySafety) -> Self {
+        self.replay_safety = replay_safety;
         self
     }
 
@@ -301,6 +530,15 @@ impl SqliteArtifactStore {
                 source              TEXT,
                 created_at          TEXT NOT NULL,
                 title               TEXT,
+                mime_type           TEXT,
+                schema              TEXT,
+                storage_uri         TEXT,
+                content_hash        TEXT,
+                size_bytes          INTEGER,
+                provenance          TEXT,
+                visibility          TEXT NOT NULL DEFAULT 'conversation',
+                retention           TEXT NOT NULL DEFAULT 'session',
+                replay_safety       TEXT NOT NULL DEFAULT 'unknown',
                 content             TEXT,
                 external_path       TEXT,
                 redaction           TEXT
@@ -310,12 +548,52 @@ impl SqliteArtifactStore {
             CREATE INDEX IF NOT EXISTS idx_artifacts_created_at ON artifacts(created_at DESC);
             "#,
         )?;
+
+        let columns = artifact_columns(conn)?;
+        for (name, ddl) in [
+            (
+                "mime_type",
+                "ALTER TABLE artifacts ADD COLUMN mime_type TEXT",
+            ),
+            ("schema", "ALTER TABLE artifacts ADD COLUMN schema TEXT"),
+            (
+                "storage_uri",
+                "ALTER TABLE artifacts ADD COLUMN storage_uri TEXT",
+            ),
+            (
+                "content_hash",
+                "ALTER TABLE artifacts ADD COLUMN content_hash TEXT",
+            ),
+            (
+                "size_bytes",
+                "ALTER TABLE artifacts ADD COLUMN size_bytes INTEGER",
+            ),
+            (
+                "provenance",
+                "ALTER TABLE artifacts ADD COLUMN provenance TEXT",
+            ),
+            (
+                "visibility",
+                "ALTER TABLE artifacts ADD COLUMN visibility TEXT NOT NULL DEFAULT 'conversation'",
+            ),
+            (
+                "retention",
+                "ALTER TABLE artifacts ADD COLUMN retention TEXT NOT NULL DEFAULT 'session'",
+            ),
+            (
+                "replay_safety",
+                "ALTER TABLE artifacts ADD COLUMN replay_safety TEXT NOT NULL DEFAULT 'unknown'",
+            ),
+        ] {
+            if !columns.iter().any(|c| c == name) {
+                conn.execute_batch(ddl)?;
+            }
+        }
         Ok(())
     }
 
-    // YYC-275: 11 fields come straight from a SQLite row decode;
-    // collapsing them into a struct here would just rename the
-    // problem at the call site. Allowed at this site only.
+    // YYC-275: fields come straight from a SQLite row decode; collapsing
+    // them into a struct here would just rename the problem at the call site.
     #[allow(clippy::too_many_arguments)]
     fn row_to_artifact(
         id: String,
@@ -326,17 +604,36 @@ impl SqliteArtifactStore {
         source: Option<String>,
         created_at: String,
         title: Option<String>,
+        mime_type: Option<String>,
+        schema: Option<String>,
+        storage_uri: Option<String>,
+        content_hash: Option<String>,
+        size_bytes: Option<i64>,
+        provenance: Option<String>,
+        visibility: String,
+        retention: String,
+        replay_safety: String,
         content: Option<String>,
         external_path: Option<String>,
         redaction: Option<String>,
     ) -> Result<Artifact> {
         let kind = match kind.as_str() {
+            "text" => ArtifactKind::Text,
             "plan" => ArtifactKind::Plan,
+            "patch" => ArtifactKind::Patch,
             "diff" => ArtifactKind::Diff,
+            "file" => ArtifactKind::File,
+            "image" => ArtifactKind::Image,
+            "audio" => ArtifactKind::Audio,
+            "video" => ArtifactKind::Video,
+            "table" => ArtifactKind::Table,
+            "json" => ArtifactKind::Json,
+            "log" => ArtifactKind::Log,
             "report" => ArtifactKind::Report,
             "tool_output" => ArtifactKind::ToolOutput,
             "subagent_summary" => ArtifactKind::SubagentSummary,
             "log_excerpt" => ArtifactKind::LogExcerpt,
+            "other" => ArtifactKind::Other,
             other => anyhow::bail!("unknown artifact kind `{other}`"),
         };
         Ok(Artifact {
@@ -353,6 +650,15 @@ impl SqliteArtifactStore {
             created_at: chrono::DateTime::parse_from_rfc3339(&created_at)?
                 .with_timezone(&chrono::Utc),
             title,
+            mime_type,
+            schema,
+            storage_uri,
+            content_hash,
+            size_bytes: size_bytes.map(|n| n.max(0) as u64),
+            provenance,
+            visibility: ArtifactVisibility::from_str(&visibility)?,
+            retention: ArtifactRetention::from_str(&retention)?,
+            replay_safety: ArtifactReplaySafety::from_str(&replay_safety)?,
             content,
             external_path,
             redaction: RedactionTag(redaction),
@@ -365,8 +671,10 @@ impl ArtifactStore for SqliteArtifactStore {
         let conn = self.conn.lock();
         conn.execute(
             "INSERT INTO artifacts (id, kind, run_id, session_id, parent_artifact_id, source,
-                                    created_at, title, content, external_path, redaction)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+                                    created_at, title, mime_type, schema, storage_uri,
+                                    content_hash, size_bytes, provenance, visibility, retention,
+                                    replay_safety, content, external_path, redaction)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)",
             params![
                 artifact.id.to_string(),
                 artifact.kind.as_str(),
@@ -376,6 +684,15 @@ impl ArtifactStore for SqliteArtifactStore {
                 artifact.source,
                 artifact.created_at.to_rfc3339(),
                 artifact.title,
+                artifact.mime_type,
+                artifact.schema,
+                artifact.storage_uri,
+                artifact.content_hash,
+                artifact.size_bytes.map(|n| n as i64),
+                artifact.provenance,
+                artifact.visibility.as_str(),
+                artifact.retention.as_str(),
+                artifact.replay_safety.as_str(),
                 artifact.content,
                 artifact.external_path,
                 artifact.redaction.0,
@@ -388,67 +705,49 @@ impl ArtifactStore for SqliteArtifactStore {
         let conn = self.conn.lock();
         let row = conn
             .query_row(
-                "SELECT id, kind, run_id, session_id, parent_artifact_id, source,
-                        created_at, title, content, external_path, redaction
-                 FROM artifacts WHERE id = ?1",
+                artifact_select_sql("WHERE id = ?1").as_str(),
                 params![id.to_string()],
                 row_columns,
             )
             .optional()?;
         match row {
             None => Ok(None),
-            Some(t) => Ok(Some(Self::row_to_artifact(
-                t.0, t.1, t.2, t.3, t.4, t.5, t.6, t.7, t.8, t.9, t.10,
-            )?)),
+            Some(t) => Ok(Some(row_tuple_to_artifact(t)?)),
         }
     }
 
     fn list_for_run(&self, run_id: crate::run_record::RunId) -> Result<Vec<Artifact>> {
         let conn = self.conn.lock();
-        let mut stmt = conn.prepare(
-            "SELECT id, kind, run_id, session_id, parent_artifact_id, source,
-                    created_at, title, content, external_path, redaction
-             FROM artifacts WHERE run_id = ?1 ORDER BY created_at ASC",
-        )?;
+        let sql = artifact_select_sql("WHERE run_id = ?1 ORDER BY created_at ASC");
+        let mut stmt = conn.prepare(&sql)?;
         let rows: Vec<_> = stmt
             .query_map(params![run_id.to_string()], row_columns)?
             .collect::<Result<Vec<_>, _>>()?;
-        rows.into_iter()
-            .map(|t| Self::row_to_artifact(t.0, t.1, t.2, t.3, t.4, t.5, t.6, t.7, t.8, t.9, t.10))
-            .collect()
+        rows.into_iter().map(row_tuple_to_artifact).collect()
     }
 
     fn list_for_session(&self, session_id: &str) -> Result<Vec<Artifact>> {
         let conn = self.conn.lock();
-        let mut stmt = conn.prepare(
-            "SELECT id, kind, run_id, session_id, parent_artifact_id, source,
-                    created_at, title, content, external_path, redaction
-             FROM artifacts WHERE session_id = ?1 ORDER BY created_at ASC",
-        )?;
+        let sql = artifact_select_sql("WHERE session_id = ?1 ORDER BY created_at ASC");
+        let mut stmt = conn.prepare(&sql)?;
         let rows: Vec<_> = stmt
             .query_map(params![session_id], row_columns)?
             .collect::<Result<Vec<_>, _>>()?;
-        rows.into_iter()
-            .map(|t| Self::row_to_artifact(t.0, t.1, t.2, t.3, t.4, t.5, t.6, t.7, t.8, t.9, t.10))
-            .collect()
+        rows.into_iter().map(row_tuple_to_artifact).collect()
     }
 
     fn recent(&self, limit: usize) -> Result<Vec<Artifact>> {
         let conn = self.conn.lock();
-        let mut stmt = conn.prepare(
-            "SELECT id, kind, run_id, session_id, parent_artifact_id, source,
-                    created_at, title, content, external_path, redaction
-             FROM artifacts ORDER BY created_at DESC LIMIT ?1",
-        )?;
+        let sql = artifact_select_sql("ORDER BY created_at DESC LIMIT ?1");
+        let mut stmt = conn.prepare(&sql)?;
         let rows: Vec<_> = stmt
             .query_map(params![limit as i64], row_columns)?
             .collect::<Result<Vec<_>, _>>()?;
-        rows.into_iter()
-            .map(|t| Self::row_to_artifact(t.0, t.1, t.2, t.3, t.4, t.5, t.6, t.7, t.8, t.9, t.10))
-            .collect()
+        rows.into_iter().map(row_tuple_to_artifact).collect()
     }
 }
 
+#[allow(clippy::type_complexity)]
 type ArtifactRowColumns = (
     String,
     String,
@@ -461,7 +760,39 @@ type ArtifactRowColumns = (
     Option<String>,
     Option<String>,
     Option<String>,
+    Option<String>,
+    Option<i64>,
+    Option<String>,
+    String,
+    String,
+    String,
+    Option<String>,
+    Option<String>,
+    Option<String>,
 );
+
+fn artifact_columns(conn: &Connection) -> Result<Vec<String>> {
+    let mut stmt = conn.prepare("PRAGMA table_info(artifacts)")?;
+    let rows = stmt.query_map([], |row| row.get::<_, String>(1))?;
+    Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+}
+
+fn artifact_select_sql(suffix: &str) -> String {
+    format!(
+        "SELECT id, kind, run_id, session_id, parent_artifact_id, source,
+                created_at, title, mime_type, schema, storage_uri, content_hash,
+                size_bytes, provenance, visibility, retention, replay_safety,
+                content, external_path, redaction
+         FROM artifacts {suffix}"
+    )
+}
+
+fn row_tuple_to_artifact(t: ArtifactRowColumns) -> Result<Artifact> {
+    SqliteArtifactStore::row_to_artifact(
+        t.0, t.1, t.2, t.3, t.4, t.5, t.6, t.7, t.8, t.9, t.10, t.11, t.12, t.13, t.14, t.15, t.16,
+        t.17, t.18, t.19,
+    )
+}
 
 fn row_columns(row: &rusqlite::Row<'_>) -> rusqlite::Result<ArtifactRowColumns> {
     Ok((
@@ -476,6 +807,15 @@ fn row_columns(row: &rusqlite::Row<'_>) -> rusqlite::Result<ArtifactRowColumns> 
         row.get(8)?,
         row.get(9)?,
         row.get(10)?,
+        row.get(11)?,
+        row.get(12)?,
+        row.get(13)?,
+        row.get(14)?,
+        row.get(15)?,
+        row.get(16)?,
+        row.get(17)?,
+        row.get(18)?,
+        row.get(19)?,
     ))
 }
 
@@ -486,12 +826,22 @@ mod tests {
     #[test]
     fn artifact_kind_round_trips_string() {
         for k in [
+            ArtifactKind::Text,
             ArtifactKind::Plan,
+            ArtifactKind::Patch,
             ArtifactKind::Diff,
+            ArtifactKind::File,
+            ArtifactKind::Image,
+            ArtifactKind::Audio,
+            ArtifactKind::Video,
+            ArtifactKind::Table,
+            ArtifactKind::Json,
+            ArtifactKind::Log,
             ArtifactKind::Report,
             ArtifactKind::ToolOutput,
             ArtifactKind::SubagentSummary,
             ArtifactKind::LogExcerpt,
+            ArtifactKind::Other,
         ] {
             let s = k.as_str();
             assert!(!s.contains(' '));
@@ -510,6 +860,91 @@ mod tests {
         assert_eq!(got.kind, ArtifactKind::Plan);
         assert_eq!(got.content.as_deref(), Some("## Plan\n- step 1"));
         assert_eq!(got.session_id.as_deref(), Some("sess-7"));
+    }
+
+    #[test]
+    fn metadata_payload_records_hash_size_and_safe_storage_uri_without_raw_content() {
+        let payload = "API_KEY=secret123\nsummary: safe to persist";
+        let art = Artifact::metadata_from_payload(
+            ArtifactKind::Report,
+            payload.as_bytes(),
+            "artifact://sha256/report-1",
+        )
+        .with_title("safe report")
+        .with_source("review")
+        .with_redaction("secrets-masked")
+        .with_provenance("tool:review")
+        .with_visibility(ArtifactVisibility::Private)
+        .with_retention(ArtifactRetention::Workspace)
+        .with_replay_safety(ArtifactReplaySafety::SummaryOnly)
+        .with_mime_type("text/markdown")
+        .with_schema("vulcan.report.v1");
+
+        assert!(
+            art.content.is_none(),
+            "raw payload must not be stored by default"
+        );
+        assert_eq!(art.size_bytes, Some(payload.len() as u64));
+        assert!(art.content_hash.as_deref().unwrap().starts_with("sha256:"));
+        assert_eq!(
+            art.storage_uri.as_deref(),
+            Some("artifact://sha256/report-1")
+        );
+        assert_eq!(art.visibility, ArtifactVisibility::Private);
+        assert_eq!(art.retention, ArtifactRetention::Workspace);
+        assert_eq!(art.replay_safety, ArtifactReplaySafety::SummaryOnly);
+        let serialized = serde_json::to_string(&art).unwrap();
+        assert!(!serialized.contains("secret123"));
+    }
+
+    #[test]
+    fn sqlite_store_persists_contract_metadata_without_raw_payload() {
+        let store = SqliteArtifactStore::try_open_in_memory().unwrap();
+        let run = crate::run_record::RunId::new();
+        let payload = br#"{"token":"secret-token","rows":3}"#;
+        let art = Artifact::metadata_from_payload(
+            ArtifactKind::Json,
+            payload,
+            "artifact://sha256/table-1",
+        )
+        .with_run_id(run)
+        .with_title("tool json")
+        .with_source("tool:query")
+        .with_redaction("secret-values-redacted")
+        .with_provenance("tool:query args=sha256:abc")
+        .with_visibility(ArtifactVisibility::Workspace)
+        .with_retention(ArtifactRetention::Session)
+        .with_replay_safety(ArtifactReplaySafety::Safe)
+        .with_mime_type("application/json")
+        .with_schema("vulcan.tool-output.v1");
+        let id = art.id;
+
+        store.create(&art).unwrap();
+        let got = store.get(id).unwrap().unwrap();
+
+        assert_eq!(got.run_id, Some(run));
+        assert_eq!(got.kind, ArtifactKind::Json);
+        assert_eq!(got.content, None);
+        assert_eq!(
+            got.storage_uri.as_deref(),
+            Some("artifact://sha256/table-1")
+        );
+        assert_eq!(got.size_bytes, Some(payload.len() as u64));
+        assert!(got.content_hash.as_deref().unwrap().starts_with("sha256:"));
+        assert_eq!(got.visibility, ArtifactVisibility::Workspace);
+        assert_eq!(got.retention, ArtifactRetention::Session);
+        assert_eq!(got.replay_safety, ArtifactReplaySafety::Safe);
+        assert_eq!(got.mime_type.as_deref(), Some("application/json"));
+        assert_eq!(got.schema.as_deref(), Some("vulcan.tool-output.v1"));
+        assert_eq!(
+            got.provenance.as_deref(),
+            Some("tool:query args=sha256:abc")
+        );
+        assert!(
+            !serde_json::to_string(&got)
+                .unwrap()
+                .contains("secret-token")
+        );
     }
 
     #[test]

@@ -398,11 +398,35 @@ fn frontend_options_from_params(
                 .ok()
         })
         .unwrap_or_default();
-    crate::daemon::session_agent::SessionAgentOptions::default().with_frontend_context(
-        capabilities,
-        extensions,
-        crate::extensions::api::FrontendEventSink::default(),
-    )
+    let mut options = crate::daemon::session_agent::SessionAgentOptions::default()
+        .with_frontend_context(
+            capabilities,
+            extensions,
+            crate::extensions::api::FrontendEventSink::default(),
+        );
+    if let Some(origin) = run_origin_from_params(params) {
+        options = options.with_run_origin(origin);
+    }
+    options
+}
+
+fn run_origin_from_params(params: &serde_json::Value) -> Option<crate::run_record::RunOrigin> {
+    let origin = params.get("origin")?;
+    match origin.get("kind").and_then(|value| value.as_str()) {
+        Some("gateway") => {
+            let lane = origin
+                .get("lane")
+                .and_then(|value| value.as_str())
+                .map(str::to_string)
+                .or_else(|| {
+                    let platform = origin.get("platform")?.as_str()?;
+                    let chat_id = origin.get("chat_id")?.as_str()?;
+                    Some(format!("{platform}:{chat_id}"))
+                })?;
+            Some(crate::run_record::RunOrigin::Gateway { lane })
+        }
+        _ => None,
+    }
 }
 
 #[cfg(test)]
@@ -446,6 +470,22 @@ mod tests {
         let state =
             crate::daemon::state::DaemonState::new(Arc::new(daemon_config)).with_cortex(store);
         (dir, Arc::new(state))
+    }
+
+    #[test]
+    fn frontend_options_capture_gateway_run_origin() {
+        let options = frontend_options_from_params(&serde_json::json!({
+            "origin": {
+                "kind": "gateway",
+                "lane": "discord:team-chat",
+                "platform": "discord",
+                "chat_id": "team-chat"
+            }
+        }));
+        assert!(matches!(
+            options.run_origin(),
+            Some(crate::run_record::RunOrigin::Gateway { lane }) if lane == "discord:team-chat"
+        ));
     }
 
     #[tokio::test]
@@ -501,26 +541,31 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn reload_queues_reload_signal() {
-        let state = Arc::new(crate::daemon::state::DaemonState::for_tests_minimal());
-        let signal = state.reload_signal();
-        let dispatcher = Dispatcher::new(state);
+    async fn reload_returns_structured_report() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("config.toml"),
+            "[provider]\nbase_url = \"http://127.0.0.1:11434/v1\"\nmodel = \"qwen2.5:3b\"\ndisable_catalog = true\n",
+        )
+        .unwrap();
+        let mut baseline = crate::config::Config::default();
+        baseline.provider.base_url = "http://127.0.0.1:11434/v1".into();
+        baseline.provider.model = "qwen2.5:3b".into();
+        baseline.provider.disable_catalog = true;
+        let state =
+            crate::daemon::state::DaemonState::for_tests_with_home(Arc::new(baseline), dir.path());
 
-        let waiter = tokio::spawn(async move {
-            signal.notified().await;
-        });
-        tokio::task::yield_now().await;
+        std::fs::write(
+            dir.path().join("config.toml"),
+            "[provider]\nbase_url = \"http://127.0.0.1:11434/v1\"\nmodel = \"qwen2.5:7b\"\ndisable_catalog = true\n",
+        )
+        .unwrap();
 
-        let resp = match dispatcher.dispatch(req("daemon.reload")).await {
-            DispatchResult::Response(r) => r,
-            DispatchResult::Stream { .. } => panic!("reload should not stream"),
-        };
-        assert_eq!(resp.result.unwrap()["ok"], true);
-
-        tokio::time::timeout(std::time::Duration::from_millis(500), waiter)
-            .await
-            .expect("reload signal must fire")
-            .unwrap();
+        let report = state.reload_from_dir(dir.path()).await;
+        let result = serde_json::to_value(report).unwrap();
+        assert_eq!(result["status"], "applied");
+        assert_eq!(result["reloads_applied"], 1);
+        assert!(result["diagnostics"].is_array());
     }
 
     #[tokio::test]
@@ -535,10 +580,8 @@ mod tests {
         let result = resp.result.expect("status ok");
         assert!(result["pid"].is_number());
         assert!(result["uptime_secs"].is_number());
-        assert!(
-            result["sessions"].is_array(),
-            "sessions should be array (Slice 0: empty)"
-        );
+        assert!(result["reloads_applied"].is_number());
+        assert!(result["sessions"].is_array(), "sessions should be array");
     }
 
     #[tokio::test]

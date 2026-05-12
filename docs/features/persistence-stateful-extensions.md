@@ -1,13 +1,29 @@
 ---
 title: Persistence & Stateful Extensions
 type: feature
-created: 2026-05-14
+status: proposed
+phase: Phase 3 planning spec
+created: 2026-05-08
+updated: 2026-05-08
+tracking: GitHub #270; Linear YYC-170 from issue audit
 tags: [extensions, persistence, state, multi-session]
 ---
 
 # Persistence & Stateful Extensions
 
-Extensions that preserve meaningful state across sessions and offer long-lived memory, plans, and auto-resume.
+## Status
+
+| Field | Value |
+|---|---|
+| Status | Proposed Phase 3 spec |
+| Current implementation state | foundation only: SQLite session persistence, FTS5 search, and extension state store handles exist; extension-owned checkpoints, knowledge graphs, and failover stores are proposed |
+| Tracking | GitHub #270; Linear YYC-170 from issue audit |
+| Dependencies / non-goals | Extension state store (#270), governance (#269), and runtime resource pool foundations. This document does not claim the proposed behavior is currently available. |
+
+> Language note: sections below describe the target design. Unless the status table explicitly calls out a shipped foundation, read capability statements as proposed behavior.
+
+
+Proposed extensions would preserve meaningful state across sessions and offer long-lived memory, plans, and auto-resume on top of shipped session persistence foundations.
 
 ## Session Persistence
 
@@ -20,7 +36,7 @@ Maintain an evolving, cross-session knowledge graph linking entities, tasks, and
 
 - **Entity resolution**: Merge mentions of the same entity across sessions.
 - **Temporal reasoning**: Track changes over time and surface trends.
-- **Querying**: Extensions can expose tools like `graph.query(...)` for agents to retrieve structured knowledge.
+- **Querying**: Proposed extensions could expose tools like `graph.query(...)` for agents to retrieve structured knowledge.
 
 ## Long-Term Planning Extensions
 

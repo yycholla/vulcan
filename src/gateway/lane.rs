@@ -3,6 +3,9 @@
 //! `LaneRouter` spawns one worker task per `LaneKey`. Messages dispatched to
 //! the same key run strictly in order; messages on different keys run on
 //! independent tasks and so make use of the multi-thread runtime.
+//! Idle lane workers self-remove after [`DEFAULT_WORKER_IDLE_TTL`] so a
+//! long-running gateway does not retain one channel/task for every chat id it
+//! has ever seen.
 
 use std::collections::HashMap;
 use std::future::Future;
@@ -11,6 +14,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use async_trait::async_trait;
 use tokio::sync::{Notify, RwLock, mpsc};
+use tokio::time::{Duration, timeout};
 
 #[derive(Clone, Eq, Hash, PartialEq, Debug)]
 pub struct LaneKey {
@@ -47,6 +51,7 @@ where
 }
 
 const DEFAULT_CHANNEL_CAPACITY: usize = 32;
+const DEFAULT_WORKER_IDLE_TTL: Duration = Duration::from_secs(300);
 
 pub struct LaneRouter<M> {
     inner: Arc<RwLock<HashMap<LaneKey, mpsc::Sender<M>>>>,
@@ -54,6 +59,7 @@ pub struct LaneRouter<M> {
     pending: Arc<AtomicUsize>,
     completed_notify: Arc<Notify>,
     channel_capacity: usize,
+    worker_idle_ttl: Duration,
 }
 
 impl<M: Send + 'static> LaneRouter<M> {
@@ -68,12 +74,24 @@ impl<M: Send + 'static> LaneRouter<M> {
     where
         H: Handler<M>,
     {
+        Self::with_capacity_and_idle(handler, channel_capacity, DEFAULT_WORKER_IDLE_TTL)
+    }
+
+    pub fn with_capacity_and_idle<H>(
+        handler: H,
+        channel_capacity: usize,
+        worker_idle_ttl: Duration,
+    ) -> Self
+    where
+        H: Handler<M>,
+    {
         Self {
             inner: Arc::new(RwLock::new(HashMap::new())),
             handler: Arc::new(handler),
             pending: Arc::new(AtomicUsize::new(0)),
             completed_notify: Arc::new(Notify::new()),
             channel_capacity,
+            worker_idle_ttl,
         }
     }
 
@@ -111,13 +129,37 @@ impl<M: Send + 'static> LaneRouter<M> {
         let handler = Arc::clone(&self.handler);
         let pending = Arc::clone(&self.pending);
         let notify = Arc::clone(&self.completed_notify);
+        let inner = Arc::clone(&self.inner);
         let lane_for_worker = lane.clone();
+        let tx_for_worker = tx.clone();
+        let idle_ttl = self.worker_idle_ttl;
         tokio::spawn(async move {
-            while let Some(msg) = rx.recv().await {
-                handler.handle(lane_for_worker.clone(), msg).await;
-                let prev = pending.fetch_sub(1, Ordering::SeqCst);
-                if prev == 1 {
-                    notify.notify_waiters();
+            loop {
+                match timeout(idle_ttl, rx.recv()).await {
+                    Ok(Some(msg)) => {
+                        handle_one(&handler, &lane_for_worker, msg, &pending, &notify).await;
+                    }
+                    Ok(None) => break,
+                    Err(_) => {
+                        let removed_self = {
+                            let mut map = inner.write().await;
+                            match map.get(&lane_for_worker) {
+                                Some(current) if current.same_channel(&tx_for_worker) => {
+                                    map.remove(&lane_for_worker);
+                                    true
+                                }
+                                _ => false,
+                            }
+                        };
+                        if !removed_self {
+                            continue;
+                        }
+                        rx.close();
+                        while let Some(msg) = rx.recv().await {
+                            handle_one(&handler, &lane_for_worker, msg, &pending, &notify).await;
+                        }
+                        break;
+                    }
                 }
             }
         });
@@ -150,6 +192,24 @@ impl<M: Send + 'static> LaneRouter<M> {
             }
             notified.await;
         }
+    }
+
+    pub async fn active_lane_count(&self) -> usize {
+        self.inner.read().await.len()
+    }
+}
+
+async fn handle_one<M: Send + 'static>(
+    handler: &Arc<dyn Handler<M>>,
+    lane: &LaneKey,
+    msg: M,
+    pending: &AtomicUsize,
+    notify: &Notify,
+) {
+    handler.handle(lane.clone(), msg).await;
+    let prev = pending.fetch_sub(1, Ordering::SeqCst);
+    if prev == 1 {
+        notify.notify_waiters();
     }
 }
 
@@ -249,5 +309,32 @@ mod tests {
         }
         router.drain().await;
         assert_eq!(counter.load(Ordering::SeqCst), 3);
+    }
+
+    #[tokio::test]
+    async fn idle_lane_worker_exits_and_removes_sender() {
+        let counter = Arc::new(AtomicUsize::new(0));
+        let seen = counter.clone();
+        let handler = from_closure(move |_: LaneKey, _: ()| {
+            let seen = seen.clone();
+            async move {
+                seen.fetch_add(1, Ordering::SeqCst);
+            }
+        });
+        let router: LaneRouter<()> =
+            LaneRouter::with_capacity_and_idle(handler, 4, Duration::from_millis(20));
+        let lane = LaneKey {
+            platform: "loop".into(),
+            chat_id: "idle".into(),
+        };
+
+        router.dispatch(lane, ()).await;
+        router.drain().await;
+        assert_eq!(counter.load(Ordering::SeqCst), 1);
+        assert_eq!(router.active_lane_count().await, 1);
+
+        tokio::time::sleep(Duration::from_millis(80)).await;
+
+        assert_eq!(router.active_lane_count().await, 0, "idle lane removed");
     }
 }

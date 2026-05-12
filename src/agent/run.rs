@@ -1186,6 +1186,18 @@ impl TurnRunnerMut<'_> {
                 .hooks
                 .apply_context(&messages, cancel.clone())
                 .await;
+            let added_messages = outgoing.len().saturating_sub(messages.len());
+            if added_messages > 0 {
+                // Record only summarized before_prompt injection metadata. The
+                // injected messages themselves may contain sensitive context and
+                // must remain transient rather than durable run-record payload.
+                self.agent.record_run_event(RunEvent::HookDecision {
+                    event: "before_prompt".into(),
+                    handler: "apply_before_prompt".into(),
+                    outcome: "inject_messages".into(),
+                    detail: Some(format!("added_messages={added_messages}")),
+                });
+            }
 
             let response = match mode {
                 TurnMode::Buffered => {

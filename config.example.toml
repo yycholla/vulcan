@@ -123,6 +123,15 @@ max_hits = 5
 min_score = 0.0
 max_chars_per_hit = 400
 
+# Tree-sitter structural outline BeforePrompt assist. Off by default; when
+# enabled, source files explicitly mentioned in the latest user prompt get
+# symbol names + line ranges injected (not source bodies), bounded here.
+[code_outline_assist]
+enabled = false
+max_files = 3
+max_symbols_per_file = 80
+max_prompt_chars = 4000
+
 [cortex]
 # Embedded graph memory. When enabled, daemon mode keeps one shared
 # cortex.redb handle open so CLI/TUI clients do not fight over the lock.

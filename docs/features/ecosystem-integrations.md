@@ -1,13 +1,29 @@
 ---
 title: Ecosystem & Integrations
 type: feature
-created: 2026-05-14
+status: proposed
+phase: Phase 3 planning spec
+created: 2026-05-08
+updated: 2026-05-08
+tracking: GitHub #277; Linear YYC-176 ecosystem catalog reference from issue audit
 tags: [extensions, integrations, observability, infra]
 ---
 
 # Ecosystem & Integrations
 
-Extensions that connect Vulcan to the broader tools and platforms teams already use.
+## Status
+
+| Field | Value |
+|---|---|
+| Status | Proposed Phase 3 spec |
+| Current implementation state | none for most integrations: observability foundations exist, but first-party Slack/email/CI/secret/data-source extensions are proposed catalog entries |
+| Tracking | GitHub #277; Linear YYC-176 ecosystem catalog reference from issue audit |
+| Dependencies / non-goals | Extension package/store (#266), governance (#269), and state APIs (#270). This document does not claim the proposed behavior is currently available. |
+
+> Language note: sections below describe the target design. Unless the status table explicitly calls out a shipped foundation, read capability statements as proposed behavior.
+
+
+A proposed catalog of extensions that would connect Vulcan to the broader tools and platforms teams already use.
 
 ## CI/CD Extensions
 

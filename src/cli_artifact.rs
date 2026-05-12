@@ -140,6 +140,35 @@ fn render_artifact_show(art: &Artifact) -> String {
         art.title.as_deref().unwrap_or("-")
     ));
     out.push_str(&format!(
+        "  mime:       {}\n",
+        art.mime_type.as_deref().unwrap_or("-")
+    ));
+    out.push_str(&format!(
+        "  schema:     {}\n",
+        art.schema.as_deref().unwrap_or("-")
+    ));
+    out.push_str(&format!(
+        "  storage:    {}\n",
+        art.storage_uri.as_deref().unwrap_or("-")
+    ));
+    out.push_str(&format!(
+        "  hash:       {}\n",
+        art.content_hash.as_deref().unwrap_or("-")
+    ));
+    out.push_str(&format!(
+        "  size:       {}\n",
+        art.size_bytes
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| "-".into())
+    ));
+    out.push_str(&format!("  visibility: {}\n", art.visibility.as_str()));
+    out.push_str(&format!("  retention:  {}\n", art.retention.as_str()));
+    out.push_str(&format!("  replay:     {}\n", art.replay_safety.as_str()));
+    out.push_str(&format!(
+        "  provenance: {}\n",
+        art.provenance.as_deref().unwrap_or("-")
+    ));
+    out.push_str(&format!(
         "  redaction:  {}\n",
         art.redaction.0.as_deref().unwrap_or("-")
     ));
@@ -186,11 +215,19 @@ fn kind_badge(kind: ArtifactKind) -> String {
     let label = format!("[{}]", kind.as_str());
     match kind {
         ArtifactKind::Plan => label.blue().bold().to_string(),
-        ArtifactKind::Diff => label.yellow().bold().to_string(),
+        ArtifactKind::Diff | ArtifactKind::Patch => label.yellow().bold().to_string(),
         ArtifactKind::Report => label.green().bold().to_string(),
-        ArtifactKind::ToolOutput => label.cyan().bold().to_string(),
+        ArtifactKind::ToolOutput | ArtifactKind::Json | ArtifactKind::Table => {
+            label.cyan().bold().to_string()
+        }
         ArtifactKind::SubagentSummary => label.magenta().bold().to_string(),
-        ArtifactKind::LogExcerpt => label.dimmed().to_string(),
+        ArtifactKind::Log | ArtifactKind::LogExcerpt => label.dimmed().to_string(),
+        ArtifactKind::Text
+        | ArtifactKind::File
+        | ArtifactKind::Image
+        | ArtifactKind::Audio
+        | ArtifactKind::Video
+        | ArtifactKind::Other => label.to_string(),
     }
 }
 

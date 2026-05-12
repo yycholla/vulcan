@@ -123,19 +123,22 @@ CREATE TABLE IF NOT EXISTS outbound_queue (
 );
 CREATE INDEX IF NOT EXISTS idx_outbound_due ON outbound_queue(state, next_attempt_at);
 
--- YYC-17 PR-3: scheduler job runs. The scheduler config is the
+-- YYC-17 PR-4: scheduler job runs. The scheduler config is the
 -- authoritative job list (so re-deploys with updated cron/prompt
 -- text take effect on restart); this table only carries the
 -- mutable run-time state per job_id.
 CREATE TABLE IF NOT EXISTS scheduler_runs (
-    job_id           TEXT PRIMARY KEY,
-    last_fired_at    INTEGER,
-    last_status      TEXT, -- 'enqueued' | 'skipped' | 'enqueue_failed'
-    last_error       TEXT,
-    last_inbound_id  INTEGER,
-    total_fires      INTEGER NOT NULL DEFAULT 0,
-    skipped_fires    INTEGER NOT NULL DEFAULT 0,
-    failed_fires     INTEGER NOT NULL DEFAULT 0
+    job_id            TEXT PRIMARY KEY,
+    last_fired_at     INTEGER,
+    last_finished_at  INTEGER,
+    last_status       TEXT, -- 'enqueued' | 'skipped' | 'enqueue_failed' | 'completed' | 'failed'
+    last_error        TEXT,
+    last_inbound_id   INTEGER,
+    total_fires       INTEGER NOT NULL DEFAULT 0,
+    skipped_fires     INTEGER NOT NULL DEFAULT 0,
+    failed_fires      INTEGER NOT NULL DEFAULT 0,
+    completed_fires   INTEGER NOT NULL DEFAULT 0,
+    active_fires      INTEGER NOT NULL DEFAULT 0
 );
 "#;
 
@@ -174,13 +177,32 @@ pub(in crate::memory) fn initialize_conn(conn: &Connection) -> Result<()> {
     );
     let _ = conn.execute("ALTER TABLE inbound_queue ADD COLUMN message_id TEXT", []);
     let _ = conn.execute("ALTER TABLE inbound_queue ADD COLUMN reply_to TEXT", []);
+    // YYC-17 PR-4: richer scheduler observability columns.
+    let _ = conn.execute(
+        "ALTER TABLE scheduler_runs ADD COLUMN last_finished_at INTEGER",
+        [],
+    );
+    let _ = conn.execute(
+        "ALTER TABLE scheduler_runs ADD COLUMN completed_fires INTEGER NOT NULL DEFAULT 0",
+        [],
+    );
+    let _ = conn.execute(
+        "ALTER TABLE scheduler_runs ADD COLUMN active_fires INTEGER NOT NULL DEFAULT 0",
+        [],
+    );
     Ok(())
 }
 
 #[cfg(feature = "gateway")]
 pub(crate) fn open_gateway_pool() -> Result<DbPool> {
     let dir = crate::config::vulcan_home();
-    std::fs::create_dir_all(&dir).ok();
+    open_gateway_pool_at(&dir)
+}
+
+#[cfg(feature = "gateway")]
+fn open_gateway_pool_at(dir: &std::path::Path) -> Result<DbPool> {
+    std::fs::create_dir_all(dir)
+        .with_context(|| format!("create vulcan_home at {}", dir.display()))?;
     let path = dir.join("sessions.db");
     // YYC-149: `with_init` runs on every fresh connection r2d2
     // instantiates so the busy_timeout (5s) is applied on every
@@ -226,6 +248,31 @@ pub(crate) fn in_memory_gateway_pool() -> Result<DbPool> {
     let conn = pool.get().context("get conn from in-memory gateway pool")?;
     initialize_conn(&conn).context("initialize in-memory gateway DB schema")?;
     Ok(pool)
+}
+
+#[cfg(all(test, feature = "gateway"))]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    #[test]
+    fn open_gateway_pool_reports_vulcan_home_creation_failures() {
+        let dir = TempDir::new().unwrap();
+        let file_path = dir.path().join("not-a-directory");
+        std::fs::write(&file_path, "already a file").unwrap();
+
+        let err = open_gateway_pool_at(&file_path)
+            .expect_err("file-backed vulcan_home should fail before opening SQLite");
+        let chain = format!("{err:#}");
+        assert!(
+            chain.contains("create vulcan_home"),
+            "error chain should identify the startup directory operation, got: {chain}",
+        );
+        assert!(
+            chain.contains("not-a-directory"),
+            "error chain should include the configured path, got: {chain}",
+        );
+    }
 }
 
 pub(in crate::memory) fn upsert_session_metadata(

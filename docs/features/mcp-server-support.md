@@ -1,11 +1,27 @@
 ---
 title: MCP Server Support
 type: feature
-created: 2026-05-14
+status: proposed
+phase: Phase 3 planning spec
+created: 2026-05-08
+updated: 2026-05-08
+tracking: GitHub #268 and #274; Linear YYC-168 / YYC-174 from issue audit
 tags: [extensions, mcp, llm-tools, interoperability]
 ---
 
 # MCP Server Support
+
+## Status
+
+| Field | Value |
+|---|---|
+| Status | Proposed Phase 3 spec |
+| Current implementation state | foundation only: MCP client/process/supervisor/tool adapter modules exist; managed server lifecycle, transparent auto-exposure, resource templates, and sampling policy are proposed |
+| Tracking | GitHub #268 and #274; Linear YYC-168 / YYC-174 from issue audit |
+| Dependencies / non-goals | Tool registry, policy hooks, and extension store/package decisions. This document does not claim the proposed behavior is currently available. |
+
+> Language note: sections below describe the target design. Unless the status table explicitly calls out a shipped foundation, read capability statements as proposed behavior.
+
 
 First-class support for the **Model Context Protocol (MCP)** — enabling extensions and agents to seamlessly integrate with external data sources, tools, and services through a standardized, secure protocol.
 
@@ -17,7 +33,7 @@ MCP provides a standardized way for LLM applications to expose and consume tools
 
 ### MCP Client (Built-in)
 
-Vulcan embeds an MCP client that can connect to one or more MCP servers on behalf of extensions or the agent itself.
+This proposal would add an MCP client that can connect to one or more MCP servers on behalf of extensions or the agent itself.
 
 - **Transport**: stdio (default), SSE (Server-Sent Events), or in-process pipes for local servers
 - **Lifecycle**: Start/stop servers, monitor health, auto-restart on crash
@@ -25,7 +41,7 @@ Vulcan embeds an MCP client that can connect to one or more MCP servers on behal
 
 ### MCP ↔ Extension Bridge
 
-Extensions can declare dependency on MCP capabilities. The bridge translates between MCP primitives and Vulcan-native concepts:
+Proposed extensions would be able to declare dependencies on MCP capabilities. The bridge translates between MCP primitives and Vulcan-native concepts:
 
 | MCP Concept | Vulcan Equivalent | Notes |
 |-------------|-------------------|-------|
@@ -38,7 +54,7 @@ Extensions can declare dependency on MCP capabilities. The bridge translates bet
 
 #### 1. Transparent Mode (Auto-Expose as Tools)
 
-MCP servers are started alongside the agent; all declared tools are automatically registered in the tool registry and appear to the agent as native capabilities.
+In the proposed transparent mode, configured MCP servers would be started alongside the agent; selected declared tools would be registered in the tool registry and appear to the agent as governed native capabilities.
 
 ```toml
 # ~/.vulcan/config.toml
@@ -55,7 +71,7 @@ Result: `list_tables`, `query`, `describe_schema` appear as agent tools immediat
 
 #### 2. Bridged Mode (Extension-Controlled)
 
-Extensions explicitly connect to MCP servers and interpret their capabilities programmatically, allowing richer behaviors (batching, caching, stateful sessions).
+In the proposed bridged mode, extensions would explicitly connect to MCP servers and interpret their capabilities programmatically, allowing richer behaviors (batching, caching, stateful sessions).
 
 ```rust
 pub struct McpBackedExtension {
@@ -97,7 +113,7 @@ On connect, the client queries server capabilities (`initialize` + `list_tools/r
 
 ### Sampling Support
 
-MCP servers can request LLM sampling (i.e., recursion) via `sampling/createMessage`. The bridge can:
+In a later proposed slice, MCP servers could request LLM sampling (i.e., recursion) via `sampling/createMessage`. The bridge can:
 - Forward to the parent agent (with depth limits)
 - Spawn a sub-agent with bounded budget
 - Deny and return error if not permitted
@@ -106,7 +122,7 @@ This enables servers to perform multi-step reasoning using tools they don't poss
 
 ### Resource Templates
 
-MCP resource templates allow dynamic URI spaces (e.g., `postgres://host/db/schemas/{schema}/tables/{table}`). Extensions can iterate these to auto-generate browsing tools.
+In the proposed managed-hosting slice, MCP resource templates would allow dynamic URI spaces (e.g., `postgres://host/db/schemas/{schema}/tables/{table}`). Extensions could iterate these to auto-generate browsing tools.
 
 ## CLI & DevEx
 
@@ -136,7 +152,7 @@ expose_as = "auto"
 permissions = { network = "slack.com" }
 ```
 
-The agent can now:
+In this proposed example, the agent could then call:
 - `slack_list_channels`
 - `slack_read_messages` (channel ID required)
 - `slack_post_message` (with approval for production channels)
@@ -186,6 +202,6 @@ Use MCP for quick integrations and scripting-friendly capabilities; use native e
 
 ## Future
 
-- **MCP-aware registry**: Discover and install MCP servers from the extension store as managed dependencies.
-- **Bidirectional MCP**: Vulcan itself can act as an MCP server, allowing external IDEs/agents to query agent state and tools.
-- **Streaming resources**: Long-lived resource subscriptions (e.g., live logs, metrics) via MCP streams.
+- **MCP-aware registry**: Proposed discovery and installation of MCP servers from the extension store as managed dependencies.
+- **Bidirectional MCP**: A proposed mode where Vulcan itself could act as an MCP server, allowing external IDEs/agents to query agent state and tools.
+- **Streaming resources**: Proposed long-lived resource subscriptions (e.g., live logs, metrics) via MCP streams.

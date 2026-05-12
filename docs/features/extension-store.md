@@ -1,8 +1,30 @@
+---
+title: Extension Store / Repository — Design & Implementation Plan
+type: feature
+status: proposed
+phase: Phase 3 planning spec
+created: 2026-05-08
+updated: 2026-05-08
+tracking: GitHub #266 and #276; Linear YYC-166 local package/store and YYC-176 marketplace refs
+---
+
 # Extension Store / Repository — Design & Implementation Plan
 
-This document describes how to add an extension store and repository system to Vulcan, enabling third-party extensions to be discovered, installed, verified, and loaded safely at runtime.
+## Status
 
-> **Prerequisite context:** See [`docs/features/extensions.md`](./extensions.md) for the lighter-weight skill→extension promotion path that feeds into this system. This document assumes extensions already exist as a concept and focuses on the packaging, distribution, and dynamic-loading infrastructure.
+| Field | Value |
+|---|---|
+| Status | Proposed Phase 3 spec |
+| Current implementation state | foundation only: manifest parsing, install-state store, verification stage, and registry bridge are present; remote repository discovery/marketplace behaviors are proposed |
+| Tracking | GitHub #266 and #276; Linear YYC-166 local package/store and YYC-176 marketplace refs |
+| Dependencies / non-goals | Extension foundation (#265), governance (#269), and sandbox policy (#273). This document does not claim the proposed behavior is currently available. |
+
+> Language note: sections below describe the target design. Unless the status table explicitly calls out a shipped foundation, read capability statements as proposed behavior.
+
+
+This proposed design describes how to add an extension store and repository system to Vulcan, enabling third-party extensions to be discovered, installed, verified, and loaded safely after the local package foundations are ready.
+
+> **Prerequisite context:** See [`docs/features/extensions.md`](./extensions.md) for the lighter-weight skill→extension promotion path that feeds into this system. This document assumes extensions already exist as a concept and focuses on the proposed packaging, distribution, and runtime-loading infrastructure.
 
 ---
 
@@ -395,7 +417,7 @@ Hosted at `https://repo.vulcan.dev/index.json`:
 
 ### Tagging & Discoverability
 
-Extensions can be tagged and categorized to enable powerful discovery and recommendation features.
+Proposed extensions would be tagged and categorized to enable discovery and recommendation features.
 
 | Field | Type | Description |
 |-------|------|-------------|
@@ -406,7 +428,7 @@ Extensions can be tagged and categorized to enable powerful discovery and recomm
 
 ### Filtering & Sorting API
 
-Clients can query the repository index with filters and sorting:
+In the proposed repository API, clients could query the repository index with filters and sorting:
 
 ```bash
 # CLI examples
@@ -534,7 +556,7 @@ pub enum Event {
 }
 ```
 
-Extensions can subscribe to react to events:
+Proposed extensions could subscribe to react to events:
 
 ```rust
 impl Extension for MyLogger {
@@ -563,7 +585,7 @@ impl EventHandler for MyLogger {
 - **TOFU** (Trust On First Use) for new repositories.
 - Extensions **must be signed** by a trusted key.
 - Official repository curated and scanned automatically.
-- Users can add custom repositories but see clear warnings.
+- Users could add custom repositories but see clear warnings.
 
 ```rust
 pub struct ExtensionStore {
@@ -674,4 +696,4 @@ Vulcan now uses Redis for memory storage when configured.
 | **Extension Context** | Safe APIs for integration |
 | **CLI / Agent Commands** | Discover, install, manage extensions |
 
-This design provides a **secure, extensible plugin ecosystem** similar to VS Code or Deno: extensions are verified, sandboxed, and easy to distribute, while Vulcan retains full control over what they can do.
+If implemented, this design would provide a **secure, extensible plugin ecosystem** similar to VS Code or Deno: extensions would be verified, sandboxed, and easy to distribute, while Vulcan would retain full control over what they can do.

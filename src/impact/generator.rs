@@ -5,10 +5,13 @@
 //! when an index isn't available, the corresponding section
 //! falls back to `Heuristic` confidence rather than erroring.
 
+use crate::code::ParserCache;
+use crate::code::graph::{CodeGraph, CodeGraphEdge};
 use anyhow::{Context, Result};
 use ignore::WalkBuilder;
 use std::collections::BTreeSet;
 use std::path::Path;
+use std::sync::Arc;
 
 use super::{Confidence, ImpactItem, ImpactReport, ImpactSource, RiskLevel, VerificationStep};
 
@@ -129,6 +132,254 @@ pub fn generate_for_file(workspace_root: &Path, target: &Path) -> Result<ImpactR
     ));
 
     Ok(report)
+}
+
+/// Build an [`ImpactReport`] for a named symbol. Code graph caller/callee
+/// edges are evidence-backed findings; textual code/test/doc hits are kept as
+/// reference/search evidence so partial indexes still produce useful output.
+pub fn generate_for_symbol(workspace_root: &Path, symbol: &str) -> Result<ImpactReport> {
+    let symbol = symbol.trim();
+    let mut report = ImpactReport::new(format!("symbol: {symbol}"));
+    let mut graph_evidence = 0usize;
+    let mut graph_unavailable = false;
+
+    match open_graph(workspace_root) {
+        Ok(graph) => {
+            graph_evidence += add_symbol_definitions(&mut report, &graph, symbol)?;
+            let edge_evidence = add_code_graph_symbol_evidence(&mut report, &graph, symbol)?;
+            graph_evidence += edge_evidence;
+            if edge_evidence == 0 {
+                graph_unavailable = true;
+            }
+        }
+        Err(_) => graph_unavailable = true,
+    }
+
+    add_reference_search_evidence(&mut report, workspace_root, symbol)?;
+    add_doc_evidence(&mut report, workspace_root, symbol)?;
+    add_standard_verifications(&mut report, workspace_root);
+
+    report.risk = Some(infer_risk(
+        report.affected_modules.len(),
+        report.affected_tests.len(),
+        !symbol.is_empty(),
+    ));
+    report.rationale = Some(format!(
+        "symbol `{symbol}` impact derived from {graph_evidence} code graph edge/definition hit(s), {} affected module(s), {} test reference(s), and {} doc hit(s){}",
+        report.affected_modules.len(),
+        report.affected_tests.len(),
+        report.affected_docs.len(),
+        if graph_unavailable {
+            "; code graph index appears partial or unavailable, so reference/search findings may be incomplete"
+        } else {
+            ""
+        }
+    ));
+
+    Ok(report)
+}
+
+/// Build an advisory report from free-form task text by extracting plausible
+/// identifiers and aggregating their symbol reports.
+pub fn generate_for_task(workspace_root: &Path, task: &str) -> Result<ImpactReport> {
+    let mut report = ImpactReport::new(format!("task: {}", task.trim()));
+    let symbols = extract_task_symbols(task);
+    let mut notes = Vec::new();
+
+    for symbol in &symbols {
+        let symbol_report = generate_for_symbol(workspace_root, symbol)?;
+        merge_items(&mut report.affected_modules, symbol_report.affected_modules);
+        merge_items(&mut report.affected_tests, symbol_report.affected_tests);
+        merge_items(&mut report.affected_docs, symbol_report.affected_docs);
+        notes.push(format!("`{symbol}`"));
+    }
+    add_standard_verifications(&mut report, workspace_root);
+    report.risk = Some(infer_risk(
+        report.affected_modules.len(),
+        report.affected_tests.len(),
+        !symbols.is_empty(),
+    ));
+    report.rationale = Some(if symbols.is_empty() {
+        "no plausible symbols found in task text; report contains only generic verification guidance".into()
+    } else {
+        format!(
+            "task text mapped to candidate symbol(s): {}; findings aggregate code graph, reference search, and docs evidence where available",
+            notes.join(", ")
+        )
+    });
+    Ok(report)
+}
+
+fn open_graph(workspace_root: &Path) -> Result<CodeGraph> {
+    CodeGraph::open(workspace_root.to_path_buf(), Arc::new(ParserCache::new()))
+}
+
+fn add_symbol_definitions(
+    report: &mut ImpactReport,
+    graph: &CodeGraph,
+    symbol: &str,
+) -> Result<usize> {
+    let rows = graph.find_by_name(symbol, 20)?;
+    let count = rows.len();
+    for row in rows {
+        push_unique_item(
+            &mut report.affected_modules,
+            ImpactItem {
+                path: row.file,
+                symbol: Some(row.name),
+                source: ImpactSource::CodeGraph,
+                confidence: Confidence::Evidence,
+                note: Some(format!("{} definition from code graph index", row.kind)),
+            },
+        );
+    }
+    Ok(count)
+}
+
+fn add_code_graph_symbol_evidence(
+    report: &mut ImpactReport,
+    graph: &CodeGraph,
+    symbol: &str,
+) -> Result<usize> {
+    let mut count = 0usize;
+    let callers = graph.find_callers(symbol, 50)?;
+    for edge in callers.edges {
+        count += add_edge_item(report, edge, true, "calls target symbol");
+    }
+    let callees = graph.find_callees(symbol, 50)?;
+    for edge in callees.edges {
+        count += add_edge_item(report, edge, false, "called by target symbol");
+    }
+    Ok(count)
+}
+
+fn add_edge_item(
+    report: &mut ImpactReport,
+    edge: CodeGraphEdge,
+    use_source: bool,
+    note: &str,
+) -> usize {
+    let (path, symbol) = if use_source {
+        (edge.source_file, edge.source_name)
+    } else {
+        (edge.target_file, edge.target_name)
+    };
+    push_unique_item(
+        &mut report.affected_modules,
+        ImpactItem {
+            path,
+            symbol,
+            source: ImpactSource::CodeGraph,
+            confidence: Confidence::Evidence,
+            note: Some(note.into()),
+        },
+    );
+    1
+}
+
+fn add_reference_search_evidence(
+    report: &mut ImpactReport,
+    workspace_root: &Path,
+    symbol: &str,
+) -> Result<()> {
+    for hit in ripgrep_workspace(workspace_root, symbol, MAX_REFERENCES_PER_SYMBOL)? {
+        if is_test_path(&hit) {
+            push_unique_item(
+                &mut report.affected_tests,
+                ImpactItem {
+                    path: hit,
+                    symbol: Some(symbol.to_string()),
+                    source: ImpactSource::RipgrepSearch,
+                    confidence: Confidence::Evidence,
+                    note: Some("test references symbol".into()),
+                },
+            );
+        } else {
+            push_unique_item(
+                &mut report.affected_modules,
+                ImpactItem {
+                    path: hit,
+                    symbol: Some(symbol.to_string()),
+                    source: ImpactSource::References,
+                    confidence: Confidence::Evidence,
+                    note: Some("textual reference search hit".into()),
+                },
+            );
+        }
+    }
+    Ok(())
+}
+
+fn add_doc_evidence(report: &mut ImpactReport, workspace_root: &Path, symbol: &str) -> Result<()> {
+    for hit in ripgrep_docs(workspace_root, symbol)? {
+        push_unique_item(
+            &mut report.affected_docs,
+            ImpactItem {
+                path: hit,
+                symbol: Some(symbol.to_string()),
+                source: ImpactSource::Docs,
+                confidence: Confidence::Evidence,
+                note: Some("doc mentions symbol".into()),
+            },
+        );
+    }
+    Ok(())
+}
+
+fn add_standard_verifications(report: &mut ImpactReport, workspace_root: &Path) {
+    if workspace_root.join("Cargo.toml").exists() {
+        report.recommended_verifications.push(VerificationStep {
+            command: "cargo build --all-targets".into(),
+            rationale: Some("compile + warnings sanity check".into()),
+        });
+        report.recommended_verifications.push(VerificationStep {
+            command: "cargo test".into(),
+            rationale: Some("run unit + integration tests".into()),
+        });
+        report.recommended_verifications.push(VerificationStep {
+            command: "cargo clippy --all-targets".into(),
+            rationale: Some("lint pass".into()),
+        });
+    }
+}
+
+fn push_unique_item(items: &mut Vec<ImpactItem>, item: ImpactItem) {
+    if !items.iter().any(|existing| {
+        existing.path == item.path
+            && existing.symbol == item.symbol
+            && existing.source == item.source
+    }) {
+        items.push(item);
+    }
+}
+
+fn merge_items(into: &mut Vec<ImpactItem>, from: Vec<ImpactItem>) {
+    for item in from {
+        push_unique_item(into, item);
+    }
+}
+
+fn is_test_path(path: &str) -> bool {
+    path.contains("/tests/")
+        || path
+            .rsplit_once('/')
+            .map(|(_, name)| name)
+            .unwrap_or(path)
+            .contains("test")
+}
+
+fn extract_task_symbols(task: &str) -> Vec<String> {
+    let mut symbols = BTreeSet::new();
+    for token in task.split(|c: char| !(c.is_alphanumeric() || c == '_' || c == ':')) {
+        let token = token.trim_matches(':');
+        if token.len() >= 3
+            && token.chars().any(|c| c == '_' || c.is_ascii_uppercase())
+            && token.chars().all(|c| c.is_alphanumeric() || c == '_')
+        {
+            symbols.insert(token.to_string());
+        }
+    }
+    symbols.into_iter().take(20).collect()
 }
 
 fn infer_risk(modules: usize, tests: usize, has_symbols: bool) -> RiskLevel {
@@ -397,6 +648,94 @@ fn it_works() {
             .filter(|i| i.confidence == Confidence::Evidence)
             .count();
         assert!(evidence >= 1, "{:?}", report.affected_modules);
+    }
+
+    #[test]
+    fn generate_for_symbol_uses_code_graph_edges_and_reference_search() {
+        let dir = fixture_repo();
+        let graph = crate::code::graph::CodeGraph::open(
+            dir.path().to_path_buf(),
+            std::sync::Arc::new(crate::code::ParserCache::new()),
+        )
+        .unwrap();
+        graph
+            .reindex_with_edges(Some(&[crate::code::graph::CodeGraphEdge {
+                kind: crate::code::graph::EdgeKind::Call,
+                source_file: "src/consumer.rs".into(),
+                source_name: Some("use_it".into()),
+                source_start_line: 3,
+                source_start_character: 1,
+                target_file: "src/lib.rs".into(),
+                target_name: Some("answer_to_life".into()),
+                target_start_line: 1,
+                target_start_character: 1,
+                provider: crate::code::graph::EdgeProvider::Lsp,
+            }]))
+            .unwrap();
+
+        let report = generate_for_symbol(dir.path(), "answer_to_life").unwrap();
+
+        assert_eq!(report.target, "symbol: answer_to_life");
+        assert!(
+            report.affected_modules.iter().any(|item| {
+                item.path == "src/consumer.rs"
+                    && item.symbol.as_deref() == Some("use_it")
+                    && item.source == ImpactSource::CodeGraph
+                    && item.confidence == Confidence::Evidence
+            }),
+            "expected code graph caller in affected modules, got {:?}",
+            report.affected_modules
+        );
+        assert!(
+            report.affected_tests.iter().any(|item| {
+                item.path == "tests/lib_tests.rs"
+                    && item.source == ImpactSource::RipgrepSearch
+                    && item.confidence == Confidence::Evidence
+            }),
+            "expected textual test reference, got {:?}",
+            report.affected_tests
+        );
+        assert!(
+            report
+                .rationale
+                .as_deref()
+                .unwrap_or_default()
+                .contains("code graph"),
+            "expected rationale to cite code graph/search evidence: {:?}",
+            report.rationale
+        );
+    }
+
+    #[test]
+    fn generate_for_symbol_falls_back_when_index_is_partial() {
+        let dir = fixture_repo();
+        let graph = crate::code::graph::CodeGraph::open(
+            dir.path().to_path_buf(),
+            std::sync::Arc::new(crate::code::ParserCache::new()),
+        )
+        .unwrap();
+        graph.reindex_with_edges(None).unwrap();
+
+        let report = generate_for_symbol(dir.path(), "answer_to_life").unwrap();
+
+        assert!(
+            report
+                .affected_modules
+                .iter()
+                .any(|item| item.path == "src/consumer.rs"
+                    && item.source == ImpactSource::References),
+            "expected reference-search fallback, got {:?}",
+            report.affected_modules
+        );
+        assert!(
+            report
+                .rationale
+                .as_deref()
+                .unwrap_or_default()
+                .contains("partial or unavailable"),
+            "expected partial-index rationale, got {:?}",
+            report.rationale
+        );
     }
 
     #[test]

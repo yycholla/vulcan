@@ -20,13 +20,17 @@ use rusqlite::{OptionalExtension, params};
 use crate::memory::DbPool;
 
 /// Status code stamped on `scheduler_runs.last_status` for the
-/// most recent firing of a job. Kept narrow + symbolic so the
-/// admin endpoint (PR-C-4) can present it without rendering free-
-/// form prose.
+/// most recent scheduler lifecycle event for a job. Kept narrow +
+/// symbolic so the admin endpoint can present it without rendering
+/// free-form prose.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ScheduledFireStatus {
     /// Firing was enqueued onto the inbound queue.
     Enqueued,
+    /// Firing completed successfully and produced a reply.
+    Completed,
+    /// Firing reached the worker pipeline but the daemon/agent run failed.
+    Failed,
     /// Firing was suppressed because the previous run is still
     /// active and `overlap_policy = "skip"`.
     Skipped,
@@ -36,13 +40,11 @@ pub enum ScheduledFireStatus {
 }
 
 impl ScheduledFireStatus {
-    /// String form persisted in `scheduler_runs.last_status`. The
-    /// `record_*` methods write the literals directly today, but
-    /// the admin endpoint in PR-C-4 will format these for display.
-    #[allow(dead_code)]
     pub(crate) fn as_str(self) -> &'static str {
         match self {
             Self::Enqueued => "enqueued",
+            Self::Completed => "completed",
+            Self::Failed => "failed",
             Self::Skipped => "skipped",
             Self::EnqueueFailed => "enqueue_failed",
         }
@@ -53,12 +55,15 @@ impl ScheduledFireStatus {
 pub struct ScheduledRun {
     pub job_id: String,
     pub last_fired_at: Option<i64>,
+    pub last_finished_at: Option<i64>,
     pub last_status: Option<String>,
     pub last_error: Option<String>,
     pub last_inbound_id: Option<i64>,
     pub total_fires: u64,
     pub skipped_fires: u64,
     pub failed_fires: u64,
+    pub completed_fires: u64,
+    pub active_fires: u64,
 }
 
 /// Thin wrapper that owns the `DbPool` handle and exposes the
@@ -80,22 +85,25 @@ impl SchedulerStore {
         self.pool.get().context("scheduler DB pool checkout")
     }
 
-    /// Record an enqueued firing. Bumps `total_fires`, sets
-    /// `last_status = 'enqueued'`, and stamps the row with the
-    /// inbound queue id so observability can join the two tables.
+    /// Record an enqueued firing. Bumps `total_fires`, marks the job
+    /// active, sets `last_status = 'enqueued'`, and stamps the row with
+    /// the inbound queue id so observability can join the two tables.
     pub fn record_enqueued(&self, job_id: &str, fired_at: i64, inbound_id: i64) -> Result<()> {
         let conn = self.conn()?;
         conn.execute(
             "INSERT INTO scheduler_runs \
-                 (job_id, last_fired_at, last_status, last_error, last_inbound_id, total_fires, skipped_fires, failed_fires) \
-             VALUES (?1, ?2, 'enqueued', NULL, ?3, 1, 0, 0) \
+                 (job_id, last_fired_at, last_finished_at, last_status, last_error, last_inbound_id, \
+                  total_fires, skipped_fires, failed_fires, completed_fires, active_fires) \
+             VALUES (?1, ?2, NULL, ?3, NULL, ?4, 1, 0, 0, 0, 1) \
              ON CONFLICT(job_id) DO UPDATE SET \
                  last_fired_at = excluded.last_fired_at, \
+                 last_finished_at = NULL, \
                  last_status = excluded.last_status, \
                  last_error = NULL, \
                  last_inbound_id = excluded.last_inbound_id, \
-                 total_fires = scheduler_runs.total_fires + 1",
-            params![job_id, fired_at, inbound_id],
+                 total_fires = scheduler_runs.total_fires + 1, \
+                 active_fires = scheduler_runs.active_fires + 1",
+            params![job_id, fired_at, ScheduledFireStatus::Enqueued.as_str(), inbound_id],
         )?;
         Ok(())
     }
@@ -107,15 +115,17 @@ impl SchedulerStore {
         let conn = self.conn()?;
         conn.execute(
             "INSERT INTO scheduler_runs \
-                 (job_id, last_fired_at, last_status, total_fires, skipped_fires, failed_fires) \
-             VALUES (?1, ?2, 'skipped', 1, 1, 0) \
+                 (job_id, last_fired_at, last_finished_at, last_status, last_error, total_fires, \
+                  skipped_fires, failed_fires, completed_fires, active_fires) \
+             VALUES (?1, ?2, ?2, ?3, NULL, 1, 1, 0, 0, 0) \
              ON CONFLICT(job_id) DO UPDATE SET \
                  last_fired_at = excluded.last_fired_at, \
+                 last_finished_at = excluded.last_finished_at, \
                  last_status = excluded.last_status, \
                  last_error = NULL, \
                  total_fires = scheduler_runs.total_fires + 1, \
                  skipped_fires = scheduler_runs.skipped_fires + 1",
-            params![job_id, fired_at],
+            params![job_id, fired_at, ScheduledFireStatus::Skipped.as_str()],
         )?;
         Ok(())
     }
@@ -126,15 +136,150 @@ impl SchedulerStore {
         let conn = self.conn()?;
         conn.execute(
             "INSERT INTO scheduler_runs \
-                 (job_id, last_fired_at, last_status, last_error, total_fires, skipped_fires, failed_fires) \
-             VALUES (?1, ?2, 'enqueue_failed', ?3, 1, 0, 1) \
+                 (job_id, last_fired_at, last_finished_at, last_status, last_error, total_fires, \
+                  skipped_fires, failed_fires, completed_fires, active_fires) \
+             VALUES (?1, ?2, ?2, ?3, ?4, 1, 0, 1, 0, 0) \
              ON CONFLICT(job_id) DO UPDATE SET \
                  last_fired_at = excluded.last_fired_at, \
+                 last_finished_at = excluded.last_finished_at, \
                  last_status = excluded.last_status, \
                  last_error = excluded.last_error, \
                  total_fires = scheduler_runs.total_fires + 1, \
                  failed_fires = scheduler_runs.failed_fires + 1",
-            params![job_id, fired_at, error],
+            params![
+                job_id,
+                fired_at,
+                ScheduledFireStatus::EnqueueFailed.as_str(),
+                error
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Record a successful worker completion for a previously-enqueued
+    /// firing. Clears the active marker and increments completed_fires.
+    pub fn record_completed(&self, job_id: &str, finished_at: i64) -> Result<()> {
+        self.finish_by_job_id(
+            job_id,
+            finished_at,
+            ScheduledFireStatus::Completed,
+            None,
+            true,
+        )
+    }
+
+    /// Same as `record_completed`, but resolves the scheduler row by the
+    /// inbound queue row id captured at enqueue time.
+    pub fn record_completed_by_inbound(&self, inbound_id: i64, finished_at: i64) -> Result<()> {
+        self.finish_by_inbound(
+            inbound_id,
+            finished_at,
+            ScheduledFireStatus::Completed,
+            None,
+            true,
+        )
+    }
+
+    /// Record a worker/daemon failure after the firing was already
+    /// enqueued. Clears the active marker and increments failed_fires.
+    pub fn record_run_failed(&self, job_id: &str, finished_at: i64, error: &str) -> Result<()> {
+        self.finish_by_job_id(
+            job_id,
+            finished_at,
+            ScheduledFireStatus::Failed,
+            Some(error),
+            false,
+        )
+    }
+
+    /// Same as `record_run_failed`, but resolves the scheduler row by the
+    /// inbound queue row id captured at enqueue time.
+    pub fn record_run_failed_by_inbound(
+        &self,
+        inbound_id: i64,
+        finished_at: i64,
+        error: &str,
+    ) -> Result<()> {
+        self.finish_by_inbound(
+            inbound_id,
+            finished_at,
+            ScheduledFireStatus::Failed,
+            Some(error),
+            false,
+        )
+    }
+
+    /// Whether the job currently has any in-flight firings according to
+    /// the persisted scheduler state.
+    pub fn has_active_runs(&self, job_id: &str) -> Result<bool> {
+        let conn = self.conn()?;
+        let active: Option<i64> = conn
+            .query_row(
+                "SELECT active_fires FROM scheduler_runs WHERE job_id = ?1",
+                params![job_id],
+                |row| row.get(0),
+            )
+            .optional()
+            .context("scheduler_runs active_fires SELECT")?;
+        Ok(active.unwrap_or(0).max(0) > 0)
+    }
+
+    fn finish_by_job_id(
+        &self,
+        job_id: &str,
+        finished_at: i64,
+        status: ScheduledFireStatus,
+        error: Option<&str>,
+        completed: bool,
+    ) -> Result<()> {
+        let conn = self.conn()?;
+        conn.execute(
+            "UPDATE scheduler_runs SET \
+                 last_finished_at = ?2, \
+                 last_status = ?3, \
+                 last_error = ?4, \
+                 failed_fires = failed_fires + ?5, \
+                 completed_fires = completed_fires + ?6, \
+                 active_fires = CASE WHEN active_fires > 0 THEN active_fires - 1 ELSE 0 END \
+             WHERE job_id = ?1",
+            params![
+                job_id,
+                finished_at,
+                status.as_str(),
+                error,
+                if completed { 0 } else { 1 },
+                if completed { 1 } else { 0 },
+            ],
+        )?;
+        Ok(())
+    }
+
+    fn finish_by_inbound(
+        &self,
+        inbound_id: i64,
+        finished_at: i64,
+        status: ScheduledFireStatus,
+        error: Option<&str>,
+        completed: bool,
+    ) -> Result<()> {
+        let conn = self.conn()?;
+        conn.execute(
+            "UPDATE scheduler_runs SET \
+                 last_finished_at = ?2, \
+                 last_status = ?3, \
+                 last_error = ?4, \
+                 failed_fires = failed_fires + ?5, \
+                 completed_fires = completed_fires + ?6, \
+                 active_fires = CASE WHEN active_fires > 0 THEN active_fires - 1 ELSE 0 END \
+             WHERE last_inbound_id = ?1",
+            params![
+                inbound_id,
+                finished_at,
+                status.as_str(),
+                error,
+                if completed { 0 } else { 1 },
+                if completed { 1 } else { 0 },
+            ],
         )?;
         Ok(())
     }
@@ -145,20 +290,23 @@ impl SchedulerStore {
         let conn = self.conn()?;
         let row = conn
             .query_row(
-                "SELECT job_id, last_fired_at, last_status, last_error, last_inbound_id, \
-                        total_fires, skipped_fires, failed_fires \
+                "SELECT job_id, last_fired_at, last_finished_at, last_status, last_error, last_inbound_id, \
+                        total_fires, skipped_fires, failed_fires, completed_fires, active_fires \
                  FROM scheduler_runs WHERE job_id = ?1",
                 params![job_id],
                 |row| {
                     Ok(ScheduledRun {
                         job_id: row.get(0)?,
                         last_fired_at: row.get(1)?,
-                        last_status: row.get(2)?,
-                        last_error: row.get(3)?,
-                        last_inbound_id: row.get(4)?,
-                        total_fires: row.get::<_, i64>(5)?.max(0) as u64,
-                        skipped_fires: row.get::<_, i64>(6)?.max(0) as u64,
-                        failed_fires: row.get::<_, i64>(7)?.max(0) as u64,
+                        last_finished_at: row.get(2)?,
+                        last_status: row.get(3)?,
+                        last_error: row.get(4)?,
+                        last_inbound_id: row.get(5)?,
+                        total_fires: row.get::<_, i64>(6)?.max(0) as u64,
+                        skipped_fires: row.get::<_, i64>(7)?.max(0) as u64,
+                        failed_fires: row.get::<_, i64>(8)?.max(0) as u64,
+                        completed_fires: row.get::<_, i64>(9)?.max(0) as u64,
+                        active_fires: row.get::<_, i64>(10)?.max(0) as u64,
                     })
                 },
             )
@@ -172,8 +320,8 @@ impl SchedulerStore {
     pub fn list(&self) -> Result<Vec<ScheduledRun>> {
         let conn = self.conn()?;
         let mut stmt = conn.prepare(
-            "SELECT job_id, last_fired_at, last_status, last_error, last_inbound_id, \
-                    total_fires, skipped_fires, failed_fires \
+            "SELECT job_id, last_fired_at, last_finished_at, last_status, last_error, last_inbound_id, \
+                    total_fires, skipped_fires, failed_fires, completed_fires, active_fires \
              FROM scheduler_runs ORDER BY job_id ASC",
         )?;
         let rows = stmt
@@ -181,12 +329,15 @@ impl SchedulerStore {
                 Ok(ScheduledRun {
                     job_id: row.get(0)?,
                     last_fired_at: row.get(1)?,
-                    last_status: row.get(2)?,
-                    last_error: row.get(3)?,
-                    last_inbound_id: row.get(4)?,
-                    total_fires: row.get::<_, i64>(5)?.max(0) as u64,
-                    skipped_fires: row.get::<_, i64>(6)?.max(0) as u64,
-                    failed_fires: row.get::<_, i64>(7)?.max(0) as u64,
+                    last_finished_at: row.get(2)?,
+                    last_status: row.get(3)?,
+                    last_error: row.get(4)?,
+                    last_inbound_id: row.get(5)?,
+                    total_fires: row.get::<_, i64>(6)?.max(0) as u64,
+                    skipped_fires: row.get::<_, i64>(7)?.max(0) as u64,
+                    failed_fires: row.get::<_, i64>(8)?.max(0) as u64,
+                    completed_fires: row.get::<_, i64>(9)?.max(0) as u64,
+                    active_fires: row.get::<_, i64>(10)?.max(0) as u64,
                 })
             })?
             .collect::<rusqlite::Result<Vec<_>>>()
@@ -248,6 +399,43 @@ mod tests {
         assert_eq!(row.last_error.as_deref(), Some("queue offline"));
         assert_eq!(row.failed_fires, 1);
         assert_eq!(row.total_fires, 1);
+    }
+
+    // YYC-17 PR-4: a successful run transitions from enqueued to completed,
+    // clears the active flag, and preserves the original inbound row id.
+    #[test]
+    fn record_completed_updates_status_and_active_count() {
+        let s = store();
+        s.record_enqueued("daily", 100, 7).unwrap();
+        assert!(s.has_active_runs("daily").unwrap());
+
+        s.record_completed("daily", 150).unwrap();
+        let row = s.get("daily").unwrap().unwrap();
+        assert_eq!(row.last_status.as_deref(), Some("completed"));
+        assert_eq!(row.last_error, None);
+        assert_eq!(row.last_inbound_id, Some(7));
+        assert_eq!(row.total_fires, 1);
+        assert_eq!(row.completed_fires, 1);
+        assert_eq!(row.active_fires, 0);
+        assert_eq!(row.last_finished_at, Some(150));
+        assert!(!s.has_active_runs("daily").unwrap());
+    }
+
+    // YYC-17 PR-4: a daemon/worker failure after enqueue stamps failed status,
+    // increments the failure counter, and clears the active flag.
+    #[test]
+    fn record_run_failed_updates_status_and_error() {
+        let s = store();
+        s.record_enqueued("nightly", 100, 9).unwrap();
+        s.record_run_failed("nightly", 155, "provider offline")
+            .unwrap();
+        let row = s.get("nightly").unwrap().unwrap();
+        assert_eq!(row.last_status.as_deref(), Some("failed"));
+        assert_eq!(row.last_error.as_deref(), Some("provider offline"));
+        assert_eq!(row.failed_fires, 1);
+        assert_eq!(row.completed_fires, 0);
+        assert_eq!(row.active_fires, 0);
+        assert_eq!(row.last_finished_at, Some(155));
     }
 
     // YYC-17 PR-3: list returns all rows sorted by job_id.

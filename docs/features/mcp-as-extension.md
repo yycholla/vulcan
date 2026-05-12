@@ -1,18 +1,34 @@
 ---
 title: MCP as an Extension
 type: promotion
-created: 2026-05-14
+status: proposed
+phase: Phase 3 planning spec
+created: 2026-05-08
+updated: 2026-05-08
+tracking: GitHub #268 and #274; Linear YYC-168 / YYC-174 from issue audit
 tags: [extensions, mcp, promotion, bridge]
 ---
 
 # MCP as an Extension
 
-MCP integration can be promoted from a standalone protocol feature into a first-class extension — and optionally into a managed extension that embeds and governs MCP servers themselves.
+## Status
+
+| Field | Value |
+|---|---|
+| Status | Proposed Phase 3 spec |
+| Current implementation state | foundation only: MCP modules and tool adapter exist; extension-managed MCP bridge/hosting and sampling policy are proposed Phase 3 behavior |
+| Tracking | GitHub #268 and #274; Linear YYC-168 / YYC-174 from issue audit |
+| Dependencies / non-goals | MCP client bridge (#268), managed server hosting (#274), and extension governance (#269). This document does not claim the proposed behavior is currently available. |
+
+> Language note: sections below describe the target design. Unless the status table explicitly calls out a shipped foundation, read capability statements as proposed behavior.
+
+
+This proposal explores promoting MCP integration from a standalone protocol feature into a first-class extension — and optionally into a managed extension that embeds and governs MCP servers themselves.
 
 There are two complementary promotion paths:
 
-- **MCP Client/Bridge Extension** — the agent embeds a robust MCP client that discovers, connects to, and governs remote MCP servers; translates MCP primitives into native tools/resources; and enforces policy, caching, and retry semantics.
-- **MCP Server Hosting Extension** — the agent (or an extension) starts, stops, and monitors local MCP servers as managed child processes (or WASM hosts) and publishes their capabilities into the tool registry under policy controls.
+- **MCP Client/Bridge Extension** — the proposed agent-side bridge would use an MCP client to discover, connect to, and govern remote MCP servers; translate MCP primitives into native tools/resources; and enforce policy, caching, and retry semantics.
+- **MCP Server Hosting Extension** — in a later proposed slice, the agent (or an extension) would start, stop, and monitor local MCP servers as managed child processes (or WASM hosts) and publish their capabilities into the tool registry under policy controls.
 
 Both paths naturally follow the skill → draft extension → code extension promotion ladder.
 
@@ -33,7 +49,7 @@ triggers: ["mcp", "use mcp", "add mcp server"]
 
 1. Install an MCP server (e.g. `npm i -g @modelcontextprotocol/server-filesystem`).
 2. Add it to `~/.vulcan/config.toml` under `[[mcp_servers]]`.
-3. Start Vulcan; the built-in MCP client will connect and list available tools.
+3. Start Vulcan; in the proposed flow, the MCP client would connect and list available tools.
 4. Call tools like `mcp_tool(<server>, <tool_name>, ...)`.
 
 ## Promotion hints
@@ -81,7 +97,7 @@ depends:
   - process
 ---
 
-The MCP Bridge extension can:
+The proposed MCP Bridge extension could:
 - Start MCP servers on demand (stdio) or connect to remote SSE endpoints.
 - Negotiate capabilities and validate them against policy before registering tools.
 - Wrap MCP tools with retry, timeouts, and call logging.
@@ -196,7 +212,7 @@ impl Tool for McpToolAdapter {
 
 ## 4. Server Hosting Extension (optional)
 
-A complementary extension can act as an **MCP server host** — managing pools of trusted servers, sandboxing their execution (resource limits, seccomp), and auto-discovering servers from manifests.
+A complementary proposed extension could act as an **MCP server host** — managing pools of trusted servers, sandboxing their execution (resource limits, seccomp), and auto-discovering servers from manifests.
 
 - Declarative server packages in `~/.vulcan/extensions/mcp-servers/` with `server.toml` (command, allowed capabilities, resource limits).
 - Supervisor restarts crashed servers, enforces memory/time budgets, and exposes server status/health as first-class resources.

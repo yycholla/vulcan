@@ -14,6 +14,7 @@ use anyhow::Context;
 
 use crate::cli::DaemonAction;
 use crate::config::vulcan_home;
+use crate::daemon::config_watch::ConfigWatcher;
 use crate::daemon::lifecycle::PidFile;
 use crate::daemon::protocol::{Request, Response, read_frame_bytes, write_request};
 use crate::daemon::server::Server;
@@ -67,8 +68,9 @@ async fn start(detach: bool) -> anyhow::Result<()> {
     // Slice 3: open the daemon's RuntimeResourcePool so subsequent
     // session/agent assembly reuses one SessionStore connection, one
     // run/artifact store, and one orchestration store across the
-    // whole process. Pool open failure is fatal — without it the
-    // session paths can't run.
+    // whole process. Durable store open failures are downgraded to
+    // operator-visible in-memory fallbacks so the daemon can continue
+    // serving predictable degraded sessions.
     let mut pool_builder = crate::runtime_pool::RuntimeResourcePool::try_new()
         .context("opening daemon RuntimeResourcePool")?;
     if let Some(cortex) = state.cortex() {
@@ -103,6 +105,8 @@ async fn start(detach: bool) -> anyhow::Result<()> {
         .with_context(|| format!("binding socket {}", sock_path.display()))?;
 
     install_signal_handlers(state.clone());
+    let _config_watcher =
+        ConfigWatcher::start(&home, state.clone()).context("starting daemon config watcher")?;
 
     // YYC-266 Slice 3 Task 3.2: idle-eviction sweeper for non-"main"
     // sessions. The handle is `_`-bound on purpose — the loop
@@ -224,7 +228,8 @@ async fn status() -> anyhow::Result<()> {
 }
 
 async fn reload() -> anyhow::Result<()> {
-    call("daemon.reload", serde_json::json!({})).await?;
+    let result = call("daemon.reload", serde_json::json!({})).await?;
+    println!("{}", serde_json::to_string_pretty(&result)?);
     Ok(())
 }
 

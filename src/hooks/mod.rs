@@ -25,6 +25,7 @@ use crate::provider::{ChatResponse, Message, StreamEvent, ToolCall};
 use crate::tools::{ToolProgress, ToolResult};
 
 pub mod audit;
+pub mod code_outline;
 pub mod safety;
 pub mod skills;
 

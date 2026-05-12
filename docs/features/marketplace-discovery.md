@@ -1,13 +1,29 @@
 ---
 title: Marketplace & Discovery
 type: feature
-created: 2026-05-14
+status: proposed
+phase: Phase 3 planning spec
+created: 2026-05-08
+updated: 2026-05-08
+tracking: GitHub #276; Linear YYC-176 marketplace reference from issue audit
 tags: [extensions, marketplace, repo, discovery]
 ---
 
 # Marketplace & Discovery
 
-Make the extension store a living, self-sustaining ecosystem.
+## Status
+
+| Field | Value |
+|---|---|
+| Status | Proposed Phase 3 spec |
+| Current implementation state | none for remote marketplace: local install/discovery foundations exist, but remote indexes, analytics, publisher badges, and recommendation systems are proposed late Phase 3 behavior |
+| Tracking | GitHub #276; Linear YYC-176 marketplace reference from issue audit |
+| Dependencies / non-goals | Local package/store (#266), verification/governance (#269), and trust ladder (#273). This document does not claim the proposed behavior is currently available. |
+
+> Language note: sections below describe the target design. Unless the status table explicitly calls out a shipped foundation, read capability statements as proposed behavior.
+
+
+Define a proposed late-Phase-3 marketplace/discovery layer for a self-sustaining extension ecosystem.
 
 ## Recommendations
 

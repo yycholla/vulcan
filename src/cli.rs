@@ -174,11 +174,13 @@ pub enum Command {
         cmd: ReplaySubcommand,
     },
     /// YYC-218 / YYC-189: generate a change-impact report for a
-    /// file. Walks code references + tests + docs and emits
-    /// markdown.
+    /// file, symbol, or task. Walks code graph + references + tests
+    /// + docs and emits markdown.
     Impact {
-        /// File path to analyze.
-        target: std::path::PathBuf,
+        /// Backward-compatible file path to analyze (`vulcan impact src/lib.rs`).
+        target: Option<std::path::PathBuf>,
+        #[command(subcommand)]
+        cmd: Option<ImpactSubcommand>,
         /// Persist the rendered report as a YYC-180 artifact.
         #[arg(long)]
         save: bool,
@@ -215,6 +217,25 @@ pub enum Command {
     #[cfg(feature = "daemon")]
     #[command(name = "__ping", hide = true)]
     HiddenPing,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum ImpactSubcommand {
+    /// Analyze a file path explicitly.
+    File {
+        /// File path to analyze.
+        target: std::path::PathBuf,
+    },
+    /// Analyze a symbol name using code graph, references, tests, and docs.
+    Symbol {
+        /// Symbol name to analyze.
+        name: String,
+    },
+    /// Analyze free-form task text by extracting likely symbol names.
+    Task {
+        /// Task text to map to candidate symbols.
+        text: String,
+    },
 }
 
 /// YYC-266 subcommands under `vulcan daemon`.
@@ -480,6 +501,18 @@ mod parse_tests {
             other => panic!("unexpected parse: {other:?}"),
         }
     }
+
+    #[test]
+    fn replay_simulate_parses_run_id() {
+        let cli = Cli::parse_from(["vulcan", "replay", "simulate", "abcd1234"]);
+
+        match cli.command {
+            Some(Command::Replay {
+                cmd: ReplaySubcommand::Simulate { id },
+            }) => assert_eq!(id, "abcd1234"),
+            other => panic!("unexpected parse: {other:?}"),
+        }
+    }
 }
 
 #[cfg(all(test, feature = "gateway"))]
@@ -555,19 +588,33 @@ pub enum ReplaySubcommand {
     /// Print the saved timeline for a run id (UUID or 8-char
     /// prefix). Read-only — no re-execution.
     Inspect { id: String },
+    /// Simulate reproduction from saved run metadata, typed artifacts,
+    /// and recorded trust/capability state. No provider/tool execution.
+    Simulate { id: String },
 }
 
 /// YYC-185: subcommands under `vulcan policy`.
 #[derive(Subcommand, Debug)]
 pub enum PolicySubcommand {
     /// Resolve effective policy for a workspace path. Defaults
-    /// to the current working directory.
+    /// to the current working directory. Passing a proposed profile
+    /// or trust override prints a redacted dry-run delta without
+    /// persisting the proposed values.
     Simulate {
         path: Option<std::path::PathBuf>,
-        /// Optional profile override; defaults to whatever the
-        /// agent would resolve at session start.
+        /// Optional proposed profile override; defaults to whatever
+        /// the agent would resolve at session start. When set, the
+        /// command compares current policy to the proposed profile.
         #[arg(long)]
         profile: Option<String>,
+        /// Proposed workspace trust level to dry-run without saving
+        /// it (trusted, restricted, sensitive, untrusted).
+        #[arg(long, value_name = "LEVEL")]
+        trust_level: Option<String>,
+        /// Proposed trust-derived capability profile. Only meaningful
+        /// with --trust-level; defaults to that level's built-in profile.
+        #[arg(long, value_name = "NAME")]
+        trust_profile: Option<String>,
     },
 }
 

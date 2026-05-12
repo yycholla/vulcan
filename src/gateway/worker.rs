@@ -23,6 +23,7 @@ use crate::gateway::lane::LaneKey;
 use crate::gateway::lane_router::DaemonLaneRouter;
 use crate::gateway::queue::{InboundQueue, InboundRow, OutboundQueue};
 use crate::gateway::render_registry::RenderRegistry;
+use crate::gateway::scheduler_store::SchedulerStore;
 use crate::platform::{OutboundMessage, PlatformCapabilities};
 
 /// Drive one inbound row through the daemon and enqueue the reply.
@@ -52,6 +53,7 @@ pub async fn process_one(
     _outbound_queue: &Arc<OutboundQueue>,
     _render_registry: &Arc<RenderRegistry>,
     _platform_caps: PlatformCapabilities,
+    scheduler_store: Option<&SchedulerStore>,
     commands: &CommandDispatcher,
 ) -> anyhow::Result<()> {
     let lane = LaneKey {
@@ -77,10 +79,10 @@ pub async fn process_one(
         .await
     {
         Ok(Some(reply)) => {
-            let id = row.id;
+            let inbound_id = row.id;
             inbound_queue
                 .complete_with_outbound(
-                    id,
+                    inbound_id,
                     OutboundMessage {
                         platform: row.platform,
                         chat_id: row.chat_id,
@@ -92,6 +94,9 @@ pub async fn process_one(
                     },
                 )
                 .await?;
+            if let Some(store) = scheduler_store {
+                record_scheduler_completion(store, inbound_id)?;
+            }
             return Ok(());
         }
         Ok(None) => {}
@@ -109,9 +114,10 @@ pub async fn process_one(
 
     match result {
         Ok(reply_text) => {
+            let inbound_id = row.id;
             inbound_queue
                 .complete_with_outbound(
-                    row.id,
+                    inbound_id,
                     OutboundMessage {
                         platform: row.platform,
                         chat_id: row.chat_id,
@@ -123,11 +129,17 @@ pub async fn process_one(
                     },
                 )
                 .await?;
+            if let Some(store) = scheduler_store {
+                record_scheduler_completion(store, inbound_id)?;
+            }
             Ok(())
         }
         Err(e) => {
             let err_str = e.to_string();
             inbound_queue.mark_failed(row.id, &err_str).await?;
+            if let Some(store) = scheduler_store {
+                record_scheduler_failure(store, row.id, &e)?;
+            }
             Err(e)
         }
     }
@@ -158,7 +170,15 @@ async fn run_prompt_via_daemon(
         .call_stream_at_session(
             &session_id,
             "prompt.stream",
-            serde_json::json!({ "text": input }),
+            serde_json::json!({
+                "text": input,
+                "origin": {
+                    "kind": "gateway",
+                    "lane": format!("{}:{}", lane.platform, lane.chat_id),
+                    "platform": lane.platform,
+                    "chat_id": lane.chat_id,
+                }
+            }),
         )
         .await
         .map_err(|e| anyhow::anyhow!("prompt.stream call: {e}"))?;
@@ -205,6 +225,35 @@ fn extract_text_chunk(frame: &StreamFrame) -> Option<String> {
         .get("chunk")
         .and_then(|v| v.as_str())
         .map(|s| s.to_string())
+}
+
+fn record_scheduler_completion(store: &SchedulerStore, inbound_id: i64) -> anyhow::Result<()> {
+    let finished_at = chrono::Utc::now().timestamp();
+    store
+        .record_completed_by_inbound(inbound_id, finished_at)
+        .map_err(|e| anyhow::anyhow!("scheduler completion persistence: {e}"))
+}
+
+fn record_scheduler_failure(
+    store: &SchedulerStore,
+    inbound_id: i64,
+    error: &anyhow::Error,
+) -> anyhow::Result<()> {
+    let finished_at = chrono::Utc::now().timestamp();
+    let message = scheduler_failure_message(error);
+    store
+        .record_run_failed_by_inbound(inbound_id, finished_at, &message)
+        .map_err(|e| anyhow::anyhow!("scheduler failure persistence: {e}"))
+}
+
+fn scheduler_failure_message(error: &anyhow::Error) -> String {
+    let text = error.to_string();
+    if let Some(message) = text.strip_prefix("daemon prompt.stream error [")
+        && let Some((_, message)) = message.split_once("]: ")
+    {
+        return message.to_string();
+    }
+    text
 }
 
 #[cfg(test)]
@@ -295,6 +344,7 @@ mod tests {
             &outbound,
             &render_registry,
             PlatformCapabilities::default(),
+            None,
             &commands,
         )
         .await
@@ -337,6 +387,10 @@ mod tests {
                             .expect("session response");
                     }
                     "prompt.stream" => {
+                        assert_eq!(req.params["origin"]["kind"], "gateway");
+                        assert_eq!(req.params["origin"]["lane"], "loopback:c");
+                        assert_eq!(req.params["origin"]["platform"], "loopback");
+                        assert_eq!(req.params["origin"]["chat_id"], "c");
                         let frame = StreamFrame {
                             version: 1,
                             id: Some(req.id.clone()),
@@ -351,6 +405,45 @@ mod tests {
                         write_response(&mut write, &resp)
                             .await
                             .expect("prompt response");
+                    }
+                    other => panic!("unexpected daemon method {other}"),
+                }
+            }
+        });
+        sock
+    }
+
+    async fn spawn_failing_prompt_daemon(dir: &tempfile::TempDir) -> std::path::PathBuf {
+        let sock = dir.path().join("gateway-fail.sock");
+        let listener = UnixListener::bind(&sock).expect("bind fake daemon");
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.expect("accept");
+            let (mut read, mut write) = stream.into_split();
+            loop {
+                let body = match read_frame_bytes(&mut read).await {
+                    Ok(body) => body,
+                    Err(_) => break,
+                };
+                let req: Request = serde_json::from_slice(&body).expect("request");
+                match req.method.as_str() {
+                    "session.create" => {
+                        let resp = Response::ok(req.id, serde_json::json!({ "created": true }));
+                        write_response(&mut write, &resp)
+                            .await
+                            .expect("session response");
+                    }
+                    "prompt.stream" => {
+                        let resp = Response::error(
+                            req.id,
+                            crate::daemon::protocol::ProtocolError {
+                                code: "PROMPT_FAILED".into(),
+                                message: "provider offline".into(),
+                                retryable: false,
+                            },
+                        );
+                        write_response(&mut write, &resp)
+                            .await
+                            .expect("prompt error response");
                     }
                     other => panic!("unexpected daemon method {other}"),
                 }
@@ -406,6 +499,7 @@ mod tests {
                 &outbound,
                 &render_registry,
                 PlatformCapabilities::default(),
+                None,
                 &commands,
             )
             .await
@@ -417,6 +511,128 @@ mod tests {
             1,
             "gateway worker must reuse one daemon client across inbound rows"
         );
+    }
+
+    #[tokio::test]
+    async fn worker_marks_scheduler_run_completed_after_success() {
+        let dir = tempdir().unwrap();
+        let sock = spawn_prompt_daemon(&dir).await;
+        let daemon_client = {
+            let sock_path = sock.clone();
+            GatewayDaemonClient::with_client_factory(move || {
+                let p = sock_path.clone();
+                Box::pin(async move { Client::connect_at(&p).await })
+            })
+        };
+
+        let db = fresh_db();
+        let inbound = InboundQueue::new(db.clone());
+        let outbound = Arc::new(OutboundQueue::new(db.clone(), 5));
+        let render_registry = Arc::new(RenderRegistry::new());
+        let lane_router = DaemonLaneRouter::new();
+        let commands = CommandDispatcher::new(&HashMap::new());
+        let store = crate::gateway::scheduler_store::SchedulerStore::new(db.clone());
+        let job = crate::config::SchedulerJobConfig {
+            id: "daily".into(),
+            name: "Daily".into(),
+            enabled: true,
+            cron: "0 8 * * * *".into(),
+            timezone: "UTC".into(),
+            platform: "loopback".into(),
+            lane: "c".into(),
+            prompt: "summarize".into(),
+            max_runtime_secs: None,
+            overlap_policy: crate::config::OverlapPolicy::Skip,
+        };
+        let inbound_id = inbound
+            .enqueue(crate::gateway::scheduler::build_inbound_message_for_job(
+                &job,
+            ))
+            .await
+            .unwrap();
+        store.record_enqueued(&job.id, 100, inbound_id).unwrap();
+
+        let row = inbound.claim_next().await.unwrap().expect("row");
+        process_one(
+            row,
+            &lane_router,
+            &daemon_client,
+            &inbound,
+            &outbound,
+            &render_registry,
+            PlatformCapabilities::default(),
+            Some(&store),
+            &commands,
+        )
+        .await
+        .unwrap();
+
+        let run = store.get("daily").unwrap().expect("scheduler row");
+        assert_eq!(run.last_status.as_deref(), Some("completed"));
+        assert_eq!(run.completed_fires, 1);
+        assert_eq!(run.active_fires, 0);
+    }
+
+    #[tokio::test]
+    async fn worker_marks_scheduler_run_failed_after_daemon_error() {
+        let dir = tempdir().unwrap();
+        let sock = spawn_failing_prompt_daemon(&dir).await;
+        let daemon_client = {
+            let sock_path = sock.clone();
+            GatewayDaemonClient::with_client_factory(move || {
+                let p = sock_path.clone();
+                Box::pin(async move { Client::connect_at(&p).await })
+            })
+        };
+
+        let db = fresh_db();
+        let inbound = crate::gateway::queue::InboundQueue::with_policy(db.clone(), 1, 60);
+        let outbound = Arc::new(OutboundQueue::new(db.clone(), 5));
+        let render_registry = Arc::new(RenderRegistry::new());
+        let lane_router = DaemonLaneRouter::new();
+        let commands = CommandDispatcher::new(&HashMap::new());
+        let store = crate::gateway::scheduler_store::SchedulerStore::new(db.clone());
+        let job = crate::config::SchedulerJobConfig {
+            id: "nightly".into(),
+            name: "Nightly".into(),
+            enabled: true,
+            cron: "0 8 * * * *".into(),
+            timezone: "UTC".into(),
+            platform: "loopback".into(),
+            lane: "c".into(),
+            prompt: "summarize".into(),
+            max_runtime_secs: None,
+            overlap_policy: crate::config::OverlapPolicy::Skip,
+        };
+        let inbound_id = inbound
+            .enqueue(crate::gateway::scheduler::build_inbound_message_for_job(
+                &job,
+            ))
+            .await
+            .unwrap();
+        store.record_enqueued(&job.id, 100, inbound_id).unwrap();
+
+        let row = inbound.claim_next().await.unwrap().expect("row");
+        let err = process_one(
+            row,
+            &lane_router,
+            &daemon_client,
+            &inbound,
+            &outbound,
+            &render_registry,
+            PlatformCapabilities::default(),
+            Some(&store),
+            &commands,
+        )
+        .await
+        .expect_err("daemon failure should propagate");
+        assert!(err.to_string().contains("provider offline"));
+
+        let run = store.get("nightly").unwrap().expect("scheduler row");
+        assert_eq!(run.last_status.as_deref(), Some("failed"));
+        assert_eq!(run.last_error.as_deref(), Some("provider offline"));
+        assert_eq!(run.failed_fires, 1);
+        assert_eq!(run.active_fires, 0);
     }
 
     /// End-to-end smoke against a real (tempdir) daemon: an inbound
@@ -472,6 +688,7 @@ mod tests {
             &outbound,
             &render_registry,
             PlatformCapabilities::default(),
+            None,
             &commands,
         )
         .await;

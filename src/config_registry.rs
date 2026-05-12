@@ -155,6 +155,44 @@ const BUILTIN_FIELDS: &[ConfigField] = &[
         help: "Per-session usage cap on approved-and-remembered dangerous commands. 0 = unlimited.",
         file: ConfigFile::Config,
     },
+    // ── code_outline_assist.* ─────────────────────────────────
+    ConfigField {
+        path: "code_outline_assist.enabled",
+        kind: FieldKind::Bool,
+        default: "false",
+        help: "Inject Tree-sitter symbol outlines for mentioned workspace source files before prompts.",
+        file: ConfigFile::Config,
+    },
+    ConfigField {
+        path: "code_outline_assist.max_files",
+        kind: FieldKind::Int {
+            min: Some(0),
+            max: Some(20),
+        },
+        default: "3",
+        help: "Maximum mentioned source files to outline per prompt.",
+        file: ConfigFile::Config,
+    },
+    ConfigField {
+        path: "code_outline_assist.max_symbols_per_file",
+        kind: FieldKind::Int {
+            min: Some(0),
+            max: Some(1_000),
+        },
+        default: "80",
+        help: "Maximum outline symbols injected for each file.",
+        file: ConfigFile::Config,
+    },
+    ConfigField {
+        path: "code_outline_assist.max_prompt_chars",
+        kind: FieldKind::Int {
+            min: Some(0),
+            max: Some(100_000),
+        },
+        default: "4000",
+        help: "Character budget for the entire code-outline assist injection.",
+        file: ConfigFile::Config,
+    },
     // ── compaction.* ──────────────────────────────────────────
     ConfigField {
         path: "compaction.enabled",

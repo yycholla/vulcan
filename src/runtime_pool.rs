@@ -17,7 +17,8 @@
 
 use std::sync::Arc;
 
-use anyhow::{Context, Result};
+use anyhow::Result;
+use serde::Serialize;
 
 use std::path::PathBuf;
 
@@ -32,6 +33,25 @@ use crate::memory::cortex::CortexStore;
 use crate::orchestration::OrchestrationStore;
 use crate::run_record::{InMemoryRunStore, RunStore, SqliteRunStore};
 
+/// Operator-visible record for a runtime resource that fell back to a
+/// degraded in-memory/non-durable mode instead of aborting daemon startup.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct RuntimeResourceDegradation {
+    pub component: String,
+    pub fallback: String,
+    pub message: String,
+}
+
+impl RuntimeResourceDegradation {
+    fn in_memory(component: &str, message: impl Into<String>) -> Self {
+        Self {
+            component: component.into(),
+            fallback: "in_memory".into(),
+            message: message.into(),
+        }
+    }
+}
+
 /// Daemon-owned set of expensive adapters shared across sessions.
 ///
 /// Cloning a field returns a cheap `Arc` clone — every session uses the
@@ -42,6 +62,7 @@ pub struct RuntimeResourcePool {
     run_store: Arc<dyn RunStore>,
     artifact_store: Arc<dyn ArtifactStore>,
     orchestration: Arc<OrchestrationStore>,
+    degraded_resources: Vec<RuntimeResourceDegradation>,
     /// Slice 3: shared LSP server pool. Sessions reuse the same pool
     /// instead of spawning per-Agent server processes; idle servers
     /// stay warm across session lifetimes.
@@ -75,15 +96,31 @@ impl RuntimeResourcePool {
     /// `Agent::build_from_parts` path so resource pooling does not
     /// silently change durability behavior.
     pub fn try_new() -> Result<Self> {
-        let session_store =
-            Arc::new(SessionStore::try_new().context("RuntimeResourcePool: open SessionStore")?);
+        let mut degraded_resources = Vec::new();
+        let session_store = match SessionStore::try_new() {
+            Ok(store) => Arc::new(store),
+            Err(e) => {
+                let message = format!(
+                    "RuntimeResourcePool: session store unavailable ({e:#}); using in-memory session history"
+                );
+                tracing::warn!("{message}");
+                degraded_resources.push(RuntimeResourceDegradation::in_memory(
+                    "session_store",
+                    message,
+                ));
+                Arc::new(SessionStore::in_memory())
+            }
+        };
 
         let run_store: Arc<dyn RunStore> = match SqliteRunStore::try_new() {
             Ok(s) => Arc::new(s),
             Err(e) => {
-                tracing::warn!(
-                    "RuntimeResourcePool: run_record store unavailable ({e}); using in-memory"
+                let message = format!(
+                    "RuntimeResourcePool: run_record store unavailable ({e:#}); using in-memory"
                 );
+                tracing::warn!("{message}");
+                degraded_resources
+                    .push(RuntimeResourceDegradation::in_memory("run_store", message));
                 Arc::new(InMemoryRunStore::default())
             }
         };
@@ -91,9 +128,14 @@ impl RuntimeResourcePool {
         let artifact_store: Arc<dyn ArtifactStore> = match SqliteArtifactStore::try_new() {
             Ok(s) => Arc::new(s),
             Err(e) => {
-                tracing::warn!(
-                    "RuntimeResourcePool: artifact store unavailable ({e}); using in-memory"
+                let message = format!(
+                    "RuntimeResourcePool: artifact store unavailable ({e:#}); using in-memory"
                 );
+                tracing::warn!("{message}");
+                degraded_resources.push(RuntimeResourceDegradation::in_memory(
+                    "artifact_store",
+                    message,
+                ));
                 Arc::new(InMemoryArtifactStore::new())
             }
         };
@@ -117,9 +159,14 @@ impl RuntimeResourcePool {
             match SqliteExtensionStateStore::try_new() {
                 Ok(store) => Arc::new(store),
                 Err(e) => {
-                    tracing::warn!(
-                        "RuntimeResourcePool: extension state store unavailable ({e}); using in-memory"
+                    let message = format!(
+                        "RuntimeResourcePool: extension state store unavailable ({e:#}); using in-memory"
                     );
+                    tracing::warn!("{message}");
+                    degraded_resources.push(RuntimeResourceDegradation::in_memory(
+                        "extension_state_store",
+                        message,
+                    ));
                     Arc::new(SqliteExtensionStateStore::try_open_in_memory()?)
                 }
             };
@@ -129,6 +176,7 @@ impl RuntimeResourcePool {
             run_store,
             artifact_store,
             orchestration,
+            degraded_resources,
             lsp_manager,
             cortex_store: None,
             extension_registry,
@@ -157,6 +205,7 @@ impl RuntimeResourcePool {
             run_store: Arc::new(InMemoryRunStore::default()),
             artifact_store: Arc::new(InMemoryArtifactStore::new()),
             orchestration: Arc::new(OrchestrationStore::new()),
+            degraded_resources: Vec::new(),
             lsp_manager: Arc::new(LspManager::new(cwd)),
             cortex_store: None,
             extension_registry,
@@ -173,6 +222,30 @@ impl RuntimeResourcePool {
     /// share the same connection through this Arc.
     pub fn session_store(&self) -> Arc<SessionStore> {
         Arc::clone(&self.session_store)
+    }
+
+    /// True when one or more durable runtime resources could not be
+    /// opened and the pool installed a safe fallback instead.
+    pub fn is_degraded(&self) -> bool {
+        !self.degraded_resources.is_empty()
+    }
+
+    /// Operator-visible degraded resource records for daemon status and
+    /// tests. Empty means all pool resources opened in their preferred mode.
+    pub fn degraded_resources(&self) -> &[RuntimeResourceDegradation] {
+        &self.degraded_resources
+    }
+
+    /// Test-only constructor that marks the otherwise in-memory test
+    /// pool as degraded so daemon status tests can exercise operator
+    /// visibility without needing filesystem permission failures.
+    #[cfg(test)]
+    #[doc(hidden)]
+    pub fn for_tests_degraded(component: &str, message: &str) -> Self {
+        let mut pool = Self::for_tests();
+        pool.degraded_resources
+            .push(RuntimeResourceDegradation::in_memory(component, message));
+        pool
     }
 
     /// Cloneable handle to the shared run-record store.
@@ -240,6 +313,19 @@ mod tests {
             Arc::ptr_eq(&s1, &s2),
             "session_store() must hand out the same Arc"
         );
+    }
+
+    #[test]
+    fn degraded_session_store_fallback_is_operator_visible() {
+        let pool = RuntimeResourcePool::for_tests_degraded(
+            "session_store",
+            "sqlite unavailable; using in-memory session history",
+        );
+
+        assert!(pool.is_degraded());
+        assert_eq!(pool.degraded_resources().len(), 1);
+        assert_eq!(pool.degraded_resources()[0].component, "session_store");
+        assert_eq!(pool.degraded_resources()[0].fallback, "in_memory");
     }
 
     #[test]

@@ -20,7 +20,7 @@ use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
 mod generator;
-pub use generator::generate_for_file;
+pub use generator::{generate_for_file, generate_for_symbol, generate_for_task};
 
 /// How confident the planner is about an entry. `Evidence` means
 /// the item was sourced from a deterministic index hit (call

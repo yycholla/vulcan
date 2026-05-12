@@ -5,13 +5,22 @@
 //! read the anchor and emit OutboundMessages with `edit_target`
 //! populated so the dispatcher routes to `Platform::edit`.
 //!
-//! Lifetime: entries live until the turn ends + a 5-minute grace
-//! period. PR-2b (worker streaming switch) wires the explicit purge.
+//! Bound: the registry keeps at most [`DEFAULT_RENDER_REGISTRY_CAPACITY`]
+//! anchors and evicts the least-recently-used entry on overflow. A turn
+//! should still call [`RenderRegistry::forget`] when it ends; the LRU cap is
+//! the daemon-mode safety net for crashed, interrupted, or otherwise missed
+//! cleanup paths.
 
 use std::collections::HashMap;
 use std::sync::Arc;
 
 use parking_lot::RwLock;
+
+/// Hard cap for in-memory render anchors. Anchors are tiny, but gateway mode
+/// can see unbounded platform/chat/turn ids over time; 512 concurrent or
+/// recently-interrupted turns is comfortably above normal operation while
+/// keeping retention deterministic.
+pub const DEFAULT_RENDER_REGISTRY_CAPACITY: usize = 512;
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct RenderKey {
@@ -24,30 +33,90 @@ pub struct RenderKey {
     pub turn_id: String,
 }
 
-#[derive(Default)]
 pub struct RenderRegistry {
-    inner: Arc<RwLock<HashMap<RenderKey, String>>>,
+    inner: Arc<RwLock<RenderRegistryInner>>,
+    capacity: usize,
+}
+
+impl Default for RenderRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[derive(Default)]
+struct RenderRegistryInner {
+    entries: HashMap<RenderKey, RenderEntry>,
+    tick: u64,
+}
+
+struct RenderEntry {
+    message_id: String,
+    last_used: u64,
 }
 
 impl RenderRegistry {
     pub fn new() -> Self {
-        Self::default()
+        Self::with_capacity(DEFAULT_RENDER_REGISTRY_CAPACITY)
+    }
+
+    pub fn with_capacity(capacity: usize) -> Self {
+        Self {
+            inner: Arc::new(RwLock::new(RenderRegistryInner::default())),
+            capacity,
+        }
     }
 
     pub fn anchor(&self, key: &RenderKey) -> Option<String> {
-        self.inner.read().get(key).cloned()
+        let mut inner = self.inner.write();
+        inner.tick = inner.tick.saturating_add(1);
+        let last_used = inner.tick;
+        let entry = inner.entries.get_mut(key)?;
+        entry.last_used = last_used;
+        Some(entry.message_id.clone())
     }
 
     pub fn set_anchor(&self, key: RenderKey, message_id: String) {
-        self.inner.write().insert(key, message_id);
+        let mut inner = self.inner.write();
+        if self.capacity == 0 {
+            inner.entries.clear();
+            return;
+        }
+
+        inner.tick = inner.tick.saturating_add(1);
+        let last_used = inner.tick;
+        if let Some(entry) = inner.entries.get_mut(&key) {
+            entry.message_id = message_id;
+            entry.last_used = last_used;
+            return;
+        }
+
+        if inner.entries.len() >= self.capacity {
+            if let Some(victim) = inner
+                .entries
+                .iter()
+                .min_by_key(|(_, entry)| entry.last_used)
+                .map(|(key, _)| key.clone())
+            {
+                inner.entries.remove(&victim);
+            }
+        }
+
+        inner.entries.insert(
+            key,
+            RenderEntry {
+                message_id,
+                last_used,
+            },
+        );
     }
 
     pub fn forget(&self, key: &RenderKey) {
-        self.inner.write().remove(key);
+        self.inner.write().entries.remove(key);
     }
 
     pub fn len(&self) -> usize {
-        self.inner.read().len()
+        self.inner.read().entries.len()
     }
 
     pub fn is_empty(&self) -> bool {
@@ -109,5 +178,27 @@ mod tests {
         assert_eq!(r.anchor(&key("loopback", "c", "t1")).as_deref(), Some("a"));
         assert_eq!(r.anchor(&key("loopback", "c", "t2")).as_deref(), Some("b"));
         assert_eq!(r.len(), 2);
+    }
+
+    #[test]
+    fn registry_evicts_least_recently_used_entry_at_capacity() {
+        let r = RenderRegistry::with_capacity(2);
+        let first = key("loopback", "c", "t1");
+        let second = key("loopback", "c", "t2");
+        let third = key("loopback", "c", "t3");
+
+        r.set_anchor(first.clone(), "a".into());
+        r.set_anchor(second.clone(), "b".into());
+        assert_eq!(r.anchor(&first).as_deref(), Some("a"), "read refreshes LRU");
+
+        r.set_anchor(third.clone(), "c".into());
+
+        assert_eq!(r.len(), 2, "registry must stay bounded by capacity");
+        assert_eq!(r.anchor(&first).as_deref(), Some("a"));
+        assert!(
+            r.anchor(&second).is_none(),
+            "least recently used entry evicted"
+        );
+        assert_eq!(r.anchor(&third).as_deref(), Some("c"));
     }
 }

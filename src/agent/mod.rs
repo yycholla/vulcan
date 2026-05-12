@@ -454,6 +454,16 @@ impl Agent {
             hooks.register(Arc::new(RecallHook::new(recall_memory, config.recall)));
         }
 
+        // Optional Tree-sitter BeforePrompt assist for source files named
+        // in the latest user prompt. Off by default and bounded by
+        // [code_outline_assist] limits.
+        if config.code_outline_assist.enabled {
+            hooks.register(Arc::new(crate::hooks::code_outline::CodeOutlineHook::new(
+                cwd.clone(),
+                config.code_outline_assist,
+            )));
+        }
+
         // Built-in hook (YYC-51): auto-run LSP diagnostics after every
         // successful edit_file/write_file. No-op when LSP isn't
         // installed for the language; the user pays nothing extra.

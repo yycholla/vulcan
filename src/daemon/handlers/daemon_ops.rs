@@ -26,8 +26,11 @@ pub async fn shutdown(state: &DaemonState, id: String, _force: bool) -> Response
 }
 
 pub async fn reload(state: &DaemonState, id: String) -> Response {
-    state.queue_reload();
-    Response::ok(id, json!({ "ok": true }))
+    let report = state.reload_from_disk().await;
+    Response::ok(
+        id,
+        serde_json::to_value(report).unwrap_or_else(|_| json!({ "ok": false })),
+    )
 }
 
 pub async fn status(state: &DaemonState, id: String) -> Response {
@@ -36,9 +39,29 @@ pub async fn status(state: &DaemonState, id: String) -> Response {
         json!({
             "pid": std::process::id(),
             "uptime_secs": state.uptime_secs(),
+            "reloads_applied": state.reloads_applied(),
+            "last_reload": state.last_reload_report(),
+            "runtime_resources": runtime_resources_status(state),
             "sessions": state.session_descriptors(),
         }),
     )
+}
+
+fn runtime_resources_status(state: &DaemonState) -> serde_json::Value {
+    match state.pool() {
+        Some(pool) if pool.is_degraded() => json!({
+            "status": "degraded",
+            "degraded": pool.degraded_resources(),
+        }),
+        Some(_) => json!({
+            "status": "ok",
+            "degraded": [],
+        }),
+        None => json!({
+            "status": "not_initialized",
+            "degraded": [],
+        }),
+    }
 }
 
 #[cfg(test)]
@@ -54,6 +77,25 @@ mod tests {
         assert_eq!(resp.id, "id-1");
         let r = resp.result.unwrap();
         assert_eq!(r["pong"], true);
+    }
+
+    #[tokio::test]
+    async fn status_surfaces_degraded_runtime_resources() {
+        let pool = Arc::new(
+            crate::runtime_pool::RuntimeResourcePool::for_tests_degraded(
+                "session_store",
+                "sqlite unavailable; using in-memory session history",
+            ),
+        );
+        let state = Arc::new(DaemonState::for_tests_minimal().with_pool(pool));
+
+        let resp = status(&state, "status-1".into()).await;
+        let r = resp.result.unwrap();
+        assert_eq!(r["runtime_resources"]["status"], "degraded");
+        assert_eq!(
+            r["runtime_resources"]["degraded"][0]["component"],
+            "session_store"
+        );
     }
 
     #[tokio::test]
