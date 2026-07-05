@@ -218,25 +218,11 @@ pub enum SurfaceFrame {
 }
 
 #[allow(dead_code)]
-pub enum UiEvent {
-    Key(vulcan_frontend_api::CanvasKey),
-    Tick,
-    Close,
-}
-
-#[allow(dead_code)]
 pub enum UiEffect {
     CloseSurface(SurfaceId),
     Focus(SurfaceId),
     Blur,
     RequestRedraw,
-}
-
-#[allow(dead_code)]
-pub trait UiSurface {
-    fn spec(&self) -> &SurfaceSpec;
-    fn frame(&self) -> SurfaceFrame;
-    fn handle_event(&mut self, event: UiEvent) -> Vec<UiEffect>;
 }
 
 #[cfg(test)]
