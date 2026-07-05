@@ -281,6 +281,7 @@ pub async fn run_tui(
     )
     .with_theme(Theme::from_name(&config.tui.theme))
     .with_keybinds(keybinds::Keybinds::from_config(&config.keybinds));
+    app.show_reasoning = config.tui.show_reasoning;
     app.audit_log = Some(audit_buf);
     app.frontend = frontend;
     // YYC-66: clone the agent's diff sink so the TUI can render real edits.

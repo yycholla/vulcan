@@ -755,16 +755,24 @@ pub struct TuiConfig {
     /// "dracula". Unknown names log a warning and fall back to "system".
     #[serde(default = "default_theme_name")]
     pub theme: String,
+    /// Render the model's reasoning trace in the TUI when present.
+    #[serde(default = "default_show_reasoning")]
+    pub show_reasoning: bool,
 }
 
 fn default_theme_name() -> String {
     "system".into()
 }
 
+fn default_show_reasoning() -> bool {
+    true
+}
+
 impl Default for TuiConfig {
     fn default() -> Self {
         Self {
             theme: default_theme_name(),
+            show_reasoning: default_show_reasoning(),
         }
     }
 }
