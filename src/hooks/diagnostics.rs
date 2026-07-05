@@ -20,7 +20,6 @@ use crate::hooks::{HookHandler, HookOutcome};
 use crate::tools::{EditDiffSink, ToolResult};
 use anyhow::Result;
 use lsp_types::DiagnosticSeverity;
-use serde_json::Value;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
@@ -179,6 +178,3 @@ fn severity_label(s: Option<DiagnosticSeverity>) -> &'static str {
         _ => "note",
     }
 }
-
-#[allow(dead_code)]
-fn _silence_value_warning(_: Value) {} // Reserved if future signature work needs Value.

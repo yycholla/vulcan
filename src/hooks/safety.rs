@@ -473,8 +473,10 @@ impl HookHandler for SafetyHook {
 fn match_dangerous(command: &str) -> Option<&'static str> {
     let raw_tokens = shell_tokenize(command);
     if raw_tokens.is_empty() {
-        // Fallback to substring-only rules for single-quoted oddities.
-        return generic_substring_rules(command);
+        // Nothing to match on (e.g. only quoted whitespace). YYC-251
+        // removed the last substring-only fallback rule; PTY caps + the
+        // bash timeout clamp own the resource-consumption defense.
+        return None;
     }
 
     for segment in command_segments(&raw_tokens) {
@@ -1120,17 +1122,6 @@ fn pipes_to_shell(command: &str) -> bool {
         }
     }
     false
-}
-
-/// Rules that don't need tokenization. Hit when the tokenizer returns an
-/// empty list (e.g. only quoted whitespace).
-///
-/// YYC-251: the literal `:(){`-substring fork-bomb check was removed
-/// here too. PTY caps + the bash timeout clamp own the resource-
-/// consumption defense; a pattern check that only catches the
-/// textbook spelling is misleading.
-fn generic_substring_rules(_command: &str) -> Option<&'static str> {
-    None
 }
 
 #[cfg(test)]
