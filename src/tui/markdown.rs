@@ -1,7 +1,7 @@
 use ratatui::text::Line;
 
 use super::{
-    render_ir::{MarkdownParser, PulldownMarkdownParser, render_tui},
+    render_ir::{PulldownMarkdownParser, render_tui},
     theme::Theme,
 };
 

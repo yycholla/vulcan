@@ -90,114 +90,11 @@ impl TypstPreviewFormat {
     }
 }
 
-pub trait MarkdownParser {
-    fn parse(&self, text: &str) -> RenderDocument;
-}
-
-#[derive(Clone, Copy, Debug, Default)]
-pub struct LegacyMarkdownParser;
-
 #[derive(Clone, Copy, Debug, Default)]
 pub struct PulldownMarkdownParser;
 
-impl MarkdownParser for LegacyMarkdownParser {
-    fn parse(&self, text: &str) -> RenderDocument {
-        let mut blocks = Vec::new();
-        let mut in_code_block = false;
-        let mut code_lang: Option<String> = None;
-        let mut code_block_content: Vec<String> = Vec::new();
-
-        for raw_line in text.lines() {
-            let trimmed_start = raw_line.trim_start();
-            if let Some(info) = trimmed_start.strip_prefix("```") {
-                if in_code_block {
-                    blocks.push(code_lines_to_block(
-                        code_lang.take(),
-                        code_block_content.clone(),
-                    ));
-                    code_block_content.clear();
-                    in_code_block = false;
-                } else {
-                    in_code_block = true;
-                    code_lang = parse_code_fence_lang(info);
-                    code_block_content.clear();
-                }
-                continue;
-            }
-
-            if in_code_block {
-                code_block_content.push(raw_line.to_string());
-                continue;
-            }
-
-            let line = raw_line.trim_end();
-
-            if line.is_empty() {
-                blocks.push(RenderBlock::BlankLine);
-                continue;
-            }
-
-            if let Some(level) = heading_level(line) {
-                let content = line.trim_start_matches('#').trim();
-                blocks.push(RenderBlock::Heading {
-                    level,
-                    content: parse_inline(content),
-                });
-                continue;
-            }
-
-            if let Some(content) = line.strip_prefix("> ") {
-                blocks.push(RenderBlock::Quote(vec![RenderBlock::Paragraph(
-                    parse_inline(content),
-                )]));
-                continue;
-            }
-            if line == ">" {
-                blocks.push(RenderBlock::Quote(Vec::new()));
-                continue;
-            }
-
-            if let Some(content) = line.strip_prefix("- ").or_else(|| line.strip_prefix("* ")) {
-                blocks.push(RenderBlock::List {
-                    ordered: false,
-                    items: vec![ListItem {
-                        number: None,
-                        blocks: vec![RenderBlock::Paragraph(parse_inline(content))],
-                    }],
-                });
-                continue;
-            }
-
-            if let Some((num_str, content)) = strip_ordered_list_prefix(line) {
-                blocks.push(RenderBlock::List {
-                    ordered: true,
-                    items: vec![ListItem {
-                        number: Some(num_str.to_string()),
-                        blocks: vec![RenderBlock::Paragraph(parse_inline(content))],
-                    }],
-                });
-                continue;
-            }
-
-            let trimmed = line.trim();
-            if trimmed == "---" || trimmed == "***" || trimmed == "___" {
-                blocks.push(RenderBlock::Rule);
-                continue;
-            }
-
-            blocks.push(RenderBlock::Paragraph(parse_inline(line)));
-        }
-
-        if in_code_block {
-            blocks.push(code_lines_to_block(code_lang, code_block_content));
-        }
-
-        RenderDocument { blocks }
-    }
-}
-
-impl MarkdownParser for PulldownMarkdownParser {
-    fn parse(&self, text: &str) -> RenderDocument {
+impl PulldownMarkdownParser {
+    pub fn parse(&self, text: &str) -> RenderDocument {
         parse_pulldown(text)
     }
 }
@@ -743,129 +640,6 @@ fn render_inline_children(
     }
 }
 
-fn parse_code_fence_lang(info: &str) -> Option<String> {
-    let lang = info.trim();
-    (!lang.is_empty()).then(|| lang.to_string())
-}
-
-fn heading_level(line: &str) -> Option<u8> {
-    let trimmed = line.trim_start();
-    if !trimmed.starts_with('#') {
-        return None;
-    }
-    let mut count = 0;
-    for ch in trimmed.chars() {
-        if ch == '#' {
-            count += 1;
-        } else if ch == ' ' {
-            break;
-        } else {
-            return None;
-        }
-    }
-    if (1..=6).contains(&count) {
-        Some(count)
-    } else {
-        None
-    }
-}
-
-fn strip_ordered_list_prefix(line: &str) -> Option<(&str, &str)> {
-    let bytes = line.as_bytes();
-    let mut i = 0;
-    while i < bytes.len() && bytes[i].is_ascii_digit() {
-        i += 1;
-    }
-    if i > 0 && i < bytes.len() && bytes[i] == b'.' {
-        let num_str = &line[..i];
-        let rest = line[i + 1..].trim();
-        Some((num_str, rest))
-    } else {
-        None
-    }
-}
-
-fn parse_inline(text: &str) -> Vec<Inline> {
-    let mut spans: Vec<Inline> = Vec::new();
-    let chars: Vec<char> = text.chars().collect();
-    let len = chars.len();
-    let mut i = 0;
-
-    while i < len {
-        if chars[i] == '\\' && i + 1 < len {
-            spans.push(Inline::Text(chars[i + 1].to_string()));
-            i += 2;
-            continue;
-        }
-
-        if chars[i] == '`' {
-            let start = i + 1;
-            if let Some(end) = chars[start..].iter().position(|&c| c == '`') {
-                let code: String = chars[start..start + end].iter().collect();
-                spans.push(Inline::Code(code));
-                i = start + end + 1;
-                continue;
-            }
-        }
-
-        if i + 1 < len && chars[i] == '*' && chars[i + 1] == '*' {
-            let start = i + 2;
-            if let Some(end) = chars[start..].windows(2).position(|w| w == ['*', '*']) {
-                let inner: String = chars[start..start + end].iter().collect();
-                spans.push(Inline::Strong(parse_inline(&inner)));
-                i = start + end + 2;
-                continue;
-            }
-        }
-
-        if chars[i] == '*' && (i + 1 >= len || chars[i + 1] != '*') {
-            let start = i + 1;
-            if let Some(end) = chars[start..].iter().position(|&c| c == '*') {
-                let inner: String = chars[start..start + end].iter().collect();
-                spans.push(Inline::Emphasis(vec![Inline::Text(inner)]));
-                i = start + end + 1;
-                continue;
-            }
-        }
-
-        if i + 1 < len && chars[i] == '~' && chars[i + 1] == '~' {
-            let start = i + 2;
-            if let Some(end) = chars[start..].windows(2).position(|w| w == ['~', '~']) {
-                let inner: String = chars[start..start + end].iter().collect();
-                spans.push(Inline::Strike(vec![Inline::Text(inner)]));
-                i = start + end + 2;
-                continue;
-            }
-        }
-
-        if chars[i] == '[' {
-            let start = i + 1;
-            if let Some(close_bracket) = chars[start..].iter().position(|&c| c == ']') {
-                let text_inner: String = chars[start..start + close_bracket].iter().collect();
-                let after_close = start + close_bracket + 1;
-                if after_close < len && chars[after_close] == '(' {
-                    let url_start = after_close + 1;
-                    if let Some(close_paren) = chars[url_start..].iter().position(|&c| c == ')') {
-                        let target: String =
-                            chars[url_start..url_start + close_paren].iter().collect();
-                        spans.push(Inline::Link {
-                            text: parse_inline(&text_inner),
-                            target,
-                        });
-                        i = url_start + close_paren + 1;
-                        continue;
-                    }
-                }
-            }
-        }
-
-        spans.push(Inline::Text(chars[i].to_string()));
-        i += 1;
-    }
-
-    spans
-}
-
 fn parse_pulldown(text: &str) -> RenderDocument {
     use pulldown_cmark::{Options, Parser};
 
@@ -1201,16 +975,6 @@ fn code_to_lines(code: &str) -> Vec<String> {
     lines
 }
 
-fn code_lines_to_block(lang: Option<String>, lines: Vec<String>) -> RenderBlock {
-    if is_typst_lang(lang.as_deref()) {
-        RenderBlock::Typst {
-            source: lines.join("\n"),
-        }
-    } else {
-        RenderBlock::CodeBlock { lang, lines }
-    }
-}
-
 fn code_to_source(code: &str) -> String {
     code.strip_suffix('\n').unwrap_or(code).to_string()
 }
@@ -1273,10 +1037,6 @@ fn display_math_from_literal(inlines: &[Inline]) -> Option<String> {
 mod tests {
     use super::*;
 
-    fn parse(text: &str) -> RenderDocument {
-        LegacyMarkdownParser.parse(text)
-    }
-
     fn parse_commonmark(text: &str) -> RenderDocument {
         PulldownMarkdownParser.parse(text)
     }
@@ -1290,30 +1050,30 @@ mod tests {
 
     #[test]
     fn parses_representative_markdown_blocks_to_ir() {
-        let doc = parse("# Title\n\n> quote\n- item\n12. step\n---\n```\ncode\n```");
+        let doc = parse_commonmark("# Title\n\n> quote\n- item\n12. step\n---\n```\ncode\n```");
 
-        assert_eq!(doc.blocks.len(), 7);
+        assert_eq!(doc.blocks.len(), 6);
         assert!(matches!(
             doc.blocks[0],
             RenderBlock::Heading { level: 1, .. }
         ));
-        assert_eq!(doc.blocks[1], RenderBlock::BlankLine);
-        assert!(matches!(doc.blocks[2], RenderBlock::Quote(_)));
+        assert!(matches!(doc.blocks[1], RenderBlock::Quote(_)));
         assert!(matches!(
-            doc.blocks[3],
+            doc.blocks[2],
             RenderBlock::List { ordered: false, .. }
         ));
         assert!(matches!(
-            doc.blocks[4],
+            doc.blocks[3],
             RenderBlock::List { ordered: true, .. }
         ));
-        assert_eq!(doc.blocks[5], RenderBlock::Rule);
-        assert!(matches!(doc.blocks[6], RenderBlock::CodeBlock { .. }));
+        assert_eq!(doc.blocks[4], RenderBlock::Rule);
+        assert!(matches!(doc.blocks[5], RenderBlock::CodeBlock { .. }));
     }
 
     #[test]
     fn parses_inline_ir_for_current_markdown_subset() {
-        let doc = parse("hello `code` **bold** *em* ~~gone~~ [link](https://example.com)");
+        let doc =
+            parse_commonmark("hello `code` **bold** *em* ~~gone~~ [link](https://example.com)");
 
         let RenderBlock::Paragraph(inlines) = &doc.blocks[0] else {
             panic!("expected paragraph");
@@ -1346,7 +1106,7 @@ mod tests {
     #[test]
     fn renders_existing_subset_from_ir_to_tui_lines() {
         let theme = Theme::system();
-        let doc = parse("# Title\n> quote\n- item\n```\ncode\n```");
+        let doc = parse_commonmark("# Title\n> quote\n- item\n```\ncode\n```");
         let rendered: Vec<String> = render_tui(&doc, &theme).iter().map(line_text).collect();
 
         assert_eq!(rendered, vec!["# Title", "▎ quote", "• item", " │code"]);
@@ -1355,7 +1115,7 @@ mod tests {
     #[test]
     fn code_block_ir_preserves_blank_code_rows() {
         let theme = Theme::system();
-        let doc = parse("```\nfirst\n\n```");
+        let doc = parse_commonmark("```\nfirst\n\n```");
         let rendered: Vec<String> = render_tui(&doc, &theme).iter().map(line_text).collect();
 
         assert_eq!(rendered, vec![" │first", " │"]);
@@ -1659,14 +1419,5 @@ mod tests {
             key,
             typst_preview_cache_key("= Report", TypstPreviewFormat::Png)
         );
-    }
-
-    #[test]
-    fn legacy_parser_remains_available_as_fallback() {
-        let legacy = LegacyMarkdownParser.parse("[not a link]");
-        let pulldown = PulldownMarkdownParser.parse("[not a link]");
-
-        assert_eq!(render_tui(&legacy, &Theme::system()).len(), 1);
-        assert_eq!(render_tui(&pulldown, &Theme::system()).len(), 1);
     }
 }
