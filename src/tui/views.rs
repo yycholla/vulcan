@@ -8,8 +8,8 @@ use ratatui::{
 };
 
 use super::chat_render::{ChatRenderOptions, VisibleChatLines};
-use super::layouts;
 use super::markdown::render_markdown;
+use super::single_stack;
 use super::state::{AppState, DiffStyle, SessionStatus};
 use super::surface::SurfaceFrame;
 use super::theme::{Palette, body, faint_bg};
@@ -27,7 +27,7 @@ pub fn render_view(f: &mut TuiFrame, area: Rect, app: &AppState) {
     }
     match app.view {
         View::TradingFloor => trading_floor(f, area, app),
-        View::SingleStack => layouts::single_stack::render(f, area, app),
+        View::SingleStack => single_stack::render(f, area, app),
         View::SplitSessions => split_sessions(f, area, app),
         View::TiledMesh => tiled_mesh(f, area, app),
         View::TreeOfThought => tree_of_thought(f, area, app),
