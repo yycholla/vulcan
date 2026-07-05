@@ -408,6 +408,9 @@ impl DiffSink {
             .cloned()
     }
 
+    /// Test-only snapshot of the ring buffer; production consumers use
+    /// `latest` / `latest_for_tool`.
+    #[cfg(test)]
     pub fn recent(&self) -> Vec<EditDiff> {
         self.inner.lock().iter().cloned().collect()
     }

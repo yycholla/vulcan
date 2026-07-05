@@ -174,9 +174,6 @@ impl CodeGraph {
         }
         let conn = Connection::open(&db_path)
             .with_context(|| format!("open code graph at {}", db_path.display()))?;
-        // Schema mirrors the issue's plan — symbols today, edges
-        // (calls/implements/inherits) reserved for the call-hierarchy
-        // follow-up.
         conn.execute_batch(
             r#"
             CREATE TABLE IF NOT EXISTS symbols (
@@ -191,19 +188,6 @@ impl CodeGraph {
             );
             CREATE INDEX IF NOT EXISTS idx_symbols_name ON symbols(name);
             CREATE INDEX IF NOT EXISTS idx_symbols_file ON symbols(file);
-
-            CREATE TABLE IF NOT EXISTS calls (
-                caller_id INTEGER NOT NULL,
-                callee_id INTEGER NOT NULL
-            );
-            CREATE TABLE IF NOT EXISTS implements (
-                impl_id  INTEGER NOT NULL,
-                trait_id INTEGER NOT NULL
-            );
-            CREATE TABLE IF NOT EXISTS inherits (
-                child_id  INTEGER NOT NULL,
-                parent_id INTEGER NOT NULL
-            );
 
             CREATE TABLE IF NOT EXISTS graph_edges (
                 id                     INTEGER PRIMARY KEY AUTOINCREMENT,
