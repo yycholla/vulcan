@@ -40,13 +40,13 @@ pub(in crate::agent) struct TurnOutcome {
 /// Slice 1 keeps existing `Agent` methods as adapters, but new turn execution
 /// behavior should move behind this seam instead of growing parallel buffered
 /// and streaming paths.
-#[allow(dead_code)]
+#[cfg(test)]
 pub(in crate::agent) struct TurnRunner<'a> {
     pub(in crate::agent) agent: &'a Agent,
 }
 
+#[cfg(test)]
 impl<'a> TurnRunner<'a> {
-    #[allow(dead_code)]
     pub(in crate::agent) fn new(agent: &'a Agent) -> Self {
         Self { agent }
     }

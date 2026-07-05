@@ -15,7 +15,9 @@ use crate::run_record::{PayloadFingerprint, RunEvent, RunOrigin, RunRecord, RunS
 use crate::tools::ToolResult;
 
 use super::dispatch::{elided_lines, preview_output, summarize_tool_args, summarize_tool_result};
-use super::turn::{TurnEvent, TurnMode, TurnOutcome, TurnRunner, TurnRunnerMut, TurnStatus};
+#[cfg(test)]
+use super::turn::TurnRunner;
+use super::turn::{TurnEvent, TurnMode, TurnOutcome, TurnRunnerMut, TurnStatus};
 use super::{Agent, StreamTurn, flatten_for_message};
 
 /// Threshold for "near context limit" hint on empty terminal turns.
@@ -377,7 +379,7 @@ impl Agent {
         }
     }
 
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub(in crate::agent) async fn prepare_stream_turn(
         &mut self,
         input: &str,
@@ -386,7 +388,7 @@ impl Agent {
         self.prepare_turn(input, cancel).await
     }
 
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub(in crate::agent) async fn prepare_turn(
         &mut self,
         input: &str,
@@ -457,7 +459,7 @@ impl Agent {
         })
     }
 
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub(in crate::agent) async fn compact_stream_messages_if_needed(
         &mut self,
         messages: &mut Vec<Message>,
@@ -481,7 +483,7 @@ impl Agent {
         let _ = forwarder.await;
     }
 
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub(in crate::agent) async fn compact_turn_messages_if_needed(
         &mut self,
         messages: &mut Vec<Message>,
@@ -697,7 +699,7 @@ impl Agent {
         true
     }
 
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub(in crate::agent) async fn collect_stream_response(
         &self,
         outgoing: &[Message],
@@ -740,7 +742,7 @@ impl Agent {
         result
     }
 
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub(in crate::agent) async fn collect_turn_response(
         &self,
         outgoing: &[Message],
@@ -947,7 +949,7 @@ impl Agent {
         }
     }
 
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub(in crate::agent) async fn execute_stream_tool_calls(
         &self,
         tool_calls: &[ToolCall],
@@ -972,7 +974,7 @@ impl Agent {
         results
     }
 
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub(in crate::agent) async fn execute_turn_tool_calls(
         &self,
         tool_calls: &[ToolCall],
@@ -1077,8 +1079,8 @@ impl Agent {
     }
 }
 
+#[cfg(test)]
 impl TurnRunner<'_> {
-    #[allow(dead_code)]
     pub(in crate::agent) async fn collect_response(
         &self,
         outgoing: &[Message],
@@ -1092,7 +1094,6 @@ impl TurnRunner<'_> {
             .await
     }
 
-    #[allow(dead_code)]
     pub(in crate::agent) async fn execute_tool_calls(
         &self,
         tool_calls: &[ToolCall],
