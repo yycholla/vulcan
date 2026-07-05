@@ -1,4 +1,8 @@
 /target
+/.direnv
+/.envrc.local
+/result
+/result-*
 
 # vulcan-soak (YYC-83) writes a dhat heap profile to CWD on Drop when built
 # with `--features bench-soak`. Generated artifact; never tracked.

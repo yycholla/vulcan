@@ -1,11 +1,25 @@
 <!-- generated-by: gsd-doc-writer -->
+
 # Vulcan
 
 Vulcan is a Rust workspace for a local AI agent with a CLI, terminal UI, daemon backend, optional gateway connectors, and an in-tree extension system.
 
 ## Installation
 
-Install the Rust toolchain declared by `rust-toolchain.toml`, then build the workspace:
+With Nix and direnv:
+
+```bash
+direnv allow
+nix build
+```
+
+Without direnv, enter the same shell manually:
+
+```bash
+nix develop
+```
+
+Or install the Rust toolchain declared by `rust-toolchain.toml`, then build the workspace:
 
 ```bash
 cargo build --all-targets
@@ -35,6 +49,12 @@ cargo run
 cargo run -- prompt "hello"
 ```
 
+With Nix:
+
+```bash
+nix run . -- prompt "hello"
+```
+
 ## Usage Examples
 
 Start an interactive session:
@@ -62,16 +82,16 @@ The root `Cargo.toml` defines a Cargo workspace. The root package `vulcan-core` 
 
 Important entry points:
 
-| Path | Purpose |
-|------|---------|
-| `src/cli.rs` | Clap command tree for the root CLI surface. |
-| `src/agent/mod.rs` | Core agent loop and tool orchestration. |
-| `src/tui/mod.rs` | Terminal UI runtime. |
-| `src/daemon/` | Long-lived daemon process and client-facing dispatch. |
-| `src/gateway/` | Optional Axum gateway routes and platform connectors. |
-| `src/extensions/` | Extension registry, manifests, and lifecycle support. |
-| `vulcan/` | Daemon binary crate. |
-| `vulcan-tui/` | TUI frontend binary crate. |
+| Path               | Purpose                                               |
+| ------------------ | ----------------------------------------------------- |
+| `src/cli.rs`       | Clap command tree for the root CLI surface.           |
+| `src/agent/mod.rs` | Core agent loop and tool orchestration.               |
+| `src/tui/mod.rs`   | Terminal UI runtime.                                  |
+| `src/daemon/`      | Long-lived daemon process and client-facing dispatch. |
+| `src/gateway/`     | Optional Axum gateway routes and platform connectors. |
+| `src/extensions/`  | Extension registry, manifests, and lifecycle support. |
+| `vulcan/`          | Daemon binary crate.                                  |
+| `vulcan-tui/`      | TUI frontend binary crate.                            |
 
 ## Documentation
 
