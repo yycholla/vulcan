@@ -34,7 +34,6 @@ pub mod routes;
 pub mod scheduler;
 pub mod scheduler_store;
 pub mod server;
-pub mod stream_render;
 #[cfg(feature = "telegram")]
 pub mod telegram;
 pub mod worker;

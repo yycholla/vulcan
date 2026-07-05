@@ -58,19 +58,6 @@ pub struct InboundRow {
     pub attempts: i64,
 }
 
-/// Snapshot of a dead-letter row for the DLQ admin endpoint.
-#[derive(Debug, Clone, serde::Serialize)]
-pub struct DeadInboundRow {
-    pub id: i64,
-    pub platform: String,
-    pub chat_id: String,
-    pub user_id: String,
-    pub text: String,
-    pub received_at: i64,
-    pub attempts: i64,
-    pub last_error: Option<String>,
-}
-
 impl InboundQueue {
     pub fn new(conn: DbPool) -> Self {
         Self::with_policy(
@@ -134,22 +121,6 @@ impl InboundQueue {
             } else {
                 Ok(None)
             }
-        })
-        .await
-    }
-
-    /// Refresh `last_heartbeat_at` for a row in-flight (YYC-137). Long
-    /// runs that exceed the stale threshold can call this periodically
-    /// to keep `recover_processing` from racing them on next startup.
-    pub async fn heartbeat(&self, id: i64) -> Result<()> {
-        db_blocking(self.conn.clone(), move |conn| {
-            let now = chrono::Utc::now().timestamp();
-            conn.execute(
-                "UPDATE inbound_queue SET last_heartbeat_at = ?1 \
-                 WHERE id = ?2 AND state = 'processing'",
-                params![now, id],
-            )?;
-            Ok(())
         })
         .await
     }
@@ -254,6 +225,9 @@ impl InboundQueue {
     }
 
     /// Count of rows currently in the dead-letter queue (YYC-137).
+    /// Test-only today; the DLQ admin endpoint it was built for was
+    /// never added.
+    #[cfg(test)]
     pub async fn count_dead(&self) -> Result<usize> {
         db_blocking(self.conn.clone(), move |conn| {
             let n: i64 = conn.query_row(
@@ -262,50 +236,6 @@ impl InboundQueue {
                 |row| row.get(0),
             )?;
             Ok(n.max(0) as usize)
-        })
-        .await
-    }
-
-    /// Snapshot the most recent `limit` dead-letter rows so an admin
-    /// endpoint can surface them for replay (YYC-137).
-    pub async fn list_dead(&self, limit: usize) -> Result<Vec<DeadInboundRow>> {
-        db_blocking(self.conn.clone(), move |conn| {
-            let mut stmt = conn.prepare(
-                "SELECT id, platform, chat_id, user_id, text, received_at, attempts, last_error \
-                 FROM inbound_queue WHERE state='dead' \
-                 ORDER BY received_at DESC LIMIT ?1",
-            )?;
-            let rows = stmt
-                .query_map(params![limit as i64], |row| {
-                    Ok(DeadInboundRow {
-                        id: row.get(0)?,
-                        platform: row.get(1)?,
-                        chat_id: row.get(2)?,
-                        user_id: row.get(3)?,
-                        text: row.get(4)?,
-                        received_at: row.get(5)?,
-                        attempts: row.get(6)?,
-                        last_error: row.get(7)?,
-                    })
-                })?
-                .collect::<rusqlite::Result<Vec<_>>>()?;
-            Ok(rows)
-        })
-        .await
-    }
-
-    /// Move a dead row back to `pending` so it gets re-claimed on the
-    /// next worker poll. Resets `attempts` to 0 so the retry budget
-    /// starts fresh; preserves `last_error` for diagnostics. Returns
-    /// whether the row was found in `dead` state (YYC-137).
-    pub async fn replay_dead(&self, id: i64) -> Result<bool> {
-        db_blocking(self.conn.clone(), move |conn| {
-            let n = conn.execute(
-                "UPDATE inbound_queue SET state='pending', attempts=0 \
-                 WHERE id = ?1 AND state='dead'",
-                params![id],
-            )?;
-            Ok(n > 0)
         })
         .await
     }
@@ -927,21 +857,6 @@ mod tests {
             "row should not re-claim after reaching max_attempts",
         );
         assert_eq!(q.count_dead().await.unwrap(), 1);
-
-        // last_error preserved + replay_dead resets attempts and
-        // re-arms the row.
-        let dead = q.list_dead(10).await.unwrap();
-        assert_eq!(dead.len(), 1);
-        assert_eq!(dead[0].last_error.as_deref(), Some("boom-2"));
-        assert_eq!(dead[0].attempts, 2);
-
-        let replayed = q.replay_dead(id).await.unwrap();
-        assert!(replayed);
-        let row = q.claim_next().await.unwrap().expect("row replayed");
-        assert_eq!(
-            row.attempts, 1,
-            "replay_dead should reset attempts to 0 then claim bumps to 1"
-        );
     }
 
     #[tokio::test]
@@ -985,29 +900,6 @@ mod tests {
             stale.claim_next().await.unwrap().is_some(),
             "stale row should be re-claimable after recovery",
         );
-    }
-
-    #[tokio::test]
-    async fn heartbeat_refreshes_last_heartbeat_at() {
-        let conn = test_conn();
-        let q = InboundQueue::with_policy(conn.clone(), 5, 60);
-        let id = q.enqueue(sample_msg()).await.unwrap();
-        let _ = q.claim_next().await.unwrap();
-
-        // Stamp heartbeat into the past, then refresh; recovery with
-        // a 10s window now leaves it alone.
-        {
-            let c = conn.get().unwrap();
-            let now = chrono::Utc::now().timestamp();
-            c.execute(
-                "UPDATE inbound_queue SET last_heartbeat_at = ?1 WHERE id = ?2",
-                params![now - 3600, id],
-            )
-            .unwrap();
-        }
-        q.heartbeat(id).await.unwrap();
-        let q_strict = InboundQueue::with_policy(conn, 5, 10);
-        assert_eq!(q_strict.recover_processing().await.unwrap(), 0);
     }
 
     #[tokio::test]
