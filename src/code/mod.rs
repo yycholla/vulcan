@@ -71,7 +71,7 @@ impl Language {
     }
 
     /// Tree-sitter grammar for this language.
-    fn grammar(self) -> TsLanguage {
+    pub fn grammar(self) -> TsLanguage {
         match self {
             Self::Rust => tree_sitter_rust::LANGUAGE.into(),
             Self::Python => tree_sitter_python::LANGUAGE.into(),

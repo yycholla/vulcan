@@ -249,7 +249,7 @@ pub(crate) fn outline(
         let tree = parser
             .parse(source, None)
             .ok_or_else(|| anyhow::anyhow!("tree-sitter failed to parse source"))?;
-        let query = Query::new(&lang.grammar_for_query(), query_text)
+        let query = Query::new(&lang.grammar(), query_text)
             .map_err(|e| anyhow::anyhow!("query compile: {e}"))?;
         let name_idx = query.capture_index_for_name("name");
         let mut cursor = QueryCursor::new();
@@ -311,7 +311,7 @@ fn run_query(
         let tree = parser
             .parse(source, None)
             .ok_or_else(|| anyhow::anyhow!("tree-sitter failed to parse source"))?;
-        let query = Query::new(&lang.grammar_for_query(), query_text)
+        let query = Query::new(&lang.grammar(), query_text)
             .map_err(|e| anyhow::anyhow!("query compile: {e}"))?;
         let mut cursor = QueryCursor::new();
         let mut iter = cursor.matches(&query, tree.root_node(), source.as_bytes());
@@ -337,26 +337,6 @@ fn run_query(
         }
         Ok(hits)
     })?
-}
-
-// Helper trait to expose grammar() for use in this module without
-// re-implementing the grammar match. Defined here (vs `code/mod.rs`) so
-// the code module's API stays minimal.
-trait LanguageExt {
-    fn grammar_for_query(&self) -> tree_sitter::Language;
-}
-
-impl LanguageExt for Language {
-    fn grammar_for_query(&self) -> tree_sitter::Language {
-        match self {
-            Language::Rust => tree_sitter_rust::LANGUAGE.into(),
-            Language::Python => tree_sitter_python::LANGUAGE.into(),
-            Language::TypeScript => tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(),
-            Language::JavaScript => tree_sitter_javascript::LANGUAGE.into(),
-            Language::Go => tree_sitter_go::LANGUAGE.into(),
-            Language::Json => tree_sitter_json::LANGUAGE.into(),
-        }
-    }
 }
 
 #[cfg(test)]

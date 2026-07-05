@@ -63,15 +63,10 @@ struct AddImportParams {
     import_statement: String,
 }
 
+/// JSON is parseable but has no notion of imports/functions, so
+/// structural edits exclude it.
 fn grammar_for(lang: Language) -> Option<tree_sitter::Language> {
-    match lang {
-        Language::Rust => Some(tree_sitter_rust::LANGUAGE.into()),
-        Language::Python => Some(tree_sitter_python::LANGUAGE.into()),
-        Language::TypeScript => Some(tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into()),
-        Language::JavaScript => Some(tree_sitter_javascript::LANGUAGE.into()),
-        Language::Go => Some(tree_sitter_go::LANGUAGE.into()),
-        Language::Json => None,
-    }
+    (lang != Language::Json).then(|| lang.grammar())
 }
 
 fn parse_source(
@@ -478,15 +473,10 @@ fn find_function_body_range(
     source: &str,
     symbol: &str,
 ) -> Result<Option<(usize, usize)>> {
-    let mut parser = TsParser::new();
-    let grammar: tree_sitter::Language = match lang {
-        Language::Rust => tree_sitter_rust::LANGUAGE.into(),
-        Language::Python => tree_sitter_python::LANGUAGE.into(),
-        Language::TypeScript => tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(),
-        Language::JavaScript => tree_sitter_javascript::LANGUAGE.into(),
-        Language::Go => tree_sitter_go::LANGUAGE.into(),
-        Language::Json => return Ok(None),
+    let Some(grammar) = grammar_for(lang) else {
+        return Ok(None);
     };
+    let mut parser = TsParser::new();
     parser
         .set_language(&grammar)
         .map_err(|e| anyhow::anyhow!("set_language: {e}"))?;
