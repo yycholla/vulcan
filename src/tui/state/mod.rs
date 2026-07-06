@@ -1162,12 +1162,17 @@ impl AppState {
                 active: true,
             });
         }
-        // YYC-207: append child runs as depth-1 nodes under root.
-        // Active (non-terminal) records highlight; terminal ones
-        // surface their final status symbol.
+        // YYC-207/YYC-209: walk the real child lineage. Top-level
+        // records (no parent) start at depth 1 under root; nested
+        // delegations indent one level per parent link. Active
+        // (non-terminal) records highlight; terminal ones surface
+        // their final status symbol.
         if let Some(store) = &self.orchestration_store {
-            for record in store.recent(8) {
-                nodes.push(child_tree_node(&record));
+            let mut budget = 16usize;
+            for record in store.list() {
+                if record.parent_id.is_none() {
+                    push_child_subtree(store, &record, 1, &mut budget, &mut nodes);
+                }
             }
         }
         nodes
@@ -1354,7 +1359,7 @@ fn child_tile_from(record: &crate::orchestration::ChildAgentRecord) -> SubAgentT
 /// YYC-207: project a `ChildAgentRecord` into a TreeNode for the
 /// TreeOfThought view. Non-terminal records are marked active so
 /// the tree highlights the live frontier.
-fn child_tree_node(record: &crate::orchestration::ChildAgentRecord) -> TreeNode {
+fn child_tree_node(record: &crate::orchestration::ChildAgentRecord, depth: u8) -> TreeNode {
     use crate::orchestration::ChildStatus;
     let (symbol, color) = match record.status {
         ChildStatus::Pending => ("○", Palette::MUTED),
@@ -1366,7 +1371,7 @@ fn child_tree_node(record: &crate::orchestration::ChildAgentRecord) -> TreeNode 
     };
     let id_short: String = record.id.to_string().chars().take(8).collect();
     TreeNode {
-        depth: 1,
+        depth,
         label: format!(
             "└─ child:{id_short} · {}",
             short_text(&record.task_summary, 40)
@@ -1374,6 +1379,32 @@ fn child_tree_node(record: &crate::orchestration::ChildAgentRecord) -> TreeNode 
         state: symbol.into(),
         color,
         active: !record.status.is_terminal(),
+    }
+}
+
+/// YYC-209: depth-first walk of a child's descendants, appending a
+/// depth-stamped node per record. `budget` bounds total appended nodes
+/// so a runaway delegation tree can't scroll the view off-screen;
+/// `depth` is clamped by the caller's cap on recursion.
+fn push_child_subtree(
+    store: &crate::orchestration::OrchestrationStore,
+    record: &crate::orchestration::ChildAgentRecord,
+    depth: u8,
+    budget: &mut usize,
+    nodes: &mut Vec<TreeNode>,
+) {
+    if *budget == 0 {
+        return;
+    }
+    *budget -= 1;
+    nodes.push(child_tree_node(record, depth));
+    // ponytail: depth cap 6 — deeper nesting renders flat rather than
+    // recursing unboundedly on a cyclic/corrupt parent chain.
+    if depth >= 6 {
+        return;
+    }
+    for child in store.children_of(record.id) {
+        push_child_subtree(store, &child, depth + 1, budget, nodes);
     }
 }
 

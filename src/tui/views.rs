@@ -676,7 +676,11 @@ fn tree_of_thought(f: &mut TuiFrame, area: Rect, app: &AppState) {
                 Style::default().fg(n.color).add_modifier(Modifier::BOLD),
             ),
             Span::styled(
-                n.label.clone(),
+                format!(
+                    "{}{}",
+                    "  ".repeat(usize::from(n.depth.saturating_sub(1))),
+                    n.label
+                ),
                 app.theme.assistant.add_modifier(if n.depth == 0 {
                     Modifier::BOLD
                 } else {
@@ -685,15 +689,19 @@ fn tree_of_thought(f: &mut TuiFrame, area: Rect, app: &AppState) {
             ),
         ]));
     }
-    lines.push(Line::from(""));
-    lines.push(Line::from(Span::styled(
-        " Delegated branch runtime not enabled yet.",
-        app.theme.muted,
-    )));
-    lines.push(Line::from(Span::styled(
-        " This pane currently shows the root orchestrator state only.",
-        app.theme.muted,
-    )));
+    // YYC-209: real delegations render as a nested tree above; the
+    // hint only shows while no child runs exist yet.
+    if !tree_nodes.iter().any(|n| n.label.contains("child:")) {
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            " No delegated child runs yet.",
+            app.theme.muted,
+        )));
+        lines.push(Line::from(Span::styled(
+            " Subagent delegations will appear here as a nested tree.",
+            app.theme.muted,
+        )));
+    }
     f.render_widget(Paragraph::new(lines), inner);
 
     // Right: focused stream

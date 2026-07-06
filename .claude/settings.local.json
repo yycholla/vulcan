@@ -1,4 +1,13 @@
 {
+  "env": {
+    "ANTHROPIC_BASE_URL": "http://127.0.0.1:8787"
+  },
+  "enableAllProjectMcpServers": true,
   "enabledMcpjsonServers": ["claude-flow"],
-  "enableAllProjectMcpServers": true
+  "permissions": {
+    "allow": [
+      "Bash(jj --no-pager --color=never describe -m '✨ Render nested orchestration tree from real lineage *)",
+      "Bash(jj --no-pager --color=never st)"
+    ]
+  }
 }

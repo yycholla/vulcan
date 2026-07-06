@@ -597,6 +597,34 @@ fn tree_nodes_include_child_records_from_store() {
     assert!(child.active);
 }
 
+// YYC-209: nested delegations render depth-stamped under their parent
+// via children_of, not flattened to depth 1.
+#[test]
+fn tree_nodes_nest_grandchildren_under_parents() {
+    use crate::orchestration::{ChildStatus, OrchestrationStore};
+    use std::sync::Arc;
+    let store = Arc::new(OrchestrationStore::new());
+    let parent = store.register(None, "parent task", 4);
+    let child = store.register(Some(parent.id), "child task", 4);
+    let _grandchild = store.register(Some(child.id), "grandchild task", 4);
+    store.update_status(parent.id, ChildStatus::Running);
+
+    let mut app = AppState::new("test-model".into(), 128_000);
+    app.orchestration_store = Some(store);
+    let nodes = app.tree_nodes();
+
+    let depth_of = |needle: &str| {
+        nodes
+            .iter()
+            .find(|n| n.label.contains(needle))
+            .unwrap_or_else(|| panic!("node containing {needle}"))
+            .depth
+    };
+    assert_eq!(depth_of("parent task"), 1);
+    assert_eq!(depth_of("child task"), 2);
+    assert_eq!(depth_of("grandchild task"), 3);
+}
+
 // YYC-207: delegated_worker_count counts only non-terminal records.
 #[test]
 fn delegated_worker_count_filters_terminal_records() {
