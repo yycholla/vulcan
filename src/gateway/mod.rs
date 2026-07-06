@@ -190,7 +190,15 @@ where
     // store. Build it once and clone the cheap handle instead of
     // reconstructing it in three places.
     let scheduler_store = if !scheduler_config.jobs.is_empty() {
-        Some(scheduler_store::SchedulerStore::new(db.clone()))
+        let store = scheduler_store::SchedulerStore::new(db.clone());
+        // A crash between enqueue and completion leaves a stale
+        // active_fires count that would suppress OverlapPolicy::Skip
+        // jobs forever; nothing is genuinely in-flight at startup.
+        let reset = store.reset_active_fires()?;
+        if reset > 0 {
+            tracing::info!(reset, "scheduler reset stale active fire counts");
+        }
+        Some(store)
     } else {
         None
     };

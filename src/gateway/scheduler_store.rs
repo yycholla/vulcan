@@ -209,6 +209,20 @@ impl SchedulerStore {
         )
     }
 
+    /// Zero out `active_fires` across all jobs. Run at gateway startup:
+    /// a crash between enqueue and completion would otherwise leave a
+    /// stale active count that suppresses `OverlapPolicy::Skip` jobs
+    /// forever. Startup is single-threaded, so nothing is genuinely
+    /// in-flight when this runs.
+    pub fn reset_active_fires(&self) -> Result<usize> {
+        let conn = self.conn()?;
+        let n = conn.execute(
+            "UPDATE scheduler_runs SET active_fires = 0 WHERE active_fires > 0",
+            [],
+        )?;
+        Ok(n)
+    }
+
     /// Whether the job currently has any in-flight firings according to
     /// the persisted scheduler state.
     pub fn has_active_runs(&self, job_id: &str) -> Result<bool> {

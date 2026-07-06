@@ -50,14 +50,6 @@ struct RunningJob {
     config: SchedulerJobConfig,
     schedule: cron::Schedule,
     tz: chrono_tz::Tz,
-    /// YYC-17 PR-3: in-process flag the overlap-policy gate
-    /// consults. Spawning the agent for a firing flips this to
-    /// true; the worker pipeline doesn't currently report
-    /// completion back, so for now the flag is cleared
-    /// immediately after enqueue. PR-C-4 will replace this with
-    /// a query against the inbound row's state so `Skip` /
-    /// `Replace` get teeth.
-    running: Arc<std::sync::atomic::AtomicBool>,
 }
 
 pub struct SchedulerHandle {
@@ -99,7 +91,6 @@ impl Scheduler {
                 config: job.clone(),
                 schedule,
                 tz,
-                running: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             });
         }
         Ok(Self {
@@ -166,24 +157,26 @@ impl Scheduler {
     }
 
     async fn fire(&mut self, idx: usize) {
-        use std::sync::atomic::Ordering;
         let job = &self.jobs[idx];
         let now = Utc::now().timestamp();
 
-        // YYC-17 PR-3: overlap policy. Skip suppresses the firing
-        // when the job's running flag is set; Enqueue and Replace
-        // both proceed (Replace becomes meaningful in PR-C-4 once
-        // the scheduler can drop pending rows).
-        if job.config.overlap_policy == OverlapPolicy::Skip && job.running.load(Ordering::Acquire) {
+        // Overlap policy. Skip suppresses the firing while the store
+        // still counts an in-flight run for this job — the worker
+        // decrements `active_fires` on completion or failure, and
+        // startup resets stale counts. Without a store there is no
+        // in-flight signal, so Skip degrades to Enqueue. A store read
+        // error also fires rather than wedging the job.
+        if job.config.overlap_policy == OverlapPolicy::Skip
+            && let Some(store) = &self.store
+            && store.has_active_runs(&job.config.id).unwrap_or(false)
+        {
             tracing::warn!(
                 target: "gateway::scheduler",
                 job_id = %job.config.id,
                 job_name = %job.config.name,
                 "previous firing still active; skipping",
             );
-            if let Some(store) = &self.store
-                && let Err(e) = store.record_skipped(&job.config.id, now)
-            {
+            if let Err(e) = store.record_skipped(&job.config.id, now) {
                 tracing::warn!(
                     target: "gateway::scheduler",
                     job_id = %job.config.id,
@@ -194,15 +187,8 @@ impl Scheduler {
             return;
         }
 
-        job.running.store(true, Ordering::Release);
         let msg = build_inbound_message_for_job(&job.config);
         let result = self.inbound.enqueue(msg).await;
-        // The inbound row is queued; the worker pipeline owns the
-        // run from here. Without a completion signal we clear the
-        // running flag immediately so subsequent fires aren't
-        // permanently suppressed. A real durable in-flight check
-        // ships in PR-C-4.
-        job.running.store(false, Ordering::Release);
 
         match result {
             Ok(row_id) => {
@@ -344,11 +330,11 @@ mod tests {
         assert!(row.last_inbound_id.is_some());
     }
 
-    // YYC-17 PR-3: with overlap_policy = Skip, a second fire while
-    // the first is still flagged as running records as skipped.
+    // With overlap_policy = Skip, a second fire while the first is
+    // still in flight (per the store's active_fires) is suppressed;
+    // once the worker records completion, firing resumes.
     #[tokio::test]
     async fn fire_skip_policy_records_skipped() {
-        use std::sync::atomic::Ordering;
         let pool = crate::memory::in_memory_gateway_pool().expect("pool");
         let inbound = Arc::new(InboundQueue::new(pool.clone()));
         let store = SchedulerStore::new(pool);
@@ -359,13 +345,24 @@ mod tests {
         let mut scheduler =
             Scheduler::from_config_with_store(&config, Arc::clone(&inbound), Some(store.clone()))
                 .expect("ok");
-        // Manually flip the running flag to simulate an in-flight run.
-        scheduler.jobs[0].running.store(true, Ordering::Release);
+
+        // First fire enqueues and leaves the run in flight (no
+        // completion recorded yet).
+        scheduler.fire(0).await;
+        // Second fire while active must be suppressed.
         scheduler.fire(0).await;
         let row = store.get("skip-test").unwrap().expect("row");
         assert_eq!(row.last_status.as_deref(), Some("skipped"));
         assert_eq!(row.skipped_fires, 1);
-        assert_eq!(row.total_fires, 1);
+        assert_eq!(row.total_fires, 2);
+
+        // Completion clears the in-flight count; the next fire enqueues.
+        store.record_completed("skip-test", 1).unwrap();
+        scheduler.fire(0).await;
+        let row = store.get("skip-test").unwrap().expect("row");
+        assert_eq!(row.last_status.as_deref(), Some("enqueued"));
+        assert_eq!(row.skipped_fires, 1);
+        assert_eq!(row.total_fires, 3);
     }
 
     // YYC-17 PR-2: a configured + enabled job round-trips through
