@@ -181,6 +181,11 @@ pub enum Command {
         #[command(subcommand)]
         cmd: ReplaySubcommand,
     },
+    /// Author and dry-run multi-agent workflows (ADR 0007/0008).
+    Symphony {
+        #[command(subcommand)]
+        cmd: SymphonySubcommand,
+    },
     /// YYC-218 / YYC-189: generate a change-impact report for a
     /// file, symbol, or task. Walks code graph + references + tests
     /// + docs and emits markdown.
@@ -599,6 +604,39 @@ pub enum ReplaySubcommand {
     /// Simulate reproduction from saved run metadata, typed artifacts,
     /// and recorded trust/capability state. No provider/tool execution.
     Simulate { id: String },
+}
+
+/// Subcommands under `vulcan symphony` — multi-agent workflow
+/// authoring + dry-run orchestration (ADR 0007/0008). Runner
+/// execution is dry-run only in this slice; real agent process
+/// launch is a later slice.
+#[derive(Subcommand, Debug)]
+pub enum SymphonySubcommand {
+    /// Scaffold a workflow spec under `.symphony/workflows/`
+    Create {
+        /// Emit a guided workflow-builder task instead of a bare spec
+        #[arg(long)]
+        guided: bool,
+        /// Workflow name (words are joined with spaces)
+        name: Vec<String>,
+    },
+    /// List workflow specs in this repository
+    List,
+    /// Validate a workflow spec's front-matter and template
+    Validate { workflow: std::path::PathBuf },
+    /// Show the normalized task list a workflow would enqueue
+    Tasks { workflow: std::path::PathBuf },
+    /// Run one dry-run orchestrator poll tick for a workflow
+    Tick { workflow: std::path::PathBuf },
+    /// List recent symphony runs from the run-record store
+    Runs {
+        /// Maximum number of runs to show
+        #[arg(long, default_value_t = 20)]
+        limit: usize,
+        /// Include non-symphony runs too
+        #[arg(long)]
+        all: bool,
+    },
 }
 
 /// YYC-185: subcommands under `vulcan policy`.

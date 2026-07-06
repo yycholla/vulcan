@@ -18,6 +18,7 @@ pub mod cli_provider;
 pub mod cli_replay;
 pub mod cli_review;
 pub mod cli_run;
+pub mod cli_symphony;
 pub mod cli_trust;
 #[cfg(feature = "daemon")]
 pub mod client;
