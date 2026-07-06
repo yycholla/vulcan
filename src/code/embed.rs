@@ -11,11 +11,7 @@
 
 use crate::code::{Language, ParserCache};
 use crate::config::EmbeddingsConfig;
-use anyhow::{Context, Result, anyhow};
-#[cfg(not(feature = "turso-backend"))]
-use parking_lot::Mutex;
-#[cfg(not(feature = "turso-backend"))]
-use rusqlite::{Connection, params};
+use anyhow::{Result, anyhow};
 use serde::Serialize;
 use serde_json::json;
 use std::path::{Path, PathBuf};
@@ -44,13 +40,8 @@ pub struct EmbeddingHit {
 }
 
 pub struct EmbeddingIndex {
-    // GH #704: the DB handle is the only backend-specific field. Under
-    // `turso-backend` it's an async turso::Connection; otherwise the
-    // rusqlite Mutex<Connection>. All DB access goes through the
-    // cfg-gated `db_*` helpers so reindex/search stay backend-agnostic.
-    #[cfg(not(feature = "turso-backend"))]
-    conn: Mutex<Connection>,
-    #[cfg(feature = "turso-backend")]
+    // GH #704: the DB handle stays here so reindex/search can share one
+    // Turso connection without exposing driver details to callers.
     conn: turso::Connection,
     workspace_root: PathBuf,
     parsers: Arc<ParserCache>,
@@ -113,15 +104,6 @@ impl EmbeddingIndex {
                 embedding   BLOB NOT NULL,
                 dim         INTEGER NOT NULL
             )";
-        #[cfg(not(feature = "turso-backend"))]
-        let conn = {
-            let conn = Connection::open(&db_path)
-                .with_context(|| format!("open embeddings at {}", db_path.display()))?;
-            conn.execute_batch(SCHEMA)?;
-            conn.execute_batch("CREATE INDEX IF NOT EXISTS idx_chunks_file ON chunks(file);")?;
-            Mutex::new(conn)
-        };
-        #[cfg(feature = "turso-backend")]
         let conn = {
             let conn = crate::db::open(&db_path).await?;
             crate::db::execute_ddl(&conn, SCHEMA).await?;
@@ -145,13 +127,7 @@ impl EmbeddingIndex {
     }
 
     /// GH #704: wipe all chunks (reindex is wipe + repopulate).
-    #[cfg(not(feature = "turso-backend"))]
-    async fn db_clear(&self) -> Result<()> {
-        self.conn.lock().execute("DELETE FROM chunks", [])?;
-        Ok(())
-    }
 
-    #[cfg(feature = "turso-backend")]
     async fn db_clear(&self) -> Result<()> {
         self.conn.execute("DELETE FROM chunks", ()).await?;
         Ok(())
@@ -159,28 +135,7 @@ impl EmbeddingIndex {
 
     /// GH #704: insert one embedded chunk. `blob` is the little-endian
     /// f32 vector; `dim` its length.
-    #[cfg(not(feature = "turso-backend"))]
-    #[allow(clippy::too_many_arguments)]
-    async fn db_insert_chunk(&self, chunk: &CodeChunk, blob: &[u8], dim: i64) -> Result<()> {
-        self.conn.lock().execute(
-            "INSERT INTO chunks (file, language, kind, name, start_line, end_line, text, embedding, dim) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
-            params![
-                chunk.file,
-                chunk.language,
-                chunk.kind,
-                chunk.name,
-                chunk.start_line as i64,
-                chunk.end_line as i64,
-                chunk.text,
-                blob,
-                dim,
-            ],
-        )?;
-        Ok(())
-    }
 
-    #[cfg(feature = "turso-backend")]
     async fn db_insert_chunk(&self, chunk: &CodeChunk, blob: &[u8], dim: i64) -> Result<()> {
         self.conn
             .execute(
@@ -204,28 +159,7 @@ impl EmbeddingIndex {
 
     /// GH #704: read every chunk's (file, kind, name, start, end,
     /// embedding-blob) for brute-force cosine ranking.
-    #[cfg(not(feature = "turso-backend"))]
-    #[allow(clippy::type_complexity)]
-    async fn db_all_embeddings(&self) -> Result<Vec<(String, String, String, i64, i64, Vec<u8>)>> {
-        let conn = self.conn.lock();
-        let mut stmt =
-            conn.prepare("SELECT file, kind, name, start_line, end_line, embedding FROM chunks")?;
-        let rows = stmt
-            .query_map([], |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, String>(2)?,
-                    row.get::<_, i64>(3)?,
-                    row.get::<_, i64>(4)?,
-                    row.get::<_, Vec<u8>>(5)?,
-                ))
-            })?
-            .collect::<Result<_, _>>()?;
-        Ok(rows)
-    }
 
-    #[cfg(feature = "turso-backend")]
     #[allow(clippy::type_complexity)]
     async fn db_all_embeddings(&self) -> Result<Vec<(String, String, String, i64, i64, Vec<u8>)>> {
         let mut rows = self

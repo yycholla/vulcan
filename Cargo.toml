@@ -41,7 +41,7 @@ name = "vulcan"
 path = "src/lib.rs"
 
 [features]
-default = ["daemon", "turso-backend"]
+default = ["daemon"]
 # Long-lived `vulcan daemon` process + Unix-socket frontend (YYC-266
 # Slice 0). Default-on so the standard CLI/TUI binary ships with the
 # daemon entry point wired in; gated as a feature so embedders / minimal
@@ -54,15 +54,7 @@ bench-soak = ["dep:dhat", "dep:hdrhistogram"]
 # YYC-266 Slice 3 Task 3.4: gateway now routes prompts through the
 # in-tree daemon Client, so it implies `daemon` (which gates `client`
 # and `daemon`).
-gateway = [
-  "daemon",
-  "dep:axum",
-  "dep:tower",
-  "dep:subtle",
-  "dep:hmac",
-  "dep:r2d2",
-  "dep:r2d2_sqlite",
-]
+gateway = ["daemon", "dep:axum", "dep:tower", "dep:subtle", "dep:hmac"]
 # Discord connector (YYC-19). Gated separately from `gateway` so
 # operators who only need the HTTP gateway / scheduler / loopback
 # pieces do not compile Serenity unless Discord support is enabled.
@@ -79,11 +71,6 @@ render-typst-image-preview = ["render-typst-preview", "render-images"]
 # GH issue #273: sandboxed extension runtime. Optional because Wasmtime
 # materially increases compile/link cost and only WASM extension hosts need it.
 extension-wasm = ["dep:wasmtime"]
-# GH issue #704: async Turso persistence backend (rusqlite -> turso).
-# Default-on for standard builds; kept as a feature until the legacy
-# rusqlite/r2d2 code paths and deps are deleted.
-turso-backend = ["dep:turso"]
-
 [dependencies]
 # Async runtime
 tokio = { version = "1", features = ["full"] }
@@ -195,11 +182,9 @@ chrono = { version = "0.4", features = ["serde"] }
 # UUID for session IDs
 uuid = { version = "1", features = ["v4", "serde"] }
 tokio-util = { version = "0.7.18", features = ["rt"] }
-rusqlite = { version = "0.39.0", features = ["bundled"] }
-# GH issue #704: async, pure-Rust SQLite (Turso). Optional during the
-# phased rusqlite->turso migration; native FTS + vector types. Verified
-# building in the flake env (turso 0.6.1, tantivy 0.26.1).
-turso = { version = "0.6.1", optional = true }
+# GH issue #704: async, pure-Rust SQLite (Turso). Native FTS + vector
+# types. Verified building in the flake env (turso 0.6.1, tantivy 0.26.1).
+turso = "0.6.1"
 strsim = "0.11.1"
 # Cortex — self-organizing temporal graph memory for AI agents. Embedded
 # library mode (no server, no external deps). Provides HNSW vector search,
@@ -271,12 +256,6 @@ serenity = { version = "0.12", default-features = false, features = [
 teloxide-core = { version = "0.13.0", default-features = false, features = [
   "rustls",
 ], optional = true }
-# Connection pool for the gateway daemon's SQLite store (YYC-113). Replaces
-# the global Arc<Mutex<Connection>> that serialized every concurrent agent
-# lane through one lock. Versions verified at crates.io latest stable.
-r2d2 = { version = "0.8.10", optional = true }
-r2d2_sqlite = { version = "0.33.0", optional = true }
-
 # `http` types are shared between axum and the `Platform` trait method
 # `verify_webhook`. Promoted to a direct, NON-feature-gated dep so the trait
 # signature compiles in builds without the `gateway` feature too.

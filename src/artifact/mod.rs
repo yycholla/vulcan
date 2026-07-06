@@ -28,10 +28,9 @@
 //! - Garbage collection / retention policy.
 //! - Cross-run artifact references (parent → child) at the gateway.
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use async_trait::async_trait;
 use parking_lot::Mutex;
-use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::path::Path;
@@ -434,17 +433,9 @@ pub trait ArtifactStore: Send + Sync {
     async fn recent(&self, limit: usize) -> Result<Vec<Artifact>>;
 }
 
-/// Open the default artifact store. Selects the backend at compile
-/// time: Turso under `turso-backend` (GH #704), else rusqlite.
+/// Open the default artifact store.
 pub async fn open_default_store() -> Result<Arc<dyn ArtifactStore>> {
-    #[cfg(feature = "turso-backend")]
-    {
-        Ok(Arc::new(TursoArtifactStore::try_new().await?))
-    }
-    #[cfg(not(feature = "turso-backend"))]
-    {
-        Ok(Arc::new(SqliteArtifactStore::try_new()?))
-    }
+    Ok(Arc::new(TursoArtifactStore::try_new().await?))
 }
 
 #[derive(Debug, Default)]
@@ -501,112 +492,20 @@ impl ArtifactStore for InMemoryArtifactStore {
     }
 }
 
-/// SQLite-backed store at `~/.vulcan/artifacts.db`. Schema mirrors
-/// the [`Artifact`] struct field-for-field — readers stay simple,
-/// migrations rare. Kind is stored as the `as_str` tag so adding
-/// a variant is backward compatible.
-pub struct SqliteArtifactStore {
-    conn: Mutex<Connection>,
-}
+/// Compatibility name for callers that predate the Turso cutover.
+pub struct SqliteArtifactStore(TursoArtifactStore);
 
 impl SqliteArtifactStore {
     pub fn try_new() -> Result<Self> {
-        let dir = crate::config::vulcan_home();
-        std::fs::create_dir_all(&dir)
-            .with_context(|| format!("create vulcan_home at {}", dir.display()))?;
-        Self::try_open_at(&dir.join("artifacts.db"))
+        crate::db::block_on(TursoArtifactStore::try_new()).map(Self)
     }
 
     pub fn try_open_at(path: &Path) -> Result<Self> {
-        let conn = Connection::open(path)
-            .with_context(|| format!("open artifacts DB at {}", path.display()))?;
-        Self::initialize(&conn)
-            .with_context(|| format!("init artifacts schema at {}", path.display()))?;
-        Ok(Self {
-            conn: Mutex::new(conn),
-        })
+        crate::db::block_on(TursoArtifactStore::try_open_at(path)).map(Self)
     }
 
     pub fn try_open_in_memory() -> Result<Self> {
-        let conn = Connection::open_in_memory().context("open in-memory artifacts DB")?;
-        Self::initialize(&conn).context("init in-memory artifacts schema")?;
-        Ok(Self {
-            conn: Mutex::new(conn),
-        })
-    }
-
-    fn initialize(conn: &Connection) -> Result<()> {
-        conn.execute_batch(
-            r#"
-            CREATE TABLE IF NOT EXISTS artifacts (
-                id                  TEXT PRIMARY KEY,
-                kind                TEXT NOT NULL,
-                run_id              TEXT,
-                session_id          TEXT,
-                parent_artifact_id  TEXT,
-                source              TEXT,
-                created_at          TEXT NOT NULL,
-                title               TEXT,
-                mime_type           TEXT,
-                schema              TEXT,
-                storage_uri         TEXT,
-                content_hash        TEXT,
-                size_bytes          INTEGER,
-                provenance          TEXT,
-                visibility          TEXT NOT NULL DEFAULT 'conversation',
-                retention           TEXT NOT NULL DEFAULT 'session',
-                replay_safety       TEXT NOT NULL DEFAULT 'unknown',
-                content             TEXT,
-                external_path       TEXT,
-                redaction           TEXT
-            );
-            CREATE INDEX IF NOT EXISTS idx_artifacts_run_id ON artifacts(run_id);
-            CREATE INDEX IF NOT EXISTS idx_artifacts_session_id ON artifacts(session_id);
-            CREATE INDEX IF NOT EXISTS idx_artifacts_created_at ON artifacts(created_at DESC);
-            "#,
-        )?;
-
-        let columns = artifact_columns(conn)?;
-        for (name, ddl) in [
-            (
-                "mime_type",
-                "ALTER TABLE artifacts ADD COLUMN mime_type TEXT",
-            ),
-            ("schema", "ALTER TABLE artifacts ADD COLUMN schema TEXT"),
-            (
-                "storage_uri",
-                "ALTER TABLE artifacts ADD COLUMN storage_uri TEXT",
-            ),
-            (
-                "content_hash",
-                "ALTER TABLE artifacts ADD COLUMN content_hash TEXT",
-            ),
-            (
-                "size_bytes",
-                "ALTER TABLE artifacts ADD COLUMN size_bytes INTEGER",
-            ),
-            (
-                "provenance",
-                "ALTER TABLE artifacts ADD COLUMN provenance TEXT",
-            ),
-            (
-                "visibility",
-                "ALTER TABLE artifacts ADD COLUMN visibility TEXT NOT NULL DEFAULT 'conversation'",
-            ),
-            (
-                "retention",
-                "ALTER TABLE artifacts ADD COLUMN retention TEXT NOT NULL DEFAULT 'session'",
-            ),
-            (
-                "replay_safety",
-                "ALTER TABLE artifacts ADD COLUMN replay_safety TEXT NOT NULL DEFAULT 'unknown'",
-            ),
-        ] {
-            if !columns.iter().any(|c| c == name) {
-                conn.execute_batch(ddl)?;
-            }
-        }
-        Ok(())
+        crate::db::block_on(TursoArtifactStore::try_open_in_memory()).map(Self)
     }
 
     // YYC-275: fields come straight from a SQLite row decode; collapsing
@@ -686,94 +585,31 @@ impl SqliteArtifactStore {
 #[async_trait]
 impl ArtifactStore for SqliteArtifactStore {
     async fn create(&self, artifact: &Artifact) -> Result<()> {
-        let conn = self.conn.lock();
-        conn.execute(
-            "INSERT INTO artifacts (id, kind, run_id, session_id, parent_artifact_id, source,
-                                    created_at, title, mime_type, schema, storage_uri,
-                                    content_hash, size_bytes, provenance, visibility, retention,
-                                    replay_safety, content, external_path, redaction)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)",
-            params![
-                artifact.id.to_string(),
-                artifact.kind.as_str(),
-                artifact.run_id.map(|r| r.to_string()),
-                artifact.session_id,
-                artifact.parent_artifact_id.map(|p| p.to_string()),
-                artifact.source,
-                artifact.created_at.to_rfc3339(),
-                artifact.title,
-                artifact.mime_type,
-                artifact.schema,
-                artifact.storage_uri,
-                artifact.content_hash,
-                artifact.size_bytes.map(|n| n as i64),
-                artifact.provenance,
-                artifact.visibility.as_str(),
-                artifact.retention.as_str(),
-                artifact.replay_safety.as_str(),
-                artifact.content,
-                artifact.external_path,
-                artifact.redaction.0,
-            ],
-        )?;
-        Ok(())
+        self.0.create(artifact).await
     }
 
     async fn get(&self, id: ArtifactId) -> Result<Option<Artifact>> {
-        let conn = self.conn.lock();
-        let row = conn
-            .query_row(
-                artifact_select_sql("WHERE id = ?1").as_str(),
-                params![id.to_string()],
-                row_columns,
-            )
-            .optional()?;
-        match row {
-            None => Ok(None),
-            Some(t) => Ok(Some(row_tuple_to_artifact(t)?)),
-        }
+        self.0.get(id).await
     }
 
     async fn list_for_run(&self, run_id: crate::run_record::RunId) -> Result<Vec<Artifact>> {
-        let conn = self.conn.lock();
-        let sql = artifact_select_sql("WHERE run_id = ?1 ORDER BY created_at ASC");
-        let mut stmt = conn.prepare(&sql)?;
-        let rows: Vec<_> = stmt
-            .query_map(params![run_id.to_string()], row_columns)?
-            .collect::<Result<Vec<_>, _>>()?;
-        rows.into_iter().map(row_tuple_to_artifact).collect()
+        self.0.list_for_run(run_id).await
     }
 
     async fn list_for_session(&self, session_id: &str) -> Result<Vec<Artifact>> {
-        let conn = self.conn.lock();
-        let sql = artifact_select_sql("WHERE session_id = ?1 ORDER BY created_at ASC");
-        let mut stmt = conn.prepare(&sql)?;
-        let rows: Vec<_> = stmt
-            .query_map(params![session_id], row_columns)?
-            .collect::<Result<Vec<_>, _>>()?;
-        rows.into_iter().map(row_tuple_to_artifact).collect()
+        self.0.list_for_session(session_id).await
     }
 
     async fn recent(&self, limit: usize) -> Result<Vec<Artifact>> {
-        let conn = self.conn.lock();
-        let sql = artifact_select_sql("ORDER BY created_at DESC LIMIT ?1");
-        let mut stmt = conn.prepare(&sql)?;
-        let rows: Vec<_> = stmt
-            .query_map(params![limit as i64], row_columns)?
-            .collect::<Result<Vec<_>, _>>()?;
-        rows.into_iter().map(row_tuple_to_artifact).collect()
+        self.0.recent(limit).await
     }
 }
 
-/// Turso-backed artifact store (GH #704). Async; bare
-/// `turso::Connection`, no `Mutex`/r2d2/`spawn_blocking`. Fresh DBs
-/// only, so it skips the rusqlite path's additive-column migration.
-#[cfg(feature = "turso-backend")]
+/// Turso-backed artifact store (GH #704).
 pub struct TursoArtifactStore {
     conn: turso::Connection,
 }
 
-#[cfg(feature = "turso-backend")]
 impl TursoArtifactStore {
     pub async fn try_new() -> Result<Self> {
         let path = crate::config::vulcan_home().join("artifacts.db");
@@ -849,7 +685,6 @@ impl TursoArtifactStore {
     }
 }
 
-#[cfg(feature = "turso-backend")]
 #[async_trait]
 impl ArtifactStore for TursoArtifactStore {
     async fn create(&self, a: &Artifact) -> Result<()> {
@@ -936,12 +771,6 @@ type ArtifactRowColumns = (
     Option<String>,
 );
 
-fn artifact_columns(conn: &Connection) -> Result<Vec<String>> {
-    let mut stmt = conn.prepare("PRAGMA table_info(artifacts)")?;
-    let rows = stmt.query_map([], |row| row.get::<_, String>(1))?;
-    Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
-}
-
 fn artifact_select_sql(suffix: &str) -> String {
     format!(
         "SELECT id, kind, run_id, session_id, parent_artifact_id, source,
@@ -957,31 +786,6 @@ fn row_tuple_to_artifact(t: ArtifactRowColumns) -> Result<Artifact> {
         t.0, t.1, t.2, t.3, t.4, t.5, t.6, t.7, t.8, t.9, t.10, t.11, t.12, t.13, t.14, t.15, t.16,
         t.17, t.18, t.19,
     )
-}
-
-fn row_columns(row: &rusqlite::Row<'_>) -> rusqlite::Result<ArtifactRowColumns> {
-    Ok((
-        row.get(0)?,
-        row.get(1)?,
-        row.get(2)?,
-        row.get(3)?,
-        row.get(4)?,
-        row.get(5)?,
-        row.get(6)?,
-        row.get(7)?,
-        row.get(8)?,
-        row.get(9)?,
-        row.get(10)?,
-        row.get(11)?,
-        row.get(12)?,
-        row.get(13)?,
-        row.get(14)?,
-        row.get(15)?,
-        row.get(16)?,
-        row.get(17)?,
-        row.get(18)?,
-        row.get(19)?,
-    ))
 }
 
 #[cfg(test)]
@@ -1190,7 +994,7 @@ mod tests {
 }
 
 // GH #704: the Turso backend satisfies the same ArtifactStore contract.
-#[cfg(all(test, feature = "turso-backend"))]
+#[cfg(test)]
 mod turso_tests {
     use super::*;
 

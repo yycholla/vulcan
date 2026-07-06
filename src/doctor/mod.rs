@@ -450,10 +450,8 @@ fn check_workspace_is_git(cwd: &Path) -> CheckResult {
 fn check_run_records_store(dir: &Path) -> CheckResult {
     let path = dir.join("run_records.db");
     if path.exists() {
-        // Best-effort openability — try to open + immediately
-        // close. We intentionally don't open in WAL mode here;
-        // that's owned by the live store.
-        match rusqlite::Connection::open(&path) {
+        // Best-effort openability — try to open + immediately close.
+        match crate::db::block_on(crate::db::open(&path)) {
             Ok(_) => CheckResult::pass(
                 "storage.run_records.openable",
                 "run records store",

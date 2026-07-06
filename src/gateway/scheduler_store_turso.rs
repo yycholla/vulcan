@@ -1,6 +1,4 @@
-//! Turso backend for [`SchedulerStore`] (GH #704). Same async surface
-//! as the rusqlite impl in `scheduler_store.rs`; bodies run directly on
-//! the shared `gateway.db` turso connection — no pool, no checkout.
+//! Turso backend for [`SchedulerStore`] (GH #704).
 
 use anyhow::Result;
 

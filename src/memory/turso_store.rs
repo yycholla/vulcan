@@ -1,8 +1,5 @@
-//! Turso backend for [`SessionStore`] (GH #704). Same async surface as
-//! the rusqlite impl in `mod.rs`; selected by the `turso-backend`
-//! feature. FTS rides Turso's native engine — a `USING fts` index that
-//! the engine auto-maintains — replacing the FTS5 virtual table and its
-//! three sync triggers.
+//! Turso backend for [`SessionStore`] (GH #704). FTS rides Turso's
+//! native engine — a `USING fts` index that the engine auto-maintains.
 //!
 //! Score contract: FTS5's `bm25()` returns *negative, lower = better*;
 //! Turso's `fts_score()` returns *positive, higher = better*. This impl
@@ -17,9 +14,7 @@ use super::codec::{decode_message, encode_message};
 use super::{SearchHit, SessionStore, SessionSummary};
 use crate::provider::Message;
 
-/// Session schema for Turso. Mirrors `schema::SESSION_SCHEMA` minus the
-/// FTS5 virtual table + triggers (replaced by the native index) and the
-/// rusqlite-era additive migrations (fresh DBs only under Turso).
+/// Session schema for Turso.
 const SESSION_SCHEMA_TURSO: &[&str] = &[
     "CREATE TABLE IF NOT EXISTS sessions (
         id                TEXT PRIMARY KEY,
@@ -49,11 +44,9 @@ impl SessionStore {
         let dir = crate::config::vulcan_home();
         std::fs::create_dir_all(&dir)
             .with_context(|| format!("create vulcan_home at {}", dir.display()))?;
-        // Distinct filename during the migration window: once Turso
-        // creates its FTS index in a file, rusqlite reads that schema
-        // as malformed ("near USING: syntax error") — the conversion is
-        // one-way. A separate file means switching cargo features never
-        // corrupts the rusqlite store. Cutover renames this back.
+        // Keep the Turso filename distinct until users intentionally
+        // move old session history; files touched by Turso FTS are not
+        // readable by pre-cutover builds.
         Self::try_open_at(&dir.join("sessions.turso.db")).await
     }
 
@@ -339,9 +332,9 @@ impl SessionStore {
     }
 }
 
-// GH #704 parity tests: the Turso backend must satisfy the same
-// SessionStore contract the rusqlite tests pin down, including the
-// FTS search behavior RecallHook and session.search depend on.
+// GH #704 parity tests: the store must satisfy the full SessionStore
+// contract, including the FTS search behavior RecallHook and
+// session.search depend on.
 #[cfg(test)]
 mod tests {
     use super::*;

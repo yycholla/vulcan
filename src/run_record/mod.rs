@@ -27,10 +27,9 @@
 //! - Gateway lane metadata (waits on PR-2).
 //! - Replay/reproduce — that's a sibling issue (YYC-184).
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use async_trait::async_trait;
 use parking_lot::Mutex;
-use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::path::Path;
@@ -324,103 +323,31 @@ impl RunStore for InMemoryRunStore {
     }
 }
 
-/// SQLite backend. Two tables: `runs` (one row per run, mutable
-/// status + ended_at + error) and `run_events` (append-only,
-/// ordered by autoincrement id). Event payloads ride as JSON so
-/// schema changes to `RunEvent` don't require a migration unless
-/// they remove a variant.
-pub struct SqliteRunStore {
-    conn: Mutex<Connection>,
-}
+/// Compatibility name for callers that predate the Turso cutover.
+pub struct SqliteRunStore(TursoRunStore);
 
 impl SqliteRunStore {
     pub fn try_new() -> Result<Self> {
-        let dir = crate::config::vulcan_home();
-        std::fs::create_dir_all(&dir)
-            .with_context(|| format!("create vulcan_home at {}", dir.display()))?;
-        Self::try_open_at(&dir.join("run_records.db"))
+        crate::db::block_on(TursoRunStore::try_new()).map(Self)
     }
 
     pub fn try_open_at(path: &Path) -> Result<Self> {
-        let conn = Connection::open(path)
-            .with_context(|| format!("open run records DB at {}", path.display()))?;
-        Self::initialize(&conn)
-            .with_context(|| format!("init run records schema at {}", path.display()))?;
-        Ok(Self {
-            conn: Mutex::new(conn),
-        })
+        crate::db::block_on(TursoRunStore::try_open_at(path)).map(Self)
     }
 
     pub fn try_open_in_memory() -> Result<Self> {
-        let conn = Connection::open_in_memory().context("open in-memory run records DB")?;
-        Self::initialize(&conn).context("init in-memory run records schema")?;
-        Ok(Self {
-            conn: Mutex::new(conn),
-        })
-    }
-
-    fn initialize(conn: &Connection) -> Result<()> {
-        conn.execute_batch(
-            r#"
-            CREATE TABLE IF NOT EXISTS runs (
-                id           TEXT PRIMARY KEY,
-                origin       TEXT NOT NULL,
-                session_id   TEXT,
-                workspace    TEXT,
-                model        TEXT,
-                started_at   TEXT NOT NULL,
-                ended_at     TEXT,
-                status       TEXT NOT NULL,
-                error        TEXT
-            );
-            CREATE INDEX IF NOT EXISTS idx_runs_started_at ON runs(started_at DESC);
-
-            CREATE TABLE IF NOT EXISTS run_events (
-                seq      INTEGER PRIMARY KEY AUTOINCREMENT,
-                run_id   TEXT NOT NULL,
-                payload  TEXT NOT NULL,
-                FOREIGN KEY (run_id) REFERENCES runs(id) ON DELETE CASCADE
-            );
-            CREATE INDEX IF NOT EXISTS idx_run_events_run_id ON run_events(run_id, seq);
-            "#,
-        )?;
-        Ok(())
+        crate::db::block_on(TursoRunStore::try_open_in_memory()).map(Self)
     }
 }
 
 #[async_trait]
 impl RunStore for SqliteRunStore {
     async fn create(&self, record: &RunRecord) -> Result<()> {
-        let conn = self.conn.lock();
-        conn.execute(
-            "INSERT INTO runs (id, origin, session_id, workspace, model, started_at, status)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-            params![
-                record.id.to_string(),
-                serde_json::to_string(&record.origin)?,
-                record.session_id,
-                record.workspace,
-                record.model,
-                record.started_at.to_rfc3339(),
-                serde_json::to_string(&record.status)?,
-            ],
-        )?;
-        Ok(())
+        self.0.create(record).await
     }
 
     async fn append_event(&self, run_id: RunId, event: RunEvent) -> Result<()> {
-        let conn = self.conn.lock();
-        conn.execute(
-            "INSERT INTO run_events (run_id, payload) VALUES (?1, ?2)",
-            params![run_id.to_string(), serde_json::to_string(&event)?],
-        )?;
-        if let RunEvent::StatusChanged { status } = &event {
-            conn.execute(
-                "UPDATE runs SET status = ?1 WHERE id = ?2",
-                params![serde_json::to_string(status)?, run_id.to_string()],
-            )?;
-        }
-        Ok(())
+        self.0.append_event(run_id, event).await
     }
 
     async fn finalize(
@@ -429,126 +356,30 @@ impl RunStore for SqliteRunStore {
         status: RunStatus,
         error: Option<String>,
     ) -> Result<()> {
-        let conn = self.conn.lock();
-        let now = chrono::Utc::now().to_rfc3339();
-        conn.execute(
-            "UPDATE runs SET status = ?1, ended_at = ?2, error = ?3 WHERE id = ?4",
-            params![
-                serde_json::to_string(&status)?,
-                now,
-                error,
-                run_id.to_string()
-            ],
-        )?;
-        conn.execute(
-            "INSERT INTO run_events (run_id, payload) VALUES (?1, ?2)",
-            params![
-                run_id.to_string(),
-                serde_json::to_string(&RunEvent::StatusChanged { status })?
-            ],
-        )?;
-        Ok(())
+        self.0.finalize(run_id, status, error).await
     }
 
     async fn get(&self, run_id: RunId) -> Result<Option<RunRecord>> {
-        let conn = self.conn.lock();
-        let id_str = run_id.to_string();
-        let row = conn
-            .query_row(
-                "SELECT origin, session_id, workspace, model, started_at, ended_at, status, error
-                 FROM runs WHERE id = ?1",
-                params![id_str],
-                |row| {
-                    let origin: String = row.get(0)?;
-                    let session_id: Option<String> = row.get(1)?;
-                    let workspace: Option<String> = row.get(2)?;
-                    let model: Option<String> = row.get(3)?;
-                    let started_at: String = row.get(4)?;
-                    let ended_at: Option<String> = row.get(5)?;
-                    let status: String = row.get(6)?;
-                    let error: Option<String> = row.get(7)?;
-                    Ok((
-                        origin, session_id, workspace, model, started_at, ended_at, status, error,
-                    ))
-                },
-            )
-            .optional()?;
-        let Some((origin, session_id, workspace, model, started_at, ended_at, status, error)) = row
-        else {
-            return Ok(None);
-        };
-        let mut stmt =
-            conn.prepare("SELECT payload FROM run_events WHERE run_id = ?1 ORDER BY seq ASC")?;
-        let events = stmt
-            .query_map(params![id_str], |row| row.get::<_, String>(0))?
-            .map(|res| {
-                res.map_err(anyhow::Error::from)
-                    .and_then(|raw| serde_json::from_str::<RunEvent>(&raw).map_err(Into::into))
-            })
-            .collect::<Result<Vec<_>>>()?;
-        Ok(Some(RunRecord {
-            id: run_id,
-            origin: serde_json::from_str(&origin)?,
-            session_id,
-            workspace,
-            model,
-            started_at: chrono::DateTime::parse_from_rfc3339(&started_at)?
-                .with_timezone(&chrono::Utc),
-            ended_at: ended_at
-                .map(|s| {
-                    chrono::DateTime::parse_from_rfc3339(&s).map(|d| d.with_timezone(&chrono::Utc))
-                })
-                .transpose()?,
-            status: serde_json::from_str(&status)?,
-            events,
-            error,
-        }))
+        self.0.get(run_id).await
     }
 
     async fn recent(&self, limit: usize) -> Result<Vec<RunRecord>> {
-        // Scope the connection + statement so both are dropped before
-        // the `self.get(id).await` loop below — a `Statement` is !Send,
-        // and the async Send check keeps the binding's slot alive across
-        // an await even after an explicit `drop`, so a block is needed.
-        let ids: Vec<String> = {
-            let conn = self.conn.lock();
-            let mut stmt = conn.prepare("SELECT id FROM runs ORDER BY started_at DESC LIMIT ?1")?;
-            stmt.query_map(params![limit as i64], |row| row.get::<_, String>(0))?
-                .collect::<Result<_, _>>()?
-        };
-        let mut out = Vec::with_capacity(ids.len());
-        for raw_id in ids {
-            let id = RunId::from_uuid(Uuid::parse_str(&raw_id)?);
-            if let Some(rec) = self.get(id).await? {
-                out.push(rec);
-            }
-        }
-        Ok(out)
+        self.0.recent(limit).await
     }
 }
 
-/// Open the default run store. Selects the backend at compile time:
-/// Turso under `turso-backend` (GH #704), else rusqlite.
+/// Open the default run store.
 pub async fn open_default_store() -> Result<Arc<dyn RunStore>> {
-    #[cfg(feature = "turso-backend")]
-    {
-        Ok(Arc::new(TursoRunStore::try_new().await?))
-    }
-    #[cfg(not(feature = "turso-backend"))]
-    {
-        Ok(Arc::new(SqliteRunStore::try_new()?))
-    }
+    Ok(Arc::new(TursoRunStore::try_new().await?))
 }
 
-/// Turso-backed run store (GH #704). Async; bare `turso::Connection`,
-/// no `Mutex`/r2d2/`spawn_blocking`. Same two-table shape (runs +
-/// append-only run_events with JSON payloads) as rusqlite.
-#[cfg(feature = "turso-backend")]
+/// Turso-backed run store (GH #704). Async; bare `turso::Connection`
+/// with a two-table shape: runs plus append-only run_events with JSON
+/// payloads.
 pub struct TursoRunStore {
     conn: turso::Connection,
 }
 
-#[cfg(feature = "turso-backend")]
 impl TursoRunStore {
     pub async fn try_new() -> Result<Self> {
         let path = crate::config::vulcan_home().join("run_records.db");
@@ -597,7 +428,6 @@ impl TursoRunStore {
     }
 }
 
-#[cfg(feature = "turso-backend")]
 #[async_trait]
 impl RunStore for TursoRunStore {
     async fn create(&self, record: &RunRecord) -> Result<()> {
@@ -983,7 +813,7 @@ mod tests {
 }
 
 // GH #704: the Turso backend satisfies the same RunStore contract.
-#[cfg(all(test, feature = "turso-backend"))]
+#[cfg(test)]
 mod turso_tests {
     use super::*;
 

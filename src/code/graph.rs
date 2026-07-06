@@ -1,4 +1,4 @@
-//! SQLite-backed code graph (YYC-50).
+//! Turso-backed code graph (YYC-50).
 //!
 //! Tracks symbol declarations and LSP-backed relationships across the
 //! workspace so the agent can ask "where is `foo` defined?" without
@@ -13,8 +13,6 @@
 use crate::code::{Language, ParserCache};
 use anyhow::{Context, Result};
 use lsp_types::{CallHierarchyItem, Location};
-use parking_lot::Mutex;
-use rusqlite::{Connection, params};
 use std::collections::{HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -158,7 +156,7 @@ pub struct CodeGraphIndexReport {
 }
 
 pub struct CodeGraph {
-    conn: Mutex<Connection>,
+    conn: turso::Connection,
     workspace_root: PathBuf,
     parsers: Arc<ParserCache>,
 }
@@ -172,11 +170,11 @@ impl CodeGraph {
         if let Some(parent) = db_path.parent() {
             std::fs::create_dir_all(parent).ok();
         }
-        let conn = Connection::open(&db_path)
+        let conn = crate::db::block_on(crate::db::open(&db_path))
             .with_context(|| format!("open code graph at {}", db_path.display()))?;
-        conn.execute_batch(
-            r#"
-            CREATE TABLE IF NOT EXISTS symbols (
+        crate::db::block_on(crate::db::execute_ddl(
+            &conn,
+            r#"CREATE TABLE IF NOT EXISTS symbols (
                 id              INTEGER PRIMARY KEY AUTOINCREMENT,
                 file            TEXT NOT NULL,
                 language        TEXT NOT NULL,
@@ -185,11 +183,12 @@ impl CodeGraph {
                 start_line      INTEGER NOT NULL,
                 end_line        INTEGER NOT NULL,
                 start_character INTEGER NOT NULL DEFAULT 1
-            );
-            CREATE INDEX IF NOT EXISTS idx_symbols_name ON symbols(name);
-            CREATE INDEX IF NOT EXISTS idx_symbols_file ON symbols(file);
-
-            CREATE TABLE IF NOT EXISTS graph_edges (
+            )"#,
+        ))
+        .context("init code graph schema")?;
+        crate::db::block_on(crate::db::execute_ddl(
+            &conn,
+            r#"CREATE TABLE IF NOT EXISTS graph_edges (
                 id                     INTEGER PRIMARY KEY AUTOINCREMENT,
                 kind                   TEXT NOT NULL,
                 source_file            TEXT NOT NULL,
@@ -201,13 +200,29 @@ impl CodeGraph {
                 target_start_line      INTEGER NOT NULL,
                 target_start_character INTEGER NOT NULL,
                 provider               TEXT NOT NULL
-            );
-            CREATE INDEX IF NOT EXISTS idx_graph_edges_source ON graph_edges(source_file, source_name);
-            CREATE INDEX IF NOT EXISTS idx_graph_edges_target ON graph_edges(target_file, target_name);
-            CREATE INDEX IF NOT EXISTS idx_graph_edges_kind ON graph_edges(kind);
-            "#,
-        )
+            )"#,
+        ))
         .context("init code graph schema")?;
+        crate::db::block_on(crate::db::execute_ddl(
+            &conn,
+            "CREATE INDEX IF NOT EXISTS idx_symbols_name ON symbols(name)",
+        ))?;
+        crate::db::block_on(crate::db::execute_ddl(
+            &conn,
+            "CREATE INDEX IF NOT EXISTS idx_symbols_file ON symbols(file)",
+        ))?;
+        crate::db::block_on(crate::db::execute_ddl(
+            &conn,
+            "CREATE INDEX IF NOT EXISTS idx_graph_edges_source ON graph_edges(source_file, source_name)",
+        ))?;
+        crate::db::block_on(crate::db::execute_ddl(
+            &conn,
+            "CREATE INDEX IF NOT EXISTS idx_graph_edges_target ON graph_edges(target_file, target_name)",
+        ))?;
+        crate::db::block_on(crate::db::execute_ddl(
+            &conn,
+            "CREATE INDEX IF NOT EXISTS idx_graph_edges_kind ON graph_edges(kind)",
+        ))?;
         ensure_column(
             &conn,
             "symbols",
@@ -216,7 +231,7 @@ impl CodeGraph {
         )?;
 
         Ok(Self {
-            conn: Mutex::new(conn),
+            conn,
             workspace_root,
             parsers,
         })
@@ -230,8 +245,10 @@ impl CodeGraph {
         let walker = ignore::WalkBuilder::new(&self.workspace_root)
             .standard_filters(true)
             .build();
-        let mut conn = self.conn.lock();
-        let tx = conn.transaction()?;
+        crate::db::block_on(async {
+            self.conn.execute("BEGIN", ()).await?;
+            Ok(())
+        })?;
         let mut files = 0usize;
         let mut symbols = 0usize;
         for entry in walker {
@@ -257,55 +274,57 @@ impl CodeGraph {
                 .to_string_lossy()
                 .into_owned();
 
-            tx.execute("DELETE FROM symbols WHERE file = ?", params![rel])?;
-            tx.execute(
-                "DELETE FROM graph_edges WHERE source_file = ? OR target_file = ?",
-                params![rel, rel],
+            block_turso(
+                self.conn
+                    .execute("DELETE FROM symbols WHERE file = ?1", [rel.clone()]),
             )?;
+            block_turso(self.conn.execute(
+                "DELETE FROM graph_edges WHERE source_file = ? OR target_file = ?",
+                (rel.clone(), rel.clone()),
+            ))?;
             let extracted = extract_symbols(&self.parsers, lang, &source)?;
             for s in &extracted {
-                tx.execute(
+                block_turso(self.conn.execute(
                     "INSERT INTO symbols (file, language, kind, name, start_line, end_line, start_character)
                      VALUES (?, ?, ?, ?, ?, ?, ?)",
-                    params![
-                        rel,
-                        lang.name(),
-                        s.kind,
-                        s.name,
-                        s.start_line as i64,
-                        s.end_line as i64,
-                        s.start_character as i64,
-                    ],
-                )?;
+                    turso::params_from_iter([
+                        turso::Value::from(rel.clone()),
+                        turso::Value::from(lang.name().to_string()),
+                        turso::Value::from(s.kind.clone()),
+                        turso::Value::from(s.name.clone()),
+                        turso::Value::from(s.start_line as i64),
+                        turso::Value::from(s.end_line as i64),
+                        turso::Value::from(s.start_character as i64),
+                    ]),
+                ))?;
                 symbols += 1;
             }
             files += 1;
         }
-        tx.commit()?;
+        crate::db::block_on(async {
+            self.conn.execute("COMMIT", ()).await?;
+            Ok(())
+        })?;
         Ok((files, symbols))
     }
 
     /// Look up symbols by exact name. Used by `find_symbol` tool.
     pub fn find_by_name(&self, name: &str, limit: usize) -> Result<Vec<SymbolRow>> {
-        let conn = self.conn.lock();
-        let mut stmt = conn.prepare(
-            "SELECT file, language, kind, name, start_line, end_line, start_character
-             FROM symbols WHERE name = ? ORDER BY file LIMIT ?",
-        )?;
-        let rows = stmt
-            .query_map(params![name, limit as i64], |row| {
-                Ok(SymbolRow {
-                    file: row.get(0)?,
-                    language: row.get(1)?,
-                    kind: row.get(2)?,
-                    name: row.get(3)?,
-                    start_line: row.get::<_, i64>(4)? as usize,
-                    end_line: row.get::<_, i64>(5)? as usize,
-                    start_character: row.get::<_, i64>(6)? as usize,
-                })
-            })?
-            .collect::<Result<Vec<_>, _>>()?;
-        Ok(rows)
+        crate::db::block_on(async {
+            let mut rows = self
+                .conn
+                .query(
+                    "SELECT file, language, kind, name, start_line, end_line, start_character
+                 FROM symbols WHERE name = ? ORDER BY file LIMIT ?",
+                    (name.to_string(), limit as i64),
+                )
+                .await?;
+            let mut out = Vec::new();
+            while let Some(row) = rows.next().await? {
+                out.push(symbol_from_row(&row)?);
+            }
+            Ok(out)
+        })
     }
 
     /// Reindex symbols and optionally persist a known edge set. `None`
@@ -337,39 +356,36 @@ impl CodeGraph {
     }
 
     pub fn replace_edges_for_file(&self, file: &str, edges: &[CodeGraphEdge]) -> Result<usize> {
-        let mut conn = self.conn.lock();
-        let tx = conn.transaction()?;
-        tx.execute(
+        block_turso(self.conn.execute(
             "DELETE FROM graph_edges WHERE source_file = ?",
-            params![file],
-        )?;
-        insert_edges(&tx, edges)?;
-        tx.commit()?;
+            [file.to_string()],
+        ))?;
+        insert_edges(&self.conn, edges)?;
         Ok(edges.len())
     }
 
     pub fn replace_all_edges(&self, edges: &[CodeGraphEdge]) -> Result<usize> {
-        let mut conn = self.conn.lock();
-        let tx = conn.transaction()?;
-        tx.execute("DELETE FROM graph_edges", [])?;
-        insert_edges(&tx, edges)?;
-        tx.commit()?;
+        block_turso(self.conn.execute("DELETE FROM graph_edges", ()))?;
+        insert_edges(&self.conn, edges)?;
         Ok(edges.len())
     }
 
     pub fn edges_for_file(&self, file: &str) -> Result<Vec<CodeGraphEdge>> {
-        let conn = self.conn.lock();
-        let mut stmt = conn.prepare(
-            "SELECT kind, source_file, source_name, source_start_line, source_start_character,
-                    target_file, target_name, target_start_line, target_start_character, provider
-             FROM graph_edges
-             WHERE source_file = ? OR target_file = ?
-             ORDER BY kind, source_file, target_file, target_name",
-        )?;
-        let rows = stmt
-            .query_map(params![file, file], edge_from_row)?
-            .collect::<Result<Vec<_>, _>>()?;
-        Ok(rows)
+        crate::db::block_on(async {
+            let mut rows = self.conn.query(
+                "SELECT kind, source_file, source_name, source_start_line, source_start_character,
+                        target_file, target_name, target_start_line, target_start_character, provider
+                 FROM graph_edges
+                 WHERE source_file = ? OR target_file = ?
+                 ORDER BY kind, source_file, target_file, target_name",
+                (file.to_string(), file.to_string()),
+            ).await?;
+            let mut out = Vec::new();
+            while let Some(row) = rows.next().await? {
+                out.push(edge_from_row(&row)?);
+            }
+            Ok(out)
+        })
     }
 
     pub fn find_callers(&self, symbol: &str, limit: usize) -> Result<EdgeQueryResult> {
@@ -499,45 +515,46 @@ impl CodeGraph {
         symbol: &str,
         limit: usize,
     ) -> Result<Vec<CodeGraphEdge>> {
-        let conn = self.conn.lock();
         let predicate = match direction {
             EdgeDirection::Incoming => "target_name = ?",
             EdgeDirection::Outgoing => "source_name = ?",
         };
-        let mut stmt = conn.prepare(&format!(
-            "SELECT kind, source_file, source_name, source_start_line, source_start_character,
-                    target_file, target_name, target_start_line, target_start_character, provider
-             FROM graph_edges
-             WHERE kind = ? AND {predicate}
-             ORDER BY source_name, target_name, source_file, target_file
-             LIMIT ?"
-        ))?;
-        let rows = stmt
-            .query_map(params![kind.as_str(), symbol, limit as i64], edge_from_row)?
-            .collect::<Result<Vec<_>, _>>()?;
-        Ok(rows)
+        crate::db::block_on(async {
+            let mut rows = self.conn.query(
+                &format!(
+                    "SELECT kind, source_file, source_name, source_start_line, source_start_character,
+                            target_file, target_name, target_start_line, target_start_character, provider
+                     FROM graph_edges
+                     WHERE kind = ? AND {predicate}
+                     ORDER BY source_name, target_name, source_file, target_file
+                     LIMIT ?"
+                ),
+                (kind.as_str().to_string(), symbol.to_string(), limit as i64),
+            ).await?;
+            let mut out = Vec::new();
+            while let Some(row) = rows.next().await? {
+                out.push(edge_from_row(&row)?);
+            }
+            Ok(out)
+        })
     }
 
     fn indexed_symbols(&self) -> Result<Vec<SymbolRow>> {
-        let conn = self.conn.lock();
-        let mut stmt = conn.prepare(
-            "SELECT file, language, kind, name, start_line, end_line, start_character
-             FROM symbols ORDER BY file, start_line",
-        )?;
-        let rows = stmt
-            .query_map([], |row| {
-                Ok(SymbolRow {
-                    file: row.get(0)?,
-                    language: row.get(1)?,
-                    kind: row.get(2)?,
-                    name: row.get(3)?,
-                    start_line: row.get::<_, i64>(4)? as usize,
-                    end_line: row.get::<_, i64>(5)? as usize,
-                    start_character: row.get::<_, i64>(6)? as usize,
-                })
-            })?
-            .collect::<Result<Vec<_>, _>>()?;
-        Ok(rows)
+        crate::db::block_on(async {
+            let mut rows = self
+                .conn
+                .query(
+                    "SELECT file, language, kind, name, start_line, end_line, start_character
+                 FROM symbols ORDER BY file, start_line",
+                    (),
+                )
+                .await?;
+            let mut out = Vec::new();
+            while let Some(row) = rows.next().await? {
+                out.push(symbol_from_row(&row)?);
+            }
+            Ok(out)
+        })
     }
 
     pub async fn harvest_lsp_edges(
@@ -654,8 +671,11 @@ impl CodeGraph {
 
     /// Total indexed symbol count — used by the index status report.
     pub fn count(&self) -> Result<usize> {
-        let conn = self.conn.lock();
-        let n: i64 = conn.query_row("SELECT COUNT(*) FROM symbols", [], |r| r.get(0))?;
+        let n: i64 = crate::db::block_on(async {
+            let mut rows = self.conn.query("SELECT COUNT(*) FROM symbols", ()).await?;
+            let row = rows.next().await?.expect("COUNT always returns one row");
+            Ok(row.get(0)?)
+        })?;
         Ok(n as usize)
     }
 
@@ -664,59 +684,92 @@ impl CodeGraph {
     }
 }
 
-fn ensure_column(conn: &Connection, table: &str, column: &str, decl: &str) -> Result<()> {
-    let mut stmt = conn.prepare(&format!("PRAGMA table_info({table})"))?;
-    let exists = stmt
-        .query_map([], |row| row.get::<_, String>(1))?
-        .collect::<Result<Vec<_>, _>>()?
-        .into_iter()
-        .any(|name| name == column);
+fn ensure_column(conn: &turso::Connection, table: &str, column: &str, decl: &str) -> Result<()> {
+    let exists = crate::db::block_on(async {
+        let mut rows = conn
+            .query(&format!("PRAGMA table_info({table})"), ())
+            .await?;
+        while let Some(row) = rows.next().await? {
+            let name: String = row.get(1)?;
+            if name == column {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    })?;
     if !exists {
-        conn.execute(
+        block_turso(conn.execute(
             &format!("ALTER TABLE {table} ADD COLUMN {column} {decl}"),
-            [],
-        )?;
+            (),
+        ))?;
     }
     Ok(())
 }
 
-fn insert_edges(conn: &Connection, edges: &[CodeGraphEdge]) -> Result<()> {
+fn block_turso<T, F>(future: F) -> Result<T>
+where
+    T: Send,
+    F: std::future::Future<Output = turso::Result<T>> + Send,
+{
+    crate::db::block_on(async move { Ok(future.await?) })
+}
+
+fn insert_edges(conn: &turso::Connection, edges: &[CodeGraphEdge]) -> Result<()> {
     for e in edges {
-        conn.execute(
+        block_turso(conn.execute(
             "INSERT INTO graph_edges (
                 kind, source_file, source_name, source_start_line, source_start_character,
                 target_file, target_name, target_start_line, target_start_character, provider
              ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            params![
-                e.kind.as_str(),
-                e.source_file,
-                e.source_name,
-                e.source_start_line as i64,
-                e.source_start_character as i64,
-                e.target_file,
-                e.target_name,
-                e.target_start_line as i64,
-                e.target_start_character as i64,
-                e.provider.as_str(),
-            ],
-        )?;
+            turso::params_from_iter([
+                turso::Value::from(e.kind.as_str().to_string()),
+                turso::Value::from(e.source_file.clone()),
+                turso::Value::from(e.source_name.clone()),
+                turso::Value::from(e.source_start_line as i64),
+                turso::Value::from(e.source_start_character as i64),
+                turso::Value::from(e.target_file.clone()),
+                turso::Value::from(e.target_name.clone()),
+                turso::Value::from(e.target_start_line as i64),
+                turso::Value::from(e.target_start_character as i64),
+                turso::Value::from(e.provider.as_str().to_string()),
+            ]),
+        ))?;
     }
     Ok(())
 }
 
-fn edge_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<CodeGraphEdge> {
+fn symbol_from_row(row: &turso::Row) -> Result<SymbolRow> {
+    let start_line: i64 = row.get(4)?;
+    let end_line: i64 = row.get(5)?;
+    let start_character: i64 = row.get(6)?;
+    Ok(SymbolRow {
+        file: row.get(0)?,
+        language: row.get(1)?,
+        kind: row.get(2)?,
+        name: row.get(3)?,
+        start_line: start_line as usize,
+        end_line: end_line as usize,
+        start_character: start_character as usize,
+    })
+}
+
+fn edge_from_row(row: &turso::Row) -> Result<CodeGraphEdge> {
     let kind: String = row.get(0)?;
     let provider: String = row.get(9)?;
+    let source_start_line: i64 = row.get(3)?;
+    let source_start_character: i64 = row.get(4)?;
+    let target_start_line: i64 = row.get(7)?;
+    let target_start_character: i64 = row.get(8)?;
     Ok(CodeGraphEdge {
         kind: EdgeKind::from_str(&kind),
         source_file: row.get(1)?,
         source_name: row.get(2)?,
-        source_start_line: row.get::<_, i64>(3)? as usize,
-        source_start_character: row.get::<_, i64>(4)? as usize,
+        source_start_line: source_start_line as usize,
+        source_start_character: source_start_character as usize,
         target_file: row.get(5)?,
         target_name: row.get(6)?,
-        target_start_line: row.get::<_, i64>(7)? as usize,
-        target_start_character: row.get::<_, i64>(8)? as usize,
+        target_start_line: target_start_line as usize,
+        target_start_character: target_start_character as usize,
         provider: EdgeProvider::from_str(&provider),
     })
 }

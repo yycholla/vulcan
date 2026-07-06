@@ -1,9 +1,4 @@
 //! Turso backend for the gateway inbound/outbound queues (GH #704).
-//! Same async surface as the rusqlite impls in `queue.rs` — methods
-//! were already async there (via `db_blocking`), so callers are
-//! untouched; only the constructors' handle type changes. The whole
-//! `db_blocking`/r2d2/`spawn_blocking` apparatus disappears: turso is
-//! natively async.
 //!
 //! All three gateway stores share one `gateway.db`, so the boot path
 //! opens a single `turso::Database` and hands each store its own
@@ -18,8 +13,6 @@ use super::queue::{
 use crate::platform::{InboundMessage, OutboundAttachment, OutboundMessage};
 
 /// Initialize the gateway schema on a fresh `gateway.db` (GH #704).
-/// Mirrors `memory::schema::GATEWAY_SCHEMA` minus the PRAGMAs and the
-/// rusqlite-era additive-column migrations — Turso DBs start fresh.
 pub(super) async fn initialize_gateway_db(conn: &turso::Connection) -> Result<()> {
     for stmt in [
         "CREATE TABLE IF NOT EXISTS inbound_queue (
@@ -406,8 +399,8 @@ fn outbound_row_from_turso(row: &turso::Row) -> Result<OutboundRow> {
     })
 }
 
-// GH #704 parity tests: the Turso queue impls must satisfy the same
-// lifecycle contract the rusqlite tests pin down.
+// GH #704 parity tests: the queue impls must satisfy the full lifecycle
+// contract.
 #[cfg(test)]
 mod tests {
     use super::*;

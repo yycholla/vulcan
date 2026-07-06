@@ -9,10 +9,6 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result, bail};
 use chrono::{DateTime, Utc};
-#[cfg(not(feature = "turso-backend"))]
-use parking_lot::Mutex;
-#[cfg(not(feature = "turso-backend"))]
-use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -36,9 +32,6 @@ pub trait ExtensionStateStore: Send + Sync {
 }
 
 pub struct SqliteExtensionStateStore {
-    #[cfg(not(feature = "turso-backend"))]
-    conn: Arc<Mutex<Connection>>,
-    #[cfg(feature = "turso-backend")]
     conn: Arc<turso::Connection>,
 }
 
@@ -50,28 +43,10 @@ impl SqliteExtensionStateStore {
         Self::try_open_at(&dir.join(Self::db_file_name()))
     }
 
-    #[cfg(not(feature = "turso-backend"))]
-    fn db_file_name() -> &'static str {
-        "extension_state.db"
-    }
-
-    #[cfg(feature = "turso-backend")]
     fn db_file_name() -> &'static str {
         "extension_state.turso.db"
     }
 
-    #[cfg(not(feature = "turso-backend"))]
-    pub fn try_open_at(path: &Path) -> Result<Self> {
-        let conn = Connection::open(path)
-            .with_context(|| format!("open extension state DB at {}", path.display()))?;
-        Self::initialize(&conn)
-            .with_context(|| format!("init extension state schema at {}", path.display()))?;
-        Ok(Self {
-            conn: Arc::new(Mutex::new(conn)),
-        })
-    }
-
-    #[cfg(feature = "turso-backend")]
     pub fn try_open_at(path: &Path) -> Result<Self> {
         let conn = crate::db::block_on(crate::db::open(path))?;
         crate::db::block_on(Self::initialize(&conn))
@@ -81,16 +56,6 @@ impl SqliteExtensionStateStore {
         })
     }
 
-    #[cfg(not(feature = "turso-backend"))]
-    pub fn try_open_in_memory() -> Result<Self> {
-        let conn = Connection::open_in_memory().context("open in-memory extension state DB")?;
-        Self::initialize(&conn).context("init in-memory extension state schema")?;
-        Ok(Self {
-            conn: Arc::new(Mutex::new(conn)),
-        })
-    }
-
-    #[cfg(feature = "turso-backend")]
     pub fn try_open_in_memory() -> Result<Self> {
         let conn = crate::db::block_on(crate::db::open_in_memory())
             .context("open in-memory extension state DB")?;
@@ -101,35 +66,6 @@ impl SqliteExtensionStateStore {
         })
     }
 
-    #[cfg(not(feature = "turso-backend"))]
-    fn initialize(conn: &Connection) -> Result<()> {
-        conn.execute_batch(
-            r#"
-            CREATE TABLE IF NOT EXISTS extension_state_kv (
-                extension_id TEXT NOT NULL,
-                key          TEXT NOT NULL,
-                value_json   TEXT NOT NULL,
-                updated_at   TEXT NOT NULL,
-                PRIMARY KEY (extension_id, key)
-            );
-
-            CREATE TABLE IF NOT EXISTS extension_checkpoints (
-                extension_id  TEXT NOT NULL,
-                checkpoint_id TEXT NOT NULL,
-                state_json    TEXT NOT NULL,
-                created_at    TEXT NOT NULL,
-                updated_at    TEXT NOT NULL,
-                PRIMARY KEY (extension_id, checkpoint_id)
-            );
-
-            CREATE INDEX IF NOT EXISTS idx_extension_checkpoints_updated
-                ON extension_checkpoints(extension_id, updated_at DESC);
-            "#,
-        )?;
-        Ok(())
-    }
-
-    #[cfg(feature = "turso-backend")]
     async fn initialize(conn: &turso::Connection) -> Result<()> {
         for stmt in [
             "CREATE TABLE IF NOT EXISTS extension_state_kv (
@@ -169,160 +105,9 @@ impl ExtensionStateStore for SqliteExtensionStateStore {
 #[derive(Clone)]
 pub struct ExtensionStateScope {
     extension_id: String,
-    #[cfg(not(feature = "turso-backend"))]
-    conn: Arc<Mutex<Connection>>,
-    #[cfg(feature = "turso-backend")]
     conn: Arc<turso::Connection>,
 }
 
-#[cfg(not(feature = "turso-backend"))]
-impl ExtensionStateScope {
-    pub fn extension_id(&self) -> &str {
-        &self.extension_id
-    }
-
-    pub fn put_json(&self, key: &str, value: &Value) -> Result<()> {
-        validate_key(key)?;
-        let value_json = serde_json::to_string(value)?;
-        let now = Utc::now().to_rfc3339();
-        let conn = self.conn.lock();
-        conn.execute(
-            "INSERT INTO extension_state_kv (extension_id, key, value_json, updated_at)
-             VALUES (?1, ?2, ?3, ?4)
-             ON CONFLICT(extension_id, key) DO UPDATE SET
-                value_json = excluded.value_json,
-                updated_at = excluded.updated_at",
-            params![self.extension_id, key, value_json, now],
-        )?;
-        Ok(())
-    }
-
-    pub fn get_json(&self, key: &str) -> Result<Option<Value>> {
-        validate_key(key)?;
-        let conn = self.conn.lock();
-        let value_json: Option<String> = conn
-            .query_row(
-                "SELECT value_json FROM extension_state_kv
-                 WHERE extension_id = ?1 AND key = ?2",
-                params![self.extension_id, key],
-                |row| row.get(0),
-            )
-            .optional()?;
-        value_json
-            .map(|raw| serde_json::from_str(&raw).context("decode extension state JSON"))
-            .transpose()
-    }
-
-    pub fn delete_key(&self, key: &str) -> Result<bool> {
-        validate_key(key)?;
-        let conn = self.conn.lock();
-        let n = conn.execute(
-            "DELETE FROM extension_state_kv WHERE extension_id = ?1 AND key = ?2",
-            params![self.extension_id, key],
-        )?;
-        Ok(n > 0)
-    }
-
-    pub fn list_keys(&self) -> Result<Vec<String>> {
-        let conn = self.conn.lock();
-        let mut stmt = conn.prepare(
-            "SELECT key FROM extension_state_kv
-             WHERE extension_id = ?1 ORDER BY key ASC",
-        )?;
-        let rows = stmt
-            .query_map(params![self.extension_id], |row| row.get::<_, String>(0))?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
-        Ok(rows)
-    }
-
-    pub fn save_checkpoint(&self, checkpoint_id: &str, state: &Value) -> Result<()> {
-        validate_identifier("checkpoint id", checkpoint_id)?;
-        let state_json = serde_json::to_string(state)?;
-        let now = Utc::now().to_rfc3339();
-        let conn = self.conn.lock();
-        conn.execute(
-            "INSERT INTO extension_checkpoints
-                (extension_id, checkpoint_id, state_json, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?4)
-             ON CONFLICT(extension_id, checkpoint_id) DO UPDATE SET
-                state_json = excluded.state_json,
-                updated_at = excluded.updated_at",
-            params![self.extension_id, checkpoint_id, state_json, now],
-        )?;
-        Ok(())
-    }
-
-    pub fn restore_checkpoint(&self, checkpoint_id: &str) -> Result<Option<CheckpointRecord>> {
-        validate_identifier("checkpoint id", checkpoint_id)?;
-        let conn = self.conn.lock();
-        let row = conn
-            .query_row(
-                "SELECT checkpoint_id, state_json, created_at, updated_at
-                 FROM extension_checkpoints
-                 WHERE extension_id = ?1 AND checkpoint_id = ?2",
-                params![self.extension_id, checkpoint_id],
-                |row| {
-                    Ok((
-                        row.get::<_, String>(0)?,
-                        row.get::<_, String>(1)?,
-                        row.get::<_, String>(2)?,
-                        row.get::<_, String>(3)?,
-                    ))
-                },
-            )
-            .optional()?;
-        row.map(|(id, state_json, created_at, updated_at)| {
-            Ok(CheckpointRecord {
-                id,
-                state: serde_json::from_str(&state_json).context("decode checkpoint JSON")?,
-                created_at: parse_time(&created_at)?,
-                updated_at: parse_time(&updated_at)?,
-            })
-        })
-        .transpose()
-    }
-
-    pub fn list_checkpoints(&self) -> Result<Vec<CheckpointInfo>> {
-        let conn = self.conn.lock();
-        let mut stmt = conn.prepare(
-            "SELECT checkpoint_id, created_at, updated_at
-             FROM extension_checkpoints
-             WHERE extension_id = ?1
-             ORDER BY updated_at DESC, checkpoint_id ASC",
-        )?;
-        let rows = stmt
-            .query_map(params![self.extension_id], |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, String>(2)?,
-                ))
-            })?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
-        rows.into_iter()
-            .map(|(id, created_at, updated_at)| {
-                Ok(CheckpointInfo {
-                    id,
-                    created_at: parse_time(&created_at)?,
-                    updated_at: parse_time(&updated_at)?,
-                })
-            })
-            .collect()
-    }
-
-    pub fn delete_checkpoint(&self, checkpoint_id: &str) -> Result<bool> {
-        validate_identifier("checkpoint id", checkpoint_id)?;
-        let conn = self.conn.lock();
-        let n = conn.execute(
-            "DELETE FROM extension_checkpoints
-             WHERE extension_id = ?1 AND checkpoint_id = ?2",
-            params![self.extension_id, checkpoint_id],
-        )?;
-        Ok(n > 0)
-    }
-}
-
-#[cfg(feature = "turso-backend")]
 impl ExtensionStateScope {
     pub fn extension_id(&self) -> &str {
         &self.extension_id
@@ -576,7 +361,6 @@ mod tests {
         );
     }
 
-    #[cfg(feature = "turso-backend")]
     #[test]
     fn turso_backend_uses_isolated_file_name() {
         assert_eq!(
@@ -608,21 +392,6 @@ mod tests {
         assert!(alpha.delete_checkpoint("draft").unwrap());
         assert!(alpha.restore_checkpoint("draft").unwrap().is_none());
         assert!(beta.restore_checkpoint("draft").unwrap().is_some());
-    }
-
-    #[cfg(not(feature = "turso-backend"))]
-    #[test]
-    fn migrations_are_idempotent() {
-        let conn = Connection::open_in_memory().unwrap();
-        SqliteExtensionStateStore::initialize(&conn).unwrap();
-        SqliteExtensionStateStore::initialize(&conn).unwrap();
-
-        conn.execute(
-            "INSERT INTO extension_state_kv (extension_id, key, value_json, updated_at)
-             VALUES ('alpha', 'k', '{}', '2026-01-01T00:00:00Z')",
-            [],
-        )
-        .unwrap();
     }
 
     #[test]

@@ -22,10 +22,9 @@
 //! - Agent-side suggestion hook (BeforeAgentEnd).
 //! - Context-pack integration so playbook entries feed prompts.
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use async_trait::async_trait;
 use parking_lot::Mutex;
-use rusqlite::{Connection, params};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 use std::sync::Arc;
@@ -130,19 +129,9 @@ pub trait PlaybookStore: Send + Sync {
     async fn remove_entry(&self, workspace: &str, entry_id: Uuid) -> Result<bool>;
 }
 
-/// Open the default playbook store for production use. Selects the
-/// backend at compile time: Turso under `turso-backend` (GH #704),
-/// else the rusqlite `SqlitePlaybookStore`. Returned as a trait object
-/// so callers are backend-agnostic.
+/// Open the default playbook store for production use.
 pub async fn open_default_store() -> Result<Arc<dyn PlaybookStore>> {
-    #[cfg(feature = "turso-backend")]
-    {
-        Ok(Arc::new(TursoPlaybookStore::try_new().await?))
-    }
-    #[cfg(not(feature = "turso-backend"))]
-    {
-        Ok(Arc::new(SqlitePlaybookStore::try_new()?))
-    }
+    Ok(Arc::new(TursoPlaybookStore::try_new().await?))
 }
 
 /// YYC-223: render the *accepted* entries for a workspace as a
@@ -250,159 +239,47 @@ impl PlaybookStore for InMemoryPlaybookStore {
     }
 }
 
-/// SQLite-backed store at `~/.vulcan/playbooks.db`.
-pub struct SqlitePlaybookStore {
-    conn: Mutex<Connection>,
-}
+/// Compatibility name for callers that predate the Turso cutover.
+pub struct SqlitePlaybookStore(TursoPlaybookStore);
 
 impl SqlitePlaybookStore {
     pub fn try_new() -> Result<Self> {
-        let dir = crate::config::vulcan_home();
-        std::fs::create_dir_all(&dir)
-            .with_context(|| format!("create vulcan_home at {}", dir.display()))?;
-        Self::try_open_at(&dir.join("playbooks.db"))
+        crate::db::block_on(TursoPlaybookStore::try_new()).map(Self)
     }
 
     pub fn try_open_at(path: &Path) -> Result<Self> {
-        let conn = Connection::open(path)
-            .with_context(|| format!("open playbooks DB at {}", path.display()))?;
-        Self::initialize(&conn)
-            .with_context(|| format!("init playbooks schema at {}", path.display()))?;
-        Ok(Self {
-            conn: Mutex::new(conn),
-        })
+        crate::db::block_on(TursoPlaybookStore::try_open_at(path)).map(Self)
     }
 
     pub fn try_open_in_memory() -> Result<Self> {
-        let conn = Connection::open_in_memory().context("open in-memory playbooks DB")?;
-        Self::initialize(&conn).context("init in-memory playbooks schema")?;
-        Ok(Self {
-            conn: Mutex::new(conn),
-        })
-    }
-
-    fn initialize(conn: &Connection) -> Result<()> {
-        conn.execute_batch(
-            r#"
-            CREATE TABLE IF NOT EXISTS playbook_entries (
-                id          TEXT PRIMARY KEY,
-                workspace   TEXT NOT NULL,
-                section     TEXT NOT NULL,
-                body        TEXT NOT NULL,
-                source      TEXT NOT NULL,
-                status      TEXT NOT NULL,
-                created_at  TEXT NOT NULL
-            );
-            CREATE INDEX IF NOT EXISTS idx_playbook_workspace
-                ON playbook_entries(workspace, created_at ASC);
-            "#,
-        )?;
-        Ok(())
+        crate::db::block_on(TursoPlaybookStore::try_open_in_memory()).map(Self)
     }
 }
 
 #[async_trait]
 impl PlaybookStore for SqlitePlaybookStore {
     async fn upsert_entry(&self, workspace: &str, entry: &PlaybookEntry) -> Result<()> {
-        let conn = self.conn.lock();
-        conn.execute(
-            "INSERT INTO playbook_entries (id, workspace, section, body, source, status, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
-             ON CONFLICT(id) DO UPDATE SET
-                workspace = excluded.workspace,
-                section = excluded.section,
-                body = excluded.body,
-                source = excluded.source,
-                status = excluded.status,
-                created_at = excluded.created_at",
-            params![
-                entry.id.to_string(),
-                workspace,
-                entry.section.as_str(),
-                entry.body,
-                entry.source,
-                match entry.status {
-                    EntryStatus::Proposed => "proposed",
-                    EntryStatus::Accepted => "accepted",
-                },
-                entry.created_at.to_rfc3339(),
-            ],
-        )?;
-        Ok(())
+        self.0.upsert_entry(workspace, entry).await
     }
 
     async fn list_entries(&self, workspace: &str) -> Result<Vec<PlaybookEntry>> {
-        let conn = self.conn.lock();
-        let mut stmt = conn.prepare(
-            "SELECT id, section, body, source, status, created_at
-             FROM playbook_entries WHERE workspace = ?1 ORDER BY created_at ASC",
-        )?;
-        let rows: Vec<PlaybookEntry> = stmt
-            .query_map(params![workspace], |row| {
-                let id: String = row.get(0)?;
-                let section: String = row.get(1)?;
-                let status: String = row.get(4)?;
-                let created_at: String = row.get(5)?;
-                Ok((
-                    id,
-                    section,
-                    row.get::<_, String>(2)?,
-                    row.get::<_, String>(3)?,
-                    status,
-                    created_at,
-                ))
-            })?
-            .collect::<Result<Vec<_>, _>>()?
-            .into_iter()
-            .map(
-                |(id, section, body, source, status, created_at)| -> Result<PlaybookEntry> {
-                    Ok(PlaybookEntry {
-                        id: Uuid::parse_str(&id)?,
-                        section: PlaybookSection::parse(&section)
-                            .ok_or_else(|| anyhow::anyhow!("unknown section `{section}`"))?,
-                        body,
-                        source,
-                        status: match status.as_str() {
-                            "accepted" => EntryStatus::Accepted,
-                            _ => EntryStatus::Proposed,
-                        },
-                        created_at: chrono::DateTime::parse_from_rfc3339(&created_at)?
-                            .with_timezone(&chrono::Utc),
-                    })
-                },
-            )
-            .collect::<Result<Vec<_>>>()?;
-        Ok(rows)
+        self.0.list_entries(workspace).await
     }
 
     async fn accept_entry(&self, workspace: &str, entry_id: Uuid) -> Result<bool> {
-        let conn = self.conn.lock();
-        let n = conn.execute(
-            "UPDATE playbook_entries SET status = 'accepted' WHERE workspace = ?1 AND id = ?2",
-            params![workspace, entry_id.to_string()],
-        )?;
-        Ok(n > 0)
+        self.0.accept_entry(workspace, entry_id).await
     }
 
     async fn remove_entry(&self, workspace: &str, entry_id: Uuid) -> Result<bool> {
-        let conn = self.conn.lock();
-        let n = conn.execute(
-            "DELETE FROM playbook_entries WHERE workspace = ?1 AND id = ?2",
-            params![workspace, entry_id.to_string()],
-        )?;
-        Ok(n > 0)
+        self.0.remove_entry(workspace, entry_id).await
     }
 }
 
-/// Turso-backed store at `~/.vulcan/playbooks.db` (GH #704). Async;
-/// holds a bare `turso::Connection` (internally sync-safe) — no
-/// `Mutex<Connection>`, no r2d2, no `spawn_blocking`.
-#[cfg(feature = "turso-backend")]
+/// Turso-backed store at `~/.vulcan/playbooks.db` (GH #704).
 pub struct TursoPlaybookStore {
     conn: turso::Connection,
 }
 
-#[cfg(feature = "turso-backend")]
 impl TursoPlaybookStore {
     pub async fn try_new() -> Result<Self> {
         let path = crate::config::vulcan_home().join("playbooks.db");
@@ -445,7 +322,6 @@ impl TursoPlaybookStore {
     }
 }
 
-#[cfg(feature = "turso-backend")]
 #[async_trait]
 impl PlaybookStore for TursoPlaybookStore {
     async fn upsert_entry(&self, workspace: &str, entry: &PlaybookEntry) -> Result<()> {
@@ -723,10 +599,10 @@ mod tests {
     }
 }
 
-// GH #704: the Turso backend must satisfy the same PlaybookStore
-// contract as rusqlite — propose -> accept -> list -> remove, with
-// proposed entries excluded from the rendered prompt block.
-#[cfg(all(test, feature = "turso-backend"))]
+// GH #704: the Turso backend must satisfy the PlaybookStore contract:
+// propose -> accept -> list -> remove, with proposed entries excluded
+// from the rendered prompt block.
+#[cfg(test)]
 mod turso_tests {
     use super::*;
 

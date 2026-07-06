@@ -1,21 +1,14 @@
 //! YYC-231 (YYC-166 PR-3): persistent install state for
 //! discovered extensions.
 //!
-//! Lives at `~/.vulcan/extension_state.db` in the rusqlite backend.
-//! The Turso migration uses `extension_install.turso.db` so feature
-//! flips cannot one-way-convert the legacy DB. One row per installed
-//! extension id, persisted across restarts. Provides the enable/disable
-//! flag the registry consults on activation plus the last load-error
-//! message for `vulcan extension list`.
+//! Lives at `~/.vulcan/extension_install.turso.db`. One row per
+//! installed extension id, persisted across restarts. Provides the
+//! enable/disable flag the registry consults on activation plus the
+//! last load-error message for `vulcan extension list`.
 
 use anyhow::{Context, Result};
-#[cfg(not(feature = "turso-backend"))]
-use parking_lot::Mutex;
-#[cfg(not(feature = "turso-backend"))]
-use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
-#[cfg(feature = "turso-backend")]
 use std::sync::Arc;
 
 use super::policy::{ExtensionPermission, PolicyDecision};
@@ -77,9 +70,6 @@ pub trait ExtensionTrustStore: Send + Sync {
 }
 
 pub struct SqliteInstallStateStore {
-    #[cfg(not(feature = "turso-backend"))]
-    conn: Mutex<Connection>,
-    #[cfg(feature = "turso-backend")]
     conn: Arc<turso::Connection>,
 }
 
@@ -91,28 +81,10 @@ impl SqliteInstallStateStore {
         Self::try_open_at(&dir.join(Self::db_file_name()))
     }
 
-    #[cfg(not(feature = "turso-backend"))]
-    fn db_file_name() -> &'static str {
-        "extension_state.db"
-    }
-
-    #[cfg(feature = "turso-backend")]
     fn db_file_name() -> &'static str {
         "extension_install.turso.db"
     }
 
-    #[cfg(not(feature = "turso-backend"))]
-    pub fn try_open_at(path: &Path) -> Result<Self> {
-        let conn = Connection::open(path)
-            .with_context(|| format!("open extension state DB at {}", path.display()))?;
-        Self::initialize(&conn)
-            .with_context(|| format!("init extension state schema at {}", path.display()))?;
-        Ok(Self {
-            conn: Mutex::new(conn),
-        })
-    }
-
-    #[cfg(feature = "turso-backend")]
     pub fn try_open_at(path: &Path) -> Result<Self> {
         let conn = crate::db::block_on(crate::db::open(path))?;
         crate::db::block_on(Self::initialize(&conn))
@@ -122,16 +94,6 @@ impl SqliteInstallStateStore {
         })
     }
 
-    #[cfg(not(feature = "turso-backend"))]
-    pub fn try_open_in_memory() -> Result<Self> {
-        let conn = Connection::open_in_memory().context("open in-memory extension state DB")?;
-        Self::initialize(&conn).context("init in-memory extension state schema")?;
-        Ok(Self {
-            conn: Mutex::new(conn),
-        })
-    }
-
-    #[cfg(feature = "turso-backend")]
     pub fn try_open_in_memory() -> Result<Self> {
         let conn = crate::db::block_on(crate::db::open_in_memory())
             .context("open in-memory extension install DB")?;
@@ -142,44 +104,6 @@ impl SqliteInstallStateStore {
         })
     }
 
-    #[cfg(not(feature = "turso-backend"))]
-    fn initialize(conn: &Connection) -> Result<()> {
-        conn.execute_batch(
-            r#"
-            CREATE TABLE IF NOT EXISTS install_state (
-                id              TEXT PRIMARY KEY,
-                version         TEXT NOT NULL,
-                enabled         INTEGER NOT NULL,
-                installed_at    TEXT NOT NULL,
-                last_load_error TEXT
-            );
-
-            CREATE TABLE IF NOT EXISTS extension_trust (
-                workspace_hash    TEXT NOT NULL,
-                extension_id      TEXT NOT NULL,
-                manifest_checksum TEXT NOT NULL,
-                trusted_at        TEXT NOT NULL,
-                PRIMARY KEY (workspace_hash, extension_id)
-            );
-
-            CREATE TABLE IF NOT EXISTS extension_runtime_audit (
-                id                   INTEGER PRIMARY KEY AUTOINCREMENT,
-                extension_id         TEXT NOT NULL,
-                requested_permission TEXT,
-                decision_json        TEXT NOT NULL,
-                allowed              INTEGER NOT NULL,
-                failure_reason       TEXT,
-                occurred_at          TEXT NOT NULL
-            );
-
-            CREATE INDEX IF NOT EXISTS idx_extension_runtime_audit_ext_time
-                ON extension_runtime_audit(extension_id, occurred_at DESC);
-            "#,
-        )?;
-        Ok(())
-    }
-
-    #[cfg(feature = "turso-backend")]
     async fn initialize(conn: &turso::Connection) -> Result<()> {
         for stmt in [
             "CREATE TABLE IF NOT EXISTS install_state (
@@ -231,260 +155,6 @@ impl SqliteInstallStateStore {
     }
 }
 
-#[cfg(not(feature = "turso-backend"))]
-impl ExtensionTrustStore for SqliteInstallStateStore {
-    fn trust(
-        &self,
-        workspace_hash: &str,
-        extension_id: &str,
-        manifest_checksum: &str,
-    ) -> Result<()> {
-        let conn = self.conn.lock();
-        conn.execute(
-            "INSERT INTO extension_trust
-                (workspace_hash, extension_id, manifest_checksum, trusted_at)
-             VALUES (?1, ?2, ?3, ?4)
-             ON CONFLICT(workspace_hash, extension_id) DO UPDATE SET
-                manifest_checksum = excluded.manifest_checksum,
-                trusted_at = excluded.trusted_at",
-            params![
-                workspace_hash,
-                extension_id,
-                manifest_checksum,
-                chrono::Utc::now().to_rfc3339(),
-            ],
-        )?;
-        Ok(())
-    }
-
-    fn untrust(&self, workspace_hash: &str, extension_id: &str) -> Result<bool> {
-        let conn = self.conn.lock();
-        let n = conn.execute(
-            "DELETE FROM extension_trust WHERE workspace_hash = ?1 AND extension_id = ?2",
-            params![workspace_hash, extension_id],
-        )?;
-        Ok(n > 0)
-    }
-
-    fn is_trusted(
-        &self,
-        workspace_hash: &str,
-        extension_id: &str,
-        manifest_checksum: &str,
-    ) -> Result<bool> {
-        let conn = self.conn.lock();
-        let found: Option<String> = conn
-            .query_row(
-                "SELECT manifest_checksum FROM extension_trust
-                 WHERE workspace_hash = ?1 AND extension_id = ?2",
-                params![workspace_hash, extension_id],
-                |row| row.get(0),
-            )
-            .optional()?;
-        Ok(found.as_deref() == Some(manifest_checksum))
-    }
-
-    fn list_trusted(&self, workspace_hash: &str) -> Result<Vec<TrustMarker>> {
-        let conn = self.conn.lock();
-        let mut stmt = conn.prepare(
-            "SELECT workspace_hash, extension_id, manifest_checksum, trusted_at
-             FROM extension_trust WHERE workspace_hash = ?1 ORDER BY extension_id ASC",
-        )?;
-        let rows: Vec<_> = stmt
-            .query_map(params![workspace_hash], |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, String>(2)?,
-                    row.get::<_, String>(3)?,
-                ))
-            })?
-            .collect::<Result<_, _>>()?;
-        rows.into_iter()
-            .map(
-                |(workspace_hash, extension_id, manifest_checksum, trusted_at)| {
-                    Ok(TrustMarker {
-                        workspace_hash,
-                        extension_id,
-                        manifest_checksum,
-                        trusted_at: chrono::DateTime::parse_from_rfc3339(&trusted_at)?
-                            .with_timezone(&chrono::Utc),
-                    })
-                },
-            )
-            .collect()
-    }
-}
-
-#[cfg(not(feature = "turso-backend"))]
-impl InstallStateStore for SqliteInstallStateStore {
-    fn upsert(&self, state: &InstallState) -> Result<()> {
-        let conn = self.conn.lock();
-        conn.execute(
-            "INSERT INTO install_state (id, version, enabled, installed_at, last_load_error)
-             VALUES (?1, ?2, ?3, ?4, ?5)
-             ON CONFLICT(id) DO UPDATE SET
-                version = excluded.version,
-                enabled = excluded.enabled,
-                installed_at = excluded.installed_at,
-                last_load_error = excluded.last_load_error",
-            params![
-                state.id,
-                state.version,
-                state.enabled as i64,
-                state.installed_at.to_rfc3339(),
-                state.last_load_error,
-            ],
-        )?;
-        Ok(())
-    }
-
-    fn get(&self, id: &str) -> Result<Option<InstallState>> {
-        let conn = self.conn.lock();
-        let row = conn
-            .query_row(
-                "SELECT id, version, enabled, installed_at, last_load_error
-                 FROM install_state WHERE id = ?1",
-                params![id],
-                |row| {
-                    Ok((
-                        row.get::<_, String>(0)?,
-                        row.get::<_, String>(1)?,
-                        row.get::<_, i64>(2)?,
-                        row.get::<_, String>(3)?,
-                        row.get::<_, Option<String>>(4)?,
-                    ))
-                },
-            )
-            .optional()?;
-        match row {
-            Some(t) => Ok(Some(Self::row_to_state(t.0, t.1, t.2, t.3, t.4)?)),
-            None => Ok(None),
-        }
-    }
-
-    fn list(&self) -> Result<Vec<InstallState>> {
-        let conn = self.conn.lock();
-        let mut stmt = conn.prepare(
-            "SELECT id, version, enabled, installed_at, last_load_error
-             FROM install_state ORDER BY id ASC",
-        )?;
-        let rows: Vec<_> = stmt
-            .query_map([], |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, i64>(2)?,
-                    row.get::<_, String>(3)?,
-                    row.get::<_, Option<String>>(4)?,
-                ))
-            })?
-            .collect::<Result<_, _>>()?;
-        rows.into_iter()
-            .map(|t| Self::row_to_state(t.0, t.1, t.2, t.3, t.4))
-            .collect()
-    }
-
-    fn set_enabled(&self, id: &str, enabled: bool) -> Result<bool> {
-        let conn = self.conn.lock();
-        let n = conn.execute(
-            "UPDATE install_state SET enabled = ?1 WHERE id = ?2",
-            params![enabled as i64, id],
-        )?;
-        Ok(n > 0)
-    }
-
-    fn record_load_error(&self, id: &str, error: &str) -> Result<bool> {
-        let conn = self.conn.lock();
-        let n = conn.execute(
-            "UPDATE install_state SET last_load_error = ?1 WHERE id = ?2",
-            params![error, id],
-        )?;
-        Ok(n > 0)
-    }
-
-    fn clear_load_error(&self, id: &str) -> Result<bool> {
-        let conn = self.conn.lock();
-        let n = conn.execute(
-            "UPDATE install_state SET last_load_error = NULL WHERE id = ?1",
-            params![id],
-        )?;
-        Ok(n > 0)
-    }
-
-    fn record_runtime_audit(&self, record: &RuntimeAuditRecord) -> Result<()> {
-        let conn = self.conn.lock();
-        conn.execute(
-            "INSERT INTO extension_runtime_audit
-                (extension_id, requested_permission, decision_json, allowed, failure_reason, occurred_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            params![
-                record.extension_id,
-                record.requested_permission.map(|p| p.as_str().to_string()),
-                serde_json::to_string(&record.decision)?,
-                record.allowed as i64,
-                record.failure_reason,
-                record.occurred_at.to_rfc3339(),
-            ],
-        )?;
-        Ok(())
-    }
-
-    fn list_runtime_audit(&self, id: &str, limit: usize) -> Result<Vec<RuntimeAuditRecord>> {
-        let conn = self.conn.lock();
-        let mut stmt = conn.prepare(
-            "SELECT extension_id, requested_permission, decision_json, allowed, failure_reason, occurred_at
-             FROM extension_runtime_audit
-             WHERE extension_id = ?1
-             ORDER BY occurred_at DESC, rowid DESC
-             LIMIT ?2",
-        )?;
-        let rows: Vec<_> = stmt
-            .query_map(params![id, limit as i64], |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, Option<String>>(1)?,
-                    row.get::<_, String>(2)?,
-                    row.get::<_, i64>(3)?,
-                    row.get::<_, Option<String>>(4)?,
-                    row.get::<_, String>(5)?,
-                ))
-            })?
-            .collect::<Result<_, _>>()?;
-        rows.into_iter()
-            .map(
-                |(
-                    extension_id,
-                    permission,
-                    decision_json,
-                    allowed,
-                    failure_reason,
-                    occurred_at,
-                )| {
-                    let requested_permission =
-                        permission.as_deref().and_then(ExtensionPermission::parse);
-                    Ok(RuntimeAuditRecord {
-                        extension_id,
-                        requested_permission,
-                        decision: serde_json::from_str(&decision_json)?,
-                        allowed: allowed != 0,
-                        failure_reason,
-                        occurred_at: chrono::DateTime::parse_from_rfc3339(&occurred_at)?
-                            .with_timezone(&chrono::Utc),
-                    })
-                },
-            )
-            .collect()
-    }
-
-    fn remove(&self, id: &str) -> Result<bool> {
-        let conn = self.conn.lock();
-        let n = conn.execute("DELETE FROM install_state WHERE id = ?1", params![id])?;
-        Ok(n > 0)
-    }
-}
-
-#[cfg(feature = "turso-backend")]
 impl ExtensionTrustStore for SqliteInstallStateStore {
     fn trust(
         &self,
@@ -583,7 +253,6 @@ impl ExtensionTrustStore for SqliteInstallStateStore {
     }
 }
 
-#[cfg(feature = "turso-backend")]
 impl InstallStateStore for SqliteInstallStateStore {
     fn upsert(&self, state: &InstallState) -> Result<()> {
         let id = state.id.clone();
@@ -904,7 +573,6 @@ mod tests {
         assert_eq!(listed[0].id, "lint-helper");
     }
 
-    #[cfg(feature = "turso-backend")]
     #[test]
     fn turso_backend_uses_isolated_file_name() {
         assert_eq!(

@@ -14,8 +14,6 @@ use crate::gateway::outbound::OutboundDispatcher;
 use crate::gateway::queue::{InboundQueue, InboundRow, OutboundQueue};
 use crate::gateway::registry::PlatformRegistry;
 use crate::gateway::server::{AppState, build_router};
-#[cfg(not(feature = "turso-backend"))]
-use crate::memory::DbPool;
 use anyhow::{Context, Result};
 use tokio::net::TcpListener;
 use tokio::task::JoinHandle;
@@ -29,14 +27,12 @@ pub mod lane_router;
 pub mod loopback;
 pub mod outbound;
 pub mod queue;
-#[cfg(feature = "turso-backend")]
 mod queue_turso;
 pub mod registry;
 pub mod render_registry;
 pub mod routes;
 pub mod scheduler;
 pub mod scheduler_store;
-#[cfg(feature = "turso-backend")]
 mod scheduler_store_turso;
 pub mod server;
 #[cfg(feature = "telegram")]
@@ -72,17 +68,13 @@ where
     // pre-bound listener and would otherwise skip the check.
     gateway.validate()?;
 
-    #[cfg(not(feature = "turso-backend"))]
-    let db = crate::memory::open_gateway_pool()?;
     // GH #704: one turso Database per file; each store gets its own
     // Connection from it (a shared connection would serialize the
     // worker/dispatcher/scheduler loops and risks the open-statement
     // write-swallowing footgun documented in memory/turso_store.rs).
-    #[cfg(feature = "turso-backend")]
     let db = {
-        // Distinct filename during the migration window (see
-        // memory/turso_store.rs try_new): rusqlite cannot read a file
-        // Turso has touched. Cutover renames this back.
+        // Keep the Turso filename distinct until users intentionally
+        // move old gateway data.
         let path = crate::config::vulcan_home().join("gateway.turso.db");
         let database = crate::db::open_database(&path).await?;
         let conn = crate::db::connect_database(&database).await?;
@@ -146,8 +138,7 @@ async fn run_on_listener_with_parts<S>(
     scheduler_config: crate::config::SchedulerConfig,
     listener: TcpListener,
     shutdown: S,
-    #[cfg(not(feature = "turso-backend"))] db: DbPool,
-    #[cfg(feature = "turso-backend")] db: turso::Database,
+    db: turso::Database,
     registry: Arc<PlatformRegistry>,
     lane_router: Arc<DaemonLaneRouter>,
     daemon_client: Arc<GatewayDaemonClient>,
@@ -155,16 +146,7 @@ async fn run_on_listener_with_parts<S>(
 where
     S: Future<Output = ()> + Send + 'static,
 {
-    #[cfg(not(feature = "turso-backend"))]
-    let inbound = Arc::new(InboundQueue::new(db.clone()));
-    #[cfg(feature = "turso-backend")]
     let inbound = Arc::new(InboundQueue::new(crate::db::connect_database(&db).await?));
-    #[cfg(not(feature = "turso-backend"))]
-    let outbound = Arc::new(OutboundQueue::new(
-        db.clone(),
-        gateway.outbound_max_attempts,
-    ));
-    #[cfg(feature = "turso-backend")]
     let outbound = Arc::new(OutboundQueue::new(
         crate::db::connect_database(&db).await?,
         gateway.outbound_max_attempts,
@@ -223,9 +205,6 @@ where
     // store. Build it once and clone the cheap handle instead of
     // reconstructing it in three places.
     let scheduler_store = if !scheduler_config.jobs.is_empty() {
-        #[cfg(not(feature = "turso-backend"))]
-        let store = scheduler_store::SchedulerStore::new(db.clone());
-        #[cfg(feature = "turso-backend")]
         let store = scheduler_store::SchedulerStore::new(crate::db::connect_database(&db).await?);
         // A crash between enqueue and completion leaves a stale
         // active_fires count that would suppress OverlapPolicy::Skip
@@ -419,283 +398,5 @@ async fn shutdown_signal() {
     #[cfg(not(unix))]
     {
         let _ = tokio::signal::ctrl_c().await;
-    }
-}
-
-#[cfg(all(test, not(feature = "turso-backend")))]
-mod tests {
-    use super::*;
-    use tokio::sync::oneshot;
-
-    fn config_with_gateway() -> Config {
-        let mut config = Config::default();
-        config.provider.api_key = Some("test-key".into());
-        config.provider.disable_catalog = true;
-        config.gateway = Some(crate::config::GatewayConfig {
-            bind: "127.0.0.1:0".into(),
-            api_token: "test-token".into(),
-            idle_ttl_secs: 1800,
-            max_concurrent_lanes: 64,
-            outbound_max_attempts: 5,
-            loopback: true,
-            discord: crate::config::DiscordConfig::default(),
-            telegram: crate::config::TelegramConfig::default(),
-            commands: std::collections::HashMap::new(),
-        });
-        config
-    }
-
-    fn fresh_db() -> DbPool {
-        crate::memory::in_memory_gateway_pool().expect("in-memory pool")
-    }
-
-    /// Build the gateway-side parts the test harness needs. The
-    /// previous version returned a mock-Agent-backed cache;
-    /// post-Slice 3 the gateway routes through the daemon, so we
-    /// hand back a [`GatewayDaemonClient`] whose factory points at no
-    /// daemon — these tests just exercise the Axum surface
-    /// (`/health`, validation), not the prompt path.
-    fn no_daemon_client() -> Arc<GatewayDaemonClient> {
-        Arc::new(GatewayDaemonClient::with_client_factory(|| {
-            Box::pin(async {
-                Err(crate::client::ClientError::Protocol(
-                    "test client: prompt path must not be reached".into(),
-                ))
-            })
-        }))
-    }
-
-    // YYC-145: empty api_token must error before bind so no socket leaks.
-    #[tokio::test]
-    async fn run_errors_before_bind_when_api_token_empty() {
-        let mut config = config_with_gateway();
-        config.gateway.as_mut().expect("gateway").api_token = String::new();
-        let err = run(&config, Some("127.0.0.1:0".into()))
-            .await
-            .expect_err("validation must fail");
-        assert!(err.to_string().contains("api_token"), "msg: {err}");
-    }
-
-    // YYC-145: same for the test entry point — pre-bound listener must
-    // still validate so a stray test config can't bypass the check.
-    #[tokio::test]
-    async fn run_on_listener_errors_when_api_token_empty() {
-        let mut config = config_with_gateway();
-        config.gateway.as_mut().expect("gateway").api_token = String::new();
-        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
-        let err = run_on_listener(config, listener, async {})
-            .await
-            .expect_err("validation must fail");
-        assert!(err.to_string().contains("api_token"), "msg: {err}");
-    }
-
-    #[tokio::test]
-    async fn run_wires_health_endpoint_on_supplied_listener() {
-        let config = config_with_gateway();
-        let gateway = config.gateway.clone().expect("gateway config");
-        let db = fresh_db();
-        let mut registry = PlatformRegistry::new();
-        registry.register("loopback", Arc::new(LoopbackPlatform::default()));
-        let registry = Arc::new(registry);
-        let lane_router = Arc::new(DaemonLaneRouter::new());
-        let daemon_client = no_daemon_client();
-        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
-        let addr = listener.local_addr().expect("addr");
-        let (shutdown_tx, shutdown_rx) = oneshot::channel();
-
-        let handle = tokio::spawn(async move {
-            run_on_listener_with_parts(
-                gateway,
-                crate::config::SchedulerConfig::default(),
-                listener,
-                async move {
-                    let _ = shutdown_rx.await;
-                },
-                db,
-                registry,
-                lane_router,
-                daemon_client,
-            )
-            .await
-        });
-
-        let client = reqwest::Client::new();
-        let mut ok = false;
-        for _ in 0..50 {
-            match client.get(format!("http://{addr}/health")).send().await {
-                Ok(resp) if resp.status().is_success() => {
-                    ok = true;
-                    break;
-                }
-                _ => tokio::time::sleep(Duration::from_millis(20)).await,
-            }
-        }
-        assert!(ok, "gateway health endpoint did not become ready");
-
-        let _ = shutdown_tx.send(());
-        handle.await.expect("join").expect("gateway exits cleanly");
-    }
-
-    /// Slice 3 Task 3.4: this end-to-end test (HTTP inbound → worker
-    /// → outbound reply) needs a real daemon to drive the prompt
-    /// path now that the gateway no longer owns the Agent. The
-    /// test-mode harness for daemon-driven prompt paths lands as a
-    /// follow-up; mark `#[ignore]` so the suite still compiles and
-    /// the assertion shape is preserved for when the harness arrives.
-    #[tokio::test]
-    #[ignore = "TODO(YYC-266 follow-up): drive end-to-end through a tempdir daemon with scripted MockProvider"]
-    async fn loopback_http_inbound_produces_outbound_reply() {
-        let config = config_with_gateway();
-        let gateway = config.gateway.clone().expect("gateway config");
-        let db = fresh_db();
-        let mut registry = PlatformRegistry::new();
-        let loopback = Arc::new(LoopbackPlatform::default());
-        registry.register("loopback", loopback.clone());
-        let registry = Arc::new(registry);
-        let lane_router = Arc::new(DaemonLaneRouter::new());
-        let daemon_client = no_daemon_client();
-        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
-        let addr = listener.local_addr().expect("addr");
-        let (shutdown_tx, shutdown_rx) = oneshot::channel();
-
-        let handle = tokio::spawn(async move {
-            run_on_listener_with_parts(
-                gateway,
-                crate::config::SchedulerConfig::default(),
-                listener,
-                async move {
-                    let _ = shutdown_rx.await;
-                },
-                db,
-                registry,
-                lane_router,
-                daemon_client,
-            )
-            .await
-        });
-
-        let client = reqwest::Client::new();
-        let mut accepted = false;
-        for _ in 0..50 {
-            let response = client
-                .post(format!("http://{addr}/v1/inbound"))
-                .bearer_auth("test-token")
-                .json(&serde_json::json!({
-                    "platform": "loopback",
-                    "chat_id": "c",
-                    "user_id": "u",
-                    "text": "hi"
-                }))
-                .send()
-                .await;
-            match response {
-                Ok(resp) if resp.status() == reqwest::StatusCode::ACCEPTED => {
-                    accepted = true;
-                    break;
-                }
-                _ => tokio::time::sleep(Duration::from_millis(20)).await,
-            }
-        }
-        assert!(accepted, "gateway did not accept inbound message");
-
-        let mut delivered = None;
-        for _ in 0..100 {
-            let recorded = loopback.recorded().await;
-            if let Some(msg) = recorded.first() {
-                delivered = Some(msg.clone());
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(25)).await;
-        }
-
-        let delivered = delivered.expect("loopback outbound reply");
-        assert_eq!(delivered.platform, "loopback");
-        assert_eq!(delivered.chat_id, "c");
-        assert_eq!(delivered.text, "hi back");
-
-        let _ = shutdown_tx.send(());
-        handle.await.expect("join").expect("gateway exits cleanly");
-    }
-
-    /// Same daemon-harness gap as above. See the matching `#[ignore]`
-    /// note on `loopback_http_inbound_produces_outbound_reply`.
-    #[tokio::test]
-    #[ignore = "TODO(YYC-266 follow-up): drive end-to-end through a tempdir daemon with scripted MockProvider"]
-    async fn restart_recovers_processing_inbound_and_delivers_reply() {
-        let config = config_with_gateway();
-        let gateway = config.gateway.clone().expect("gateway config");
-        let db = fresh_db();
-        let inbound = InboundQueue::new(db.clone());
-        inbound
-            .enqueue(crate::platform::InboundMessage {
-                platform: "loopback".into(),
-                chat_id: "c".into(),
-                user_id: "u".into(),
-                text: "recover me".into(),
-                message_id: None,
-                reply_to: None,
-                attachments: vec![],
-            })
-            .await
-            .unwrap();
-        let claimed = inbound.claim_next().await.unwrap().expect("processing row");
-        assert_eq!(claimed.text, "recover me");
-        // YYC-137: stamp the heartbeat into the past so the gateway's
-        // startup recover_processing (which only resets stale rows)
-        // picks this up. Without this the row's fresh heartbeat looks
-        // like a live worker is mid-flight and recovery skips it.
-        {
-            let c = db.get().unwrap();
-            let now = chrono::Utc::now().timestamp();
-            c.execute(
-                "UPDATE inbound_queue SET last_heartbeat_at = ?1 WHERE id = ?2",
-                rusqlite::params![now - 7200, claimed.id],
-            )
-            .unwrap();
-        }
-
-        let _ = config;
-
-        let mut registry = PlatformRegistry::new();
-        let loopback = Arc::new(LoopbackPlatform::default());
-        registry.register("loopback", loopback.clone());
-        let registry = Arc::new(registry);
-        let lane_router = Arc::new(DaemonLaneRouter::new());
-        let daemon_client = no_daemon_client();
-        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
-        let (shutdown_tx, shutdown_rx) = oneshot::channel();
-
-        let handle = tokio::spawn(async move {
-            run_on_listener_with_parts(
-                gateway,
-                crate::config::SchedulerConfig::default(),
-                listener,
-                async move {
-                    let _ = shutdown_rx.await;
-                },
-                db,
-                registry,
-                lane_router,
-                daemon_client,
-            )
-            .await
-        });
-
-        let mut delivered = None;
-        for _ in 0..100 {
-            let recorded = loopback.recorded().await;
-            if let Some(msg) = recorded.first() {
-                delivered = Some(msg.clone());
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(25)).await;
-        }
-
-        let delivered = delivered.expect("recovered loopback reply");
-        assert_eq!(delivered.text, "recovered reply");
-        assert_eq!(delivered.chat_id, "c");
-
-        let _ = shutdown_tx.send(());
-        handle.await.expect("join").expect("gateway exits cleanly");
     }
 }

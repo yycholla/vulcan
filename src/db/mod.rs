@@ -1,15 +1,12 @@
 //! Turso persistence seam (GH #704).
 //!
 //! Thin wrapper over `turso` connection setup so stores don't hardcode
-//! the driver or repeat the experimental-flag dance. Introduced during
-//! the phased rusqlite -> turso migration; gated behind `turso-backend`
-//! until every store has ported, at which point this becomes the only
-//! backend and `rusqlite`/`r2d2` drop out.
+//! the driver or repeat the experimental-flag dance.
 //!
 //! Turso is async and its `Connection` is internally sync-safe (clonable
 //! handle, no external `Mutex`), so ported stores hold a bare
-//! `turso::Connection` and drop the `Mutex<Connection>` / r2d2 pool /
-//! `spawn_blocking` scaffolding the rusqlite stores needed.
+//! `turso::Connection` and avoid external mutex/pool/blocking-thread
+//! scaffolding.
 
 use anyhow::{Context, Result, bail};
 use std::future::Future;
