@@ -454,6 +454,24 @@ impl Agent {
             hooks.register(Arc::new(RecallHook::new(recall_memory, config.recall)));
         }
 
+        // Built-in hook (YYC-223): inject the workspace's *accepted*
+        // playbook entries as a transient system block. A store-open
+        // failure only costs the injection, never the agent build.
+        match crate::playbook::SqlitePlaybookStore::try_new() {
+            Ok(store) => {
+                let workspace = cwd
+                    .canonicalize()
+                    .unwrap_or_else(|_| cwd.clone())
+                    .display()
+                    .to_string();
+                hooks.register(Arc::new(crate::hooks::playbook::PlaybookHook::new(
+                    Arc::new(store),
+                    workspace,
+                )));
+            }
+            Err(e) => tracing::debug!("playbook: store unavailable, skipping hook: {e}"),
+        }
+
         // Optional Tree-sitter BeforePrompt assist for source files named
         // in the latest user prompt. Off by default and bounded by
         // [code_outline_assist] limits.
