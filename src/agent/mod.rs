@@ -38,7 +38,7 @@ mod tests;
 /// are handled by a real URL parser instead of hand-rolled split/strip.
 /// Bare host:port input (no scheme) is normalized with `http://`
 /// before parsing so the heuristic still works on user-pasted endpoints.
-pub(in crate::agent) fn is_local_base_url(base_url: &str) -> bool {
+pub fn is_local_base_url(base_url: &str) -> bool {
     let normalized = if base_url.contains("://") {
         base_url.to_string()
     } else {

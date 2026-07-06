@@ -75,7 +75,7 @@ async fn main() -> anyhow::Result<()> {
         vulcan::cli_gateway::init(&dir, &config, force)?;
         return Ok(());
     }
-    let config = Config::load()?;
+    let mut config = Config::load()?;
 
     // YYC-264: when `--seed-cortex` is passed and cortex is enabled, seed
     // the knowledge graph from recent SQLite sessions before the session
@@ -103,6 +103,27 @@ async fn main() -> anyhow::Result<()> {
 
     match cli.command {
         None | Some(Command::Chat) => {
+            // First-run onboarding: launching without an API key drops
+            // into the interactive `vulcan auth` provider setup instead
+            // of erroring out, then continues into the TUI with the
+            // fresh config. Local/self-hosted endpoints don't need auth.
+            let active = config.active_provider_config();
+            if config.api_key().is_none()
+                && !active.disable_catalog
+                && !vulcan::agent::is_local_base_url(&active.base_url)
+                && std::io::IsTerminal::is_terminal(&std::io::stdin())
+            {
+                println!("No model provider configured yet — let's set one up.\n");
+                vulcan::cli_auth::run(
+                    vulcan::cli_auth::AuthArgs {
+                        preset: None,
+                        custom: false,
+                    },
+                    vulcan::config::vulcan_home(),
+                )
+                .await?;
+                config = Config::load()?;
+            }
             init_tui_observability!("chat");
             let resume = if cli.resume {
                 // --resume takes priority over --continue
