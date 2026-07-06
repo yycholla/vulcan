@@ -35,7 +35,7 @@ pub async fn run(cmd: SymphonySubcommand) -> Result<()> {
         SymphonySubcommand::Validate { workflow } => validate_to_string(&workflow)?,
         SymphonySubcommand::Tasks { workflow } => tasks_to_string(&workflow)?,
         SymphonySubcommand::Tick { workflow } => tick_to_string(&workflow)?,
-        SymphonySubcommand::Runs { limit, all } => runs_to_string(limit, all)?,
+        SymphonySubcommand::Runs { limit, all } => runs_to_string(limit, all).await?,
     };
     print!("{output}");
     Ok(())
@@ -197,17 +197,17 @@ pub fn tick_to_string(workflow: &Path) -> Result<String> {
     Ok(render_tick_outcome(&outcome.events, &identifiers))
 }
 
-pub fn runs_to_string(limit: usize, all: bool) -> Result<String> {
+pub async fn runs_to_string(limit: usize, all: bool) -> Result<String> {
     let store = SqliteRunStore::try_new().context("open ~/.vulcan/run_records.db")?;
-    runs_from_store_to_string(&store, limit, all)
+    runs_from_store_to_string(&store, limit, all).await
 }
 
-fn runs_from_store_to_string<S: RunStore + ?Sized>(
+async fn runs_from_store_to_string<S: RunStore + ?Sized>(
     store: &S,
     limit: usize,
     all: bool,
 ) -> Result<String> {
-    let recent = store.recent(limit)?;
+    let recent = store.recent(limit).await?;
     let runs = if all {
         recent
     } else {
@@ -688,8 +688,8 @@ Handle {{ issue.identifier }}: {{ issue.title }}
         assert!(!output.contains("ISSUE-2"));
     }
 
-    #[test]
-    fn tick_runs_one_deterministic_dry_run_dispatch() {
+    #[tokio::test]
+    async fn tick_runs_one_deterministic_dry_run_dispatch() {
         let dir = fixture_dir("tick");
         let workflow = write_workflow(&dir);
 
@@ -701,30 +701,34 @@ Handle {{ issue.identifier }}: {{ issue.title }}
         assert!(output.contains("status=published"));
     }
 
-    #[test]
-    fn runs_lists_symphony_associated_records_only_by_default() {
+    #[tokio::test]
+    async fn runs_lists_symphony_associated_records_only_by_default() {
         let store = crate::run_record::InMemoryRunStore::default();
         let mut symphony = RunRecord::new(RunOrigin::Other("symphony".into()));
         symphony.workspace = Some(".symphony/workspaces/gh-1".into());
         let mut cli = RunRecord::new(RunOrigin::Cli);
         cli.workspace = Some("/repo".into());
-        store.create(&symphony).unwrap();
-        store.create(&cli).unwrap();
+        store.create(&symphony).await.unwrap();
+        store.create(&cli).await.unwrap();
 
-        let output = runs_from_store_to_string(&store, 20, false).expect("list runs");
+        let output = runs_from_store_to_string(&store, 20, false)
+            .await
+            .expect("list runs");
 
         assert!(output.contains(&symphony.id.to_string()[..8]));
         assert!(output.contains("symphony"));
         assert!(!output.contains(&cli.id.to_string()[..8]));
     }
 
-    #[test]
-    fn runs_all_includes_non_symphony_records() {
+    #[tokio::test]
+    async fn runs_all_includes_non_symphony_records() {
         let store = crate::run_record::InMemoryRunStore::default();
         let cli = RunRecord::new(RunOrigin::Cli);
-        store.create(&cli).unwrap();
+        store.create(&cli).await.unwrap();
 
-        let output = runs_from_store_to_string(&store, 20, true).expect("list runs");
+        let output = runs_from_store_to_string(&store, 20, true)
+            .await
+            .expect("list runs");
 
         assert!(output.contains(&cli.id.to_string()[..8]));
         assert!(output.contains("cli"));

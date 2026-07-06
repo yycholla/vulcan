@@ -28,11 +28,13 @@
 //! - Replay/reproduce — that's a sibling issue (YYC-184).
 
 use anyhow::{Context, Result};
+use async_trait::async_trait;
 use parking_lot::Mutex;
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::path::Path;
+use std::sync::Arc;
 use uuid::Uuid;
 
 /// Stable identifier for a single agent turn.
@@ -241,12 +243,14 @@ impl RunRecord {
 /// Storage backend for run records. Both backends append events,
 /// finalize on terminal status, and query recent records by id /
 /// time.
+#[async_trait]
 pub trait RunStore: Send + Sync {
-    fn create(&self, record: &RunRecord) -> Result<()>;
-    fn append_event(&self, run_id: RunId, event: RunEvent) -> Result<()>;
-    fn finalize(&self, run_id: RunId, status: RunStatus, error: Option<String>) -> Result<()>;
-    fn get(&self, run_id: RunId) -> Result<Option<RunRecord>>;
-    fn recent(&self, limit: usize) -> Result<Vec<RunRecord>>;
+    async fn create(&self, record: &RunRecord) -> Result<()>;
+    async fn append_event(&self, run_id: RunId, event: RunEvent) -> Result<()>;
+    async fn finalize(&self, run_id: RunId, status: RunStatus, error: Option<String>)
+    -> Result<()>;
+    async fn get(&self, run_id: RunId) -> Result<Option<RunRecord>>;
+    async fn recent(&self, limit: usize) -> Result<Vec<RunRecord>>;
 }
 
 /// In-memory backend — fine for tests + the no-DB code paths.
@@ -272,8 +276,9 @@ impl InMemoryRunStore {
     }
 }
 
+#[async_trait]
 impl RunStore for InMemoryRunStore {
-    fn create(&self, record: &RunRecord) -> Result<()> {
+    async fn create(&self, record: &RunRecord) -> Result<()> {
         let mut guard = self.inner.lock();
         if guard.len() >= self.cap {
             guard.remove(0);
@@ -282,7 +287,7 @@ impl RunStore for InMemoryRunStore {
         Ok(())
     }
 
-    fn append_event(&self, run_id: RunId, event: RunEvent) -> Result<()> {
+    async fn append_event(&self, run_id: RunId, event: RunEvent) -> Result<()> {
         let mut guard = self.inner.lock();
         if let Some(rec) = guard.iter_mut().find(|r| r.id == run_id) {
             if let RunEvent::StatusChanged { status } = &event {
@@ -293,7 +298,12 @@ impl RunStore for InMemoryRunStore {
         Ok(())
     }
 
-    fn finalize(&self, run_id: RunId, status: RunStatus, error: Option<String>) -> Result<()> {
+    async fn finalize(
+        &self,
+        run_id: RunId,
+        status: RunStatus,
+        error: Option<String>,
+    ) -> Result<()> {
         let mut guard = self.inner.lock();
         if let Some(rec) = guard.iter_mut().find(|r| r.id == run_id) {
             rec.status = status;
@@ -304,11 +314,11 @@ impl RunStore for InMemoryRunStore {
         Ok(())
     }
 
-    fn get(&self, run_id: RunId) -> Result<Option<RunRecord>> {
+    async fn get(&self, run_id: RunId) -> Result<Option<RunRecord>> {
         Ok(self.inner.lock().iter().find(|r| r.id == run_id).cloned())
     }
 
-    fn recent(&self, limit: usize) -> Result<Vec<RunRecord>> {
+    async fn recent(&self, limit: usize) -> Result<Vec<RunRecord>> {
         let guard = self.inner.lock();
         Ok(guard.iter().rev().take(limit).cloned().collect())
     }
@@ -378,8 +388,9 @@ impl SqliteRunStore {
     }
 }
 
+#[async_trait]
 impl RunStore for SqliteRunStore {
-    fn create(&self, record: &RunRecord) -> Result<()> {
+    async fn create(&self, record: &RunRecord) -> Result<()> {
         let conn = self.conn.lock();
         conn.execute(
             "INSERT INTO runs (id, origin, session_id, workspace, model, started_at, status)
@@ -397,7 +408,7 @@ impl RunStore for SqliteRunStore {
         Ok(())
     }
 
-    fn append_event(&self, run_id: RunId, event: RunEvent) -> Result<()> {
+    async fn append_event(&self, run_id: RunId, event: RunEvent) -> Result<()> {
         let conn = self.conn.lock();
         conn.execute(
             "INSERT INTO run_events (run_id, payload) VALUES (?1, ?2)",
@@ -412,7 +423,12 @@ impl RunStore for SqliteRunStore {
         Ok(())
     }
 
-    fn finalize(&self, run_id: RunId, status: RunStatus, error: Option<String>) -> Result<()> {
+    async fn finalize(
+        &self,
+        run_id: RunId,
+        status: RunStatus,
+        error: Option<String>,
+    ) -> Result<()> {
         let conn = self.conn.lock();
         let now = chrono::Utc::now().to_rfc3339();
         conn.execute(
@@ -434,7 +450,7 @@ impl RunStore for SqliteRunStore {
         Ok(())
     }
 
-    fn get(&self, run_id: RunId) -> Result<Option<RunRecord>> {
+    async fn get(&self, run_id: RunId) -> Result<Option<RunRecord>> {
         let conn = self.conn.lock();
         let id_str = run_id.to_string();
         let row = conn
@@ -489,18 +505,239 @@ impl RunStore for SqliteRunStore {
         }))
     }
 
-    fn recent(&self, limit: usize) -> Result<Vec<RunRecord>> {
-        let conn = self.conn.lock();
-        let mut stmt = conn.prepare("SELECT id FROM runs ORDER BY started_at DESC LIMIT ?1")?;
-        let ids: Vec<String> = stmt
-            .query_map(params![limit as i64], |row| row.get::<_, String>(0))?
-            .collect::<Result<_, _>>()?;
-        drop(stmt);
-        drop(conn);
+    async fn recent(&self, limit: usize) -> Result<Vec<RunRecord>> {
+        // Scope the connection + statement so both are dropped before
+        // the `self.get(id).await` loop below — a `Statement` is !Send,
+        // and the async Send check keeps the binding's slot alive across
+        // an await even after an explicit `drop`, so a block is needed.
+        let ids: Vec<String> = {
+            let conn = self.conn.lock();
+            let mut stmt = conn.prepare("SELECT id FROM runs ORDER BY started_at DESC LIMIT ?1")?;
+            stmt.query_map(params![limit as i64], |row| row.get::<_, String>(0))?
+                .collect::<Result<_, _>>()?
+        };
         let mut out = Vec::with_capacity(ids.len());
         for raw_id in ids {
             let id = RunId::from_uuid(Uuid::parse_str(&raw_id)?);
-            if let Some(rec) = self.get(id)? {
+            if let Some(rec) = self.get(id).await? {
+                out.push(rec);
+            }
+        }
+        Ok(out)
+    }
+}
+
+/// Open the default run store. Selects the backend at compile time:
+/// Turso under `turso-backend` (GH #704), else rusqlite.
+pub async fn open_default_store() -> Result<Arc<dyn RunStore>> {
+    #[cfg(feature = "turso-backend")]
+    {
+        Ok(Arc::new(TursoRunStore::try_new().await?))
+    }
+    #[cfg(not(feature = "turso-backend"))]
+    {
+        Ok(Arc::new(SqliteRunStore::try_new()?))
+    }
+}
+
+/// Turso-backed run store (GH #704). Async; bare `turso::Connection`,
+/// no `Mutex`/r2d2/`spawn_blocking`. Same two-table shape (runs +
+/// append-only run_events with JSON payloads) as rusqlite.
+#[cfg(feature = "turso-backend")]
+pub struct TursoRunStore {
+    conn: turso::Connection,
+}
+
+#[cfg(feature = "turso-backend")]
+impl TursoRunStore {
+    pub async fn try_new() -> Result<Self> {
+        let path = crate::config::vulcan_home().join("run_records.db");
+        Self::try_open_at(&path).await
+    }
+
+    pub async fn try_open_at(path: &Path) -> Result<Self> {
+        let conn = crate::db::open(path).await?;
+        Self::initialize(&conn).await?;
+        Ok(Self { conn })
+    }
+
+    pub async fn try_open_in_memory() -> Result<Self> {
+        let conn = crate::db::open_in_memory().await?;
+        Self::initialize(&conn).await?;
+        Ok(Self { conn })
+    }
+
+    async fn initialize(conn: &turso::Connection) -> Result<()> {
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS runs (
+                id TEXT PRIMARY KEY, origin TEXT NOT NULL, session_id TEXT, workspace TEXT,
+                model TEXT, started_at TEXT NOT NULL, ended_at TEXT, status TEXT NOT NULL, error TEXT
+            )",
+            (),
+        )
+        .await?;
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_runs_started_at ON runs(started_at DESC)",
+            (),
+        )
+        .await?;
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS run_events (
+                seq INTEGER PRIMARY KEY AUTOINCREMENT, run_id TEXT NOT NULL, payload TEXT NOT NULL
+            )",
+            (),
+        )
+        .await?;
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_run_events_run_id ON run_events(run_id, seq)",
+            (),
+        )
+        .await?;
+        Ok(())
+    }
+}
+
+#[cfg(feature = "turso-backend")]
+#[async_trait]
+impl RunStore for TursoRunStore {
+    async fn create(&self, record: &RunRecord) -> Result<()> {
+        self.conn
+            .execute(
+                "INSERT INTO runs (id, origin, session_id, workspace, model, started_at, status) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                turso::params_from_iter([
+                    turso::Value::from(record.id.to_string()),
+                    turso::Value::from(serde_json::to_string(&record.origin)?),
+                    record.session_id.clone().into(),
+                    record.workspace.clone().into(),
+                    record.model.clone().into(),
+                    turso::Value::from(record.started_at.to_rfc3339()),
+                    turso::Value::from(serde_json::to_string(&record.status)?),
+                ]),
+            )
+            .await?;
+        Ok(())
+    }
+
+    async fn append_event(&self, run_id: RunId, event: RunEvent) -> Result<()> {
+        self.conn
+            .execute(
+                "INSERT INTO run_events (run_id, payload) VALUES (?1, ?2)",
+                (run_id.to_string(), serde_json::to_string(&event)?),
+            )
+            .await?;
+        if let RunEvent::StatusChanged { status } = &event {
+            self.conn
+                .execute(
+                    "UPDATE runs SET status = ?1 WHERE id = ?2",
+                    (serde_json::to_string(status)?, run_id.to_string()),
+                )
+                .await?;
+        }
+        Ok(())
+    }
+
+    async fn finalize(
+        &self,
+        run_id: RunId,
+        status: RunStatus,
+        error: Option<String>,
+    ) -> Result<()> {
+        let now = chrono::Utc::now().to_rfc3339();
+        self.conn
+            .execute(
+                "UPDATE runs SET status = ?1, ended_at = ?2, error = ?3 WHERE id = ?4",
+                turso::params_from_iter([
+                    turso::Value::from(serde_json::to_string(&status)?),
+                    turso::Value::from(now),
+                    error.into(),
+                    turso::Value::from(run_id.to_string()),
+                ]),
+            )
+            .await?;
+        self.conn
+            .execute(
+                "INSERT INTO run_events (run_id, payload) VALUES (?1, ?2)",
+                (
+                    run_id.to_string(),
+                    serde_json::to_string(&RunEvent::StatusChanged { status })?,
+                ),
+            )
+            .await?;
+        Ok(())
+    }
+
+    async fn get(&self, run_id: RunId) -> Result<Option<RunRecord>> {
+        let id_str = run_id.to_string();
+        let mut rows = self
+            .conn
+            .query(
+                "SELECT origin, session_id, workspace, model, started_at, ended_at, status, error \
+                 FROM runs WHERE id = ?1",
+                (id_str.clone(),),
+            )
+            .await?;
+        let Some(row) = rows.next().await? else {
+            return Ok(None);
+        };
+        let origin: String = row.get(0)?;
+        let session_id: Option<String> = row.get(1)?;
+        let workspace: Option<String> = row.get(2)?;
+        let model: Option<String> = row.get(3)?;
+        let started_at: String = row.get(4)?;
+        let ended_at: Option<String> = row.get(5)?;
+        let status: String = row.get(6)?;
+        let error: Option<String> = row.get(7)?;
+
+        let mut ev_rows = self
+            .conn
+            .query(
+                "SELECT payload FROM run_events WHERE run_id = ?1 ORDER BY seq ASC",
+                (id_str,),
+            )
+            .await?;
+        let mut events = Vec::new();
+        while let Some(ev) = ev_rows.next().await? {
+            let raw: String = ev.get(0)?;
+            events.push(serde_json::from_str::<RunEvent>(&raw)?);
+        }
+
+        Ok(Some(RunRecord {
+            id: run_id,
+            origin: serde_json::from_str(&origin)?,
+            session_id,
+            workspace,
+            model,
+            started_at: chrono::DateTime::parse_from_rfc3339(&started_at)?
+                .with_timezone(&chrono::Utc),
+            ended_at: ended_at
+                .map(|s| {
+                    chrono::DateTime::parse_from_rfc3339(&s).map(|d| d.with_timezone(&chrono::Utc))
+                })
+                .transpose()?,
+            status: serde_json::from_str(&status)?,
+            events,
+            error,
+        }))
+    }
+
+    async fn recent(&self, limit: usize) -> Result<Vec<RunRecord>> {
+        let mut rows = self
+            .conn
+            .query(
+                "SELECT id FROM runs ORDER BY started_at DESC LIMIT ?1",
+                (limit as i64,),
+            )
+            .await?;
+        let mut ids = Vec::new();
+        while let Some(row) = rows.next().await? {
+            let raw: String = row.get(0)?;
+            ids.push(raw);
+        }
+        let mut out = Vec::with_capacity(ids.len());
+        for raw_id in ids {
+            let id = RunId::from_uuid(Uuid::parse_str(&raw_id)?);
+            if let Some(rec) = self.get(id).await? {
                 out.push(rec);
             }
         }
@@ -544,13 +781,13 @@ mod tests {
         assert!(RunStatus::Cancelled.is_terminal());
     }
 
-    #[test]
-    fn in_memory_store_records_full_lifecycle() {
+    #[tokio::test]
+    async fn in_memory_store_records_full_lifecycle() {
         let store = InMemoryRunStore::default();
         let mut record = RunRecord::new(RunOrigin::Cli);
         record.session_id = Some("sess-1".into());
         let id = record.id;
-        store.create(&record).unwrap();
+        store.create(&record).await.unwrap();
         store
             .append_event(
                 id,
@@ -558,38 +795,42 @@ mod tests {
                     status: RunStatus::Running,
                 },
             )
+            .await
             .unwrap();
-        store.append_event(id, sample_event()).unwrap();
-        store.finalize(id, RunStatus::Completed, None).unwrap();
-        let got = store.get(id).unwrap().expect("stored");
+        store.append_event(id, sample_event()).await.unwrap();
+        store
+            .finalize(id, RunStatus::Completed, None)
+            .await
+            .unwrap();
+        let got = store.get(id).await.unwrap().expect("stored");
         assert_eq!(got.status, RunStatus::Completed);
         assert!(got.ended_at.is_some());
         // Three events: Running, ToolCall, Completed.
         assert_eq!(got.events.len(), 3);
     }
 
-    #[test]
-    fn in_memory_store_caps_records() {
+    #[tokio::test]
+    async fn in_memory_store_caps_records() {
         let store = InMemoryRunStore::new(2);
         let r1 = RunRecord::new(RunOrigin::Cli);
         let r2 = RunRecord::new(RunOrigin::Tui);
         let r3 = RunRecord::new(RunOrigin::Other("test".into()));
-        store.create(&r1).unwrap();
-        store.create(&r2).unwrap();
-        store.create(&r3).unwrap();
+        store.create(&r1).await.unwrap();
+        store.create(&r2).await.unwrap();
+        store.create(&r3).await.unwrap();
         // r1 evicted under FIFO drop.
-        assert!(store.get(r1.id).unwrap().is_none());
-        assert!(store.get(r2.id).unwrap().is_some());
-        assert!(store.get(r3.id).unwrap().is_some());
+        assert!(store.get(r1.id).await.unwrap().is_none());
+        assert!(store.get(r2.id).await.unwrap().is_some());
+        assert!(store.get(r3.id).await.unwrap().is_some());
     }
 
-    #[test]
-    fn sqlite_store_round_trip() {
+    #[tokio::test]
+    async fn sqlite_store_round_trip() {
         let store = SqliteRunStore::try_open_in_memory().expect("open in-memory");
         let mut record = RunRecord::new(RunOrigin::Tui);
         record.model = Some("opus-4".into());
         let id = record.id;
-        store.create(&record).unwrap();
+        store.create(&record).await.unwrap();
 
         store
             .append_event(
@@ -600,6 +841,7 @@ mod tests {
                     raw: None,
                 },
             )
+            .await
             .unwrap();
         store
             .append_event(
@@ -610,11 +852,15 @@ mod tests {
                     message_count: 3,
                 },
             )
+            .await
             .unwrap();
-        store.append_event(id, sample_event()).unwrap();
-        store.finalize(id, RunStatus::Completed, None).unwrap();
+        store.append_event(id, sample_event()).await.unwrap();
+        store
+            .finalize(id, RunStatus::Completed, None)
+            .await
+            .unwrap();
 
-        let got = store.get(id).unwrap().expect("present");
+        let got = store.get(id).await.unwrap().expect("present");
         assert_eq!(got.status, RunStatus::Completed);
         assert_eq!(got.model.as_deref(), Some("opus-4"));
         assert!(got.ended_at.is_some());
@@ -634,12 +880,12 @@ mod tests {
         }
     }
 
-    #[test]
-    fn sqlite_store_failure_is_distinguishable_from_success() {
+    #[tokio::test]
+    async fn sqlite_store_failure_is_distinguishable_from_success() {
         let store = SqliteRunStore::try_open_in_memory().unwrap();
         let record = RunRecord::new(RunOrigin::Cli);
         let id = record.id;
-        store.create(&record).unwrap();
+        store.create(&record).await.unwrap();
         store
             .append_event(
                 id,
@@ -648,18 +894,20 @@ mod tests {
                     retryable: true,
                 },
             )
+            .await
             .unwrap();
         store
             .finalize(id, RunStatus::Failed, Some("provider down".into()))
+            .await
             .unwrap();
-        let got = store.get(id).unwrap().expect("present");
+        let got = store.get(id).await.unwrap().expect("present");
         assert_eq!(got.status, RunStatus::Failed);
         assert_eq!(got.error.as_deref(), Some("provider down"));
         assert!(matches!(got.events[0], RunEvent::ProviderError { .. }));
     }
 
-    #[test]
-    fn sqlite_store_blocked_hook_is_visible() {
+    #[tokio::test]
+    async fn sqlite_store_blocked_hook_is_visible() {
         // Acceptance: blocked hook decisions and tool errors must be
         // distinguishable from successful tool calls. We assert the
         // event variant directly because the schema is designed so
@@ -667,7 +915,7 @@ mod tests {
         let store = SqliteRunStore::try_open_in_memory().unwrap();
         let record = RunRecord::new(RunOrigin::Cli);
         let id = record.id;
-        store.create(&record).unwrap();
+        store.create(&record).await.unwrap();
         store
             .append_event(
                 id,
@@ -678,6 +926,7 @@ mod tests {
                     detail: Some("rm -rf /".into()),
                 },
             )
+            .await
             .unwrap();
         store
             .append_event(
@@ -691,9 +940,13 @@ mod tests {
                     error: Some("blocked by safety hook".into()),
                 },
             )
+            .await
             .unwrap();
-        store.finalize(id, RunStatus::Completed, None).unwrap();
-        let got = store.get(id).unwrap().unwrap();
+        store
+            .finalize(id, RunStatus::Completed, None)
+            .await
+            .unwrap();
+        let got = store.get(id).await.unwrap().unwrap();
         let outcomes: Vec<&str> = got
             .events
             .iter()
@@ -714,17 +967,68 @@ mod tests {
         assert_eq!(tool_errs, vec![true]);
     }
 
-    #[test]
-    fn sqlite_store_recent_returns_newest_first() {
+    #[tokio::test]
+    async fn sqlite_store_recent_returns_newest_first() {
         let store = SqliteRunStore::try_open_in_memory().unwrap();
         let r1 = RunRecord::new(RunOrigin::Cli);
         std::thread::sleep(std::time::Duration::from_millis(2));
         let r2 = RunRecord::new(RunOrigin::Tui);
-        store.create(&r1).unwrap();
-        store.create(&r2).unwrap();
-        let recent = store.recent(10).unwrap();
+        store.create(&r1).await.unwrap();
+        store.create(&r2).await.unwrap();
+        let recent = store.recent(10).await.unwrap();
         assert_eq!(recent.len(), 2);
         assert_eq!(recent[0].id, r2.id);
         assert_eq!(recent[1].id, r1.id);
+    }
+}
+
+// GH #704: the Turso backend satisfies the same RunStore contract.
+#[cfg(all(test, feature = "turso-backend"))]
+mod turso_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn turso_store_round_trips_lifecycle_and_timeline() {
+        let store = TursoRunStore::try_open_in_memory().await.unwrap();
+        let mut rec = RunRecord::new(RunOrigin::Cli);
+        rec.session_id = Some("sess-1".into());
+        rec.model = Some("test-model".into());
+        let id = rec.id;
+        store.create(&rec).await.unwrap();
+
+        store
+            .append_event(
+                id,
+                RunEvent::StatusChanged {
+                    status: RunStatus::Running,
+                },
+            )
+            .await
+            .unwrap();
+        store
+            .append_event(
+                id,
+                RunEvent::PromptReceived {
+                    fingerprint: PayloadFingerprint::of(b"hello"),
+                    char_count: 5,
+                    raw: None,
+                },
+            )
+            .await
+            .unwrap();
+        store
+            .finalize(id, RunStatus::Completed, None)
+            .await
+            .unwrap();
+
+        let got = store.get(id).await.unwrap().expect("run present");
+        assert_eq!(got.status, RunStatus::Completed);
+        assert_eq!(got.session_id.as_deref(), Some("sess-1"));
+        assert!(got.ended_at.is_some());
+        assert_eq!(got.events.len(), 3);
+
+        let recent = store.recent(10).await.unwrap();
+        assert_eq!(recent.len(), 1);
+        assert_eq!(recent[0].id, id);
     }
 }

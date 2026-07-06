@@ -149,12 +149,17 @@ impl Agent {
         origin: RunOrigin,
     ) -> Result<String> {
         self.turn_cancel = cancel;
-        self.begin_run_record_with_origin(input, origin);
+        self.begin_run_record_with_origin(input, origin).await;
         let result = self.run_prompt_body(input).await;
         match &result {
-            Ok(text) if text == "Cancelled" => self.end_run_record(RunStatus::Cancelled, None),
-            Ok(_) => self.end_run_record(RunStatus::Completed, None),
-            Err(e) => self.end_run_record(RunStatus::Failed, Some(e.to_string())),
+            Ok(text) if text == "Cancelled" => {
+                self.end_run_record(RunStatus::Cancelled, None).await
+            }
+            Ok(_) => self.end_run_record(RunStatus::Completed, None).await,
+            Err(e) => {
+                self.end_run_record(RunStatus::Failed, Some(e.to_string()))
+                    .await
+            }
         }
         result
     }
@@ -171,40 +176,47 @@ impl Agent {
     /// fingerprint of the input — raw text isn't persisted by
     /// default. Returns the new `RunId` so the caller can attach
     /// further events.
-    fn begin_run_record(&mut self, input: &str) {
-        self.begin_run_record_with_origin(input, RunOrigin::Cli);
+    async fn begin_run_record(&mut self, input: &str) {
+        self.begin_run_record_with_origin(input, RunOrigin::Cli)
+            .await;
     }
 
-    fn begin_run_record_with_origin(&mut self, input: &str, origin: RunOrigin) {
+    async fn begin_run_record_with_origin(&mut self, input: &str, origin: RunOrigin) {
         let mut record = RunRecord::new(origin);
         record.session_id = Some(self.session_id.clone());
         record.model = Some(self.provider_config.model.clone());
         let id = record.id;
-        if let Err(e) = self.run_store.create(&record) {
+        if let Err(e) = self.run_store.create(&record).await {
             tracing::warn!("run_record create failed: {e}");
             *self.current_run_id.lock() = None;
             return;
         }
         *self.current_run_id.lock() = Some(id);
-        let _ = self.run_store.append_event(
-            id,
-            RunEvent::StatusChanged {
-                status: RunStatus::Running,
-            },
-        );
+        let _ = self
+            .run_store
+            .append_event(
+                id,
+                RunEvent::StatusChanged {
+                    status: RunStatus::Running,
+                },
+            )
+            .await;
         // YYC-182: stamp the trust profile up front so timeline
         // viewers can see the policy posture for this turn.
         let trust = &self.trust_profile;
-        let _ = self.run_store.append_event(
-            id,
-            RunEvent::TrustResolved {
-                level: trust.level.as_str().to_string(),
-                capability_profile: trust.capability_profile.clone(),
-                reason: trust.reason.clone(),
-                allow_indexing: trust.allow_indexing,
-                allow_persistence: trust.allow_persistence,
-            },
-        );
+        let _ = self
+            .run_store
+            .append_event(
+                id,
+                RunEvent::TrustResolved {
+                    level: trust.level.as_str().to_string(),
+                    capability_profile: trust.capability_profile.clone(),
+                    reason: trust.reason.clone(),
+                    allow_indexing: trust.allow_indexing,
+                    allow_persistence: trust.allow_persistence,
+                },
+            )
+            .await;
         let _ = self.run_store.append_event(
             id,
             RunEvent::PromptReceived {
@@ -217,9 +229,10 @@ impl Agent {
 
     /// YYC-179: write the terminal status for the current run and
     /// clear `current_run_id`. Safe to call when no run is active.
-    fn end_run_record(&mut self, status: RunStatus, error: Option<String>) {
-        if let Some(id) = self.current_run_id.lock().take() {
-            let _ = self.run_store.finalize(id, status, error);
+    async fn end_run_record(&mut self, status: RunStatus, error: Option<String>) {
+        let id = self.current_run_id.lock().take();
+        if let Some(id) = id {
+            let _ = self.run_store.finalize(id, status, error).await;
         }
     }
 
@@ -227,26 +240,28 @@ impl Agent {
     /// any. Drops silently when no run is in flight (e.g. a tool
     /// running outside a turn) so callers don't have to gate their
     /// emit sites.
-    pub(in crate::agent) fn record_run_event(&self, event: RunEvent) {
-        if let Some(id) = *self.current_run_id.lock() {
-            if let Err(e) = self.run_store.append_event(id, event) {
+    pub(in crate::agent) async fn record_run_event(&self, event: RunEvent) {
+        let id = *self.current_run_id.lock();
+        if let Some(id) = id {
+            if let Err(e) = self.run_store.append_event(id, event).await {
                 tracing::warn!("run_record append failed: {e}");
             }
         }
     }
 
     async fn run_prompt_inner(&mut self, input: &str) -> Result<String> {
-        self.begin_run_record(input);
+        self.begin_run_record(input).await;
         let result = self.run_prompt_body(input).await;
         match &result {
             Ok(text) if text == "Cancelled" => {
-                self.end_run_record(RunStatus::Cancelled, None);
+                self.end_run_record(RunStatus::Cancelled, None).await;
             }
             Ok(_) => {
-                self.end_run_record(RunStatus::Completed, None);
+                self.end_run_record(RunStatus::Completed, None).await;
             }
             Err(e) => {
-                self.end_run_record(RunStatus::Failed, Some(e.to_string()));
+                self.end_run_record(RunStatus::Failed, Some(e.to_string()))
+                    .await;
             }
         }
         result
@@ -293,17 +308,19 @@ impl Agent {
         cancel: CancellationToken,
         lane: String,
     ) -> Result<String> {
-        self.begin_run_record_with_origin(input, RunOrigin::Gateway { lane });
+        self.begin_run_record_with_origin(input, RunOrigin::Gateway { lane })
+            .await;
         let result = self.run_prompt_stream_body(input, ui_tx, cancel).await;
         match &result {
             Ok(text) if text == "Cancelled" => {
-                self.end_run_record(RunStatus::Cancelled, None);
+                self.end_run_record(RunStatus::Cancelled, None).await;
             }
             Ok(_) => {
-                self.end_run_record(RunStatus::Completed, None);
+                self.end_run_record(RunStatus::Completed, None).await;
             }
             Err(e) => {
-                self.end_run_record(RunStatus::Failed, Some(e.to_string()));
+                self.end_run_record(RunStatus::Failed, Some(e.to_string()))
+                    .await;
             }
         }
         result
@@ -321,17 +338,19 @@ impl Agent {
         // YYC-179: open a run record for the streaming turn too. The
         // TUI is the primary streaming consumer, so the resulting
         // origin is `Tui` rather than `Cli`.
-        self.begin_run_record_with_origin(input, RunOrigin::Tui);
+        self.begin_run_record_with_origin(input, RunOrigin::Tui)
+            .await;
         let result = self.run_prompt_stream_body(input, ui_tx, cancel).await;
         match &result {
             Ok(text) if text == "Cancelled" => {
-                self.end_run_record(RunStatus::Cancelled, None);
+                self.end_run_record(RunStatus::Cancelled, None).await;
             }
             Ok(_) => {
-                self.end_run_record(RunStatus::Completed, None);
+                self.end_run_record(RunStatus::Completed, None).await;
             }
             Err(e) => {
-                self.end_run_record(RunStatus::Failed, Some(e.to_string()));
+                self.end_run_record(RunStatus::Failed, Some(e.to_string()))
+                    .await;
             }
         }
         result
@@ -811,7 +830,8 @@ impl Agent {
             model: self.provider_config.model.clone(),
             streaming: true,
             message_count: outgoing.len(),
-        });
+        })
+        .await;
         self.hooks
             .on_before_provider_request(outgoing, cancel.clone())
             .await;
@@ -853,7 +873,8 @@ impl Agent {
             self.record_run_event(RunEvent::ProviderError {
                 message: user_message.clone(),
                 retryable: false,
-            });
+            })
+            .await;
             let _ = turn_tx
                 .send(TurnEvent::Error {
                     message: user_message.clone(),
@@ -921,14 +942,16 @@ impl Agent {
                         completion_tokens: usage.completion_tokens as u32,
                         total_tokens: usage.total_tokens as u32,
                         finish_reason: r.finish_reason.clone(),
-                    });
+                    })
+                    .await;
                 } else {
                     self.record_run_event(RunEvent::ProviderResponse {
                         prompt_tokens: 0,
                         completion_tokens: 0,
                         total_tokens: 0,
                         finish_reason: r.finish_reason.clone(),
-                    });
+                    })
+                    .await;
                 }
                 Ok(r)
             }
@@ -938,7 +961,8 @@ impl Agent {
                 self.record_run_event(RunEvent::ProviderError {
                     message: msg.to_string(),
                     retryable: false,
-                });
+                })
+                .await;
                 let _ = turn_tx
                     .send(TurnEvent::Error {
                         message: msg.into(),
@@ -1192,21 +1216,25 @@ impl TurnRunnerMut<'_> {
                 // Record only summarized before_prompt injection metadata. The
                 // injected messages themselves may contain sensitive context and
                 // must remain transient rather than durable run-record payload.
-                self.agent.record_run_event(RunEvent::HookDecision {
-                    event: "before_prompt".into(),
-                    handler: "apply_before_prompt".into(),
-                    outcome: "inject_messages".into(),
-                    detail: Some(format!("added_messages={added_messages}")),
-                });
+                self.agent
+                    .record_run_event(RunEvent::HookDecision {
+                        event: "before_prompt".into(),
+                        handler: "apply_before_prompt".into(),
+                        outcome: "inject_messages".into(),
+                        detail: Some(format!("added_messages={added_messages}")),
+                    })
+                    .await;
             }
 
             let response = match mode {
                 TurnMode::Buffered => {
-                    self.agent.record_run_event(RunEvent::ProviderRequest {
-                        model: self.agent.provider_config.model.clone(),
-                        streaming: false,
-                        message_count: outgoing.len(),
-                    });
+                    self.agent
+                        .record_run_event(RunEvent::ProviderRequest {
+                            model: self.agent.provider_config.model.clone(),
+                            streaming: false,
+                            message_count: outgoing.len(),
+                        })
+                        .await;
                     self.agent
                         .hooks
                         .on_before_provider_request(&outgoing, cancel.clone())
@@ -1260,10 +1288,12 @@ impl TurnRunnerMut<'_> {
                                 "error",
                                 Some("provider_error"),
                             );
-                            self.agent.record_run_event(RunEvent::ProviderError {
-                                message: e.to_string(),
-                                retryable: false,
-                            });
+                            self.agent
+                                .record_run_event(RunEvent::ProviderError {
+                                    message: e.to_string(),
+                                    retryable: false,
+                                })
+                                .await;
                             return Err(e);
                         }
                     };
@@ -1272,19 +1302,23 @@ impl TurnRunnerMut<'_> {
                         .on_after_provider_response(&resp, cancel.clone())
                         .await;
                     if let Some(usage) = &resp.usage {
-                        self.agent.record_run_event(RunEvent::ProviderResponse {
-                            prompt_tokens: usage.prompt_tokens as u32,
-                            completion_tokens: usage.completion_tokens as u32,
-                            total_tokens: usage.total_tokens as u32,
-                            finish_reason: resp.finish_reason.clone(),
-                        });
+                        self.agent
+                            .record_run_event(RunEvent::ProviderResponse {
+                                prompt_tokens: usage.prompt_tokens as u32,
+                                completion_tokens: usage.completion_tokens as u32,
+                                total_tokens: usage.total_tokens as u32,
+                                finish_reason: resp.finish_reason.clone(),
+                            })
+                            .await;
                     } else {
-                        self.agent.record_run_event(RunEvent::ProviderResponse {
-                            prompt_tokens: 0,
-                            completion_tokens: 0,
-                            total_tokens: 0,
-                            finish_reason: resp.finish_reason.clone(),
-                        });
+                        self.agent
+                            .record_run_event(RunEvent::ProviderResponse {
+                                prompt_tokens: 0,
+                                completion_tokens: 0,
+                                total_tokens: 0,
+                                finish_reason: resp.finish_reason.clone(),
+                            })
+                            .await;
                     }
                     if let Some(text) = &resp.content {
                         // Buffered path doesn't naturally fan-out chunks;

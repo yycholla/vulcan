@@ -9,28 +9,29 @@ use crate::run_record::{RunId, RunStore, SqliteRunStore};
 
 pub async fn run(cmd: ReplaySubcommand) -> Result<()> {
     match cmd {
-        ReplaySubcommand::Inspect { id } => inspect(&id),
+        ReplaySubcommand::Inspect { id } => inspect(&id).await,
         ReplaySubcommand::Simulate { id } => simulate_run(&id).await,
     }
 }
 
-fn load_run(store: &SqliteRunStore, raw_id: &str) -> Result<crate::run_record::RunRecord> {
-    let id = resolve(store, raw_id)?;
+async fn load_run(store: &SqliteRunStore, raw_id: &str) -> Result<crate::run_record::RunRecord> {
+    let id = resolve(store, raw_id).await?;
     store
-        .get(id)?
+        .get(id)
+        .await?
         .ok_or_else(|| anyhow!("run record {id} not found"))
 }
 
-fn inspect(raw_id: &str) -> Result<()> {
+async fn inspect(raw_id: &str) -> Result<()> {
     let store = SqliteRunStore::try_new()?;
-    let rec = load_run(&store, raw_id)?;
+    let rec = load_run(&store, raw_id).await?;
     print!("{}", render_inspect(&rec));
     Ok(())
 }
 
 async fn simulate_run(raw_id: &str) -> Result<()> {
     let run_store = SqliteRunStore::try_new()?;
-    let rec = load_run(&run_store, raw_id)?;
+    let rec = load_run(&run_store, raw_id).await?;
     let artifact_store = SqliteArtifactStore::try_new()?;
     let artifacts = artifact_store.list_for_run(rec.id).await?;
     let report = simulate(&rec, &artifacts);
@@ -38,11 +39,11 @@ async fn simulate_run(raw_id: &str) -> Result<()> {
     Ok(())
 }
 
-fn resolve(store: &SqliteRunStore, raw: &str) -> Result<RunId> {
+async fn resolve(store: &SqliteRunStore, raw: &str) -> Result<RunId> {
     if let Ok(uuid) = uuid::Uuid::parse_str(raw) {
         return Ok(RunId::from_uuid(uuid));
     }
-    let recent = store.recent(500)?;
+    let recent = store.recent(500).await?;
     let matches: Vec<_> = recent
         .iter()
         .filter(|r| r.id.to_string().starts_with(raw))

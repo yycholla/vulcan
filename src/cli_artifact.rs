@@ -57,7 +57,7 @@ async fn list<S: ArtifactStore + ?Sized>(
     session_filter: Option<&str>,
 ) -> Result<()> {
     let items = if let Some(raw) = run_filter {
-        let run_id = resolve_run_id(raw)?;
+        let run_id = resolve_run_id(raw).await?;
         store.list_for_run(run_id).await?
     } else if let Some(s) = session_filter {
         store.list_for_session(s).await?
@@ -258,11 +258,11 @@ fn truncate(s: &str, max_chars: usize) -> String {
     out
 }
 
-fn resolve_run_id(raw_id: &str) -> Result<RunId> {
+async fn resolve_run_id(raw_id: &str) -> Result<RunId> {
     if let Ok(uuid) = Uuid::parse_str(raw_id) {
         return Ok(RunId::from_uuid(uuid));
     }
-    let runs = SqliteRunStore::try_new()?.recent(500)?;
+    let runs = SqliteRunStore::try_new()?.recent(500).await?;
     let matches: Vec<_> = runs
         .iter()
         .filter(|r| r.id.to_string().starts_with(raw_id))

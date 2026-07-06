@@ -69,7 +69,7 @@ async fn run_record_lifecycle_events_land_for_completed_turn() {
     let _ = agent.run_prompt("hello").await.unwrap();
 
     let store = agent.run_store();
-    let recent = store.recent(1).unwrap();
+    let recent = store.recent(1).await.unwrap();
     assert_eq!(recent.len(), 1);
     let record = &recent[0];
     assert_eq!(record.status, vulcan::run_record::RunStatus::Completed);
@@ -159,7 +159,7 @@ async fn run_record_gateway_origin_carries_lane_string() {
         .await
         .unwrap();
     let store = agent.run_store();
-    let recent = store.recent(1).unwrap();
+    let recent = store.recent(1).await.unwrap();
     let record = &recent[0];
     match &record.origin {
         vulcan::run_record::RunOrigin::Gateway { lane } => {
@@ -185,7 +185,7 @@ async fn run_record_captures_streaming_turn_with_tui_origin() {
         .unwrap();
 
     let store = agent.run_store();
-    let recent = store.recent(1).unwrap();
+    let recent = store.recent(1).await.unwrap();
     let record = &recent[0];
     assert_eq!(record.status, vulcan::run_record::RunStatus::Completed);
     assert!(matches!(record.origin, vulcan::run_record::RunOrigin::Tui));
@@ -221,7 +221,7 @@ async fn run_record_captures_tool_call_with_error_distinguishable_from_success()
     let _ = agent.run_prompt("read missing").await.unwrap();
 
     let store = agent.run_store();
-    let recent = store.recent(1).unwrap();
+    let recent = store.recent(1).await.unwrap();
     let record = &recent[0];
     let tool_events: Vec<(String, bool)> = record
         .events

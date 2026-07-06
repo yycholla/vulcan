@@ -61,7 +61,8 @@ impl Agent {
                     handler: "*replace_args*".into(),
                     outcome: "replace_args".into(),
                     detail: Some(name.to_string()),
-                });
+                })
+                .await;
                 (
                     serde_json::to_string(&new_args).unwrap_or_else(|_| raw_args.to_string()),
                     None,
@@ -80,7 +81,8 @@ impl Agent {
                 handler: "*block*".into(),
                 outcome: "block".into(),
                 detail: Some(reason.clone()),
-            });
+            })
+            .await;
             ToolResult::err(format!("Blocked: {reason}"))
         } else {
             match self
@@ -119,7 +121,8 @@ impl Agent {
                     handler: "*replace_result*".into(),
                     outcome: "replace_result".into(),
                     detail: Some(name.to_string()),
-                });
+                })
+                .await;
                 replaced
             }
             None => raw_result,
@@ -170,7 +173,8 @@ impl Agent {
             duration_ms,
             is_error: final_result.is_error,
             error,
-        });
+        })
+        .await;
 
         final_result
     }

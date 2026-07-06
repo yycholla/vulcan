@@ -163,7 +163,7 @@ async fn disallowed_tool_call_produces_structured_denial_in_run_record() {
     let _ = agent.run_prompt("write something").await.unwrap();
 
     let store = agent.run_store();
-    let recent = store.recent(1).unwrap();
+    let recent = store.recent(1).await.unwrap();
     let record = &recent[0];
     let tool_evs: Vec<(String, bool)> = record
         .events
@@ -198,7 +198,7 @@ async fn tool_errors_are_distinguishable_from_successes() {
     let _ = agent.run_prompt("try a missing path").await.unwrap();
 
     let store = agent.run_store();
-    let recent = store.recent(1).unwrap();
+    let recent = store.recent(1).await.unwrap();
     let record = &recent[0];
     let errs: Vec<bool> = record
         .events
@@ -243,7 +243,7 @@ async fn happy_turn_produces_no_provider_error_events() {
     let _ = agent.run_prompt("hi").await.unwrap();
 
     let store = agent.run_store();
-    let record = &store.recent(1).unwrap()[0];
+    let record = &store.recent(1).await.unwrap()[0];
     let provider_errors = record
         .events
         .iter()

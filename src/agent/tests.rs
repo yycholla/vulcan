@@ -321,6 +321,7 @@ async fn run_record_captures_before_prompt_injection_without_raw_payload() {
     let rec = agent
         .run_store()
         .recent(1)
+        .await
         .unwrap()
         .into_iter()
         .next()
@@ -956,7 +957,11 @@ async fn run_prompt_with_cancel_origin_stamps_subagent_run_record() {
         .await
         .unwrap();
 
-    let recent = agent.run_store().recent(10).expect("list recent runs");
+    let recent = agent
+        .run_store()
+        .recent(10)
+        .await
+        .expect("list recent runs");
     let subagent_run = recent
         .iter()
         .find(|r| matches!(r.origin, RunOrigin::Subagent { .. }))

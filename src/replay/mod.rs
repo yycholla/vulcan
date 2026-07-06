@@ -526,15 +526,15 @@ mod tests {
         assert!(err.contains("render_inspect"));
     }
 
-    #[test]
-    fn inspect_round_trips_through_run_store() {
+    #[tokio::test]
+    async fn inspect_round_trips_through_run_store() {
         // Ensures the fixture record actually round-trips through
         // the same path the live agent uses, so the inspect
         // renderer doesn't drift from real records.
         let store = InMemoryRunStore::default();
         let rec = fixture_record();
-        store.create(&rec).unwrap();
-        let got = store.get(rec.id).unwrap().unwrap();
+        store.create(&rec).await.unwrap();
+        let got = store.get(rec.id).await.unwrap().unwrap();
         let txt = render_inspect(&got);
         assert!(txt.contains(&rec.id.to_string()));
     }

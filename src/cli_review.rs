@@ -26,7 +26,7 @@ pub async fn run(cmd: ReviewSubcommand) -> Result<()> {
             review(config, ReviewKind::Diff, load_target(&target)?).await
         }
         ReviewSubcommand::Run { id } => {
-            let target = render_run_for_review(&id)?;
+            let target = render_run_for_review(&id).await?;
             review(config, ReviewKind::Run, target).await
         }
     }
@@ -66,11 +66,12 @@ fn load_target(spec: &str) -> Result<String> {
     std::fs::read_to_string(spec).with_context(|| format!("read review target {spec}"))
 }
 
-fn render_run_for_review(raw_id: &str) -> Result<String> {
+async fn render_run_for_review(raw_id: &str) -> Result<String> {
     let store = SqliteRunStore::try_new()?;
-    let id = resolve_run_id_for_review(&store, raw_id)?;
+    let id = resolve_run_id_for_review(&store, raw_id).await?;
     let rec = store
-        .get(id)?
+        .get(id)
+        .await?
         .ok_or_else(|| anyhow::anyhow!("run record {id} not found"))?;
     let mut out = String::new();
     out.push_str(&format!(
@@ -85,14 +86,14 @@ fn render_run_for_review(raw_id: &str) -> Result<String> {
     Ok(out)
 }
 
-fn resolve_run_id_for_review(
+async fn resolve_run_id_for_review(
     store: &SqliteRunStore,
     raw: &str,
 ) -> Result<crate::run_record::RunId> {
     if let Ok(uuid) = uuid::Uuid::parse_str(raw) {
         return Ok(crate::run_record::RunId::from_uuid(uuid));
     }
-    let recent = store.recent(500)?;
+    let recent = store.recent(500).await?;
     let matches: Vec<_> = recent
         .iter()
         .filter(|r| r.id.to_string().starts_with(raw))

@@ -15,20 +15,20 @@ use crate::run_record::{RunEvent, RunId, RunRecord, RunStatus, RunStore, SqliteR
 pub async fn run(cmd: Option<RunSubcommand>) -> Result<()> {
     let store = SqliteRunStore::try_new().context("open ~/.vulcan/run_records.db")?;
     match cmd {
-        None => interactive_select(&store),
-        Some(RunSubcommand::List { limit }) => list(&store, limit),
-        Some(RunSubcommand::Show { id }) => show(&store, &id),
+        None => interactive_select(&store).await,
+        Some(RunSubcommand::List { limit }) => list(&store, limit).await,
+        Some(RunSubcommand::Show { id }) => show(&store, &id).await,
     }
 }
 
-fn interactive_select(store: &SqliteRunStore) -> Result<()> {
+async fn interactive_select(store: &SqliteRunStore) -> Result<()> {
     if !std::io::stdin().is_terminal() {
         anyhow::bail!(
             "vulcan run (interactive) requires a terminal. Use `vulcan run list` to browse, or `vulcan run show <id>` to inspect a run."
         );
     }
 
-    let recent = store.recent(20)?;
+    let recent = store.recent(20).await?;
     if recent.is_empty() {
         println!("No run records yet.");
         return Ok(());
@@ -47,8 +47,8 @@ fn interactive_select(store: &SqliteRunStore) -> Result<()> {
     Ok(())
 }
 
-fn list<S: RunStore + ?Sized>(store: &S, limit: usize) -> Result<()> {
-    let recent = store.recent(limit)?;
+async fn list<S: RunStore + ?Sized>(store: &S, limit: usize) -> Result<()> {
+    let recent = store.recent(limit).await?;
     if recent.is_empty() {
         println!("No run records yet.");
         return Ok(());
@@ -57,10 +57,11 @@ fn list<S: RunStore + ?Sized>(store: &S, limit: usize) -> Result<()> {
     Ok(())
 }
 
-fn show<S: RunStore + ?Sized>(store: &S, raw_id: &str) -> Result<()> {
-    let id = resolve_run_id(store, raw_id)?;
+async fn show<S: RunStore + ?Sized>(store: &S, raw_id: &str) -> Result<()> {
+    let id = resolve_run_id(store, raw_id).await?;
     let rec = store
-        .get(id)?
+        .get(id)
+        .await?
         .ok_or_else(|| anyhow!("run record {id} not found"))?;
     print!("{}", render_run_show(&rec));
     Ok(())
@@ -140,11 +141,11 @@ fn render_run_show(rec: &RunRecord) -> String {
 /// scans recent runs (a few hundred at most) — fine for the size
 /// of this store. Generic over `RunStore` so unit tests can drive
 /// it with the in-memory backend.
-fn resolve_run_id<S: RunStore + ?Sized>(store: &S, raw_id: &str) -> Result<RunId> {
+async fn resolve_run_id<S: RunStore + ?Sized>(store: &S, raw_id: &str) -> Result<RunId> {
     if let Ok(uuid) = Uuid::parse_str(raw_id) {
         return Ok(RunId::from_uuid(uuid));
     }
-    let recent = store.recent(500)?;
+    let recent = store.recent(500).await?;
     let matches: Vec<_> = recent
         .iter()
         .filter(|r| r.id.to_string().starts_with(raw_id))
@@ -312,31 +313,31 @@ mod tests {
     use super::*;
     use crate::run_record::{InMemoryRunStore, PayloadFingerprint, RunOrigin, RunRecord};
 
-    #[test]
-    fn resolve_run_id_accepts_full_uuid() {
+    #[tokio::test]
+    async fn resolve_run_id_accepts_full_uuid() {
         let store = InMemoryRunStore::default();
         let rec = RunRecord::new(RunOrigin::Cli);
         let id = rec.id;
-        store.create(&rec).unwrap();
-        let resolved = resolve_run_id(&store, &id.to_string()).unwrap();
+        store.create(&rec).await.unwrap();
+        let resolved = resolve_run_id(&store, &id.to_string()).await.unwrap();
         assert_eq!(resolved, id);
     }
 
-    #[test]
-    fn resolve_run_id_accepts_prefix() {
+    #[tokio::test]
+    async fn resolve_run_id_accepts_prefix() {
         let store = InMemoryRunStore::default();
         let rec = RunRecord::new(RunOrigin::Cli);
         let id = rec.id;
-        store.create(&rec).unwrap();
+        store.create(&rec).await.unwrap();
         let prefix: String = id.to_string().chars().take(8).collect();
-        let resolved = resolve_run_id(&store, &prefix).unwrap();
+        let resolved = resolve_run_id(&store, &prefix).await.unwrap();
         assert_eq!(resolved, id);
     }
 
-    #[test]
-    fn resolve_run_id_errors_on_no_match() {
+    #[tokio::test]
+    async fn resolve_run_id_errors_on_no_match() {
         let store = InMemoryRunStore::default();
-        let err = resolve_run_id(&store, "abcd1234").unwrap_err();
+        let err = resolve_run_id(&store, "abcd1234").await.unwrap_err();
         assert!(err.to_string().contains("no run record matches"));
     }
 
