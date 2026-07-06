@@ -95,7 +95,7 @@ pub async fn process_one(
                 )
                 .await?;
             if let Some(store) = scheduler_store {
-                record_scheduler_completion(store, inbound_id)?;
+                record_scheduler_completion(store, inbound_id).await?;
             }
             return Ok(());
         }
@@ -130,7 +130,7 @@ pub async fn process_one(
                 )
                 .await?;
             if let Some(store) = scheduler_store {
-                record_scheduler_completion(store, inbound_id)?;
+                record_scheduler_completion(store, inbound_id).await?;
             }
             Ok(())
         }
@@ -138,7 +138,7 @@ pub async fn process_one(
             let err_str = e.to_string();
             inbound_queue.mark_failed(row.id, &err_str).await?;
             if let Some(store) = scheduler_store {
-                record_scheduler_failure(store, row.id, &e)?;
+                record_scheduler_failure(store, row.id, &e).await?;
             }
             Err(e)
         }
@@ -227,14 +227,18 @@ fn extract_text_chunk(frame: &StreamFrame) -> Option<String> {
         .map(|s| s.to_string())
 }
 
-fn record_scheduler_completion(store: &SchedulerStore, inbound_id: i64) -> anyhow::Result<()> {
+async fn record_scheduler_completion(
+    store: &SchedulerStore,
+    inbound_id: i64,
+) -> anyhow::Result<()> {
     let finished_at = chrono::Utc::now().timestamp();
     store
         .record_completed_by_inbound(inbound_id, finished_at)
+        .await
         .map_err(|e| anyhow::anyhow!("scheduler completion persistence: {e}"))
 }
 
-fn record_scheduler_failure(
+async fn record_scheduler_failure(
     store: &SchedulerStore,
     inbound_id: i64,
     error: &anyhow::Error,
@@ -243,6 +247,7 @@ fn record_scheduler_failure(
     let message = scheduler_failure_message(error);
     store
         .record_run_failed_by_inbound(inbound_id, finished_at, &message)
+        .await
         .map_err(|e| anyhow::anyhow!("scheduler failure persistence: {e}"))
 }
 
@@ -256,7 +261,7 @@ fn scheduler_failure_message(error: &anyhow::Error) -> String {
     text
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(feature = "turso-backend")))]
 mod tests {
     //! Worker integration tests are deferred until a daemon-driven test
     //! harness lands (next slice). Today the worker drives every prompt
@@ -550,7 +555,10 @@ mod tests {
             ))
             .await
             .unwrap();
-        store.record_enqueued(&job.id, 100, inbound_id).unwrap();
+        store
+            .record_enqueued(&job.id, 100, inbound_id)
+            .await
+            .unwrap();
 
         let row = inbound.claim_next().await.unwrap().expect("row");
         process_one(
@@ -567,7 +575,7 @@ mod tests {
         .await
         .unwrap();
 
-        let run = store.get("daily").unwrap().expect("scheduler row");
+        let run = store.get("daily").await.unwrap().expect("scheduler row");
         assert_eq!(run.last_status.as_deref(), Some("completed"));
         assert_eq!(run.completed_fires, 1);
         assert_eq!(run.active_fires, 0);
@@ -610,7 +618,10 @@ mod tests {
             ))
             .await
             .unwrap();
-        store.record_enqueued(&job.id, 100, inbound_id).unwrap();
+        store
+            .record_enqueued(&job.id, 100, inbound_id)
+            .await
+            .unwrap();
 
         let row = inbound.claim_next().await.unwrap().expect("row");
         let err = process_one(
@@ -628,7 +639,7 @@ mod tests {
         .expect_err("daemon failure should propagate");
         assert!(err.to_string().contains("provider offline"));
 
-        let run = store.get("nightly").unwrap().expect("scheduler row");
+        let run = store.get("nightly").await.unwrap().expect("scheduler row");
         assert_eq!(run.last_status.as_deref(), Some("failed"));
         assert_eq!(run.last_error.as_deref(), Some("provider offline"));
         assert_eq!(run.failed_fires, 1);

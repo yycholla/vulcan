@@ -812,7 +812,7 @@ impl TursoArtifactStore {
             "CREATE INDEX IF NOT EXISTS idx_artifacts_session_id ON artifacts(session_id)",
             "CREATE INDEX IF NOT EXISTS idx_artifacts_created_at ON artifacts(created_at DESC)",
         ] {
-            conn.execute(idx, ()).await?;
+            crate::db::execute_ddl(conn, idx).await?;
         }
         Ok(())
     }

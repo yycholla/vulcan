@@ -42,10 +42,10 @@ pub async fn handle(State(state): State<AppState>) -> Json<serde_json::Value> {
     let mut entries: Vec<JobStatus<'_>> = Vec::with_capacity(jobs.len());
     for job in jobs.iter() {
         let next_fire_at = next_fire_for(job);
-        let run = state
-            .scheduler_store
-            .as_ref()
-            .and_then(|store| store.get(&job.id).ok().flatten());
+        let run = match state.scheduler_store.as_ref() {
+            Some(store) => store.get(&job.id).await.ok().flatten(),
+            None => None,
+        };
         entries.push(JobStatus {
             id: &job.id,
             name: &job.name,
@@ -80,7 +80,7 @@ fn next_fire_for(job: &SchedulerJobConfig) -> Option<i64> {
     Some(upcoming.with_timezone(&Utc).timestamp())
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(feature = "turso-backend")))]
 mod tests {
     use std::sync::Arc;
 
@@ -199,8 +199,11 @@ mod tests {
     async fn get_scheduler_merges_run_history() {
         let db = fresh_db();
         let store = SchedulerStore::new(db.clone());
-        store.record_enqueued("daily", 1_700_000_000, 42).unwrap();
-        store.record_skipped("daily", 1_700_000_100).unwrap();
+        store
+            .record_enqueued("daily", 1_700_000_000, 42)
+            .await
+            .unwrap();
+        store.record_skipped("daily", 1_700_000_100).await.unwrap();
         let jobs = vec![job("daily", "0 8 * * * *")];
         let state = build_app_state(db, jobs, Some(store));
         let app = build_router(state);

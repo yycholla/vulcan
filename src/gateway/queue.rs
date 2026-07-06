@@ -1,10 +1,14 @@
+#[cfg(not(feature = "turso-backend"))]
 use anyhow::{Result, anyhow};
+#[cfg(not(feature = "turso-backend"))]
 use rusqlite::params;
 
+#[cfg(not(feature = "turso-backend"))]
 use crate::memory::DbPool;
 
 /// YYC-271: alias for the pooled connection type so the
 /// `db_blocking` helper signature is readable.
+#[cfg(not(feature = "turso-backend"))]
 type PooledConn = r2d2::PooledConnection<r2d2_sqlite::SqliteConnectionManager>;
 
 /// YYC-271: run a synchronous closure on the blocking pool with a
@@ -12,6 +16,7 @@ type PooledConn = r2d2::PooledConnection<r2d2_sqlite::SqliteConnectionManager>;
 /// (rusqlite + r2d2) — running them on the tokio worker thread
 /// blocks the async runtime under load. `spawn_blocking` parks the
 /// work on the blocking pool so async workers stay responsive.
+#[cfg(not(feature = "turso-backend"))]
 async fn db_blocking<F, T>(pool: DbPool, f: F) -> Result<T>
 where
     F: FnOnce(PooledConn) -> Result<T> + Send + 'static,
@@ -26,7 +31,9 @@ where
     .await
     .map_err(|e| anyhow!("DB blocking task panicked: {e}"))?
 }
-use crate::platform::{InboundMessage, OutboundAttachment, OutboundMessage};
+use crate::platform::OutboundAttachment;
+#[cfg(not(feature = "turso-backend"))]
+use crate::platform::{InboundMessage, OutboundMessage};
 
 /// Default per-row attempt cap before mark_failed routes a row to the
 /// dead-letter queue (YYC-137). Operators can override via
@@ -42,9 +49,12 @@ pub const DEFAULT_INBOUND_MAX_ATTEMPTS: u32 = 3;
 pub const DEFAULT_INBOUND_HEARTBEAT_STALE_SECS: i64 = 1800;
 
 pub struct InboundQueue {
-    conn: DbPool,
-    max_attempts: u32,
-    heartbeat_stale_secs: i64,
+    #[cfg(not(feature = "turso-backend"))]
+    pub(super) conn: DbPool,
+    #[cfg(feature = "turso-backend")]
+    pub(super) conn: turso::Connection,
+    pub(super) max_attempts: u32,
+    pub(super) heartbeat_stale_secs: i64,
 }
 
 #[derive(Debug, Clone)]
@@ -58,6 +68,7 @@ pub struct InboundRow {
     pub attempts: i64,
 }
 
+#[cfg(not(feature = "turso-backend"))]
 impl InboundQueue {
     pub fn new(conn: DbPool) -> Self {
         Self::with_policy(
@@ -242,8 +253,11 @@ impl InboundQueue {
 }
 
 pub struct OutboundQueue {
-    conn: DbPool,
-    max_attempts: u32,
+    #[cfg(not(feature = "turso-backend"))]
+    pub(super) conn: DbPool,
+    #[cfg(feature = "turso-backend")]
+    pub(super) conn: turso::Connection,
+    pub(super) max_attempts: u32,
 }
 
 #[derive(Debug, Clone)]
@@ -270,12 +284,13 @@ pub struct OutboundRow {
 }
 
 // Retry waits indexed by failures-so-far: 1st → 5s, 2nd → 30s, ... clamps at 7200s.
-fn outbound_backoff_secs(attempts: i64) -> i64 {
+pub(super) fn outbound_backoff_secs(attempts: i64) -> i64 {
     const SCHEDULE: &[i64] = &[5, 30, 300, 1800, 7200];
     let idx = (attempts - 1).clamp(0, (SCHEDULE.len() - 1) as i64) as usize;
     SCHEDULE[idx]
 }
 
+#[cfg(not(feature = "turso-backend"))]
 impl OutboundQueue {
     pub fn new(conn: DbPool, max_attempts: u32) -> Self {
         Self { conn, max_attempts }
@@ -448,7 +463,7 @@ impl OutboundQueue {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(feature = "turso-backend")))]
 mod tests {
     use super::*;
 

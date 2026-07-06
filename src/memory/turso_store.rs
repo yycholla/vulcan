@@ -49,7 +49,12 @@ impl SessionStore {
         let dir = crate::config::vulcan_home();
         std::fs::create_dir_all(&dir)
             .with_context(|| format!("create vulcan_home at {}", dir.display()))?;
-        Self::try_open_at(&dir.join("sessions.db")).await
+        // Distinct filename during the migration window: once Turso
+        // creates its FTS index in a file, rusqlite reads that schema
+        // as malformed ("near USING: syntax error") — the conversion is
+        // one-way. A separate file means switching cargo features never
+        // corrupts the rusqlite store. Cutover renames this back.
+        Self::try_open_at(&dir.join("sessions.turso.db")).await
     }
 
     pub async fn try_open_at(path: &std::path::Path) -> Result<Self> {
@@ -71,9 +76,7 @@ impl SessionStore {
 
     async fn initialize(conn: &turso::Connection) -> Result<()> {
         for stmt in SESSION_SCHEMA_TURSO {
-            conn.execute(stmt, ())
-                .await
-                .with_context(|| format!("init session schema: {}", &stmt[..40.min(stmt.len())]))?;
+            crate::db::execute_ddl(conn, stmt).await?;
         }
         Ok(())
     }

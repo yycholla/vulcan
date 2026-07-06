@@ -14,6 +14,7 @@ use crate::gateway::outbound::OutboundDispatcher;
 use crate::gateway::queue::{InboundQueue, InboundRow, OutboundQueue};
 use crate::gateway::registry::PlatformRegistry;
 use crate::gateway::server::{AppState, build_router};
+#[cfg(not(feature = "turso-backend"))]
 use crate::memory::DbPool;
 use anyhow::{Context, Result};
 use tokio::net::TcpListener;
@@ -28,11 +29,15 @@ pub mod lane_router;
 pub mod loopback;
 pub mod outbound;
 pub mod queue;
+#[cfg(feature = "turso-backend")]
+mod queue_turso;
 pub mod registry;
 pub mod render_registry;
 pub mod routes;
 pub mod scheduler;
 pub mod scheduler_store;
+#[cfg(feature = "turso-backend")]
+mod scheduler_store_turso;
 pub mod server;
 #[cfg(feature = "telegram")]
 pub mod telegram;
@@ -67,7 +72,23 @@ where
     // pre-bound listener and would otherwise skip the check.
     gateway.validate()?;
 
+    #[cfg(not(feature = "turso-backend"))]
     let db = crate::memory::open_gateway_pool()?;
+    // GH #704: one turso Database per file; each store gets its own
+    // Connection from it (a shared connection would serialize the
+    // worker/dispatcher/scheduler loops and risks the open-statement
+    // write-swallowing footgun documented in memory/turso_store.rs).
+    #[cfg(feature = "turso-backend")]
+    let db = {
+        // Distinct filename during the migration window (see
+        // memory/turso_store.rs try_new): rusqlite cannot read a file
+        // Turso has touched. Cutover renames this back.
+        let path = crate::config::vulcan_home().join("gateway.turso.db");
+        let database = crate::db::open_database(&path).await?;
+        let conn = crate::db::connect_database(&database).await?;
+        queue_turso::initialize_gateway_db(&conn).await?;
+        database
+    };
     let mut registry = PlatformRegistry::new();
     if gateway.loopback {
         registry.register("loopback", Arc::new(LoopbackPlatform::default()));
@@ -125,7 +146,8 @@ async fn run_on_listener_with_parts<S>(
     scheduler_config: crate::config::SchedulerConfig,
     listener: TcpListener,
     shutdown: S,
-    db: DbPool,
+    #[cfg(not(feature = "turso-backend"))] db: DbPool,
+    #[cfg(feature = "turso-backend")] db: turso::Database,
     registry: Arc<PlatformRegistry>,
     lane_router: Arc<DaemonLaneRouter>,
     daemon_client: Arc<GatewayDaemonClient>,
@@ -133,9 +155,18 @@ async fn run_on_listener_with_parts<S>(
 where
     S: Future<Output = ()> + Send + 'static,
 {
+    #[cfg(not(feature = "turso-backend"))]
     let inbound = Arc::new(InboundQueue::new(db.clone()));
+    #[cfg(feature = "turso-backend")]
+    let inbound = Arc::new(InboundQueue::new(crate::db::connect_database(&db).await?));
+    #[cfg(not(feature = "turso-backend"))]
     let outbound = Arc::new(OutboundQueue::new(
         db.clone(),
+        gateway.outbound_max_attempts,
+    ));
+    #[cfg(feature = "turso-backend")]
+    let outbound = Arc::new(OutboundQueue::new(
+        crate::db::connect_database(&db).await?,
         gateway.outbound_max_attempts,
     ));
 
@@ -192,11 +223,14 @@ where
     // store. Build it once and clone the cheap handle instead of
     // reconstructing it in three places.
     let scheduler_store = if !scheduler_config.jobs.is_empty() {
+        #[cfg(not(feature = "turso-backend"))]
         let store = scheduler_store::SchedulerStore::new(db.clone());
+        #[cfg(feature = "turso-backend")]
+        let store = scheduler_store::SchedulerStore::new(crate::db::connect_database(&db).await?);
         // A crash between enqueue and completion leaves a stale
         // active_fires count that would suppress OverlapPolicy::Skip
         // jobs forever; nothing is genuinely in-flight at startup.
-        let reset = store.reset_active_fires()?;
+        let reset = store.reset_active_fires().await?;
         if reset > 0 {
             tracing::info!(reset, "scheduler reset stale active fire counts");
         }
@@ -388,7 +422,7 @@ async fn shutdown_signal() {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(feature = "turso-backend")))]
 mod tests {
     use super::*;
     use tokio::sync::oneshot;

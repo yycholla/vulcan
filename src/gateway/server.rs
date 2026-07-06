@@ -111,7 +111,7 @@ async fn bearer_auth(
     Ok(next.run(req).await)
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(feature = "turso-backend")))]
 mod tests {
     use super::*;
     use std::sync::Arc;

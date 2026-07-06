@@ -49,7 +49,7 @@ pub async fn handle(
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(feature = "turso-backend")))]
 mod tests {
     use std::sync::Arc;
 

@@ -12,11 +12,15 @@
 //! sync DB ops via the gateway pool's `with_init` busy_timeout, so
 //! a contended writer doesn't pin the runtime thread.
 
+#[cfg(not(feature = "turso-backend"))]
 use std::sync::Arc;
 
+#[cfg(not(feature = "turso-backend"))]
 use anyhow::{Context, Result};
+#[cfg(not(feature = "turso-backend"))]
 use rusqlite::{OptionalExtension, params};
 
+#[cfg(not(feature = "turso-backend"))]
 use crate::memory::DbPool;
 
 /// Status code stamped on `scheduler_runs.last_status` for the
@@ -71,9 +75,13 @@ pub struct ScheduledRun {
 /// sections.
 #[derive(Clone)]
 pub struct SchedulerStore {
-    pool: Arc<DbPool>,
+    #[cfg(not(feature = "turso-backend"))]
+    pub(super) pool: Arc<DbPool>,
+    #[cfg(feature = "turso-backend")]
+    pub(super) conn: turso::Connection,
 }
 
+#[cfg(not(feature = "turso-backend"))]
 impl SchedulerStore {
     pub fn new(pool: DbPool) -> Self {
         Self {
@@ -88,7 +96,12 @@ impl SchedulerStore {
     /// Record an enqueued firing. Bumps `total_fires`, marks the job
     /// active, sets `last_status = 'enqueued'`, and stamps the row with
     /// the inbound queue id so observability can join the two tables.
-    pub fn record_enqueued(&self, job_id: &str, fired_at: i64, inbound_id: i64) -> Result<()> {
+    pub async fn record_enqueued(
+        &self,
+        job_id: &str,
+        fired_at: i64,
+        inbound_id: i64,
+    ) -> Result<()> {
         let conn = self.conn()?;
         conn.execute(
             "INSERT INTO scheduler_runs \
@@ -111,7 +124,7 @@ impl SchedulerStore {
     /// Record a firing that was skipped by overlap policy. Bumps
     /// `total_fires` + `skipped_fires` so reporting can show
     /// suppression rates without a separate query.
-    pub fn record_skipped(&self, job_id: &str, fired_at: i64) -> Result<()> {
+    pub async fn record_skipped(&self, job_id: &str, fired_at: i64) -> Result<()> {
         let conn = self.conn()?;
         conn.execute(
             "INSERT INTO scheduler_runs \
@@ -132,7 +145,12 @@ impl SchedulerStore {
 
     /// Record an enqueue failure. Carries the error message verbatim
     /// so operators can read what went wrong without trawling logs.
-    pub fn record_enqueue_failed(&self, job_id: &str, fired_at: i64, error: &str) -> Result<()> {
+    pub async fn record_enqueue_failed(
+        &self,
+        job_id: &str,
+        fired_at: i64,
+        error: &str,
+    ) -> Result<()> {
         let conn = self.conn()?;
         conn.execute(
             "INSERT INTO scheduler_runs \
@@ -158,7 +176,7 @@ impl SchedulerStore {
 
     /// Record a successful worker completion for a previously-enqueued
     /// firing. Clears the active marker and increments completed_fires.
-    pub fn record_completed(&self, job_id: &str, finished_at: i64) -> Result<()> {
+    pub async fn record_completed(&self, job_id: &str, finished_at: i64) -> Result<()> {
         self.finish_by_job_id(
             job_id,
             finished_at,
@@ -166,11 +184,16 @@ impl SchedulerStore {
             None,
             true,
         )
+        .await
     }
 
     /// Same as `record_completed`, but resolves the scheduler row by the
     /// inbound queue row id captured at enqueue time.
-    pub fn record_completed_by_inbound(&self, inbound_id: i64, finished_at: i64) -> Result<()> {
+    pub async fn record_completed_by_inbound(
+        &self,
+        inbound_id: i64,
+        finished_at: i64,
+    ) -> Result<()> {
         self.finish_by_inbound(
             inbound_id,
             finished_at,
@@ -178,11 +201,17 @@ impl SchedulerStore {
             None,
             true,
         )
+        .await
     }
 
     /// Record a worker/daemon failure after the firing was already
     /// enqueued. Clears the active marker and increments failed_fires.
-    pub fn record_run_failed(&self, job_id: &str, finished_at: i64, error: &str) -> Result<()> {
+    pub async fn record_run_failed(
+        &self,
+        job_id: &str,
+        finished_at: i64,
+        error: &str,
+    ) -> Result<()> {
         self.finish_by_job_id(
             job_id,
             finished_at,
@@ -190,11 +219,12 @@ impl SchedulerStore {
             Some(error),
             false,
         )
+        .await
     }
 
     /// Same as `record_run_failed`, but resolves the scheduler row by the
     /// inbound queue row id captured at enqueue time.
-    pub fn record_run_failed_by_inbound(
+    pub async fn record_run_failed_by_inbound(
         &self,
         inbound_id: i64,
         finished_at: i64,
@@ -207,6 +237,7 @@ impl SchedulerStore {
             Some(error),
             false,
         )
+        .await
     }
 
     /// Zero out `active_fires` across all jobs. Run at gateway startup:
@@ -214,7 +245,7 @@ impl SchedulerStore {
     /// stale active count that suppresses `OverlapPolicy::Skip` jobs
     /// forever. Startup is single-threaded, so nothing is genuinely
     /// in-flight when this runs.
-    pub fn reset_active_fires(&self) -> Result<usize> {
+    pub async fn reset_active_fires(&self) -> Result<usize> {
         let conn = self.conn()?;
         let n = conn.execute(
             "UPDATE scheduler_runs SET active_fires = 0 WHERE active_fires > 0",
@@ -225,7 +256,7 @@ impl SchedulerStore {
 
     /// Whether the job currently has any in-flight firings according to
     /// the persisted scheduler state.
-    pub fn has_active_runs(&self, job_id: &str) -> Result<bool> {
+    pub async fn has_active_runs(&self, job_id: &str) -> Result<bool> {
         let conn = self.conn()?;
         let active: Option<i64> = conn
             .query_row(
@@ -238,7 +269,7 @@ impl SchedulerStore {
         Ok(active.unwrap_or(0).max(0) > 0)
     }
 
-    fn finish_by_job_id(
+    async fn finish_by_job_id(
         &self,
         job_id: &str,
         finished_at: i64,
@@ -268,7 +299,7 @@ impl SchedulerStore {
         Ok(())
     }
 
-    fn finish_by_inbound(
+    async fn finish_by_inbound(
         &self,
         inbound_id: i64,
         finished_at: i64,
@@ -300,7 +331,7 @@ impl SchedulerStore {
 
     /// Read the persisted row for a job, if any. Returns `None`
     /// for a job that has never fired.
-    pub fn get(&self, job_id: &str) -> Result<Option<ScheduledRun>> {
+    pub async fn get(&self, job_id: &str) -> Result<Option<ScheduledRun>> {
         let conn = self.conn()?;
         let row = conn
             .query_row(
@@ -331,7 +362,7 @@ impl SchedulerStore {
 
     /// Snapshot every job's run history. Sorted by `job_id` so the
     /// admin endpoint output is stable.
-    pub fn list(&self) -> Result<Vec<ScheduledRun>> {
+    pub async fn list(&self) -> Result<Vec<ScheduledRun>> {
         let conn = self.conn()?;
         let mut stmt = conn.prepare(
             "SELECT job_id, last_fired_at, last_finished_at, last_status, last_error, last_inbound_id, \
@@ -360,7 +391,7 @@ impl SchedulerStore {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(feature = "turso-backend")))]
 mod tests {
     use super::*;
 
@@ -371,11 +402,11 @@ mod tests {
 
     // YYC-17 PR-3: enqueued firing inserts a fresh row and bumps
     // counters; reading it back round-trips the fields.
-    #[test]
-    fn record_enqueued_inserts_and_increments() {
+    #[tokio::test]
+    async fn record_enqueued_inserts_and_increments() {
         let s = store();
-        s.record_enqueued("daily", 100, 7).unwrap();
-        let row = s.get("daily").unwrap().expect("row");
+        s.record_enqueued("daily", 100, 7).await.unwrap();
+        let row = s.get("daily").await.unwrap().expect("row");
         assert_eq!(row.last_status.as_deref(), Some("enqueued"));
         assert_eq!(row.last_fired_at, Some(100));
         assert_eq!(row.last_inbound_id, Some(7));
@@ -383,19 +414,19 @@ mod tests {
         assert_eq!(row.skipped_fires, 0);
         assert_eq!(row.failed_fires, 0);
 
-        s.record_enqueued("daily", 200, 8).unwrap();
-        let row = s.get("daily").unwrap().unwrap();
+        s.record_enqueued("daily", 200, 8).await.unwrap();
+        let row = s.get("daily").await.unwrap().unwrap();
         assert_eq!(row.last_fired_at, Some(200));
         assert_eq!(row.total_fires, 2);
     }
 
     // YYC-17 PR-3: skipped firings increment skipped_fires + total.
-    #[test]
-    fn record_skipped_increments_skip_counter() {
+    #[tokio::test]
+    async fn record_skipped_increments_skip_counter() {
         let s = store();
-        s.record_skipped("hourly", 100).unwrap();
-        s.record_skipped("hourly", 200).unwrap();
-        let row = s.get("hourly").unwrap().unwrap();
+        s.record_skipped("hourly", 100).await.unwrap();
+        s.record_skipped("hourly", 200).await.unwrap();
+        let row = s.get("hourly").await.unwrap().unwrap();
         assert_eq!(row.last_status.as_deref(), Some("skipped"));
         assert_eq!(row.total_fires, 2);
         assert_eq!(row.skipped_fires, 2);
@@ -403,12 +434,13 @@ mod tests {
     }
 
     // YYC-17 PR-3: enqueue failures carry the error text.
-    #[test]
-    fn record_enqueue_failed_carries_error() {
+    #[tokio::test]
+    async fn record_enqueue_failed_carries_error() {
         let s = store();
         s.record_enqueue_failed("nightly", 100, "queue offline")
+            .await
             .unwrap();
-        let row = s.get("nightly").unwrap().unwrap();
+        let row = s.get("nightly").await.unwrap().unwrap();
         assert_eq!(row.last_status.as_deref(), Some("enqueue_failed"));
         assert_eq!(row.last_error.as_deref(), Some("queue offline"));
         assert_eq!(row.failed_fires, 1);
@@ -417,14 +449,14 @@ mod tests {
 
     // YYC-17 PR-4: a successful run transitions from enqueued to completed,
     // clears the active flag, and preserves the original inbound row id.
-    #[test]
-    fn record_completed_updates_status_and_active_count() {
+    #[tokio::test]
+    async fn record_completed_updates_status_and_active_count() {
         let s = store();
-        s.record_enqueued("daily", 100, 7).unwrap();
-        assert!(s.has_active_runs("daily").unwrap());
+        s.record_enqueued("daily", 100, 7).await.unwrap();
+        assert!(s.has_active_runs("daily").await.unwrap());
 
-        s.record_completed("daily", 150).unwrap();
-        let row = s.get("daily").unwrap().unwrap();
+        s.record_completed("daily", 150).await.unwrap();
+        let row = s.get("daily").await.unwrap().unwrap();
         assert_eq!(row.last_status.as_deref(), Some("completed"));
         assert_eq!(row.last_error, None);
         assert_eq!(row.last_inbound_id, Some(7));
@@ -432,18 +464,19 @@ mod tests {
         assert_eq!(row.completed_fires, 1);
         assert_eq!(row.active_fires, 0);
         assert_eq!(row.last_finished_at, Some(150));
-        assert!(!s.has_active_runs("daily").unwrap());
+        assert!(!s.has_active_runs("daily").await.unwrap());
     }
 
     // YYC-17 PR-4: a daemon/worker failure after enqueue stamps failed status,
     // increments the failure counter, and clears the active flag.
-    #[test]
-    fn record_run_failed_updates_status_and_error() {
+    #[tokio::test]
+    async fn record_run_failed_updates_status_and_error() {
         let s = store();
-        s.record_enqueued("nightly", 100, 9).unwrap();
+        s.record_enqueued("nightly", 100, 9).await.unwrap();
         s.record_run_failed("nightly", 155, "provider offline")
+            .await
             .unwrap();
-        let row = s.get("nightly").unwrap().unwrap();
+        let row = s.get("nightly").await.unwrap().unwrap();
         assert_eq!(row.last_status.as_deref(), Some("failed"));
         assert_eq!(row.last_error.as_deref(), Some("provider offline"));
         assert_eq!(row.failed_fires, 1);
@@ -453,21 +486,21 @@ mod tests {
     }
 
     // YYC-17 PR-3: list returns all rows sorted by job_id.
-    #[test]
-    fn list_returns_jobs_sorted_by_id() {
+    #[tokio::test]
+    async fn list_returns_jobs_sorted_by_id() {
         let s = store();
-        s.record_enqueued("zeta", 1, 1).unwrap();
-        s.record_enqueued("alpha", 2, 2).unwrap();
-        s.record_enqueued("middle", 3, 3).unwrap();
-        let rows = s.list().unwrap();
+        s.record_enqueued("zeta", 1, 1).await.unwrap();
+        s.record_enqueued("alpha", 2, 2).await.unwrap();
+        s.record_enqueued("middle", 3, 3).await.unwrap();
+        let rows = s.list().await.unwrap();
         let ids: Vec<&str> = rows.iter().map(|r| r.job_id.as_str()).collect();
         assert_eq!(ids, vec!["alpha", "middle", "zeta"]);
     }
 
     // YYC-17 PR-3: missing job returns None, not an error.
-    #[test]
-    fn get_returns_none_for_missing_job() {
+    #[tokio::test]
+    async fn get_returns_none_for_missing_job() {
         let s = store();
-        assert!(s.get("never-fired").unwrap().is_none());
+        assert!(s.get("never-fired").await.unwrap().is_none());
     }
 }

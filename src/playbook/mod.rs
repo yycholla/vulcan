@@ -435,10 +435,10 @@ impl TursoPlaybookStore {
             (),
         )
         .await?;
-        conn.execute(
+        crate::db::execute_ddl(
+            conn,
             "CREATE INDEX IF NOT EXISTS idx_playbook_workspace \
              ON playbook_entries(workspace, created_at ASC)",
-            (),
         )
         .await?;
         Ok(())

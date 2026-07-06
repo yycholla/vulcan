@@ -43,7 +43,7 @@ pub async fn handle(
     Ok((StatusCode::OK, Json(serde_json::json!({"status": "ok"}))))
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(feature = "turso-backend")))]
 mod tests {
     use std::sync::Arc;
 

@@ -124,10 +124,10 @@ impl EmbeddingIndex {
         #[cfg(feature = "turso-backend")]
         let conn = {
             let conn = crate::db::open(&db_path).await?;
-            conn.execute(SCHEMA, ()).await?;
-            conn.execute(
+            crate::db::execute_ddl(&conn, SCHEMA).await?;
+            crate::db::execute_ddl(
+                &conn,
                 "CREATE INDEX IF NOT EXISTS idx_chunks_file ON chunks(file)",
-                (),
             )
             .await?;
             conn

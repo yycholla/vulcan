@@ -168,7 +168,7 @@ impl Scheduler {
         // error also fires rather than wedging the job.
         if job.config.overlap_policy == OverlapPolicy::Skip
             && let Some(store) = &self.store
-            && store.has_active_runs(&job.config.id).unwrap_or(false)
+            && store.has_active_runs(&job.config.id).await.unwrap_or(false)
         {
             tracing::warn!(
                 target: "gateway::scheduler",
@@ -176,7 +176,7 @@ impl Scheduler {
                 job_name = %job.config.name,
                 "previous firing still active; skipping",
             );
-            if let Err(e) = store.record_skipped(&job.config.id, now) {
+            if let Err(e) = store.record_skipped(&job.config.id, now).await {
                 tracing::warn!(
                     target: "gateway::scheduler",
                     job_id = %job.config.id,
@@ -202,7 +202,7 @@ impl Scheduler {
                     "scheduler firing enqueued",
                 );
                 if let Some(store) = &self.store
-                    && let Err(e) = store.record_enqueued(&job.config.id, now, row_id)
+                    && let Err(e) = store.record_enqueued(&job.config.id, now, row_id).await
                 {
                     tracing::warn!(
                         target: "gateway::scheduler",
@@ -220,8 +220,9 @@ impl Scheduler {
                     "scheduler enqueue failed",
                 );
                 if let Some(store) = &self.store
-                    && let Err(store_err) =
-                        store.record_enqueue_failed(&job.config.id, now, &e.to_string())
+                    && let Err(store_err) = store
+                        .record_enqueue_failed(&job.config.id, now, &e.to_string())
+                        .await
                 {
                     tracing::warn!(
                         target: "gateway::scheduler",
@@ -250,7 +251,7 @@ pub fn build_inbound_message_for_job(job: &SchedulerJobConfig) -> InboundMessage
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(feature = "turso-backend")))]
 mod tests {
     use super::*;
     use crate::config::OverlapPolicy;
@@ -324,7 +325,7 @@ mod tests {
             Scheduler::from_config_with_store(&config, Arc::clone(&inbound), Some(store.clone()))
                 .expect("ok");
         scheduler.fire(0).await;
-        let row = store.get("fire-test").unwrap().expect("row");
+        let row = store.get("fire-test").await.unwrap().expect("row");
         assert_eq!(row.last_status.as_deref(), Some("enqueued"));
         assert_eq!(row.total_fires, 1);
         assert!(row.last_inbound_id.is_some());
@@ -351,15 +352,15 @@ mod tests {
         scheduler.fire(0).await;
         // Second fire while active must be suppressed.
         scheduler.fire(0).await;
-        let row = store.get("skip-test").unwrap().expect("row");
+        let row = store.get("skip-test").await.unwrap().expect("row");
         assert_eq!(row.last_status.as_deref(), Some("skipped"));
         assert_eq!(row.skipped_fires, 1);
         assert_eq!(row.total_fires, 2);
 
         // Completion clears the in-flight count; the next fire enqueues.
-        store.record_completed("skip-test", 1).unwrap();
+        store.record_completed("skip-test", 1).await.unwrap();
         scheduler.fire(0).await;
-        let row = store.get("skip-test").unwrap().expect("row");
+        let row = store.get("skip-test").await.unwrap().expect("row");
         assert_eq!(row.last_status.as_deref(), Some("enqueued"));
         assert_eq!(row.skipped_fires, 1);
         assert_eq!(row.total_fires, 3);

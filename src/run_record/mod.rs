@@ -576,9 +576,9 @@ impl TursoRunStore {
             (),
         )
         .await?;
-        conn.execute(
+        crate::db::execute_ddl(
+            conn,
             "CREATE INDEX IF NOT EXISTS idx_runs_started_at ON runs(started_at DESC)",
-            (),
         )
         .await?;
         conn.execute(
@@ -588,9 +588,9 @@ impl TursoRunStore {
             (),
         )
         .await?;
-        conn.execute(
+        crate::db::execute_ddl(
+            conn,
             "CREATE INDEX IF NOT EXISTS idx_run_events_run_id ON run_events(run_id, seq)",
-            (),
         )
         .await?;
         Ok(())

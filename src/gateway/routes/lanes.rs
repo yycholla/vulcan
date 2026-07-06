@@ -17,7 +17,7 @@ pub async fn handle(State(state): State<AppState>) -> Json<serde_json::Value> {
     Json(serde_json::json!({ "lanes": snapshot }))
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(feature = "turso-backend")))]
 mod tests {
     use std::sync::Arc;
 
