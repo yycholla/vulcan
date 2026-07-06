@@ -418,7 +418,9 @@ impl Agent {
                 config.embeddings.clone(),
                 active_provider.base_url.clone(),
                 api_key.clone().into(),
-            ) {
+            )
+            .await
+            {
                 Ok(index) => {
                     let arc = Arc::new(index);
                     tools.register(Arc::new(

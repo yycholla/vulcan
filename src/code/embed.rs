@@ -12,7 +12,9 @@
 use crate::code::{Language, ParserCache};
 use crate::config::EmbeddingsConfig;
 use anyhow::{Context, Result, anyhow};
+#[cfg(not(feature = "turso-backend"))]
 use parking_lot::Mutex;
+#[cfg(not(feature = "turso-backend"))]
 use rusqlite::{Connection, params};
 use serde::Serialize;
 use serde_json::json;
@@ -42,7 +44,14 @@ pub struct EmbeddingHit {
 }
 
 pub struct EmbeddingIndex {
+    // GH #704: the DB handle is the only backend-specific field. Under
+    // `turso-backend` it's an async turso::Connection; otherwise the
+    // rusqlite Mutex<Connection>. All DB access goes through the
+    // cfg-gated `db_*` helpers so reindex/search stay backend-agnostic.
+    #[cfg(not(feature = "turso-backend"))]
     conn: Mutex<Connection>,
+    #[cfg(feature = "turso-backend")]
+    conn: turso::Connection,
     workspace_root: PathBuf,
     parsers: Arc<ParserCache>,
     cfg: EmbeddingsConfig,
@@ -58,7 +67,7 @@ pub struct EmbeddingIndex {
 }
 
 impl EmbeddingIndex {
-    pub fn open(
+    pub async fn open(
         workspace_root: PathBuf,
         parsers: Arc<ParserCache>,
         cfg: EmbeddingsConfig,
@@ -73,13 +82,14 @@ impl EmbeddingIndex {
             fallback_api_key,
             globset::GlobSet::empty(),
         )
+        .await
     }
 
     /// YYC-216: open with an explicit knowledge-exclusion glob set.
     /// Files whose workspace-relative path matches any glob are
     /// skipped at reindex time. The plain `open` constructor is the
     /// no-exclusion convenience for tests + legacy callers.
-    pub fn open_with_excluder(
+    pub async fn open_with_excluder(
         workspace_root: PathBuf,
         parsers: Arc<ParserCache>,
         cfg: EmbeddingsConfig,
@@ -91,11 +101,7 @@ impl EmbeddingIndex {
         if let Some(parent) = db_path.parent() {
             std::fs::create_dir_all(parent).ok();
         }
-        let conn = Connection::open(&db_path)
-            .with_context(|| format!("open embeddings at {}", db_path.display()))?;
-        conn.execute_batch(
-            r#"
-            CREATE TABLE IF NOT EXISTS chunks (
+        const SCHEMA: &str = "CREATE TABLE IF NOT EXISTS chunks (
                 id          INTEGER PRIMARY KEY AUTOINCREMENT,
                 file        TEXT NOT NULL,
                 language    TEXT NOT NULL,
@@ -106,12 +112,28 @@ impl EmbeddingIndex {
                 text        TEXT NOT NULL,
                 embedding   BLOB NOT NULL,
                 dim         INTEGER NOT NULL
-            );
-            CREATE INDEX IF NOT EXISTS idx_chunks_file ON chunks(file);
-            "#,
-        )?;
+            )";
+        #[cfg(not(feature = "turso-backend"))]
+        let conn = {
+            let conn = Connection::open(&db_path)
+                .with_context(|| format!("open embeddings at {}", db_path.display()))?;
+            conn.execute_batch(SCHEMA)?;
+            conn.execute_batch("CREATE INDEX IF NOT EXISTS idx_chunks_file ON chunks(file);")?;
+            Mutex::new(conn)
+        };
+        #[cfg(feature = "turso-backend")]
+        let conn = {
+            let conn = crate::db::open(&db_path).await?;
+            conn.execute(SCHEMA, ()).await?;
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_chunks_file ON chunks(file)",
+                (),
+            )
+            .await?;
+            conn
+        };
         Ok(Self {
-            conn: Mutex::new(conn),
+            conn,
             workspace_root,
             parsers,
             cfg,
@@ -120,6 +142,111 @@ impl EmbeddingIndex {
             client: reqwest::Client::new(),
             excluder,
         })
+    }
+
+    /// GH #704: wipe all chunks (reindex is wipe + repopulate).
+    #[cfg(not(feature = "turso-backend"))]
+    async fn db_clear(&self) -> Result<()> {
+        self.conn.lock().execute("DELETE FROM chunks", [])?;
+        Ok(())
+    }
+
+    #[cfg(feature = "turso-backend")]
+    async fn db_clear(&self) -> Result<()> {
+        self.conn.execute("DELETE FROM chunks", ()).await?;
+        Ok(())
+    }
+
+    /// GH #704: insert one embedded chunk. `blob` is the little-endian
+    /// f32 vector; `dim` its length.
+    #[cfg(not(feature = "turso-backend"))]
+    #[allow(clippy::too_many_arguments)]
+    async fn db_insert_chunk(&self, chunk: &CodeChunk, blob: &[u8], dim: i64) -> Result<()> {
+        self.conn.lock().execute(
+            "INSERT INTO chunks (file, language, kind, name, start_line, end_line, text, embedding, dim) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            params![
+                chunk.file,
+                chunk.language,
+                chunk.kind,
+                chunk.name,
+                chunk.start_line as i64,
+                chunk.end_line as i64,
+                chunk.text,
+                blob,
+                dim,
+            ],
+        )?;
+        Ok(())
+    }
+
+    #[cfg(feature = "turso-backend")]
+    async fn db_insert_chunk(&self, chunk: &CodeChunk, blob: &[u8], dim: i64) -> Result<()> {
+        self.conn
+            .execute(
+                "INSERT INTO chunks (file, language, kind, name, start_line, end_line, text, embedding, dim) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                turso::params_from_iter([
+                    turso::Value::from(chunk.file.clone()),
+                    turso::Value::from(chunk.language.clone()),
+                    turso::Value::from(chunk.kind.clone()),
+                    turso::Value::from(chunk.name.clone()),
+                    turso::Value::from(chunk.start_line as i64),
+                    turso::Value::from(chunk.end_line as i64),
+                    turso::Value::from(chunk.text.clone()),
+                    turso::Value::from(blob.to_vec()),
+                    turso::Value::from(dim),
+                ]),
+            )
+            .await?;
+        Ok(())
+    }
+
+    /// GH #704: read every chunk's (file, kind, name, start, end,
+    /// embedding-blob) for brute-force cosine ranking.
+    #[cfg(not(feature = "turso-backend"))]
+    #[allow(clippy::type_complexity)]
+    async fn db_all_embeddings(&self) -> Result<Vec<(String, String, String, i64, i64, Vec<u8>)>> {
+        let conn = self.conn.lock();
+        let mut stmt =
+            conn.prepare("SELECT file, kind, name, start_line, end_line, embedding FROM chunks")?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, i64>(3)?,
+                    row.get::<_, i64>(4)?,
+                    row.get::<_, Vec<u8>>(5)?,
+                ))
+            })?
+            .collect::<Result<_, _>>()?;
+        Ok(rows)
+    }
+
+    #[cfg(feature = "turso-backend")]
+    #[allow(clippy::type_complexity)]
+    async fn db_all_embeddings(&self) -> Result<Vec<(String, String, String, i64, i64, Vec<u8>)>> {
+        let mut rows = self
+            .conn
+            .query(
+                "SELECT file, kind, name, start_line, end_line, embedding FROM chunks",
+                (),
+            )
+            .await?;
+        let mut out = Vec::new();
+        while let Some(row) = rows.next().await? {
+            out.push((
+                row.get(0)?,
+                row.get(1)?,
+                row.get(2)?,
+                row.get(3)?,
+                row.get(4)?,
+                row.get(5)?,
+            ));
+        }
+        Ok(out)
     }
 
     fn endpoint(&self) -> String {
@@ -231,10 +358,7 @@ impl EmbeddingIndex {
             return Ok((0, files));
         }
         // Wipe + repopulate. Incremental updates land as a follow-up.
-        {
-            let conn = self.conn.lock();
-            conn.execute("DELETE FROM chunks", [])?;
-        }
+        self.db_clear().await?;
 
         // Batch embed in groups of 64 to keep request bodies small and
         // share token budget across files.
@@ -249,24 +373,9 @@ impl EmbeddingIndex {
                     batch.len()
                 ));
             }
-            let conn = self.conn.lock();
             for (chunk, vec) in batch.iter().zip(vectors.into_iter()) {
                 let blob = vec_to_bytes(&vec);
-                conn.execute(
-                    "INSERT INTO chunks (file, language, kind, name, start_line, end_line, text, embedding, dim)
-                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                    params![
-                        chunk.file,
-                        chunk.language,
-                        chunk.kind,
-                        chunk.name,
-                        chunk.start_line as i64,
-                        chunk.end_line as i64,
-                        chunk.text,
-                        blob,
-                        vec.len() as i64,
-                    ],
-                )?;
+                self.db_insert_chunk(chunk, &blob, vec.len() as i64).await?;
                 total += 1;
             }
         }
@@ -283,22 +392,7 @@ impl EmbeddingIndex {
             .next()
             .ok_or_else(|| anyhow!("empty embedding response for query"))?;
 
-        let rows: Vec<(String, String, String, i64, i64, Vec<u8>)> = {
-            let conn = self.conn.lock();
-            let mut stmt = conn
-                .prepare("SELECT file, kind, name, start_line, end_line, embedding FROM chunks")?;
-            stmt.query_map([], |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, String>(2)?,
-                    row.get::<_, i64>(3)?,
-                    row.get::<_, i64>(4)?,
-                    row.get::<_, Vec<u8>>(5)?,
-                ))
-            })?
-            .collect::<Result<_, _>>()?
-        };
+        let rows = self.db_all_embeddings().await?;
 
         let mut scored: Vec<EmbeddingHit> = rows
             .into_iter()
