@@ -26,7 +26,12 @@ pub(in crate::memory) const BUSY_TIMEOUT: Duration = Duration::from_millis(5_000
 #[cfg(feature = "gateway")]
 pub type DbPool = r2d2::Pool<r2d2_sqlite::SqliteConnectionManager>;
 
-pub(in crate::memory) const SCHEMA: &str = r#"
+/// Session-store schema (`~/.vulcan/sessions.db`): sessions, messages,
+/// and the FTS5 index. GH #704 split the gateway queue/scheduler tables
+/// into their own `gateway.db` (see `GATEWAY_SCHEMA`) so the two stores
+/// no longer share a file — a prerequisite for porting either backend
+/// independently.
+pub(in crate::memory) const SESSION_SCHEMA: &str = r#"
 PRAGMA foreign_keys = ON;
 PRAGMA journal_mode = WAL;
 
@@ -72,6 +77,15 @@ CREATE TRIGGER IF NOT EXISTS messages_au AFTER UPDATE ON messages BEGIN
     INSERT INTO messages_fts(messages_fts, rowid, content) VALUES('delete', old.id, COALESCE(old.content, ''));
     INSERT INTO messages_fts(rowid, content) VALUES (new.id, COALESCE(new.content, ''));
 END;
+"#;
+
+/// Gateway schema (`~/.vulcan/gateway.db`, GH #704): durable inbound /
+/// outbound queues and scheduler runs. Split out of the session store's
+/// file so the two can port to Turso independently.
+#[cfg(feature = "gateway")]
+pub(in crate::memory) const GATEWAY_SCHEMA: &str = r#"
+PRAGMA foreign_keys = ON;
+PRAGMA journal_mode = WAL;
 
 CREATE TABLE IF NOT EXISTS inbound_queue (
   id INTEGER PRIMARY KEY,
@@ -151,15 +165,27 @@ pub(in crate::memory) fn apply_connection_pragmas(conn: &Connection) -> Result<(
     Ok(())
 }
 
+/// Initialize a session-store connection (`sessions.db`): session +
+/// message tables, FTS5 index, and additive-column migrations.
 pub(in crate::memory) fn initialize_conn(conn: &Connection) -> Result<()> {
     apply_connection_pragmas(conn)?;
-    conn.execute_batch(SCHEMA)?;
+    conn.execute_batch(SESSION_SCHEMA)?;
 
     // Idempotent migrations for DBs created before additive columns landed.
     let _ = conn.execute("ALTER TABLE messages ADD COLUMN reasoning_content TEXT", []);
     let _ = conn.execute("ALTER TABLE sessions ADD COLUMN parent_session_id TEXT", []);
     let _ = conn.execute("ALTER TABLE sessions ADD COLUMN lineage_label TEXT", []);
     let _ = conn.execute("ALTER TABLE sessions ADD COLUMN provider_profile TEXT", []);
+    Ok(())
+}
+
+/// Initialize a gateway connection (`gateway.db`, GH #704): durable
+/// queues + scheduler runs, with their additive-column migrations.
+#[cfg(feature = "gateway")]
+pub(in crate::memory) fn initialize_gateway_conn(conn: &Connection) -> Result<()> {
+    apply_connection_pragmas(conn)?;
+    conn.execute_batch(GATEWAY_SCHEMA)?;
+
     // YYC-137: dead-letter + heartbeat columns for inbound_queue.
     let _ = conn.execute("ALTER TABLE inbound_queue ADD COLUMN last_error TEXT", []);
     let _ = conn.execute(
@@ -203,7 +229,10 @@ pub(crate) fn open_gateway_pool() -> Result<DbPool> {
 fn open_gateway_pool_at(dir: &std::path::Path) -> Result<DbPool> {
     std::fs::create_dir_all(dir)
         .with_context(|| format!("create vulcan_home at {}", dir.display()))?;
-    let path = dir.join("sessions.db");
+    // GH #704: gateway queues/scheduler live in their own file, split
+    // from the session store's `sessions.db`, so the two can port to
+    // Turso independently without two drivers racing on one file.
+    let path = dir.join("gateway.db");
     // YYC-149: `with_init` runs on every fresh connection r2d2
     // instantiates so the busy_timeout (5s) is applied on every
     // checkout, not just the one that ran schema migrations.
@@ -221,7 +250,7 @@ fn open_gateway_pool_at(dir: &std::path::Path) -> Result<DbPool> {
     let conn = pool
         .get()
         .context("Failed to check out a connection for schema init")?;
-    initialize_conn(&conn).context("Failed to initialize session DB schema")?;
+    initialize_gateway_conn(&conn).context("Failed to initialize gateway DB schema")?;
     Ok(pool)
 }
 
@@ -246,7 +275,7 @@ pub(crate) fn in_memory_gateway_pool() -> Result<DbPool> {
         .build(manager)
         .context("build in-memory gateway DB pool")?;
     let conn = pool.get().context("get conn from in-memory gateway pool")?;
-    initialize_conn(&conn).context("initialize in-memory gateway DB schema")?;
+    initialize_gateway_conn(&conn).context("initialize in-memory gateway DB schema")?;
     Ok(pool)
 }
 

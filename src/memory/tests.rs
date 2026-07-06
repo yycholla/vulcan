@@ -297,26 +297,42 @@ fn assistant_with_tool_calls_round_trips() {
     }
 }
 
+// GH #704: the gateway queue tables were split out of the session
+// store's file into `gateway.db`. The session store must NOT create
+// them; the gateway pool must.
 #[test]
-fn queue_tables_created() {
+fn session_store_has_no_queue_tables_after_split() {
     let store = SessionStore::in_memory();
     let conn = store.conn.lock();
     let count: i64 = conn
         .query_row(
             "SELECT count(*) FROM sqlite_master \
-         WHERE type='table' AND name IN ('inbound_queue','outbound_queue')",
+         WHERE type='table' AND name IN ('inbound_queue','outbound_queue','scheduler_runs')",
             [],
             |r| r.get(0),
         )
         .expect("query");
-    assert_eq!(count, 2);
+    assert_eq!(
+        count, 0,
+        "queue tables must live in gateway.db, not sessions.db"
+    );
 }
 
+#[cfg(feature = "gateway")]
 #[test]
-fn queue_indexes_created() {
-    let store = SessionStore::in_memory();
-    let conn = store.conn.lock();
-    let count: i64 = conn
+fn gateway_pool_creates_queue_tables_and_indexes() {
+    let pool = crate::memory::in_memory_gateway_pool().expect("gateway pool");
+    let conn = pool.get().expect("checkout");
+    let tables: i64 = conn
+        .query_row(
+            "SELECT count(*) FROM sqlite_master \
+         WHERE type='table' AND name IN ('inbound_queue','outbound_queue','scheduler_runs')",
+            [],
+            |r| r.get(0),
+        )
+        .expect("query");
+    assert_eq!(tables, 3);
+    let indexes: i64 = conn
         .query_row(
             "SELECT count(*) FROM sqlite_master \
          WHERE type='index' AND name IN ('idx_inbound_lane','idx_inbound_state','idx_outbound_due')",
@@ -324,7 +340,7 @@ fn queue_indexes_created() {
             |r| r.get(0),
         )
         .expect("query");
-    assert_eq!(count, 3);
+    assert_eq!(indexes, 3);
 }
 
 #[test]
