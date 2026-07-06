@@ -23,10 +23,12 @@
 //! - Context-pack integration so playbook entries feed prompts.
 
 use anyhow::{Context, Result};
+use async_trait::async_trait;
 use parking_lot::Mutex;
 use rusqlite::{Connection, params};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
+use std::sync::Arc;
 use uuid::Uuid;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -120,11 +122,27 @@ impl PlaybookEntry {
 /// Storage backend abstraction so callers can use the in-memory
 /// impl in tests + SQLite in production without touching writer
 /// code paths.
+#[async_trait]
 pub trait PlaybookStore: Send + Sync {
-    fn upsert_entry(&self, workspace: &str, entry: &PlaybookEntry) -> Result<()>;
-    fn list_entries(&self, workspace: &str) -> Result<Vec<PlaybookEntry>>;
-    fn accept_entry(&self, workspace: &str, entry_id: Uuid) -> Result<bool>;
-    fn remove_entry(&self, workspace: &str, entry_id: Uuid) -> Result<bool>;
+    async fn upsert_entry(&self, workspace: &str, entry: &PlaybookEntry) -> Result<()>;
+    async fn list_entries(&self, workspace: &str) -> Result<Vec<PlaybookEntry>>;
+    async fn accept_entry(&self, workspace: &str, entry_id: Uuid) -> Result<bool>;
+    async fn remove_entry(&self, workspace: &str, entry_id: Uuid) -> Result<bool>;
+}
+
+/// Open the default playbook store for production use. Selects the
+/// backend at compile time: Turso under `turso-backend` (GH #704),
+/// else the rusqlite `SqlitePlaybookStore`. Returned as a trait object
+/// so callers are backend-agnostic.
+pub async fn open_default_store() -> Result<Arc<dyn PlaybookStore>> {
+    #[cfg(feature = "turso-backend")]
+    {
+        Ok(Arc::new(TursoPlaybookStore::try_new().await?))
+    }
+    #[cfg(not(feature = "turso-backend"))]
+    {
+        Ok(Arc::new(SqlitePlaybookStore::try_new()?))
+    }
 }
 
 /// YYC-223: render the *accepted* entries for a workspace as a
@@ -133,11 +151,11 @@ pub trait PlaybookStore: Send + Sync {
 /// agent suggestion must never silently flow back into a prompt.
 /// Returns `None` when no accepted entries exist so callers can
 /// skip injection without rendering an empty header.
-pub fn render_accepted_entries(
+pub async fn render_accepted_entries(
     store: &dyn PlaybookStore,
     workspace: &str,
 ) -> Result<Option<String>> {
-    let entries = store.list_entries(workspace)?;
+    let entries = store.list_entries(workspace).await?;
     let accepted: Vec<PlaybookEntry> = entries
         .into_iter()
         .filter(|e| e.status == EntryStatus::Accepted)
@@ -188,8 +206,9 @@ impl InMemoryPlaybookStore {
     }
 }
 
+#[async_trait]
 impl PlaybookStore for InMemoryPlaybookStore {
-    fn upsert_entry(&self, workspace: &str, entry: &PlaybookEntry) -> Result<()> {
+    async fn upsert_entry(&self, workspace: &str, entry: &PlaybookEntry) -> Result<()> {
         let mut guard = self.inner.lock();
         if let Some(slot) = guard
             .iter_mut()
@@ -202,7 +221,7 @@ impl PlaybookStore for InMemoryPlaybookStore {
         Ok(())
     }
 
-    fn list_entries(&self, workspace: &str) -> Result<Vec<PlaybookEntry>> {
+    async fn list_entries(&self, workspace: &str) -> Result<Vec<PlaybookEntry>> {
         Ok(self
             .inner
             .lock()
@@ -212,7 +231,7 @@ impl PlaybookStore for InMemoryPlaybookStore {
             .collect())
     }
 
-    fn accept_entry(&self, workspace: &str, entry_id: Uuid) -> Result<bool> {
+    async fn accept_entry(&self, workspace: &str, entry_id: Uuid) -> Result<bool> {
         let mut guard = self.inner.lock();
         for (w, e) in guard.iter_mut() {
             if w == workspace && e.id == entry_id {
@@ -223,7 +242,7 @@ impl PlaybookStore for InMemoryPlaybookStore {
         Ok(false)
     }
 
-    fn remove_entry(&self, workspace: &str, entry_id: Uuid) -> Result<bool> {
+    async fn remove_entry(&self, workspace: &str, entry_id: Uuid) -> Result<bool> {
         let mut guard = self.inner.lock();
         let before = guard.len();
         guard.retain(|(w, e)| !(w == workspace && e.id == entry_id));
@@ -282,8 +301,9 @@ impl SqlitePlaybookStore {
     }
 }
 
+#[async_trait]
 impl PlaybookStore for SqlitePlaybookStore {
-    fn upsert_entry(&self, workspace: &str, entry: &PlaybookEntry) -> Result<()> {
+    async fn upsert_entry(&self, workspace: &str, entry: &PlaybookEntry) -> Result<()> {
         let conn = self.conn.lock();
         conn.execute(
             "INSERT INTO playbook_entries (id, workspace, section, body, source, status, created_at)
@@ -311,7 +331,7 @@ impl PlaybookStore for SqlitePlaybookStore {
         Ok(())
     }
 
-    fn list_entries(&self, workspace: &str) -> Result<Vec<PlaybookEntry>> {
+    async fn list_entries(&self, workspace: &str) -> Result<Vec<PlaybookEntry>> {
         let conn = self.conn.lock();
         let mut stmt = conn.prepare(
             "SELECT id, section, body, source, status, created_at
@@ -355,7 +375,7 @@ impl PlaybookStore for SqlitePlaybookStore {
         Ok(rows)
     }
 
-    fn accept_entry(&self, workspace: &str, entry_id: Uuid) -> Result<bool> {
+    async fn accept_entry(&self, workspace: &str, entry_id: Uuid) -> Result<bool> {
         let conn = self.conn.lock();
         let n = conn.execute(
             "UPDATE playbook_entries SET status = 'accepted' WHERE workspace = ?1 AND id = ?2",
@@ -364,7 +384,7 @@ impl PlaybookStore for SqlitePlaybookStore {
         Ok(n > 0)
     }
 
-    fn remove_entry(&self, workspace: &str, entry_id: Uuid) -> Result<bool> {
+    async fn remove_entry(&self, workspace: &str, entry_id: Uuid) -> Result<bool> {
         let conn = self.conn.lock();
         let n = conn.execute(
             "DELETE FROM playbook_entries WHERE workspace = ?1 AND id = ?2",
@@ -374,12 +394,151 @@ impl PlaybookStore for SqlitePlaybookStore {
     }
 }
 
+/// Turso-backed store at `~/.vulcan/playbooks.db` (GH #704). Async;
+/// holds a bare `turso::Connection` (internally sync-safe) — no
+/// `Mutex<Connection>`, no r2d2, no `spawn_blocking`.
+#[cfg(feature = "turso-backend")]
+pub struct TursoPlaybookStore {
+    conn: turso::Connection,
+}
+
+#[cfg(feature = "turso-backend")]
+impl TursoPlaybookStore {
+    pub async fn try_new() -> Result<Self> {
+        let path = crate::config::vulcan_home().join("playbooks.db");
+        Self::try_open_at(&path).await
+    }
+
+    pub async fn try_open_at(path: &Path) -> Result<Self> {
+        let conn = crate::db::open(path).await?;
+        Self::initialize(&conn).await?;
+        Ok(Self { conn })
+    }
+
+    pub async fn try_open_in_memory() -> Result<Self> {
+        let conn = crate::db::open_in_memory().await?;
+        Self::initialize(&conn).await?;
+        Ok(Self { conn })
+    }
+
+    async fn initialize(conn: &turso::Connection) -> Result<()> {
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS playbook_entries (
+                id          TEXT PRIMARY KEY,
+                workspace   TEXT NOT NULL,
+                section     TEXT NOT NULL,
+                body        TEXT NOT NULL,
+                source      TEXT NOT NULL,
+                status      TEXT NOT NULL,
+                created_at  TEXT NOT NULL
+            )",
+            (),
+        )
+        .await?;
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_playbook_workspace \
+             ON playbook_entries(workspace, created_at ASC)",
+            (),
+        )
+        .await?;
+        Ok(())
+    }
+}
+
+#[cfg(feature = "turso-backend")]
+#[async_trait]
+impl PlaybookStore for TursoPlaybookStore {
+    async fn upsert_entry(&self, workspace: &str, entry: &PlaybookEntry) -> Result<()> {
+        self.conn
+            .execute(
+                "INSERT INTO playbook_entries \
+                    (id, workspace, section, body, source, status, created_at) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7) \
+                 ON CONFLICT(id) DO UPDATE SET \
+                    workspace = excluded.workspace, section = excluded.section, \
+                    body = excluded.body, source = excluded.source, \
+                    status = excluded.status, created_at = excluded.created_at",
+                (
+                    entry.id.to_string(),
+                    workspace.to_string(),
+                    entry.section.as_str().to_string(),
+                    entry.body.clone(),
+                    entry.source.clone(),
+                    match entry.status {
+                        EntryStatus::Proposed => "proposed".to_string(),
+                        EntryStatus::Accepted => "accepted".to_string(),
+                    },
+                    entry.created_at.to_rfc3339(),
+                ),
+            )
+            .await?;
+        Ok(())
+    }
+
+    async fn list_entries(&self, workspace: &str) -> Result<Vec<PlaybookEntry>> {
+        let mut rows = self
+            .conn
+            .query(
+                "SELECT id, section, body, source, status, created_at \
+                 FROM playbook_entries WHERE workspace = ?1 ORDER BY created_at ASC",
+                (workspace.to_string(),),
+            )
+            .await?;
+        let mut out = Vec::new();
+        while let Some(row) = rows.next().await? {
+            let id: String = row.get(0)?;
+            let section: String = row.get(1)?;
+            let body: String = row.get(2)?;
+            let source: String = row.get(3)?;
+            let status: String = row.get(4)?;
+            let created_at: String = row.get(5)?;
+            out.push(PlaybookEntry {
+                id: Uuid::parse_str(&id)?,
+                section: PlaybookSection::parse(&section)
+                    .ok_or_else(|| anyhow::anyhow!("unknown section `{section}`"))?,
+                body,
+                source,
+                status: match status.as_str() {
+                    "accepted" => EntryStatus::Accepted,
+                    _ => EntryStatus::Proposed,
+                },
+                created_at: chrono::DateTime::parse_from_rfc3339(&created_at)?
+                    .with_timezone(&chrono::Utc),
+            });
+        }
+        Ok(out)
+    }
+
+    async fn accept_entry(&self, workspace: &str, entry_id: Uuid) -> Result<bool> {
+        let n = self
+            .conn
+            .execute(
+                "UPDATE playbook_entries SET status = 'accepted' \
+                 WHERE workspace = ?1 AND id = ?2",
+                (workspace.to_string(), entry_id.to_string()),
+            )
+            .await?;
+        Ok(n > 0)
+    }
+
+    async fn remove_entry(&self, workspace: &str, entry_id: Uuid) -> Result<bool> {
+        let n = self
+            .conn
+            .execute(
+                "DELETE FROM playbook_entries WHERE workspace = ?1 AND id = ?2",
+                (workspace.to_string(), entry_id.to_string()),
+            )
+            .await?;
+        Ok(n > 0)
+    }
+}
+
 #[cfg(test)]
 mod yyc223_render_tests {
     use super::*;
 
-    #[test]
-    fn render_accepted_entries_excludes_proposed_entries() {
+    #[tokio::test]
+    async fn render_accepted_entries_excludes_proposed_entries() {
         // Gating contract: a Proposed entry must never appear in
         // the rendered prompt block. The user's `accept` action is
         // the security boundary.
@@ -395,10 +554,11 @@ mod yyc223_render_tests {
             "DELETE FROM secrets WHERE 1=1 — do not actually run",
             "agent-suggestion",
         );
-        store.upsert_entry("ws", &accepted).unwrap();
-        store.upsert_entry("ws", &proposed).unwrap();
+        store.upsert_entry("ws", &accepted).await.unwrap();
+        store.upsert_entry("ws", &proposed).await.unwrap();
 
         let rendered = render_accepted_entries(&store, "ws")
+            .await
             .unwrap()
             .expect("at least one accepted entry");
         assert!(rendered.contains("oo cargo test"));
@@ -408,21 +568,26 @@ mod yyc223_render_tests {
         );
     }
 
-    #[test]
-    fn render_accepted_entries_returns_none_when_empty() {
+    #[tokio::test]
+    async fn render_accepted_entries_returns_none_when_empty() {
         let store = InMemoryPlaybookStore::new();
         let proposed = PlaybookEntry::proposed(
             PlaybookSection::Pitfalls,
             "still-unreviewed",
             "agent-suggestion",
         );
-        store.upsert_entry("ws", &proposed).unwrap();
+        store.upsert_entry("ws", &proposed).await.unwrap();
         // Only proposed entries → no rendered output.
-        assert!(render_accepted_entries(&store, "ws").unwrap().is_none());
+        assert!(
+            render_accepted_entries(&store, "ws")
+                .await
+                .unwrap()
+                .is_none()
+        );
     }
 
-    #[test]
-    fn render_accepted_entries_groups_by_section() {
+    #[tokio::test]
+    async fn render_accepted_entries_groups_by_section() {
         let store = InMemoryPlaybookStore::new();
         for (section, body) in [
             (PlaybookSection::Setup, "install deps"),
@@ -431,9 +596,12 @@ mod yyc223_render_tests {
         ] {
             let mut e = PlaybookEntry::proposed(section, body, "manual");
             e.accept();
-            store.upsert_entry("ws", &e).unwrap();
+            store.upsert_entry("ws", &e).await.unwrap();
         }
-        let rendered = render_accepted_entries(&store, "ws").unwrap().unwrap();
+        let rendered = render_accepted_entries(&store, "ws")
+            .await
+            .unwrap()
+            .unwrap();
         // Each section header present and in the canonical order.
         let setup_at = rendered.find("### setup").expect("has setup");
         let build_at = rendered.find("### build").expect("has build");
@@ -442,16 +610,19 @@ mod yyc223_render_tests {
         assert!(build_at < wf_at);
     }
 
-    #[test]
-    fn render_accepted_entries_filters_to_specified_workspace() {
+    #[tokio::test]
+    async fn render_accepted_entries_filters_to_specified_workspace() {
         let store = InMemoryPlaybookStore::new();
         let mut a = PlaybookEntry::proposed(PlaybookSection::Setup, "ws-a entry", "manual");
         a.accept();
         let mut b = PlaybookEntry::proposed(PlaybookSection::Setup, "ws-b entry", "manual");
         b.accept();
-        store.upsert_entry("ws-a", &a).unwrap();
-        store.upsert_entry("ws-b", &b).unwrap();
-        let rendered = render_accepted_entries(&store, "ws-a").unwrap().unwrap();
+        store.upsert_entry("ws-a", &a).await.unwrap();
+        store.upsert_entry("ws-b", &b).await.unwrap();
+        let rendered = render_accepted_entries(&store, "ws-a")
+            .await
+            .unwrap()
+            .unwrap();
         assert!(rendered.contains("ws-a entry"));
         assert!(!rendered.contains("ws-b entry"));
     }
@@ -473,43 +644,43 @@ mod tests {
         assert_eq!(e.status, EntryStatus::Accepted);
     }
 
-    #[test]
-    fn in_memory_store_isolates_workspaces() {
+    #[tokio::test]
+    async fn in_memory_store_isolates_workspaces() {
         let store = InMemoryPlaybookStore::new();
         let a = entry(PlaybookSection::Build, "cargo test", "AGENTS.md");
         let b = entry(PlaybookSection::Build, "make test", "README.md");
-        store.upsert_entry("ws-a", &a).unwrap();
-        store.upsert_entry("ws-b", &b).unwrap();
-        let listed_a = store.list_entries("ws-a").unwrap();
+        store.upsert_entry("ws-a", &a).await.unwrap();
+        store.upsert_entry("ws-b", &b).await.unwrap();
+        let listed_a = store.list_entries("ws-a").await.unwrap();
         assert_eq!(listed_a.len(), 1);
         assert_eq!(listed_a[0].body, "cargo test");
-        let listed_b = store.list_entries("ws-b").unwrap();
+        let listed_b = store.list_entries("ws-b").await.unwrap();
         assert_eq!(listed_b.len(), 1);
         assert_eq!(listed_b[0].body, "make test");
     }
 
-    #[test]
-    fn accept_entry_round_trips_through_sqlite() {
+    #[tokio::test]
+    async fn accept_entry_round_trips_through_sqlite() {
         let store = SqlitePlaybookStore::try_open_in_memory().unwrap();
         let mut e = entry(PlaybookSection::Verification, "cargo clippy", "AGENTS.md");
         let id = e.id;
-        store.upsert_entry("ws", &e).unwrap();
-        assert!(store.accept_entry("ws", id).unwrap());
-        let listed = store.list_entries("ws").unwrap();
+        store.upsert_entry("ws", &e).await.unwrap();
+        assert!(store.accept_entry("ws", id).await.unwrap());
+        let listed = store.list_entries("ws").await.unwrap();
         assert_eq!(listed.len(), 1);
         assert_eq!(listed[0].status, EntryStatus::Accepted);
         // Idempotency: a second accept call returns true (still
         // exists) without error.
         e.accept();
-        store.upsert_entry("ws", &e).unwrap();
+        store.upsert_entry("ws", &e).await.unwrap();
         assert_eq!(
-            store.list_entries("ws").unwrap()[0].status,
+            store.list_entries("ws").await.unwrap()[0].status,
             EntryStatus::Accepted
         );
     }
 
-    #[test]
-    fn sqlite_store_lists_in_creation_order() {
+    #[tokio::test]
+    async fn sqlite_store_lists_in_creation_order() {
         let store = SqlitePlaybookStore::try_open_in_memory().unwrap();
         let e1 = entry(PlaybookSection::Setup, "cargo build", "first");
         std::thread::sleep(std::time::Duration::from_millis(2));
@@ -518,18 +689,18 @@ mod tests {
             "PTY tests need /usr/bin/bash",
             "second",
         );
-        store.upsert_entry("ws", &e1).unwrap();
-        store.upsert_entry("ws", &e2).unwrap();
-        let listed = store.list_entries("ws").unwrap();
+        store.upsert_entry("ws", &e1).await.unwrap();
+        store.upsert_entry("ws", &e2).await.unwrap();
+        let listed = store.list_entries("ws").await.unwrap();
         assert_eq!(listed.len(), 2);
         assert_eq!(listed[0].source, "first");
         assert_eq!(listed[1].source, "second");
     }
 
-    #[test]
-    fn remove_returns_false_when_entry_missing() {
+    #[tokio::test]
+    async fn remove_returns_false_when_entry_missing() {
         let store = SqlitePlaybookStore::try_open_in_memory().unwrap();
-        let removed = store.remove_entry("ws", Uuid::new_v4()).unwrap();
+        let removed = store.remove_entry("ws", Uuid::new_v4()).await.unwrap();
         assert!(!removed);
     }
 
@@ -549,5 +720,39 @@ mod tests {
             assert_eq!(PlaybookSection::parse(s.as_str()).unwrap(), s);
         }
         assert!(PlaybookSection::parse("nope").is_none());
+    }
+}
+
+// GH #704: the Turso backend must satisfy the same PlaybookStore
+// contract as rusqlite — propose -> accept -> list -> remove, with
+// proposed entries excluded from the rendered prompt block.
+#[cfg(all(test, feature = "turso-backend"))]
+mod turso_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn turso_store_round_trips_lifecycle_and_render() {
+        let store = TursoPlaybookStore::try_open_in_memory().await.unwrap();
+        let ws = "/tmp/ws";
+        let mut accepted = PlaybookEntry::proposed(PlaybookSection::Build, "cargo build", "manual");
+        let id = accepted.id;
+        accepted.accept();
+        let proposed =
+            PlaybookEntry::proposed(PlaybookSection::Pitfalls, "unreviewed danger", "agent");
+        store.upsert_entry(ws, &accepted).await.unwrap();
+        store.upsert_entry(ws, &proposed).await.unwrap();
+
+        let listed = store.list_entries(ws).await.unwrap();
+        assert_eq!(listed.len(), 2);
+
+        let rendered = render_accepted_entries(&store, ws)
+            .await
+            .unwrap()
+            .expect("one accepted entry");
+        assert!(rendered.contains("cargo build"));
+        assert!(!rendered.contains("unreviewed danger"));
+
+        assert!(store.remove_entry(ws, id).await.unwrap());
+        assert_eq!(store.list_entries(ws).await.unwrap().len(), 1);
     }
 }

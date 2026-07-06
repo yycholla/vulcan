@@ -48,7 +48,7 @@ impl HookHandler for PlaybookHook {
         _messages: &[Message],
         _cancel: CancellationToken,
     ) -> Result<HookOutcome> {
-        let body = match render_accepted_entries(self.store.as_ref(), &self.workspace) {
+        let body = match render_accepted_entries(self.store.as_ref(), &self.workspace).await {
             Ok(Some(body)) => body,
             Ok(None) => return Ok(HookOutcome::Continue),
             Err(e) => {
@@ -87,6 +87,7 @@ mod tests {
         // Proposed-only workspace → no injection.
         store
             .upsert_entry(ws, &entry(EntryStatus::Proposed))
+            .await
             .unwrap();
         let hook = PlaybookHook::new(store.clone(), ws.to_string());
         let outcome = hook
@@ -98,6 +99,7 @@ mod tests {
         // Accepted entry → injected as an AfterSystem system message.
         store
             .upsert_entry(ws, &entry(EntryStatus::Accepted))
+            .await
             .unwrap();
         let outcome = hook
             .before_prompt(&[], CancellationToken::new())

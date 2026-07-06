@@ -13,19 +13,23 @@ pub async fn run(cmd: PlaybookSubcommand) -> Result<()> {
     let store = SqlitePlaybookStore::try_new()?;
     let workspace = workspace_key()?;
     match cmd {
-        PlaybookSubcommand::List { status } => list(&store, &workspace, status.as_deref()),
-        PlaybookSubcommand::Show { id } => show(&store, &workspace, &id),
-        PlaybookSubcommand::Accept { id } => accept(&store, &workspace, &id),
-        PlaybookSubcommand::Remove { id } => remove(&store, &workspace, &id),
+        PlaybookSubcommand::List { status } => list(&store, &workspace, status.as_deref()).await,
+        PlaybookSubcommand::Show { id } => show(&store, &workspace, &id).await,
+        PlaybookSubcommand::Accept { id } => accept(&store, &workspace, &id).await,
+        PlaybookSubcommand::Remove { id } => remove(&store, &workspace, &id).await,
         PlaybookSubcommand::Import { path } => {
             let target = path.unwrap_or(std::env::current_dir()?);
-            import(&store, &workspace, &target)
+            import(&store, &workspace, &target).await
         }
     }
 }
 
-fn list(store: &SqlitePlaybookStore, workspace: &str, status_filter: Option<&str>) -> Result<()> {
-    let entries = store.list_entries(workspace)?;
+async fn list(
+    store: &SqlitePlaybookStore,
+    workspace: &str,
+    status_filter: Option<&str>,
+) -> Result<()> {
+    let entries = store.list_entries(workspace).await?;
     let filter = match status_filter {
         Some("proposed") => Some(EntryStatus::Proposed),
         Some("accepted") => Some(EntryStatus::Accepted),
@@ -63,8 +67,8 @@ fn list(store: &SqlitePlaybookStore, workspace: &str, status_filter: Option<&str
     Ok(())
 }
 
-fn show(store: &SqlitePlaybookStore, workspace: &str, raw_id: &str) -> Result<()> {
-    let entry = resolve_entry(store, workspace, raw_id)?;
+async fn show(store: &SqlitePlaybookStore, workspace: &str, raw_id: &str) -> Result<()> {
+    let entry = resolve_entry(store, workspace, raw_id).await?;
     println!("Playbook entry {}", entry.id);
     println!("  section: {}", entry.section.as_str());
     println!(
@@ -84,13 +88,13 @@ fn show(store: &SqlitePlaybookStore, workspace: &str, raw_id: &str) -> Result<()
     Ok(())
 }
 
-fn accept(store: &SqlitePlaybookStore, workspace: &str, raw_id: &str) -> Result<()> {
-    let entry = resolve_entry(store, workspace, raw_id)?;
+async fn accept(store: &SqlitePlaybookStore, workspace: &str, raw_id: &str) -> Result<()> {
+    let entry = resolve_entry(store, workspace, raw_id).await?;
     if entry.status == EntryStatus::Accepted {
         println!("(already accepted)");
         return Ok(());
     }
-    let ok = store.accept_entry(workspace, entry.id)?;
+    let ok = store.accept_entry(workspace, entry.id).await?;
     if ok {
         println!("accepted {}", entry.id);
     } else {
@@ -99,9 +103,9 @@ fn accept(store: &SqlitePlaybookStore, workspace: &str, raw_id: &str) -> Result<
     Ok(())
 }
 
-fn remove(store: &SqlitePlaybookStore, workspace: &str, raw_id: &str) -> Result<()> {
-    let entry = resolve_entry(store, workspace, raw_id)?;
-    let ok = store.remove_entry(workspace, entry.id)?;
+async fn remove(store: &SqlitePlaybookStore, workspace: &str, raw_id: &str) -> Result<()> {
+    let entry = resolve_entry(store, workspace, raw_id).await?;
+    let ok = store.remove_entry(workspace, entry.id).await?;
     if ok {
         println!("removed {}", entry.id);
     } else {
@@ -110,7 +114,7 @@ fn remove(store: &SqlitePlaybookStore, workspace: &str, raw_id: &str) -> Result<
     Ok(())
 }
 
-fn import(store: &SqlitePlaybookStore, workspace: &str, root: &Path) -> Result<()> {
+async fn import(store: &SqlitePlaybookStore, workspace: &str, root: &Path) -> Result<()> {
     let mut imported = 0usize;
     for filename in ["AGENTS.md", "CLAUDE.md", "README.md"] {
         let path = root.join(filename);
@@ -126,7 +130,7 @@ fn import(store: &SqlitePlaybookStore, workspace: &str, root: &Path) -> Result<(
             _ => PlaybookSection::Architecture,
         };
         let entry = PlaybookEntry::proposed(section, body, format!("imported from {filename}"));
-        store.upsert_entry(workspace, &entry)?;
+        store.upsert_entry(workspace, &entry).await?;
         println!("imported {filename} as proposed entry {}", entry.id);
         imported += 1;
     }
@@ -143,19 +147,19 @@ fn import(store: &SqlitePlaybookStore, workspace: &str, root: &Path) -> Result<(
     Ok(())
 }
 
-fn resolve_entry(
+async fn resolve_entry(
     store: &SqlitePlaybookStore,
     workspace: &str,
     raw_id: &str,
 ) -> Result<PlaybookEntry> {
     if let Ok(uuid) = Uuid::parse_str(raw_id) {
-        let entries = store.list_entries(workspace)?;
+        let entries = store.list_entries(workspace).await?;
         return entries
             .into_iter()
             .find(|e| e.id == uuid)
             .ok_or_else(|| anyhow!("entry {uuid} not found"));
     }
-    let entries = store.list_entries(workspace)?;
+    let entries = store.list_entries(workspace).await?;
     let matches: Vec<PlaybookEntry> = entries
         .into_iter()
         .filter(|e| e.id.to_string().starts_with(raw_id))
