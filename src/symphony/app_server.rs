@@ -277,7 +277,6 @@ fn string_field(message: &JsonValue, field: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use std::fs;
-    use std::os::unix::fs::PermissionsExt;
     use std::time::Duration;
 
     use serde_json::Value as JsonValue;
@@ -302,8 +301,11 @@ printf 'pleted","session_id":"worker-session","usage":{"input_tokens":42,"output
 "#,
         );
         let client = AppServerClient::new(AppServerConfig {
-            command: fake.display().to_string(),
-            args: vec![temp.path().display().to_string()],
+            command: "sh".to_string(),
+            args: vec![
+                fake.display().to_string(),
+                temp.path().display().to_string(),
+            ],
             timeout: Duration::from_secs(1),
         });
 
@@ -396,8 +398,8 @@ printf 'pleted","session_id":"worker-session","usage":{"input_tokens":42,"output
                 &format!("#!/bin/sh\ncat >/dev/null\nprintf '%s\\n' '{}'\n", escaped),
             );
             let client = AppServerClient::new(AppServerConfig {
-                command: fake.display().to_string(),
-                args: Vec::new(),
+                command: "sh".to_string(),
+                args: vec![fake.display().to_string()],
                 timeout: Duration::from_secs(1),
             });
 
@@ -457,8 +459,8 @@ printf '{"type":"turn/completed","session_id":"session","usage":{"input_tokens":
         fs::create_dir_all(&workspace).unwrap();
         let fake = fake_process(&temp, body);
         AppServerClient::new(AppServerConfig {
-            command: fake.display().to_string(),
-            args: Vec::new(),
+            command: "sh".to_string(),
+            args: vec![fake.display().to_string()],
             timeout,
         })
         .run_turn(AppServerRequest {
@@ -473,9 +475,6 @@ printf '{"type":"turn/completed","session_id":"session","usage":{"input_tokens":
     fn fake_process(temp: &TempDir, body: &str) -> std::path::PathBuf {
         let path = temp.path().join("fake-worker.sh");
         fs::write(&path, body).unwrap();
-        let mut perms = fs::metadata(&path).unwrap().permissions();
-        perms.set_mode(0o755);
-        fs::set_permissions(&path, perms).unwrap();
         path
     }
 

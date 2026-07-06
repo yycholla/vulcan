@@ -572,7 +572,10 @@ mod tests {
                     tool: Some("bash".to_string()),
                 },
                 command: "sh".to_string(),
-                args: vec!["-c".to_string(), "printf '%s' 'not json'".to_string()],
+                args: vec![
+                    "-c".to_string(),
+                    "cat >/dev/null; printf '%s' 'not json'".to_string(),
+                ],
                 enabled: true,
                 policy: ExternalHookPolicy::Allow,
                 ..Default::default()
