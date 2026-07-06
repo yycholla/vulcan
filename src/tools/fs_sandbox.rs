@@ -80,10 +80,20 @@ fn resolve_for_write(raw: &str) -> Result<PathBuf, FsSandboxError> {
         path: raw.to_string(),
         source: std::io::Error::other("no parent directory"),
     })?;
-    let canon_parent = std::fs::canonicalize(parent).map_err(|source| FsSandboxError::Resolve {
-        path: raw.to_string(),
-        source,
-    })?;
+    let canon_parent = match std::fs::canonicalize(parent) {
+        Ok(p) => p,
+        // Parent doesn't exist either (e.g. /etc/sudoers.d on systems
+        // without it). Fall back to the absolutized parent — same as
+        // the read path — so the denylist prefix check still fires and
+        // reports "blocked" rather than a NotFound resolve error.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => parent.to_path_buf(),
+        Err(source) => {
+            return Err(FsSandboxError::Resolve {
+                path: raw.to_string(),
+                source,
+            });
+        }
+    };
     let filename = absolute
         .file_name()
         .ok_or_else(|| FsSandboxError::Resolve {

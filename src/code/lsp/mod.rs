@@ -818,14 +818,10 @@ mod tests {
     #[tokio::test]
     async fn server_marks_dead_when_subprocess_exits() {
         let temp = tempfile::tempdir().unwrap();
-        let server = LspServer::spawn_no_handshake(
-            Language::Rust,
-            temp.path().to_path_buf(),
-            "/bin/true",
-            &[],
-        )
-        .await
-        .expect("spawn /bin/true");
+        let server =
+            LspServer::spawn_no_handshake(Language::Rust, temp.path().to_path_buf(), "true", &[])
+                .await
+                .expect("spawn true");
 
         // Reader runs in a background task; give it time to hit EOF.
         for _ in 0..50 {
@@ -844,14 +840,10 @@ mod tests {
     #[tokio::test]
     async fn request_against_dead_server_fails_fast() {
         let temp = tempfile::tempdir().unwrap();
-        let server = LspServer::spawn_no_handshake(
-            Language::Rust,
-            temp.path().to_path_buf(),
-            "/bin/true",
-            &[],
-        )
-        .await
-        .expect("spawn /bin/true");
+        let server =
+            LspServer::spawn_no_handshake(Language::Rust, temp.path().to_path_buf(), "true", &[])
+                .await
+                .expect("spawn true");
         for _ in 0..50 {
             if !server.is_alive() {
                 break;
@@ -884,14 +876,9 @@ mod tests {
         // need to inject the test command path. Instead, exercise
         // the eviction logic by inserting a dead server manually.
         let dead = Arc::new(
-            LspServer::spawn_no_handshake(
-                Language::Rust,
-                temp.path().to_path_buf(),
-                "/bin/true",
-                &[],
-            )
-            .await
-            .expect("spawn /bin/true"),
+            LspServer::spawn_no_handshake(Language::Rust, temp.path().to_path_buf(), "true", &[])
+                .await
+                .expect("spawn true"),
         );
         // Wait for it to die.
         for _ in 0..50 {
