@@ -10,6 +10,7 @@ use std::path::Path;
 
 use crate::cli::ExtensionSubcommand;
 use crate::config::vulcan_home;
+#[cfg(feature = "daemon")]
 use crate::daemon::protocol::{Request, Response, read_frame_bytes, write_request};
 use crate::extensions::ExtensionRegistry;
 use crate::extensions::install_state::{
@@ -275,6 +276,7 @@ fn workspace_hash(workspace: &Path) -> String {
     crate::extensions::store::manifest_checksum(&workspace.display().to_string())
 }
 
+#[cfg(feature = "daemon")]
 async fn call_daemon(method: &str, params: serde_json::Value) -> Result<Option<serde_json::Value>> {
     let sock_path = vulcan_home().join("vulcan.sock");
     let mut stream = match tokio::net::UnixStream::connect(&sock_path).await {
@@ -299,6 +301,14 @@ async fn call_daemon(method: &str, params: serde_json::Value) -> Result<Option<s
         anyhow::bail!("{}: {}", err.code, err.message);
     }
     Ok(resp.result)
+}
+
+#[cfg(not(feature = "daemon"))]
+async fn call_daemon(
+    _method: &str,
+    _params: serde_json::Value,
+) -> Result<Option<serde_json::Value>> {
+    Ok(None)
 }
 
 fn uninstall(

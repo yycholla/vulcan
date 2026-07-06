@@ -41,7 +41,7 @@ name = "vulcan"
 path = "src/lib.rs"
 
 [features]
-default = ["daemon"]
+default = ["daemon", "turso-backend"]
 # Long-lived `vulcan daemon` process + Unix-socket frontend (YYC-266
 # Slice 0). Default-on so the standard CLI/TUI binary ships with the
 # daemon entry point wired in; gated as a feature so embedders / minimal
@@ -80,8 +80,8 @@ render-typst-image-preview = ["render-typst-preview", "render-images"]
 # materially increases compile/link cost and only WASM extension hosts need it.
 extension-wasm = ["dep:wasmtime"]
 # GH issue #704: async Turso persistence backend (rusqlite -> turso).
-# Migration is phased store-by-store behind this flag; when every store
-# has ported, turso becomes unconditional and rusqlite/r2d2 drop out.
+# Default-on for standard builds; kept as a feature until the legacy
+# rusqlite/r2d2 code paths and deps are deleted.
 turso-backend = ["dep:turso"]
 
 [dependencies]

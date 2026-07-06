@@ -9,7 +9,7 @@ repository = "https://github.com/yycholla/vulcan"
 default-run = "vulcan"
 
 [features]
-default = ["daemon"]
+default = ["daemon", "turso-backend"]
 # Re-export of the vulcan-core daemon feature. Keep the bin's feature
 # set in lockstep with the lib's so `cargo run --features ...` here
 # composes naturally.
