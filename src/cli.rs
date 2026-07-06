@@ -156,7 +156,11 @@ pub enum Command {
     },
     /// YYC-183: structured runtime diagnostics — config,
     /// storage, workspace, tool registry checks.
-    Doctor,
+    Doctor {
+        /// Emit the report as JSON instead of human-readable text
+        #[arg(long)]
+        json: bool,
+    },
     /// YYC-221: render a release summary for a git revision range
     /// (e.g. `main..HEAD`). Walks `git log`, groups commits by
     /// `YYC-<id>` issue refs, surfaces risk-flagged subjects, and

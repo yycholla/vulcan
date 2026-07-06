@@ -31,11 +31,16 @@ async fn main() -> anyhow::Result<()> {
     // fails — diagnosing a broken config is the whole point.
     // Run it before the load step so a parse error surfaces as
     // a check instead of an unhandled abort.
-    if matches!(cli.command, Some(Command::Doctor)) {
+    if let Some(Command::Doctor { json }) = &cli.command {
+        let json = *json;
         let home = vulcan::config::vulcan_home();
         let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
         let report = vulcan::doctor::run_checks(&home, &cwd);
-        print!("{}", vulcan::doctor::render_human(&report));
+        if json {
+            println!("{}", serde_json::to_string_pretty(&report)?);
+        } else {
+            print!("{}", vulcan::doctor::render_human(&report));
+        }
         if matches!(report.overall(), vulcan::doctor::CheckStatus::Fail) {
             std::process::exit(1);
         }
@@ -244,7 +249,7 @@ async fn main() -> anyhow::Result<()> {
             init_cli_observability!("review");
             vulcan::cli_review::run(cmd).await?;
         }
-        Some(Command::Doctor) => unreachable!("handled before Config::load above"),
+        Some(Command::Doctor { .. }) => unreachable!("handled before Config::load above"),
         Some(Command::Release { range }) => {
             init_cli_observability!("release");
             // YYC-221: ingest git log → build summary → render.
