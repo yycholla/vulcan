@@ -55,7 +55,7 @@ pub async fn run_review(config: &Config, kind: ReviewKind, target: &str) -> Resu
 /// Persist the review report as a YYC-180 `Report` artifact and
 /// return its id. Callers pass `None` for `store` when artifact
 /// persistence isn't wired (one-shot CLI w/o an agent handle).
-pub fn persist_report(
+pub async fn persist_report(
     store: Option<&dyn ArtifactStore>,
     kind: &ReviewKind,
     outcome: &ReviewOutcome,
@@ -79,7 +79,7 @@ pub fn persist_report(
         art = art.with_session_id(s);
     }
     let id = art.id;
-    store.create(&art)?;
+    store.create(&art).await?;
     Ok(Some(id))
 }
 
@@ -88,8 +88,8 @@ mod tests {
     use super::*;
     use crate::artifact::InMemoryArtifactStore;
 
-    #[test]
-    fn persist_report_writes_report_artifact_with_review_source() {
+    #[tokio::test]
+    async fn persist_report_writes_report_artifact_with_review_source() {
         let store = InMemoryArtifactStore::new();
         let outcome = ReviewOutcome {
             report: ReviewReport::new(),
@@ -101,9 +101,10 @@ mod tests {
             &outcome,
             Some("sess-1".into()),
         )
+        .await
         .unwrap()
         .expect("artifact persisted");
-        let got = store.get(id).unwrap().unwrap();
+        let got = store.get(id).await.unwrap().unwrap();
         assert_eq!(got.kind, ArtifactKind::Report);
         assert_eq!(got.source.as_deref(), Some("review"));
         assert_eq!(got.title.as_deref(), Some("Diff review"));
@@ -111,13 +112,15 @@ mod tests {
         assert!(got.content.unwrap().contains("_No findings._"));
     }
 
-    #[test]
-    fn persist_report_is_a_noop_without_store() {
+    #[tokio::test]
+    async fn persist_report_is_a_noop_without_store() {
         let outcome = ReviewOutcome {
             report: ReviewReport::new(),
             markdown: String::new(),
         };
-        let id = persist_report(None, &ReviewKind::Run, &outcome, None).unwrap();
+        let id = persist_report(None, &ReviewKind::Run, &outcome, None)
+            .await
+            .unwrap();
         assert!(id.is_none());
     }
 }

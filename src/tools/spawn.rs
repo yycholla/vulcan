@@ -486,7 +486,7 @@ impl SpawnSubagentTool {
                     )
                     .with_source(format!("subagent:{child_id}"))
                     .with_title(task.chars().take(60).collect::<String>());
-                    if let Err(e) = store.create(&art) {
+                    if let Err(e) = store.create(&art).await {
                         tracing::warn!("subagent summary artifact persist failed: {e}");
                     }
                 }

@@ -29,11 +29,13 @@
 //! - Cross-run artifact references (parent → child) at the gateway.
 
 use anyhow::{Context, Result};
+use async_trait::async_trait;
 use parking_lot::Mutex;
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::path::Path;
+use std::sync::Arc;
 use uuid::Uuid;
 
 /// Stable identifier for a single artifact. Distinct from `RunId`
@@ -423,12 +425,26 @@ impl Artifact {
     }
 }
 
+#[async_trait]
 pub trait ArtifactStore: Send + Sync {
-    fn create(&self, artifact: &Artifact) -> Result<()>;
-    fn get(&self, id: ArtifactId) -> Result<Option<Artifact>>;
-    fn list_for_run(&self, run_id: crate::run_record::RunId) -> Result<Vec<Artifact>>;
-    fn list_for_session(&self, session_id: &str) -> Result<Vec<Artifact>>;
-    fn recent(&self, limit: usize) -> Result<Vec<Artifact>>;
+    async fn create(&self, artifact: &Artifact) -> Result<()>;
+    async fn get(&self, id: ArtifactId) -> Result<Option<Artifact>>;
+    async fn list_for_run(&self, run_id: crate::run_record::RunId) -> Result<Vec<Artifact>>;
+    async fn list_for_session(&self, session_id: &str) -> Result<Vec<Artifact>>;
+    async fn recent(&self, limit: usize) -> Result<Vec<Artifact>>;
+}
+
+/// Open the default artifact store. Selects the backend at compile
+/// time: Turso under `turso-backend` (GH #704), else rusqlite.
+pub async fn open_default_store() -> Result<Arc<dyn ArtifactStore>> {
+    #[cfg(feature = "turso-backend")]
+    {
+        Ok(Arc::new(TursoArtifactStore::try_new().await?))
+    }
+    #[cfg(not(feature = "turso-backend"))]
+    {
+        Ok(Arc::new(SqliteArtifactStore::try_new()?))
+    }
 }
 
 #[derive(Debug, Default)]
@@ -442,17 +458,18 @@ impl InMemoryArtifactStore {
     }
 }
 
+#[async_trait]
 impl ArtifactStore for InMemoryArtifactStore {
-    fn create(&self, artifact: &Artifact) -> Result<()> {
+    async fn create(&self, artifact: &Artifact) -> Result<()> {
         self.inner.lock().push(artifact.clone());
         Ok(())
     }
 
-    fn get(&self, id: ArtifactId) -> Result<Option<Artifact>> {
+    async fn get(&self, id: ArtifactId) -> Result<Option<Artifact>> {
         Ok(self.inner.lock().iter().find(|a| a.id == id).cloned())
     }
 
-    fn list_for_run(&self, run_id: crate::run_record::RunId) -> Result<Vec<Artifact>> {
+    async fn list_for_run(&self, run_id: crate::run_record::RunId) -> Result<Vec<Artifact>> {
         Ok(self
             .inner
             .lock()
@@ -462,7 +479,7 @@ impl ArtifactStore for InMemoryArtifactStore {
             .collect())
     }
 
-    fn list_for_session(&self, session_id: &str) -> Result<Vec<Artifact>> {
+    async fn list_for_session(&self, session_id: &str) -> Result<Vec<Artifact>> {
         Ok(self
             .inner
             .lock()
@@ -472,7 +489,7 @@ impl ArtifactStore for InMemoryArtifactStore {
             .collect())
     }
 
-    fn recent(&self, limit: usize) -> Result<Vec<Artifact>> {
+    async fn recent(&self, limit: usize) -> Result<Vec<Artifact>> {
         Ok(self
             .inner
             .lock()
@@ -666,8 +683,9 @@ impl SqliteArtifactStore {
     }
 }
 
+#[async_trait]
 impl ArtifactStore for SqliteArtifactStore {
-    fn create(&self, artifact: &Artifact) -> Result<()> {
+    async fn create(&self, artifact: &Artifact) -> Result<()> {
         let conn = self.conn.lock();
         conn.execute(
             "INSERT INTO artifacts (id, kind, run_id, session_id, parent_artifact_id, source,
@@ -701,7 +719,7 @@ impl ArtifactStore for SqliteArtifactStore {
         Ok(())
     }
 
-    fn get(&self, id: ArtifactId) -> Result<Option<Artifact>> {
+    async fn get(&self, id: ArtifactId) -> Result<Option<Artifact>> {
         let conn = self.conn.lock();
         let row = conn
             .query_row(
@@ -716,7 +734,7 @@ impl ArtifactStore for SqliteArtifactStore {
         }
     }
 
-    fn list_for_run(&self, run_id: crate::run_record::RunId) -> Result<Vec<Artifact>> {
+    async fn list_for_run(&self, run_id: crate::run_record::RunId) -> Result<Vec<Artifact>> {
         let conn = self.conn.lock();
         let sql = artifact_select_sql("WHERE run_id = ?1 ORDER BY created_at ASC");
         let mut stmt = conn.prepare(&sql)?;
@@ -726,7 +744,7 @@ impl ArtifactStore for SqliteArtifactStore {
         rows.into_iter().map(row_tuple_to_artifact).collect()
     }
 
-    fn list_for_session(&self, session_id: &str) -> Result<Vec<Artifact>> {
+    async fn list_for_session(&self, session_id: &str) -> Result<Vec<Artifact>> {
         let conn = self.conn.lock();
         let sql = artifact_select_sql("WHERE session_id = ?1 ORDER BY created_at ASC");
         let mut stmt = conn.prepare(&sql)?;
@@ -736,7 +754,7 @@ impl ArtifactStore for SqliteArtifactStore {
         rows.into_iter().map(row_tuple_to_artifact).collect()
     }
 
-    fn recent(&self, limit: usize) -> Result<Vec<Artifact>> {
+    async fn recent(&self, limit: usize) -> Result<Vec<Artifact>> {
         let conn = self.conn.lock();
         let sql = artifact_select_sql("ORDER BY created_at DESC LIMIT ?1");
         let mut stmt = conn.prepare(&sql)?;
@@ -744,6 +762,153 @@ impl ArtifactStore for SqliteArtifactStore {
             .query_map(params![limit as i64], row_columns)?
             .collect::<Result<Vec<_>, _>>()?;
         rows.into_iter().map(row_tuple_to_artifact).collect()
+    }
+}
+
+/// Turso-backed artifact store (GH #704). Async; bare
+/// `turso::Connection`, no `Mutex`/r2d2/`spawn_blocking`. Fresh DBs
+/// only, so it skips the rusqlite path's additive-column migration.
+#[cfg(feature = "turso-backend")]
+pub struct TursoArtifactStore {
+    conn: turso::Connection,
+}
+
+#[cfg(feature = "turso-backend")]
+impl TursoArtifactStore {
+    pub async fn try_new() -> Result<Self> {
+        let path = crate::config::vulcan_home().join("artifacts.db");
+        Self::try_open_at(&path).await
+    }
+
+    pub async fn try_open_at(path: &Path) -> Result<Self> {
+        let conn = crate::db::open(path).await?;
+        Self::initialize(&conn).await?;
+        Ok(Self { conn })
+    }
+
+    pub async fn try_open_in_memory() -> Result<Self> {
+        let conn = crate::db::open_in_memory().await?;
+        Self::initialize(&conn).await?;
+        Ok(Self { conn })
+    }
+
+    async fn initialize(conn: &turso::Connection) -> Result<()> {
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS artifacts (
+                id TEXT PRIMARY KEY, kind TEXT NOT NULL, run_id TEXT, session_id TEXT,
+                parent_artifact_id TEXT, source TEXT, created_at TEXT NOT NULL, title TEXT,
+                mime_type TEXT, schema TEXT, storage_uri TEXT, content_hash TEXT,
+                size_bytes INTEGER, provenance TEXT,
+                visibility TEXT NOT NULL DEFAULT 'conversation',
+                retention TEXT NOT NULL DEFAULT 'session',
+                replay_safety TEXT NOT NULL DEFAULT 'unknown',
+                content TEXT, external_path TEXT, redaction TEXT
+            )",
+            (),
+        )
+        .await?;
+        for idx in [
+            "CREATE INDEX IF NOT EXISTS idx_artifacts_run_id ON artifacts(run_id)",
+            "CREATE INDEX IF NOT EXISTS idx_artifacts_session_id ON artifacts(session_id)",
+            "CREATE INDEX IF NOT EXISTS idx_artifacts_created_at ON artifacts(created_at DESC)",
+        ] {
+            conn.execute(idx, ()).await?;
+        }
+        Ok(())
+    }
+
+    async fn read_rows(&self, sql: &str, params: impl turso::IntoParams) -> Result<Vec<Artifact>> {
+        let mut rows = self.conn.query(sql, params).await?;
+        let mut out = Vec::new();
+        while let Some(row) = rows.next().await? {
+            let t: ArtifactRowColumns = (
+                row.get(0)?,
+                row.get(1)?,
+                row.get(2)?,
+                row.get(3)?,
+                row.get(4)?,
+                row.get(5)?,
+                row.get(6)?,
+                row.get(7)?,
+                row.get(8)?,
+                row.get(9)?,
+                row.get(10)?,
+                row.get(11)?,
+                row.get(12)?,
+                row.get(13)?,
+                row.get(14)?,
+                row.get(15)?,
+                row.get(16)?,
+                row.get(17)?,
+                row.get(18)?,
+                row.get(19)?,
+            );
+            out.push(row_tuple_to_artifact(t)?);
+        }
+        Ok(out)
+    }
+}
+
+#[cfg(feature = "turso-backend")]
+#[async_trait]
+impl ArtifactStore for TursoArtifactStore {
+    async fn create(&self, a: &Artifact) -> Result<()> {
+        self.conn
+            .execute(
+                "INSERT INTO artifacts (id, kind, run_id, session_id, parent_artifact_id, \
+                 source, created_at, title, mime_type, schema, storage_uri, content_hash, \
+                 size_bytes, provenance, visibility, retention, replay_safety, content, \
+                 external_path, redaction) VALUES \
+                 (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20)",
+                turso::params_from_iter([
+                    turso::Value::from(a.id.to_string()),
+                    turso::Value::from(a.kind.as_str().to_string()),
+                    a.run_id.map(|r| r.to_string()).into(),
+                    a.session_id.clone().into(),
+                    a.parent_artifact_id.map(|p| p.to_string()).into(),
+                    a.source.clone().into(),
+                    turso::Value::from(a.created_at.to_rfc3339()),
+                    a.title.clone().into(),
+                    a.mime_type.clone().into(),
+                    a.schema.clone().into(),
+                    a.storage_uri.clone().into(),
+                    a.content_hash.clone().into(),
+                    a.size_bytes.map(|n| n as i64).into(),
+                    a.provenance.clone().into(),
+                    turso::Value::from(a.visibility.as_str().to_string()),
+                    turso::Value::from(a.retention.as_str().to_string()),
+                    turso::Value::from(a.replay_safety.as_str().to_string()),
+                    a.content.clone().into(),
+                    a.external_path.clone().into(),
+                    a.redaction.0.clone().into(),
+                ]),
+            )
+            .await?;
+        Ok(())
+    }
+
+    async fn get(&self, id: ArtifactId) -> Result<Option<Artifact>> {
+        let sql = artifact_select_sql("WHERE id = ?1");
+        Ok(self
+            .read_rows(&sql, (id.to_string(),))
+            .await?
+            .into_iter()
+            .next())
+    }
+
+    async fn list_for_run(&self, run_id: crate::run_record::RunId) -> Result<Vec<Artifact>> {
+        let sql = artifact_select_sql("WHERE run_id = ?1 ORDER BY created_at ASC");
+        self.read_rows(&sql, (run_id.to_string(),)).await
+    }
+
+    async fn list_for_session(&self, session_id: &str) -> Result<Vec<Artifact>> {
+        let sql = artifact_select_sql("WHERE session_id = ?1 ORDER BY created_at ASC");
+        self.read_rows(&sql, (session_id.to_string(),)).await
+    }
+
+    async fn recent(&self, limit: usize) -> Result<Vec<Artifact>> {
+        let sql = artifact_select_sql("ORDER BY created_at DESC LIMIT ?1");
+        self.read_rows(&sql, (limit as i64,)).await
     }
 }
 
@@ -848,15 +1013,15 @@ mod tests {
         }
     }
 
-    #[test]
-    fn in_memory_store_round_trips_text_artifact() {
+    #[tokio::test]
+    async fn in_memory_store_round_trips_text_artifact() {
         let store = InMemoryArtifactStore::new();
         let art = Artifact::inline_text(ArtifactKind::Plan, "## Plan\n- step 1")
             .with_session_id("sess-7")
             .with_source("planner");
         let id = art.id;
-        store.create(&art).unwrap();
-        let got = store.get(id).unwrap().unwrap();
+        store.create(&art).await.unwrap();
+        let got = store.get(id).await.unwrap().unwrap();
         assert_eq!(got.kind, ArtifactKind::Plan);
         assert_eq!(got.content.as_deref(), Some("## Plan\n- step 1"));
         assert_eq!(got.session_id.as_deref(), Some("sess-7"));
@@ -897,8 +1062,8 @@ mod tests {
         assert!(!serialized.contains("secret123"));
     }
 
-    #[test]
-    fn sqlite_store_persists_contract_metadata_without_raw_payload() {
+    #[tokio::test]
+    async fn sqlite_store_persists_contract_metadata_without_raw_payload() {
         let store = SqliteArtifactStore::try_open_in_memory().unwrap();
         let run = crate::run_record::RunId::new();
         let payload = br#"{"token":"secret-token","rows":3}"#;
@@ -919,8 +1084,8 @@ mod tests {
         .with_schema("vulcan.tool-output.v1");
         let id = art.id;
 
-        store.create(&art).unwrap();
-        let got = store.get(id).unwrap().unwrap();
+        store.create(&art).await.unwrap();
+        let got = store.get(id).await.unwrap().unwrap();
 
         assert_eq!(got.run_id, Some(run));
         assert_eq!(got.kind, ArtifactKind::Json);
@@ -947,8 +1112,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn sqlite_store_round_trips_two_kinds() {
+    #[tokio::test]
+    async fn sqlite_store_round_trips_two_kinds() {
         // Acceptance: at least two artifact kinds exercised — one
         // text-like (Plan), one structured (Diff with JSON-shaped
         // content).
@@ -960,7 +1125,7 @@ mod tests {
             .with_title("rollout plan")
             .with_redaction("none");
         let plan_id = plan.id;
-        store.create(&plan).unwrap();
+        store.create(&plan).await.unwrap();
 
         let diff = Artifact::inline_text(
             ArtifactKind::Diff,
@@ -970,56 +1135,84 @@ mod tests {
         .with_source("write_file")
         .with_redaction("path-only");
         let diff_id = diff.id;
-        store.create(&diff).unwrap();
+        store.create(&diff).await.unwrap();
 
-        let listed = store.list_for_session(session).unwrap();
+        let listed = store.list_for_session(session).await.unwrap();
         assert_eq!(listed.len(), 2);
 
-        let got_plan = store.get(plan_id).unwrap().unwrap();
+        let got_plan = store.get(plan_id).await.unwrap().unwrap();
         assert_eq!(got_plan.title.as_deref(), Some("rollout plan"));
         assert_eq!(got_plan.kind, ArtifactKind::Plan);
 
-        let got_diff = store.get(diff_id).unwrap().unwrap();
+        let got_diff = store.get(diff_id).await.unwrap().unwrap();
         assert_eq!(got_diff.kind, ArtifactKind::Diff);
         assert_eq!(got_diff.source.as_deref(), Some("write_file"));
         assert_eq!(got_diff.redaction.0.as_deref(), Some("path-only"));
     }
 
-    #[test]
-    fn sqlite_store_links_artifact_to_run_id() {
+    #[tokio::test]
+    async fn sqlite_store_links_artifact_to_run_id() {
         let store = SqliteArtifactStore::try_open_in_memory().unwrap();
         let run = crate::run_record::RunId::new();
         let art = Artifact::inline_text(ArtifactKind::Report, "ok").with_run_id(run);
-        store.create(&art).unwrap();
-        let listed = store.list_for_run(run).unwrap();
+        store.create(&art).await.unwrap();
+        let listed = store.list_for_run(run).await.unwrap();
         assert_eq!(listed.len(), 1);
         assert_eq!(listed[0].run_id, Some(run));
     }
 
-    #[test]
-    fn sqlite_store_recent_returns_newest_first() {
+    #[tokio::test]
+    async fn sqlite_store_recent_returns_newest_first() {
         let store = SqliteArtifactStore::try_open_in_memory().unwrap();
         let a1 = Artifact::inline_text(ArtifactKind::Plan, "a");
         std::thread::sleep(std::time::Duration::from_millis(2));
         let a2 = Artifact::inline_text(ArtifactKind::Plan, "b");
-        store.create(&a1).unwrap();
-        store.create(&a2).unwrap();
-        let recent = store.recent(10).unwrap();
+        store.create(&a1).await.unwrap();
+        store.create(&a2).await.unwrap();
+        let recent = store.recent(10).await.unwrap();
         assert_eq!(recent.len(), 2);
         assert_eq!(recent[0].id, a2.id);
         assert_eq!(recent[1].id, a1.id);
     }
 
-    #[test]
-    fn parent_artifact_id_round_trips() {
+    #[tokio::test]
+    async fn parent_artifact_id_round_trips() {
         let store = SqliteArtifactStore::try_open_in_memory().unwrap();
         let parent = Artifact::inline_text(ArtifactKind::Plan, "parent");
         let parent_id = parent.id;
-        store.create(&parent).unwrap();
+        store.create(&parent).await.unwrap();
         let child = Artifact::inline_text(ArtifactKind::Diff, "child").with_parent(parent_id);
         let child_id = child.id;
-        store.create(&child).unwrap();
-        let got = store.get(child_id).unwrap().unwrap();
+        store.create(&child).await.unwrap();
+        let got = store.get(child_id).await.unwrap().unwrap();
         assert_eq!(got.parent_artifact_id, Some(parent_id));
+    }
+}
+
+// GH #704: the Turso backend satisfies the same ArtifactStore contract.
+#[cfg(all(test, feature = "turso-backend"))]
+mod turso_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn turso_store_round_trips_create_get_list_recent() {
+        let store = TursoArtifactStore::try_open_in_memory().await.unwrap();
+        let run_id = crate::run_record::RunId::new();
+        let art = Artifact::inline_text(ArtifactKind::Report, "findings")
+            .with_source("review")
+            .with_title("Review report")
+            .with_session_id("sess-1")
+            .with_run_id(run_id);
+        let id = art.id;
+        store.create(&art).await.unwrap();
+
+        let got = store.get(id).await.unwrap().expect("artifact present");
+        assert_eq!(got.kind, ArtifactKind::Report);
+        assert_eq!(got.source.as_deref(), Some("review"));
+        assert_eq!(got.content.as_deref(), Some("findings"));
+
+        assert_eq!(store.list_for_run(run_id).await.unwrap().len(), 1);
+        assert_eq!(store.list_for_session("sess-1").await.unwrap().len(), 1);
+        assert_eq!(store.recent(10).await.unwrap().len(), 1);
     }
 }

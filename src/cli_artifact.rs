@@ -14,24 +14,24 @@ use crate::run_record::{RunId, RunStore, SqliteRunStore};
 pub async fn run(cmd: Option<ArtifactSubcommand>) -> Result<()> {
     let store = SqliteArtifactStore::try_new().context("open ~/.vulcan/artifacts.db")?;
     match cmd {
-        None => interactive_select(&store),
+        None => interactive_select(&store).await,
         Some(ArtifactSubcommand::List {
             limit,
             run,
             session,
-        }) => list(&store, limit, run.as_deref(), session.as_deref()),
-        Some(ArtifactSubcommand::Show { id }) => show(&store, &id),
+        }) => list(&store, limit, run.as_deref(), session.as_deref()).await,
+        Some(ArtifactSubcommand::Show { id }) => show(&store, &id).await,
     }
 }
 
-fn interactive_select(store: &SqliteArtifactStore) -> Result<()> {
+async fn interactive_select(store: &SqliteArtifactStore) -> Result<()> {
     if !std::io::stdin().is_terminal() {
         anyhow::bail!(
             "vulcan artifact (interactive) requires a terminal. Use `vulcan artifact list` to browse, or `vulcan artifact show <id>` to inspect an artifact."
         );
     }
 
-    let items = store.recent(20)?;
+    let items = store.recent(20).await?;
     if items.is_empty() {
         println!("No artifacts.");
         return Ok(());
@@ -50,7 +50,7 @@ fn interactive_select(store: &SqliteArtifactStore) -> Result<()> {
     Ok(())
 }
 
-fn list<S: ArtifactStore + ?Sized>(
+async fn list<S: ArtifactStore + ?Sized>(
     store: &S,
     limit: usize,
     run_filter: Option<&str>,
@@ -58,11 +58,11 @@ fn list<S: ArtifactStore + ?Sized>(
 ) -> Result<()> {
     let items = if let Some(raw) = run_filter {
         let run_id = resolve_run_id(raw)?;
-        store.list_for_run(run_id)?
+        store.list_for_run(run_id).await?
     } else if let Some(s) = session_filter {
-        store.list_for_session(s)?
+        store.list_for_session(s).await?
     } else {
-        store.recent(limit)?
+        store.recent(limit).await?
     };
     if items.is_empty() {
         println!("No artifacts.");
@@ -72,10 +72,11 @@ fn list<S: ArtifactStore + ?Sized>(
     Ok(())
 }
 
-fn show<S: ArtifactStore + ?Sized>(store: &S, raw_id: &str) -> Result<()> {
-    let id = resolve_artifact_id(store, raw_id)?;
+async fn show<S: ArtifactStore + ?Sized>(store: &S, raw_id: &str) -> Result<()> {
+    let id = resolve_artifact_id(store, raw_id).await?;
     let art = store
-        .get(id)?
+        .get(id)
+        .await?
         .ok_or_else(|| anyhow!("artifact {id} not found"))?;
     print!("{}", render_artifact_show(&art));
     Ok(())
@@ -193,11 +194,14 @@ fn render_artifact_show(art: &Artifact) -> String {
     out
 }
 
-fn resolve_artifact_id<S: ArtifactStore + ?Sized>(store: &S, raw_id: &str) -> Result<ArtifactId> {
+async fn resolve_artifact_id<S: ArtifactStore + ?Sized>(
+    store: &S,
+    raw_id: &str,
+) -> Result<ArtifactId> {
     if let Ok(uuid) = Uuid::parse_str(raw_id) {
         return Ok(ArtifactId::from_uuid(uuid));
     }
-    let recent = store.recent(500)?;
+    let recent = store.recent(500).await?;
     let matches: Vec<&Artifact> = recent
         .iter()
         .filter(|a| a.id.to_string().starts_with(raw_id))
@@ -277,31 +281,31 @@ mod tests {
     use super::*;
     use crate::artifact::{Artifact, ArtifactKind, InMemoryArtifactStore};
 
-    #[test]
-    fn resolve_artifact_id_accepts_full_uuid() {
+    #[tokio::test]
+    async fn resolve_artifact_id_accepts_full_uuid() {
         let store = InMemoryArtifactStore::new();
         let art = Artifact::inline_text(ArtifactKind::Plan, "p");
         let id = art.id;
-        store.create(&art).unwrap();
-        let resolved = resolve_artifact_id(&store, &id.to_string()).unwrap();
+        store.create(&art).await.unwrap();
+        let resolved = resolve_artifact_id(&store, &id.to_string()).await.unwrap();
         assert_eq!(resolved, id);
     }
 
-    #[test]
-    fn resolve_artifact_id_accepts_prefix() {
+    #[tokio::test]
+    async fn resolve_artifact_id_accepts_prefix() {
         let store = InMemoryArtifactStore::new();
         let art = Artifact::inline_text(ArtifactKind::Plan, "p");
         let id = art.id;
-        store.create(&art).unwrap();
+        store.create(&art).await.unwrap();
         let prefix: String = id.to_string().chars().take(8).collect();
-        let resolved = resolve_artifact_id(&store, &prefix).unwrap();
+        let resolved = resolve_artifact_id(&store, &prefix).await.unwrap();
         assert_eq!(resolved, id);
     }
 
-    #[test]
-    fn resolve_artifact_id_errors_on_no_match() {
+    #[tokio::test]
+    async fn resolve_artifact_id_errors_on_no_match() {
         let store = InMemoryArtifactStore::new();
-        let err = resolve_artifact_id(&store, "abcd1234").unwrap_err();
+        let err = resolve_artifact_id(&store, "abcd1234").await.unwrap_err();
         assert!(err.to_string().contains("no artifact matches"));
     }
 

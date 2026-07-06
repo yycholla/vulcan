@@ -10,7 +10,7 @@ use crate::run_record::{RunId, RunStore, SqliteRunStore};
 pub async fn run(cmd: ReplaySubcommand) -> Result<()> {
     match cmd {
         ReplaySubcommand::Inspect { id } => inspect(&id),
-        ReplaySubcommand::Simulate { id } => simulate_run(&id),
+        ReplaySubcommand::Simulate { id } => simulate_run(&id).await,
     }
 }
 
@@ -28,11 +28,11 @@ fn inspect(raw_id: &str) -> Result<()> {
     Ok(())
 }
 
-fn simulate_run(raw_id: &str) -> Result<()> {
+async fn simulate_run(raw_id: &str) -> Result<()> {
     let run_store = SqliteRunStore::try_new()?;
     let rec = load_run(&run_store, raw_id)?;
     let artifact_store = SqliteArtifactStore::try_new()?;
-    let artifacts = artifact_store.list_for_run(rec.id)?;
+    let artifacts = artifact_store.list_for_run(rec.id).await?;
     let report = simulate(&rec, &artifacts);
     print!("{}", render_report(&report));
     Ok(())

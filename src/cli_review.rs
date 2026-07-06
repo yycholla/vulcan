@@ -50,7 +50,7 @@ async fn review(config: Config, kind: ReviewKind, target: String) -> Result<()> 
         );
     }
     if let Ok(store) = SqliteArtifactStore::try_new() {
-        if let Some(id) = persist_report(Some(&store), &kind, &outcome, None)? {
+        if let Some(id) = persist_report(Some(&store), &kind, &outcome, None).await? {
             eprintln!("review report persisted as artifact {id}");
         }
     }

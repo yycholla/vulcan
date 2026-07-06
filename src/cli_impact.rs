@@ -36,19 +36,19 @@ pub async fn run(target: Option<&Path>, cmd: Option<&ImpactSubcommand>, save: bo
     let md = render_markdown(&report);
     print!("{md}");
     if save {
-        persist_report(md, title)?;
+        persist_report(md, title).await?;
     }
     Ok(())
 }
 
-fn persist_report(md: String, title: String) -> Result<()> {
+async fn persist_report(md: String, title: String) -> Result<()> {
     match SqliteArtifactStore::try_new() {
         Ok(store) => {
             let art = Artifact::inline_text(ArtifactKind::Report, md)
                 .with_source("impact")
                 .with_title(title);
             let id = art.id;
-            if let Err(e) = ArtifactStoreExt::create(&store, &art) {
+            if let Err(e) = crate::artifact::ArtifactStore::create(&store, &art).await {
                 eprintln!("artifact persist failed: {e}");
             } else {
                 eprintln!("impact report persisted as artifact {id}");
@@ -57,13 +57,4 @@ fn persist_report(md: String, title: String) -> Result<()> {
         Err(e) => eprintln!("artifact store unavailable: {e}"),
     }
     Ok(())
-}
-trait ArtifactStoreExt {
-    fn create(&self, art: &Artifact) -> Result<()>;
-}
-
-impl ArtifactStoreExt for SqliteArtifactStore {
-    fn create(&self, art: &Artifact) -> Result<()> {
-        crate::artifact::ArtifactStore::create(self, art)
-    }
 }

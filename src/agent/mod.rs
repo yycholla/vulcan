@@ -933,7 +933,7 @@ impl Agent {
     /// references it. The artifact's `run_id` and `session_id` are
     /// auto-filled from the active run if the caller hasn't set
     /// them. Returns the stored artifact's id.
-    pub fn create_artifact(
+    pub async fn create_artifact(
         &self,
         mut artifact: crate::artifact::Artifact,
     ) -> anyhow::Result<crate::artifact::ArtifactId> {
@@ -946,7 +946,7 @@ impl Agent {
         }
         let id = artifact.id;
         let kind = artifact.kind;
-        self.artifact_store.create(&artifact)?;
+        self.artifact_store.create(&artifact).await?;
         // Emit on the run timeline if the agent is mid-turn so
         // `vulcan run show` lists the artifact alongside the events
         // that produced it.

@@ -134,14 +134,14 @@ async fn agent_create_artifact_persists_with_run_and_session_links() {
     )
     .with_session_id(session.clone())
     .with_source("test-fixture");
-    let id = agent.create_artifact(art).expect("artifact persists");
+    let id = agent.create_artifact(art).await.expect("artifact persists");
 
-    let got = store.get(id).unwrap().unwrap();
+    let got = store.get(id).await.unwrap().unwrap();
     assert_eq!(got.kind, vulcan::artifact::ArtifactKind::Plan);
     assert_eq!(got.session_id.as_deref(), Some(session.as_str()));
     assert_eq!(got.source.as_deref(), Some("test-fixture"));
 
-    let by_session = store.list_for_session(&session).unwrap();
+    let by_session = store.list_for_session(&session).await.unwrap();
     assert!(by_session.iter().any(|a| a.id == id));
 }
 
