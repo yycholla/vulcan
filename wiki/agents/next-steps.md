@@ -11,19 +11,40 @@ Done: seam (Phase 0), playbook, artifact, run_record, code/embed. Pattern proven
 (async trait or cfg-gated struct + rusqlite default + turso impl behind
 `turso-backend` + selector; callers await). Remaining, in ascending risk:
 
-1. **code/graph** — concrete struct (~15 methods), no vectors. Same cfg-gated
-   `db_*` helper approach as code/embed. Callers: impact ×2, knowledge, tools ×2.
+1. **code/graph** — **DEFERRED / keep on rusqlite.** Attempted and reverted:
+   `CodeGraph::open` going async forces `ToolRegistry::new*` async, which cascades
+   into **20+ call sites** (mostly tests) plus the agent build — a disproportionate
+   blast radius for **zero migration value** (no FTS, no `db_blocking`/r2d2; it's a
+   plain `Mutex<Connection>`). Port only if the tool-registry constructor is
+   independently made async, or refactor the code-graph tools to open the graph
+   lazily inside their async `call()` (an `Arc<OnceCell<CodeGraph>>`) so the
+   registry constructor stays sync. Not worth it before the value-bearing stores.
 2. **extensions/state** — the scope pattern; `ExtensionStateScope` holds the
-   connection. Port scope + its get/set/checkpoint methods.
+   connection. Same caution as code/graph: its get/set/checkpoint callers run in
+   the largely-sync WASM extension host, so check for a constructor cascade first.
 3. **extensions/install_state** — biggest cascade: forces the ~60-function sync
    extension registry loader async. Budget for it; do it in its own PR.
 4. **gateway trio + memory-FTS finale** — inbound/outbound queue + scheduler +
    memory share one r2d2 `DbPool`; they move together. This is where FTS5
    (`messages_fts` virtual table + 3 triggers) becomes Turso native FTS
    (`CREATE INDEX ... USING fts`, `fts_match`/`fts_score`, no triggers) and
-   `db_blocking`/r2d2/`spawn_blocking` get deleted — the real prize.
+   `db_blocking`/r2d2/`spawn_blocking` get deleted — **the real prize**. Highest
+   value of all remaining migration work; do this before the low-value code stores.
 5. **Cutover** — drop `rusqlite`/`r2d2`/`r2d2_sqlite`, remove the feature flag,
-   make Turso the only backend.
+   make Turso the only backend. (Requires all stores ported, or a permanent
+   rusqlite carve-out for code/graph + code/embed if those stay unported.)
+
+### Lesson from the migration so far
+
+Trait-based application stores (playbook, artifact, run_record) port cleanly — a
+trait already isolates the backend and callers already `.await`. **Concrete
+structs whose constructor is called from many sync sites** (code/graph via the
+tool registry; likely extensions/state via the WASM host) cascade the async
+conversion far beyond the store itself. For those, either introduce a lazy-open
+handle so the sync constructor survives, or accept a permanent rusqlite carve-out.
+The value-bearing stores (FTS + `db_blocking` deletion) are all in the gateway
+trio — prioritize those over faithful driver-swaps of the code-intelligence
+stores.
 
 ## Phase B — One-wire product gaps (already-landed substrate)
 
