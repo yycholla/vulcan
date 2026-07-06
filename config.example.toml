@@ -210,6 +210,7 @@ theme = "system"
 # idle_ttl_secs = 1800
 # max_concurrent_lanes = 64
 # outbound_max_attempts = 5
+# loopback = false             # register the in-memory loopback connector (gateway smoke-testing only)
 
 # [gateway.telegram]
 # enabled = false
@@ -239,8 +240,8 @@ theme = "system"
 #   - Caret sigils:  "⌃K" (Ctrl), "⌥T" (Alt), "⇧F4" (Shift)
 #   - Function keys: "F1" .. "F24"
 #   - Named keys:    "Esc", "Enter", "Tab", "Backspace", "Up"/"Down"/"Left"/"Right"
-toggle_sessions  = "Ctrl+K"        # open the session picker (Insert mode)
-toggle_tools     = "Ctrl+T"        # switch to the trading-floor tool log
-toggle_reasoning = "Ctrl+R"        # show/hide reasoning traces
-cancel           = "Ctrl+C"        # cancel current turn / quit
-queue_drop       = "Ctrl+Backspace" # pop the most recent queued submission
+toggle_sessions = "Ctrl+K"    # open the session picker (Insert mode)
+toggle_tools = "Ctrl+T"       # switch to the trading-floor tool log
+toggle_reasoning = "Ctrl+R"   # show/hide reasoning traces
+cancel = "Ctrl+C"             # cancel current turn / quit
+queue_drop = "Ctrl+Backspace" # pop the most recent queued submission

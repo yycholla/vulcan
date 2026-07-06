@@ -772,6 +772,7 @@ fn gateway_with_token(token: &str) -> GatewayConfig {
         idle_ttl_secs: 1800,
         max_concurrent_lanes: 64,
         outbound_max_attempts: 5,
+        loopback: false,
         discord: DiscordConfig::default(),
         telegram: TelegramConfig::default(),
         commands: HashMap::new(),

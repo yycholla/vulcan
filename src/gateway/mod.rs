@@ -69,7 +69,9 @@ where
 
     let db = crate::memory::open_gateway_pool()?;
     let mut registry = PlatformRegistry::new();
-    registry.register("loopback", Arc::new(LoopbackPlatform::default()));
+    if gateway.loopback {
+        registry.register("loopback", Arc::new(LoopbackPlatform::default()));
+    }
     #[cfg(feature = "discord")]
     if gateway.discord.enabled {
         registry.register(
@@ -401,6 +403,7 @@ mod tests {
             idle_ttl_secs: 1800,
             max_concurrent_lanes: 64,
             outbound_max_attempts: 5,
+            loopback: true,
             discord: crate::config::DiscordConfig::default(),
             telegram: crate::config::TelegramConfig::default(),
             commands: std::collections::HashMap::new(),

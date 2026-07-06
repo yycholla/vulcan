@@ -819,6 +819,13 @@ pub struct GatewayConfig {
     pub max_concurrent_lanes: usize,
     #[serde(default = "default_gateway_outbound_max_attempts")]
     pub outbound_max_attempts: u32,
+    /// Register the in-memory loopback connector so operators can
+    /// smoke-test the gateway pipeline without a real chat platform.
+    /// Off by default: loopback records outbound traffic in memory and
+    /// accepts inbound rows from any bearer-authenticated caller, so it
+    /// has no business in a production registry unless asked for.
+    #[serde(default)]
+    pub loopback: bool,
     #[serde(default)]
     pub discord: DiscordConfig,
     /// YYC-18 PR-3: Telegram connector. Behind the `telegram` cargo
