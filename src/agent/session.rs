@@ -15,6 +15,7 @@ impl Agent {
         if let Err(e) = self
             .memory
             .save_session_metadata(&self.session_id, None, None)
+            .await
         {
             tracing::warn!("failed to initialize session metadata: {e}");
         }
@@ -30,10 +31,11 @@ impl Agent {
             .await;
         self.lsp_manager.shutdown_all().await;
     }
-    pub fn resume_session(&mut self, session_id: &str) -> Result<()> {
+    pub async fn resume_session(&mut self, session_id: &str) -> Result<()> {
         let history = self
             .memory
-            .load_history(session_id)?
+            .load_history(session_id)
+            .await?
             .ok_or_else(|| anyhow::anyhow!("Session not found: {session_id}"))?;
         self.session_id = session_id.to_string();
         tracing::info!("resumed session {session_id} ({} messages)", history.len());
@@ -42,23 +44,21 @@ impl Agent {
 
     /// Resume the most recently active session. Errors if there are no
     /// sessions on disk.
-    pub fn continue_last_session(&mut self) -> Result<()> {
-        match self.memory.last_session_id() {
-            Some(id) => self.resume_session(&id),
+    pub async fn continue_last_session(&mut self) -> Result<()> {
+        match self.memory.last_session_id().await {
+            Some(id) => self.resume_session(&id).await,
             None => anyhow::bail!("No previous session to resume"),
         }
     }
 
     /// Create a new child session rooted at the current one, persist its
     /// lineage, and switch the agent to that child session immediately.
-    pub fn fork_session(&mut self, lineage_label: Option<&str>) -> Result<String> {
+    pub async fn fork_session(&mut self, lineage_label: Option<&str>) -> Result<String> {
         let parent_session_id = self.session_id.clone();
         let child_session_id = Uuid::new_v4().to_string();
-        self.memory.save_session_metadata(
-            &child_session_id,
-            Some(&parent_session_id),
-            lineage_label,
-        )?;
+        self.memory
+            .save_session_metadata(&child_session_id, Some(&parent_session_id), lineage_label)
+            .await?;
         self.session_id = child_session_id.clone();
         tracing::info!(
             "forked session {} -> {}",
@@ -73,7 +73,7 @@ impl Agent {
         self.hooks
             .on_session_before_fork(self.turn_cancel.clone())
             .await;
-        self.fork_session(lineage_label)
+        self.fork_session(lineage_label).await
     }
 
     /// Borrow the underlying `SessionStore`. Used by the TUI's `/search`

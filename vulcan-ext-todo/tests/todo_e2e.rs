@@ -11,7 +11,7 @@ use vulcan_ext_todo::TodoExtension;
 
 #[tokio::test]
 async fn todo_details_survive_session_end_then_session_start_replay() {
-    let memory = Arc::new(SessionStore::in_memory());
+    let memory = Arc::new(SessionStore::in_memory().await);
     let session_id = "todo-e2e-session";
 
     let registry = ExtensionRegistry::new();
@@ -71,6 +71,7 @@ async fn todo_details_survive_session_end_then_session_start_replay() {
                 },
             ],
         )
+        .await
         .expect("save session history");
     hooks.session_end(session_id, 1).await;
 

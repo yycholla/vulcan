@@ -12,8 +12,8 @@ fn store_in(dir: &TempDir) -> SessionStore {
     }
 }
 
-#[test]
-fn round_trip_messages() {
+#[tokio::test]
+async fn round_trip_messages() {
     let dir = TempDir::new().unwrap();
     let store = store_in(&dir);
     let session_id = uuid::Uuid::new_v4().to_string();
@@ -32,8 +32,8 @@ fn round_trip_messages() {
         },
     ];
 
-    store.save_messages(&session_id, &messages).unwrap();
-    let loaded = store.load_history(&session_id).unwrap().unwrap();
+    store.save_messages(&session_id, &messages).await.unwrap();
+    let loaded = store.load_history(&session_id).await.unwrap().unwrap();
     assert_eq!(loaded.len(), 3);
     match &loaded[1] {
         Message::User { content } => assert_eq!(content, "what is rust?"),
@@ -41,34 +41,40 @@ fn round_trip_messages() {
     }
 }
 
-#[test]
-fn provider_profile_round_trips() {
+#[tokio::test]
+async fn provider_profile_round_trips() {
     let dir = TempDir::new().unwrap();
     let store = store_in(&dir);
     let id = uuid::Uuid::new_v4().to_string();
 
     // No row yet → None.
-    assert_eq!(store.load_provider_profile(&id).unwrap(), None);
+    assert_eq!(store.load_provider_profile(&id).await.unwrap(), None);
 
     // Set a profile (creates the row).
-    store.save_provider_profile(&id, Some("local")).unwrap();
+    store
+        .save_provider_profile(&id, Some("local"))
+        .await
+        .unwrap();
     assert_eq!(
-        store.load_provider_profile(&id).unwrap().as_deref(),
+        store.load_provider_profile(&id).await.unwrap().as_deref(),
         Some("local")
     );
 
     // Clearing collapses back to None.
-    store.save_provider_profile(&id, None).unwrap();
-    assert_eq!(store.load_provider_profile(&id).unwrap(), None);
+    store.save_provider_profile(&id, None).await.unwrap();
+    assert_eq!(store.load_provider_profile(&id).await.unwrap(), None);
 }
 
-#[test]
-fn provider_profile_survives_save_messages() {
+#[tokio::test]
+async fn provider_profile_survives_save_messages() {
     let dir = TempDir::new().unwrap();
     let store = store_in(&dir);
     let id = uuid::Uuid::new_v4().to_string();
 
-    store.save_provider_profile(&id, Some("local")).unwrap();
+    store
+        .save_provider_profile(&id, Some("local"))
+        .await
+        .unwrap();
     store
         .save_messages(
             &id,
@@ -76,17 +82,18 @@ fn provider_profile_survives_save_messages() {
                 content: "hi".into(),
             }],
         )
+        .await
         .unwrap();
 
     // save_messages must not clobber the profile column.
     assert_eq!(
-        store.load_provider_profile(&id).unwrap().as_deref(),
+        store.load_provider_profile(&id).await.unwrap().as_deref(),
         Some("local")
     );
 }
 
-#[test]
-fn list_sessions_includes_provider_profile() {
+#[tokio::test]
+async fn list_sessions_includes_provider_profile() {
     let dir = TempDir::new().unwrap();
     let store = store_in(&dir);
     let id = uuid::Uuid::new_v4().to_string();
@@ -97,16 +104,20 @@ fn list_sessions_includes_provider_profile() {
                 content: "hi".into(),
             }],
         )
+        .await
         .unwrap();
-    store.save_provider_profile(&id, Some("local")).unwrap();
+    store
+        .save_provider_profile(&id, Some("local"))
+        .await
+        .unwrap();
 
-    let summaries = store.list_sessions(10).unwrap();
+    let summaries = store.list_sessions(10).await.unwrap();
     let summary = summaries.iter().find(|s| s.id == id).expect("summary");
     assert_eq!(summary.provider_profile.as_deref(), Some("local"));
 }
 
-#[test]
-fn last_session_id_returns_most_recent() {
+#[tokio::test]
+async fn last_session_id_returns_most_recent() {
     let dir = TempDir::new().unwrap();
     let store = store_in(&dir);
     let id = uuid::Uuid::new_v4().to_string();
@@ -118,12 +129,13 @@ fn last_session_id_returns_most_recent() {
                 content: "first".into(),
             }],
         )
+        .await
         .unwrap();
-    assert_eq!(store.last_session_id(), Some(id));
+    assert_eq!(store.last_session_id().await, Some(id));
 }
 
-#[test]
-fn list_sessions_returns_summaries_in_recency_order() {
+#[tokio::test]
+async fn list_sessions_returns_summaries_in_recency_order() {
     let dir = TempDir::new().unwrap();
     let store = store_in(&dir);
     let s1 = uuid::Uuid::new_v4().to_string();
@@ -136,6 +148,7 @@ fn list_sessions_returns_summaries_in_recency_order() {
                 content: "a".into(),
             }],
         )
+        .await
         .unwrap();
     // Sleep 1s would make this deterministic, but the second save bumps
     // last_active beyond the first's wall-clock-second granularity in
@@ -148,17 +161,18 @@ fn list_sessions_returns_summaries_in_recency_order() {
                 content: "b".into(),
             }],
         )
+        .await
         .unwrap();
 
-    let summaries = store.list_sessions(10).unwrap();
+    let summaries = store.list_sessions(10).await.unwrap();
     assert_eq!(summaries.len(), 2);
     assert_eq!(summaries[0].id, s2, "most recent should come first");
     assert_eq!(summaries[1].id, s1);
     assert_eq!(summaries[0].message_count, 1);
 }
 
-#[test]
-fn fts_search_finds_content() {
+#[tokio::test]
+async fn fts_search_finds_content() {
     let dir = TempDir::new().unwrap();
     let store = store_in(&dir);
     let session_id = uuid::Uuid::new_v4().to_string();
@@ -175,17 +189,18 @@ fn fts_search_finds_content() {
                 },
             ],
         )
+        .await
         .unwrap();
 
-    let hits = store.search_messages("brown fox", 10).unwrap();
+    let hits = store.search_messages("brown fox", 10).await.unwrap();
     assert!(
         hits.iter().any(|h| h.content.contains("brown fox")),
         "expected fox hit, got {hits:?}"
     );
 }
 
-#[test]
-fn session_lineage_survives_metadata_and_message_saves() {
+#[tokio::test]
+async fn session_lineage_survives_metadata_and_message_saves() {
     let dir = TempDir::new().unwrap();
     let store = store_in(&dir);
     let parent_id = uuid::Uuid::new_v4().to_string();
@@ -198,6 +213,7 @@ fn session_lineage_survives_metadata_and_message_saves() {
                 content: "root".into(),
             }],
         )
+        .await
         .unwrap();
     store
         .save_session_metadata(
@@ -205,6 +221,7 @@ fn session_lineage_survives_metadata_and_message_saves() {
             Some(&parent_id),
             Some("branched from root session"),
         )
+        .await
         .unwrap();
     store
         .save_messages(
@@ -213,9 +230,10 @@ fn session_lineage_survives_metadata_and_message_saves() {
                 content: "child".into(),
             }],
         )
+        .await
         .unwrap();
 
-    let summaries = store.list_sessions(10).unwrap();
+    let summaries = store.list_sessions(10).await.unwrap();
     let child = summaries
         .iter()
         .find(|s| s.id == child_id)
@@ -228,8 +246,8 @@ fn session_lineage_survives_metadata_and_message_saves() {
     assert_eq!(child.message_count, 1);
 }
 
-#[test]
-fn save_messages_preserves_existing_lineage_metadata() {
+#[tokio::test]
+async fn save_messages_preserves_existing_lineage_metadata() {
     let dir = TempDir::new().unwrap();
     let store = store_in(&dir);
     let parent_id = uuid::Uuid::new_v4().to_string();
@@ -237,6 +255,7 @@ fn save_messages_preserves_existing_lineage_metadata() {
 
     store
         .save_session_metadata(&child_id, Some(&parent_id), Some("forked"))
+        .await
         .unwrap();
     store
         .save_messages(
@@ -245,6 +264,7 @@ fn save_messages_preserves_existing_lineage_metadata() {
                 content: "first".into(),
             }],
         )
+        .await
         .unwrap();
     store
         .save_messages(
@@ -253,9 +273,10 @@ fn save_messages_preserves_existing_lineage_metadata() {
                 content: "second".into(),
             }],
         )
+        .await
         .unwrap();
 
-    let summaries = store.list_sessions(10).unwrap();
+    let summaries = store.list_sessions(10).await.unwrap();
     let child = summaries
         .iter()
         .find(|s| s.id == child_id)
@@ -265,8 +286,8 @@ fn save_messages_preserves_existing_lineage_metadata() {
     assert_eq!(child.message_count, 1);
 }
 
-#[test]
-fn assistant_with_tool_calls_round_trips() {
+#[tokio::test]
+async fn assistant_with_tool_calls_round_trips() {
     let dir = TempDir::new().unwrap();
     let store = store_in(&dir);
     let id = uuid::Uuid::new_v4().to_string();
@@ -284,8 +305,8 @@ fn assistant_with_tool_calls_round_trips() {
         reasoning_content: None,
     }];
 
-    store.save_messages(&id, &messages).unwrap();
-    let loaded = store.load_history(&id).unwrap().unwrap();
+    store.save_messages(&id, &messages).await.unwrap();
+    let loaded = store.load_history(&id).await.unwrap().unwrap();
 
     match &loaded[0] {
         Message::Assistant { tool_calls, .. } => {
@@ -300,9 +321,9 @@ fn assistant_with_tool_calls_round_trips() {
 // GH #704: the gateway queue tables were split out of the session
 // store's file into `gateway.db`. The session store must NOT create
 // them; the gateway pool must.
-#[test]
-fn session_store_has_no_queue_tables_after_split() {
-    let store = SessionStore::in_memory();
+#[tokio::test]
+async fn session_store_has_no_queue_tables_after_split() {
+    let store = SessionStore::in_memory().await;
     let conn = store.conn.lock();
     let count: i64 = conn
         .query_row(
@@ -343,8 +364,8 @@ fn gateway_pool_creates_queue_tables_and_indexes() {
     assert_eq!(indexes, 3);
 }
 
-#[test]
-fn reasoning_content_round_trips() {
+#[tokio::test]
+async fn reasoning_content_round_trips() {
     let dir = TempDir::new().unwrap();
     let store = store_in(&dir);
     let id = uuid::Uuid::new_v4().to_string();
@@ -355,8 +376,8 @@ fn reasoning_content_round_trips() {
         reasoning_content: Some("First I considered…then I weighed…".into()),
     }];
 
-    store.save_messages(&id, &messages).unwrap();
-    let loaded = store.load_history(&id).unwrap().unwrap();
+    store.save_messages(&id, &messages).await.unwrap();
+    let loaded = store.load_history(&id).await.unwrap().unwrap();
     match &loaded[0] {
         Message::Assistant {
             reasoning_content, ..
@@ -372,8 +393,8 @@ fn reasoning_content_round_trips() {
 // the autoincrement row IDs of prior messages untouched. A
 // regression that secretly DELETEd would surface here as
 // reassigned IDs after the second save.
-#[test]
-fn append_messages_preserves_prior_row_ids() {
+#[tokio::test]
+async fn append_messages_preserves_prior_row_ids() {
     let dir = TempDir::new().unwrap();
     let store = store_in(&dir);
     let id = uuid::Uuid::new_v4().to_string();
@@ -384,6 +405,7 @@ fn append_messages_preserves_prior_row_ids() {
                 content: "first".into(),
             }],
         )
+        .await
         .unwrap();
     let initial_id: i64 = {
         let conn = store.conn.lock();
@@ -403,6 +425,7 @@ fn append_messages_preserves_prior_row_ids() {
                 reasoning_content: None,
             }],
         )
+        .await
         .unwrap();
     let ids_after: Vec<i64> = {
         let conn = store.conn.lock();
@@ -429,8 +452,8 @@ fn append_messages_preserves_prior_row_ids() {
 // should report the failed append phase directly instead of silently
 // treating a failed position lookup as position 0 and surfacing a
 // later, less-actionable INSERT error.
-#[test]
-fn append_messages_reports_position_lookup_failures() {
+#[tokio::test]
+async fn append_messages_reports_position_lookup_failures() {
     let conn = Connection::open_in_memory().unwrap();
     initialize_conn(&conn).unwrap();
     conn.execute("DROP TABLE messages", []).unwrap();
@@ -446,6 +469,7 @@ fn append_messages_reports_position_lookup_failures() {
                 content: "will fail before insert".into(),
             }],
         )
+        .await
         .expect_err("corrupt messages table should fail append");
     let chain = format!("{err:#}");
     assert!(
@@ -462,8 +486,8 @@ fn append_messages_reports_position_lookup_failures() {
 // to reissue row IDs (DELETE + re-INSERT). This test is a guard so
 // nobody quietly replaces save_messages with append-only semantics
 // and breaks the compaction contract.
-#[test]
-fn save_messages_does_replace_existing_rows() {
+#[tokio::test]
+async fn save_messages_does_replace_existing_rows() {
     let dir = TempDir::new().unwrap();
     let store = store_in(&dir);
     let id = uuid::Uuid::new_v4().to_string();
@@ -474,6 +498,7 @@ fn save_messages_does_replace_existing_rows() {
                 content: "v1".into(),
             }],
         )
+        .await
         .unwrap();
     let initial_id: i64 = {
         let conn = store.conn.lock();
@@ -491,6 +516,7 @@ fn save_messages_does_replace_existing_rows() {
                 content: "v2".into(),
             }],
         )
+        .await
         .unwrap();
     let post_id: i64 = {
         let conn = store.conn.lock();
@@ -511,11 +537,11 @@ fn save_messages_does_replace_existing_rows() {
 // path can't be opened. Pointing at a nonexistent parent directory
 // triggers SQLite's open-with-create to fail; we assert the error
 // chain includes the path so operators see actionable context.
-#[test]
-fn try_open_at_returns_err_when_parent_missing() {
+#[tokio::test]
+async fn try_open_at_returns_err_when_parent_missing() {
     let dir = TempDir::new().unwrap();
     let bogus = dir.path().join("does_not_exist").join("sessions.db");
-    let err = match SessionStore::try_open_at(&bogus) {
+    let err = match SessionStore::try_open_at(&bogus).await {
         Ok(_) => panic!("expected open to fail"),
         Err(e) => e,
     };
@@ -534,16 +560,17 @@ fn try_open_at_returns_err_when_parent_missing() {
 // store that round-trips data — guards against a future regression
 // where the new API is broken in some subtle way that the panic
 // path didn't exercise.
-#[test]
-fn try_open_at_returns_ok_for_writable_path() {
+#[tokio::test]
+async fn try_open_at_returns_ok_for_writable_path() {
     let dir = TempDir::new().unwrap();
     let path = dir.path().join("ok.db");
-    let store = SessionStore::try_open_at(&path).expect("open ok");
+    let store = SessionStore::try_open_at(&path).await.expect("open ok");
     let id = uuid::Uuid::new_v4().to_string();
     store
         .save_session_metadata(&id, None, None)
+        .await
         .expect("save metadata");
-    assert_eq!(store.last_session_id().as_deref(), Some(id.as_str()));
+    assert_eq!(store.last_session_id().await.as_deref(), Some(id.as_str()));
 }
 
 // YYC-149: every connection used by SessionStore should have the

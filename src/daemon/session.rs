@@ -200,8 +200,13 @@ impl SessionState {
         };
 
         let mut rebuilt = assembler.assemble(seed.into_options()).await?;
-        if rebuilt.memory().load_history(&prior_session_id)?.is_some() {
-            rebuilt.resume_session(&prior_session_id)?;
+        if rebuilt
+            .memory()
+            .load_history(&prior_session_id)
+            .await?
+            .is_some()
+        {
+            rebuilt.resume_session(&prior_session_id).await?;
         }
         self.set_agent(rebuilt);
         Ok(())
@@ -338,7 +343,7 @@ mod tests {
     /// Build a minimal MockProvider-backed Agent for tests that need a
     /// stand-in without going through `Agent::builder` (which requires a
     /// real provider config / API key).
-    fn test_agent() -> crate::agent::Agent {
+    async fn test_agent() -> crate::agent::Agent {
         use crate::hooks::HookRegistry;
         use crate::provider::{LLMProvider, Message, mock::MockProvider};
         use crate::skills::SkillRegistry;
@@ -379,12 +384,13 @@ mod tests {
             HookRegistry::new(),
             Arc::new(SkillRegistry::empty()),
         )
+        .await
     }
 
     #[tokio::test]
     async fn ensure_agent_returns_existing_when_set() {
         let sess = Arc::new(SessionState::new("foo".into()));
-        sess.set_agent(test_agent());
+        sess.set_agent(test_agent().await);
         let assembler =
             SessionAgentAssembler::new(Arc::new(crate::config::Config::default()), None);
         let h = sess.ensure_agent(&assembler).await.unwrap();

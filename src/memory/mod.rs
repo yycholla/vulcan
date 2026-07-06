@@ -20,10 +20,12 @@
 //! helpers, `codec` carries the message (de)serialization helpers, and this
 //! file holds `SessionStore` plus its CRUD surface.
 
+#[cfg(not(feature = "turso-backend"))]
 use parking_lot::Mutex;
 
 use anyhow::{Context, Result};
 use chrono::Utc;
+#[cfg(not(feature = "turso-backend"))]
 use rusqlite::{Connection, OptionalExtension, params};
 
 use crate::provider::Message;
@@ -31,8 +33,10 @@ use crate::provider::Message;
 mod codec;
 pub mod cortex;
 mod schema;
+#[cfg(feature = "turso-backend")]
+mod turso_store;
 
-#[cfg(test)]
+#[cfg(all(test, not(feature = "turso-backend")))]
 mod tests;
 
 #[cfg(all(test, feature = "gateway"))]
@@ -41,6 +45,7 @@ pub(crate) use schema::in_memory_gateway_pool;
 pub(crate) use schema::{DbPool, open_gateway_pool};
 
 use codec::{decode_message, encode_message};
+#[cfg(not(feature = "turso-backend"))]
 use schema::{initialize_conn, upsert_session_metadata, upsert_session_provider_profile};
 
 /// Persistent session storage.
@@ -57,7 +62,14 @@ use schema::{initialize_conn, upsert_session_metadata, upsert_session_provider_p
 /// for measurable time, but the busy_timeout fix lands the immediate
 /// safety net without churning the call sites.
 pub struct SessionStore {
-    conn: Mutex<Connection>,
+    // GH #704: backend-specific handle. Turso is async + internally
+    // sync-safe; rusqlite stays behind a Mutex. The two backends live
+    // in cfg-gated impl blocks (rusqlite below, turso in turso_store.rs)
+    // with identical async signatures.
+    #[cfg(not(feature = "turso-backend"))]
+    pub(in crate::memory) conn: Mutex<Connection>,
+    #[cfg(feature = "turso-backend")]
+    pub(in crate::memory) conn: turso::Connection,
 }
 
 /// One row from a full-text search. Score is the BM25 rank (lower = better
@@ -87,6 +99,7 @@ pub struct SessionSummary {
     pub preview: Option<String>,
 }
 
+#[cfg(not(feature = "turso-backend"))]
 impl SessionStore {
     /// Open (or create) the session store at `~/.vulcan/sessions.db`,
     /// returning an error instead of panicking when the DB directory
@@ -94,18 +107,18 @@ impl SessionStore {
     /// migrations fail. Production startup paths (gateway, TUI, CLI)
     /// use this so misconfigured hosts surface an actionable message
     /// rather than aborting the process (YYC-150).
-    pub fn try_new() -> Result<Self> {
+    pub async fn try_new() -> Result<Self> {
         let dir = crate::config::vulcan_home();
         std::fs::create_dir_all(&dir)
             .with_context(|| format!("create vulcan_home at {}", dir.display()))?;
         let path = dir.join("sessions.db");
-        Self::try_open_at(&path)
+        Self::try_open_at(&path).await
     }
 
     /// Open the session store at an arbitrary path. Used by
     /// `try_new` after resolving `vulcan_home`, and by tests that
     /// need to point at a temp directory.
-    pub fn try_open_at(path: &std::path::Path) -> Result<Self> {
+    pub async fn try_open_at(path: &std::path::Path) -> Result<Self> {
         let conn = Connection::open(path)
             .with_context(|| format!("open session DB at {}", path.display()))?;
         initialize_conn(&conn)
@@ -115,16 +128,9 @@ impl SessionStore {
         })
     }
 
-    /// Panicking shim around `try_new`. Kept so existing test code
-    /// and the `Default` impl don't need to thread `Result` through;
-    /// production paths should call `try_new` (YYC-150).
-    pub fn new() -> Self {
-        Self::try_new().expect("SessionStore::new failed; use try_new() to handle the error")
-    }
-
     /// Most recently active session, by `last_active`. `None` if there are no
     /// sessions yet.
-    pub fn last_session_id(&self) -> Option<String> {
+    pub async fn last_session_id(&self) -> Option<String> {
         let conn = self.conn.lock();
         conn.query_row(
             "SELECT id FROM sessions ORDER BY last_active DESC LIMIT 1",
@@ -138,7 +144,7 @@ impl SessionStore {
 
     /// Load all messages for `session_id` in the order they were saved.
     /// Returns `Ok(None)` if the session doesn't exist.
-    pub fn load_history(&self, session_id: &str) -> Result<Option<Vec<Message>>> {
+    pub async fn load_history(&self, session_id: &str) -> Result<Option<Vec<Message>>> {
         let conn = self.conn.lock();
 
         let exists: bool = conn
@@ -204,7 +210,7 @@ impl SessionStore {
     /// (the YYC-138 compaction defense). YYC-148 audit confirmed the
     /// non-compaction call sites are tests; production hot paths take the
     /// O(new messages) route via `append_messages`.
-    pub fn save_messages(&self, session_id: &str, messages: &[Message]) -> Result<()> {
+    pub async fn save_messages(&self, session_id: &str, messages: &[Message]) -> Result<()> {
         let now = Utc::now().timestamp();
 
         let mut conn = self.conn.lock();
@@ -248,7 +254,7 @@ impl SessionStore {
     /// overhead. Finds the current max position for the session and inserts
     /// from there. Use this from the agent loop to avoid O(n) delete+reinsert
     /// on every turn.
-    pub fn append_messages(&self, session_id: &str, messages: &[Message]) -> Result<()> {
+    pub async fn append_messages(&self, session_id: &str, messages: &[Message]) -> Result<()> {
         let now = Utc::now().timestamp();
         let mut conn = self.conn.lock();
         let tx = conn.transaction()?;
@@ -291,7 +297,7 @@ impl SessionStore {
     /// (YYC-95). `None` flags the session as running on the legacy unnamed
     /// `[provider]` block. The session row is created if it doesn't exist
     /// yet so the column is set even before the first message saves.
-    pub fn save_provider_profile(
+    pub async fn save_provider_profile(
         &self,
         session_id: &str,
         provider_profile: Option<&str>,
@@ -305,7 +311,7 @@ impl SessionStore {
     /// (YYC-95). Returns `Ok(None)` when the session row doesn't exist or
     /// the column is NULL — both interpretations mean "use the legacy
     /// `[provider]` block".
-    pub fn load_provider_profile(&self, session_id: &str) -> Result<Option<String>> {
+    pub async fn load_provider_profile(&self, session_id: &str) -> Result<Option<String>> {
         let conn = self.conn.lock();
         let value = conn
             .query_row(
@@ -320,7 +326,7 @@ impl SessionStore {
 
     /// Persist session metadata even before any messages exist. Used to create
     /// truthful child sessions with lineage before the first turn lands.
-    pub fn save_session_metadata(
+    pub async fn save_session_metadata(
         &self,
         session_id: &str,
         parent_session_id: Option<&str>,
@@ -333,7 +339,7 @@ impl SessionStore {
     }
 
     /// Most-recent-first list of saved sessions, capped at `limit`.
-    pub fn list_sessions(&self, limit: usize) -> Result<Vec<SessionSummary>> {
+    pub async fn list_sessions(&self, limit: usize) -> Result<Vec<SessionSummary>> {
         let conn = self.conn.lock();
 
         let mut stmt = conn.prepare(
@@ -371,7 +377,7 @@ impl SessionStore {
 
     /// Full-text search across every saved message. Returns the top `limit`
     /// hits ranked by BM25.
-    pub fn search_messages(&self, query: &str, limit: usize) -> Result<Vec<SearchHit>> {
+    pub async fn search_messages(&self, query: &str, limit: usize) -> Result<Vec<SearchHit>> {
         let conn = self.conn.lock();
 
         let mut stmt = conn.prepare(
@@ -415,17 +421,11 @@ impl SessionStore {
     /// audit in YYC-158 confirmed every caller is in a test or
     /// `Agent::for_test` test helper.
     #[doc(hidden)]
-    pub fn in_memory() -> Self {
+    pub async fn in_memory() -> Self {
         let conn = Connection::open_in_memory().expect("open in-memory session DB");
         initialize_conn(&conn).expect("initialize in-memory session DB");
         Self {
             conn: Mutex::new(conn),
         }
-    }
-}
-
-impl Default for SessionStore {
-    fn default() -> Self {
-        Self::new()
     }
 }

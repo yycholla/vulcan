@@ -92,7 +92,7 @@ impl HookHandler for TodoReplayHook {
     }
 
     async fn session_start(&self, session_id: &str) {
-        let Ok(Some(history)) = self.memory.load_history(session_id) else {
+        let Ok(Some(history)) = self.memory.load_history(session_id).await else {
             return;
         };
         let mut latest = None;
@@ -275,7 +275,7 @@ mod tests {
 
     #[tokio::test]
     async fn add_list_clear_emit_details_snapshots() {
-        let memory = Arc::new(vulcan::memory::SessionStore::in_memory());
+        let memory = Arc::new(vulcan::memory::SessionStore::in_memory().await);
         let session = TodoExtension.instantiate(ctx(memory));
         let tools = session.tools();
 

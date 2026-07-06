@@ -95,9 +95,9 @@ impl RuntimeResourcePool {
     /// fallback policy identical to the all-in-one
     /// `Agent::build_from_parts` path so resource pooling does not
     /// silently change durability behavior.
-    pub fn try_new() -> Result<Self> {
+    pub async fn try_new() -> Result<Self> {
         let mut degraded_resources = Vec::new();
-        let session_store = match SessionStore::try_new() {
+        let session_store = match SessionStore::try_new().await {
             Ok(store) => Arc::new(store),
             Err(e) => {
                 let message = format!(
@@ -108,7 +108,7 @@ impl RuntimeResourcePool {
                     "session_store",
                     message,
                 ));
-                Arc::new(SessionStore::in_memory())
+                Arc::new(SessionStore::in_memory().await)
             }
         };
 
@@ -196,12 +196,12 @@ impl RuntimeResourcePool {
     /// Test-only constructor with in-memory backends. Production
     /// callers always go through [`Self::try_new`].
     #[doc(hidden)]
-    pub fn for_tests() -> Self {
+    pub async fn for_tests() -> Self {
         let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
         let extension_registry = Arc::new(ExtensionRegistry::new());
         wire_inventory_into_registry(&extension_registry);
         Self {
-            session_store: Arc::new(SessionStore::in_memory()),
+            session_store: Arc::new(SessionStore::in_memory().await),
             run_store: Arc::new(InMemoryRunStore::default()),
             artifact_store: Arc::new(InMemoryArtifactStore::new()),
             orchestration: Arc::new(OrchestrationStore::new()),
@@ -241,8 +241,8 @@ impl RuntimeResourcePool {
     /// visibility without needing filesystem permission failures.
     #[cfg(test)]
     #[doc(hidden)]
-    pub fn for_tests_degraded(component: &str, message: &str) -> Self {
-        let mut pool = Self::for_tests();
+    pub async fn for_tests_degraded(component: &str, message: &str) -> Self {
+        let mut pool = Self::for_tests().await;
         pool.degraded_resources
             .push(RuntimeResourceDegradation::in_memory(component, message));
         pool
@@ -302,11 +302,11 @@ impl RuntimeResourcePool {
 mod tests {
     use super::*;
 
-    #[test]
-    fn for_tests_hands_out_same_session_store_arc() {
+    #[tokio::test]
+    async fn for_tests_hands_out_same_session_store_arc() {
         // Slice 3 acceptance: sessions share the daemon's SessionStore
         // instead of each opening their own SQLite connection.
-        let pool = RuntimeResourcePool::for_tests();
+        let pool = RuntimeResourcePool::for_tests().await;
         let s1 = pool.session_store();
         let s2 = pool.session_store();
         assert!(
@@ -315,12 +315,13 @@ mod tests {
         );
     }
 
-    #[test]
-    fn degraded_session_store_fallback_is_operator_visible() {
+    #[tokio::test]
+    async fn degraded_session_store_fallback_is_operator_visible() {
         let pool = RuntimeResourcePool::for_tests_degraded(
             "session_store",
             "sqlite unavailable; using in-memory session history",
-        );
+        )
+        .await;
 
         assert!(pool.is_degraded());
         assert_eq!(pool.degraded_resources().len(), 1);
@@ -328,39 +329,39 @@ mod tests {
         assert_eq!(pool.degraded_resources()[0].fallback, "in_memory");
     }
 
-    #[test]
-    fn for_tests_shares_run_artifact_orchestration_stores() {
-        let pool = RuntimeResourcePool::for_tests();
+    #[tokio::test]
+    async fn for_tests_shares_run_artifact_orchestration_stores() {
+        let pool = RuntimeResourcePool::for_tests().await;
         assert!(Arc::ptr_eq(&pool.run_store(), &pool.run_store()));
         assert!(Arc::ptr_eq(&pool.artifact_store(), &pool.artifact_store()));
         assert!(Arc::ptr_eq(&pool.orchestration(), &pool.orchestration()));
     }
 
-    #[test]
-    fn for_tests_shares_lsp_manager() {
+    #[tokio::test]
+    async fn for_tests_shares_lsp_manager() {
         // Slice 3 deepening: LSP servers stay warm across sessions —
         // the pool hands out the same Arc.
-        let pool = RuntimeResourcePool::for_tests();
+        let pool = RuntimeResourcePool::for_tests().await;
         assert!(Arc::ptr_eq(&pool.lsp_manager(), &pool.lsp_manager()));
     }
 
-    #[test]
-    fn cortex_store_is_none_by_default_and_some_after_install() {
+    #[tokio::test]
+    async fn cortex_store_is_none_by_default_and_some_after_install() {
         // Slice 3 deepening: cortex is install-on-demand. Default
         // pool has no cortex store; the daemon installs one at boot
         // when config.cortex.enabled.
-        let pool = RuntimeResourcePool::for_tests();
+        let pool = RuntimeResourcePool::for_tests().await;
         assert!(pool.cortex_store().is_none());
     }
 
-    #[test]
-    fn pool_exposes_extension_registry_populated_from_inventory() {
+    #[tokio::test]
+    async fn pool_exposes_extension_registry_populated_from_inventory() {
         // GH issue #549: the daemon-owned **Runtime Resource Pool**
         // owns one **`ExtensionRegistry`**. Calling `extension_registry()`
         // hands out the same `Arc` and the registry is pre-populated
         // from `inventory::iter` so cargo-crate extensions self-register
         // at pool construction.
-        let pool = RuntimeResourcePool::for_tests();
+        let pool = RuntimeResourcePool::for_tests().await;
         let r1 = pool.extension_registry();
         let r2 = pool.extension_registry();
         assert!(
@@ -376,9 +377,9 @@ mod tests {
         );
     }
 
-    #[test]
-    fn for_tests_shares_extension_state_store() {
-        let pool = RuntimeResourcePool::for_tests();
+    #[tokio::test]
+    async fn for_tests_shares_extension_state_store() {
+        let pool = RuntimeResourcePool::for_tests().await;
         let store = pool.extension_state_store();
         let alpha = store.scope("alpha").unwrap();
         alpha

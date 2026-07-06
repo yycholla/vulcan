@@ -118,8 +118,8 @@ fn sanitize_treats_empty_tool_calls_as_no_calls() {
     assert_eq!(messages.len(), 1);
 }
 
-#[test]
-fn sanitize_handles_multiple_tool_calls_in_one_assistant_turn() {
+#[tokio::test]
+async fn sanitize_handles_multiple_tool_calls_in_one_assistant_turn() {
     let mut messages = vec![
         asst_with_tool_calls(&["a", "b", "c"]),
         tool_msg("a"),
@@ -135,7 +135,7 @@ fn sanitize_handles_multiple_tool_calls_in_one_assistant_turn() {
 
 /// Build an Agent with a MockProvider and minimal setup. Returns the agent
 /// and a handle to the mock so tests can enqueue responses + inspect calls.
-fn agent_with_mock() -> (Agent, Arc<MockProvider>) {
+async fn agent_with_mock() -> (Agent, Arc<MockProvider>) {
     let mock = Arc::new(MockProvider::new(128_000));
     // The agent needs Box<dyn LLMProvider>; we wrap a clone of the Arc.
     // Since MockProvider's state is in interior Mutex, cloning the Arc
@@ -169,11 +169,12 @@ fn agent_with_mock() -> (Agent, Arc<MockProvider>) {
         ToolRegistry::new(),
         HookRegistry::new(),
         empty_skills(),
-    );
+    )
+    .await;
     (agent, mock)
 }
 
-fn agent_with_mock_and_hooks(hooks: HookRegistry) -> (Agent, Arc<MockProvider>) {
+async fn agent_with_mock_and_hooks(hooks: HookRegistry) -> (Agent, Arc<MockProvider>) {
     let mock = Arc::new(MockProvider::new(128_000));
     struct ProviderHandle(Arc<MockProvider>);
     #[async_trait::async_trait]
@@ -204,7 +205,8 @@ fn agent_with_mock_and_hooks(hooks: HookRegistry) -> (Agent, Arc<MockProvider>) 
         ToolRegistry::new(),
         hooks,
         empty_skills(),
-    );
+    )
+    .await;
     (agent, mock)
 }
 
@@ -271,7 +273,7 @@ async fn builder_wires_enabled_external_hooks_from_config() {
 
 #[tokio::test]
 async fn single_turn_text_response() {
-    let (mut agent, mock) = agent_with_mock();
+    let (mut agent, mock) = agent_with_mock().await;
     mock.enqueue_text("Hello there");
 
     let resp = agent.run_prompt("hi").await.unwrap();
@@ -313,7 +315,7 @@ async fn run_record_captures_before_prompt_injection_without_raw_payload() {
 
     let hooks = HookRegistry::new();
     hooks.register(Arc::new(InjectHook));
-    let (mut agent, mock) = agent_with_mock_and_hooks(hooks);
+    let (mut agent, mock) = agent_with_mock_and_hooks(hooks).await;
     mock.enqueue_text("ok");
 
     let _ = agent.run_prompt("hi").await.unwrap();
@@ -357,7 +359,7 @@ async fn run_record_captures_before_prompt_injection_without_raw_payload() {
 
 #[tokio::test]
 async fn multi_turn_with_tool_call() {
-    let (mut agent, mock) = agent_with_mock();
+    let (mut agent, mock) = agent_with_mock().await;
     // Iter 0: tool call. Iter 1: final text response.
     mock.enqueue_tool_call(
         "read_file",
@@ -391,11 +393,11 @@ async fn multi_turn_with_tool_call() {
 #[tokio::test]
 async fn streaming_and_buffered_paths_match() {
     // Same scripted response in both paths; final returned text should match.
-    let (mut a1, m1) = agent_with_mock();
+    let (mut a1, m1) = agent_with_mock().await;
     m1.enqueue_text("identical output");
     let buffered = a1.run_prompt("x").await.unwrap();
 
-    let (mut a2, m2) = agent_with_mock();
+    let (mut a2, m2) = agent_with_mock().await;
     m2.enqueue_text("identical output");
     let (tx, mut rx) = tokio::sync::mpsc::channel(crate::provider::STREAM_CHANNEL_CAPACITY);
     let streamed = a2.run_prompt_stream("x", tx).await.unwrap();
@@ -408,7 +410,7 @@ async fn streaming_and_buffered_paths_match() {
 
 #[tokio::test]
 async fn run_prompt_stream_emits_one_terminal_done() {
-    let (mut agent, mock) = agent_with_mock();
+    let (mut agent, mock) = agent_with_mock().await;
     mock.enqueue_text("streamed once");
     let (tx, mut rx) = tokio::sync::mpsc::channel(crate::provider::STREAM_CHANNEL_CAPACITY);
 
@@ -434,7 +436,7 @@ async fn run_prompt_stream_emits_one_terminal_done() {
 
 #[tokio::test]
 async fn prepare_stream_turn_builds_prompt_and_persists_user_message() {
-    let (mut agent, _mock) = agent_with_mock();
+    let (mut agent, _mock) = agent_with_mock().await;
     let cancel = CancellationToken::new();
 
     let turn = agent
@@ -455,7 +457,7 @@ async fn prepare_stream_turn_builds_prompt_and_persists_user_message() {
 
 #[tokio::test]
 async fn prepare_turn_builds_prompt_and_persists_user_message() {
-    let (mut agent, _mock) = agent_with_mock();
+    let (mut agent, _mock) = agent_with_mock().await;
     let cancel = CancellationToken::new();
 
     let turn = agent
@@ -479,7 +481,7 @@ async fn compact_stream_messages_if_needed_replaces_history_with_summary_and_kee
     // YYC-128: real compaction calls the provider to summarize the older
     // slice, splices the summary in place of it, and preserves the recent
     // window verbatim — including the new user prompt.
-    let (mut agent, mock) = agent_with_mock();
+    let (mut agent, mock) = agent_with_mock().await;
     agent.context = ContextManager::new(10);
     // Summarizer call returns this body — the new System message should
     // contain it and not the legacy "Previous conversation context:" stub.
@@ -536,7 +538,7 @@ async fn compact_stream_messages_if_needed_replaces_history_with_summary_and_kee
 
 #[tokio::test]
 async fn compact_turn_messages_if_needed_emits_domain_event() {
-    let (mut agent, mock) = agent_with_mock();
+    let (mut agent, mock) = agent_with_mock().await;
     agent.context = ContextManager::new(10);
     mock.enqueue_text("- user wanted X done\n- file /tmp/foo.txt was created");
 
@@ -593,7 +595,7 @@ async fn rewrite_history_from_before_compact_replaces_durable_history() {
 
     let hooks = HookRegistry::new();
     hooks.register(Arc::new(RewriteHook));
-    let (mut agent, mock) = agent_with_mock_and_hooks(hooks);
+    let (mut agent, mock) = agent_with_mock_and_hooks(hooks).await;
     agent.context = ContextManager::new(10);
 
     let (tx, mut rx) = tokio::sync::mpsc::channel(crate::provider::STREAM_CHANNEL_CAPACITY);
@@ -650,7 +652,7 @@ async fn invalid_rewrite_history_falls_back_to_builtin_and_audits_rejection() {
     let audit = Arc::new(ExtensionAuditLog::new(8));
     let hooks = HookRegistry::new().with_audit_log(audit.clone());
     hooks.register(Arc::new(BadRewriteHook));
-    let (mut agent, mock) = agent_with_mock_and_hooks(hooks);
+    let (mut agent, mock) = agent_with_mock_and_hooks(hooks).await;
     agent.context = ContextManager::new(10);
     mock.enqueue_text("built in summary");
 
@@ -712,7 +714,7 @@ async fn block_skips_compaction_until_context_overflow_is_imminent() {
 
     let hooks = HookRegistry::new();
     hooks.register(Arc::new(BlockHook));
-    let (mut agent, mock) = agent_with_mock_and_hooks(hooks);
+    let (mut agent, mock) = agent_with_mock_and_hooks(hooks).await;
     agent.context = ContextManager::with_config(
         10_000,
         crate::config::CompactionConfig {
@@ -768,7 +770,7 @@ async fn block_is_overridden_on_context_overflow_and_audited() {
     let audit = Arc::new(ExtensionAuditLog::new(8));
     let hooks = HookRegistry::new().with_audit_log(audit.clone());
     hooks.register(Arc::new(BlockHook));
-    let (mut agent, mock) = agent_with_mock_and_hooks(hooks);
+    let (mut agent, mock) = agent_with_mock_and_hooks(hooks).await;
     agent.context = ContextManager::new(10);
     mock.enqueue_text("forced summary");
 
@@ -816,7 +818,7 @@ async fn block_is_overridden_on_context_overflow_and_audited() {
 async fn compact_skips_when_no_user_boundary_in_recent_window() {
     // No User in the trailing window (mid tool-loop): compaction must be a
     // no-op so we don't break the tool_calls/Tool wire invariant.
-    let (mut agent, _mock) = agent_with_mock();
+    let (mut agent, _mock) = agent_with_mock().await;
     agent.context = ContextManager::new(10);
     let (tx, _rx) = tokio::sync::mpsc::channel(crate::provider::STREAM_CHANNEL_CAPACITY);
     let original = vec![
@@ -845,7 +847,7 @@ async fn compact_skips_when_no_user_boundary_in_recent_window() {
 
 #[tokio::test]
 async fn collect_stream_response_forwards_text_and_returns_done() {
-    let (agent, mock) = agent_with_mock();
+    let (agent, mock) = agent_with_mock().await;
     mock.enqueue_text("streamed text");
     let (tx, mut rx) = tokio::sync::mpsc::channel(crate::provider::STREAM_CHANNEL_CAPACITY);
     let messages = vec![Message::User {
@@ -870,7 +872,7 @@ async fn collect_stream_response_forwards_text_and_returns_done() {
 
 #[tokio::test]
 async fn collect_turn_response_emits_domain_events() {
-    let (agent, mock) = agent_with_mock();
+    let (agent, mock) = agent_with_mock().await;
     mock.enqueue_text("streamed text");
     let (tx, mut rx) = tokio::sync::mpsc::channel(crate::provider::STREAM_CHANNEL_CAPACITY);
     let messages = vec![Message::User {
@@ -895,7 +897,7 @@ async fn collect_turn_response_emits_domain_events() {
 
 #[tokio::test]
 async fn execute_stream_tool_calls_emits_events_and_preserves_result_order() {
-    let (agent, _mock) = agent_with_mock();
+    let (agent, _mock) = agent_with_mock().await;
     let calls = vec![
         crate::provider::ToolCall {
             id: "call_a".into(),
@@ -947,7 +949,7 @@ async fn run_prompt_with_cancel_origin_stamps_subagent_run_record() {
     // and analytics queries can discover parent → child lineage
     // without joining against orchestration metadata.
     use crate::run_record::{RunId, RunOrigin};
-    let (mut agent, mock) = agent_with_mock();
+    let (mut agent, mock) = agent_with_mock().await;
     mock.enqueue_text("done");
     let parent_run_id = RunId::new();
 
@@ -979,13 +981,14 @@ async fn cache_matches_persisted_state_after_completed_turn() {
     // Slice 2 acceptance: cancelled (or simply finished) turns leave
     // history valid for the next provider request — that means the
     // in-memory cache must not drift from durable storage.
-    let (mut agent, mock) = agent_with_mock();
+    let (mut agent, mock) = agent_with_mock().await;
     mock.enqueue_text("done");
     agent.run_prompt("hi").await.unwrap();
 
     let stored = agent
         .memory
         .load_history(agent.session_id())
+        .await
         .unwrap()
         .unwrap_or_default();
     assert_eq!(
@@ -1007,7 +1010,7 @@ async fn compaction_updates_in_memory_history_cache() {
     // updates both durable storage and the live cache, so the next
     // prepare_turn sees the summarized snapshot — not a stale Vec full
     // of pre-compaction turns.
-    let (mut agent, mock) = agent_with_mock();
+    let (mut agent, mock) = agent_with_mock().await;
     agent.context = ContextManager::new(10);
     mock.enqueue_text("- summary line one\n- summary line two");
 
@@ -1055,7 +1058,7 @@ async fn agent_built_with_pool_shares_pool_session_store() {
     let mut config = Config::default();
     config.provider.base_url = "http://127.0.0.1:11434/v1".into();
     config.provider.disable_catalog = true;
-    let pool = Arc::new(crate::runtime_pool::RuntimeResourcePool::for_tests());
+    let pool = Arc::new(crate::runtime_pool::RuntimeResourcePool::for_tests().await);
 
     let agent = Agent::builder(&config)
         .with_pool(Arc::clone(&pool))
@@ -1072,10 +1075,15 @@ async fn agent_built_with_pool_shares_pool_session_store() {
                 content: "shared write".into(),
             }],
         )
+        .await
         .unwrap();
 
     // Same SessionStore: pool's handle observes the write.
-    let read_back = pool.session_store().load_history(&session_id).unwrap();
+    let read_back = pool
+        .session_store()
+        .load_history(&session_id)
+        .await
+        .unwrap();
     let messages = read_back.expect("session present");
     assert!(matches!(
         messages.first(),
@@ -1088,14 +1096,18 @@ async fn second_prepare_turn_uses_cached_history_not_storage_reload() {
     // Slice 2 acceptance: in-memory SessionHistory is canonical; storage
     // is durability + recovery only. Wiping storage between turns must
     // not erase the live transcript a session is reasoning over.
-    let (mut agent, mock) = agent_with_mock();
+    let (mut agent, mock) = agent_with_mock().await;
     mock.enqueue_text("first answer");
     agent.run_prompt("hello").await.unwrap();
 
     // Simulate a storage corruption / external wipe between turns. With a
     // cached SessionHistory, the next prepare_turn still sees prior
     // conversation; without one, history would silently reset.
-    agent.memory.save_messages(agent.session_id(), &[]).unwrap();
+    agent
+        .memory
+        .save_messages(agent.session_id(), &[])
+        .await
+        .unwrap();
 
     let cancel = CancellationToken::new();
     let turn = agent.prepare_turn("again", cancel).await.unwrap();
@@ -1124,7 +1136,7 @@ async fn second_prepare_turn_uses_cached_history_not_storage_reload() {
 async fn turn_runner_run_buffered_completes_single_iteration() {
     // Slice 1 acceptance: buffered execution flows through TurnRunner.run,
     // returning a TurnOutcome instead of duplicating the iteration loop.
-    let (mut agent, mock) = agent_with_mock();
+    let (mut agent, mock) = agent_with_mock().await;
     mock.enqueue_text("hello");
     let cancel = CancellationToken::new();
     let (tx, mut rx) = tokio::sync::mpsc::channel(crate::provider::STREAM_CHANNEL_CAPACITY);
@@ -1148,7 +1160,7 @@ async fn turn_runner_run_buffered_completes_single_iteration() {
 async fn turn_runner_run_streaming_emits_text_and_completes() {
     // Slice 1 acceptance: streaming execution shares the same loop, emitting
     // text tokens through the TurnEvent sink.
-    let (mut agent, mock) = agent_with_mock();
+    let (mut agent, mock) = agent_with_mock().await;
     mock.enqueue_text("streamed");
     let cancel = CancellationToken::new();
     let (tx, mut rx) = tokio::sync::mpsc::channel(crate::provider::STREAM_CHANNEL_CAPACITY);
@@ -1174,7 +1186,7 @@ async fn turn_runner_run_streaming_emits_text_and_completes() {
 
 #[tokio::test]
 async fn turn_runner_run_handles_tool_call_then_terminal_text() {
-    let (mut agent, mock) = agent_with_mock();
+    let (mut agent, mock) = agent_with_mock().await;
     mock.enqueue_tool_call(
         "read_file",
         "call_x",
@@ -1203,7 +1215,7 @@ async fn turn_runner_run_handles_tool_call_then_terminal_text() {
 
 #[tokio::test]
 async fn execute_turn_tool_calls_emits_domain_events_and_preserves_result_order() {
-    let (agent, _mock) = agent_with_mock();
+    let (agent, _mock) = agent_with_mock().await;
     let calls = vec![
         crate::provider::ToolCall {
             id: "call_a".into(),
@@ -1250,7 +1262,7 @@ async fn execute_turn_tool_calls_emits_domain_events_and_preserves_result_order(
 
 #[tokio::test]
 async fn provider_error_propagates() {
-    let (mut agent, mock) = agent_with_mock();
+    let (mut agent, mock) = agent_with_mock().await;
     mock.enqueue_error("simulated 500");
 
     let result = agent.run_prompt("anything").await;
@@ -1261,7 +1273,7 @@ async fn provider_error_propagates() {
 
 #[tokio::test]
 async fn reasoning_carries_into_assistant_message() {
-    let (mut agent, mock) = agent_with_mock();
+    let (mut agent, mock) = agent_with_mock().await;
     mock.enqueue(MockResponse::WithReasoning {
         reasoning: "the user wants a greeting".into(),
         content: "Hi!".into(),
@@ -1391,13 +1403,16 @@ async fn spawn_model_catalog_server() -> String {
 
 #[tokio::test]
 async fn fork_session_records_lineage_and_switches_active_session() {
-    let (mut agent, _mock) = agent_with_mock();
+    let (mut agent, _mock) = agent_with_mock().await;
     let parent_id = agent.session_id().to_string();
 
-    let child_id = agent.fork_session(Some("branched for UI work")).unwrap();
+    let child_id = agent
+        .fork_session(Some("branched for UI work"))
+        .await
+        .unwrap();
 
     assert_eq!(agent.session_id(), child_id);
-    let summaries = agent.memory().list_sessions(10).unwrap();
+    let summaries = agent.memory().list_sessions(10).await.unwrap();
     let child = summaries
         .iter()
         .find(|s| s.id == child_id)
@@ -1461,7 +1476,8 @@ async fn fork_session_with_hooks_emits_before_fork_event() {
         ToolRegistry::new(),
         hooks,
         empty_skills(),
-    );
+    )
+    .await;
 
     let child_id = agent
         .fork_session_with_hooks(Some("hooked fork"))
@@ -1549,7 +1565,8 @@ async fn parallel_tool_calls_dispatch_concurrently() {
         tools,
         HookRegistry::new(),
         empty_skills(),
-    );
+    )
+    .await;
 
     // Iter 0: three parallel calls. Iter 1: final text.
     mock.enqueue_tool_calls(vec![

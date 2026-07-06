@@ -246,14 +246,14 @@ pub async fn run_tui(
         let outcome = match &resume {
             ResumeTarget::None => None,
             ResumeTarget::Pick => None, // session picker shown in UI later
-            ResumeTarget::Last => match a.continue_last_session() {
+            ResumeTarget::Last => match a.continue_last_session().await {
                 Ok(()) => Some(Ok(format!(
                     "Resumed last session ({})",
                     short_id(a.session_id())
                 ))),
                 Err(e) => Some(Err(format!("Could not resume last session: {e}"))),
             },
-            ResumeTarget::Specific(id) => match a.resume_session(id) {
+            ResumeTarget::Specific(id) => match a.resume_session(id).await {
                 Ok(()) => Some(Ok(format!("Resumed session {}", short_id(id)))),
                 Err(e) => Some(Err(format!("Could not resume session: {e}"))),
             },
@@ -326,7 +326,7 @@ pub async fn run_tui(
         // tool activity separately).
         let history = {
             let a = agent.lock().await;
-            a.memory().load_history(a.session_id()).ok().flatten()
+            a.memory().load_history(a.session_id()).await.ok().flatten()
         };
         if let Some(msgs) = history {
             for msg in msgs {
@@ -1025,7 +1025,7 @@ pub async fn run_tui(
                                                         }
                                                         let hits = {
                                                             let a = agent.lock().await;
-                                                            a.memory().search_messages(query, 10)
+                                                            a.memory().search_messages(query, 10).await
                                                         };
                                                         let report = match hits {
                                                             Ok(hs) if hs.is_empty() => format!("No matches for '{query}'"),

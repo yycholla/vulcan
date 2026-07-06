@@ -72,6 +72,7 @@ async fn start(detach: bool) -> anyhow::Result<()> {
     // operator-visible in-memory fallbacks so the daemon can continue
     // serving predictable degraded sessions.
     let mut pool_builder = crate::runtime_pool::RuntimeResourcePool::try_new()
+        .await
         .context("opening daemon RuntimeResourcePool")?;
     if let Some(cortex) = state.cortex() {
         pool_builder = pool_builder.with_cortex_store(Arc::clone(cortex));
@@ -166,7 +167,7 @@ mod tests {
         let mut config = crate::config::Config::default();
         config.provider.base_url = "http://127.0.0.1:11434/v1".into();
         config.provider.disable_catalog = true;
-        let pool = Arc::new(crate::runtime_pool::RuntimeResourcePool::for_tests());
+        let pool = Arc::new(crate::runtime_pool::RuntimeResourcePool::for_tests().await);
 
         let agent = build_daemon_agent(&config, Arc::clone(&pool))
             .await
@@ -180,9 +181,14 @@ mod tests {
                     content: "from daemon agent".into(),
                 }],
             )
+            .await
             .unwrap();
 
-        let loaded = pool.session_store().load_history(&session_id).unwrap();
+        let loaded = pool
+            .session_store()
+            .load_history(&session_id)
+            .await
+            .unwrap();
         assert!(
             matches!(
                 loaded.as_deref().and_then(|messages| messages.first()),

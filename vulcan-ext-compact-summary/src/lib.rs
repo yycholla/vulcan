@@ -165,11 +165,11 @@ mod tests {
     use super::*;
     use vulcan::hooks::{RewriteRejection, validate_rewrite_history};
 
-    fn ctx() -> SessionExtensionCtx {
+    async fn ctx() -> SessionExtensionCtx {
         SessionExtensionCtx::new(
             std::path::PathBuf::from("/tmp/test"),
             "test-session".to_string(),
-            Arc::new(vulcan::memory::SessionStore::in_memory()),
+            Arc::new(vulcan::memory::SessionStore::in_memory().await),
         )
     }
 
@@ -192,7 +192,7 @@ mod tests {
 
     #[tokio::test]
     async fn rewrite_mode_returns_valid_shorter_history() {
-        let session = CompactSummaryExtension.instantiate(ctx());
+        let session = CompactSummaryExtension.instantiate(ctx().await);
         let handlers = session.hook_handlers();
         let input = long_history();
 

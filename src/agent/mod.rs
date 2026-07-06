@@ -439,7 +439,7 @@ impl Agent {
         // legacy direct-mode build path.
         let memory: Arc<SessionStore> = match &pool {
             Some(p) => p.session_store(),
-            None => Arc::new(SessionStore::try_new()?),
+            None => Arc::new(SessionStore::try_new().await?),
         };
         let context =
             ContextManager::with_config(provider.max_context(), config.compaction.clone());
@@ -452,7 +452,7 @@ impl Agent {
         // FTS read doesn't contend with the agent's main message-write
         // path on the existing memory mutex.
         if config.recall.enabled {
-            let recall_memory = Arc::new(SessionStore::try_new()?);
+            let recall_memory = Arc::new(SessionStore::try_new().await?);
             hooks.register(Arc::new(RecallHook::new(recall_memory, config.recall)));
         }
 
@@ -964,7 +964,7 @@ impl Agent {
         Ok(id)
     }
 
-    pub fn for_test(
+    pub async fn for_test(
         provider: Box<dyn LLMProvider>,
         tools: ToolRegistry,
         hooks: HookRegistry,
@@ -976,7 +976,7 @@ impl Agent {
             tools,
             skills,
             context: ContextManager::new(max_context),
-            memory: Arc::new(SessionStore::in_memory()),
+            memory: Arc::new(SessionStore::in_memory().await),
             prompt_builder: PromptBuilder,
             hooks: Arc::new(hooks),
             session_extensions: Vec::new(),
@@ -1115,10 +1115,12 @@ impl Agent {
     /// provider rejects on the next turn ("Tool message must follow
     /// Assistant tool_calls"). Use [`Self::replace_history`] for the
     /// explicit reset call sites; this auto-detect is a defense.
-    pub fn save_messages(&mut self, messages: &[Message]) -> Result<()> {
+    pub async fn save_messages(&mut self, messages: &[Message]) -> Result<()> {
         let new_count = messages.len();
         if new_count < self.last_saved_count {
-            self.memory.save_messages(&self.session_id, messages)?;
+            self.memory
+                .save_messages(&self.session_id, messages)
+                .await?;
             self.last_saved_count = new_count;
             // Slice 2: keep the in-memory snapshot in lockstep with
             // storage so a compaction-style shrink (handled here as a
@@ -1127,7 +1129,9 @@ impl Agent {
             self.history_cache = messages.iter().skip(1).cloned().collect();
         } else if new_count > self.last_saved_count {
             let to_save = &messages[self.last_saved_count..];
-            self.memory.append_messages(&self.session_id, to_save)?;
+            self.memory
+                .append_messages(&self.session_id, to_save)
+                .await?;
             // Slice 2: extend the cache with the just-appended tail
             // so subsequent turns observe live conversation state
             // without re-running `load_history`.
@@ -1143,8 +1147,10 @@ impl Agent {
     /// so subsequent `save_messages` calls append on top of the new
     /// truncated history rather than leaving orphan Tool rows behind
     /// (YYC-138).
-    pub fn replace_history(&mut self, messages: &[Message]) -> Result<()> {
-        self.memory.save_messages(&self.session_id, messages)?;
+    pub async fn replace_history(&mut self, messages: &[Message]) -> Result<()> {
+        self.memory
+            .save_messages(&self.session_id, messages)
+            .await?;
         self.last_saved_count = messages.len();
         // Slice 2: cache mirrors the post-rewrite snapshot. Skip the
         // leading System frame because it's rebuilt fresh by the

@@ -105,11 +105,11 @@ inventory::submit! {
 mod tests {
     use super::*;
 
-    fn ctx() -> SessionExtensionCtx {
+    async fn ctx() -> SessionExtensionCtx {
         SessionExtensionCtx::new(
             std::path::PathBuf::from("/tmp/test"),
             "test-session".to_string(),
-            Arc::new(vulcan::memory::SessionStore::in_memory()),
+            Arc::new(vulcan::memory::SessionStore::in_memory().await),
         )
     }
 
@@ -126,7 +126,7 @@ mod tests {
 
     #[tokio::test]
     async fn first_turn_passes_bang_bang_through_unchanged() {
-        let session = InputDemoExtension.instantiate(ctx());
+        let session = InputDemoExtension.instantiate(ctx().await);
         let handlers = session.hook_handlers();
         let outcome = handlers[0]
             .on_input("!!", CancellationToken::new())
@@ -137,7 +137,7 @@ mod tests {
 
     #[tokio::test]
     async fn bang_bang_after_real_input_replaces_with_previous_message() {
-        let session = InputDemoExtension.instantiate(ctx());
+        let session = InputDemoExtension.instantiate(ctx().await);
         let handlers = session.hook_handlers();
 
         let _ = handlers[0]
@@ -156,7 +156,7 @@ mod tests {
 
     #[tokio::test]
     async fn non_bang_bang_input_is_cached_and_passes_through() {
-        let session = InputDemoExtension.instantiate(ctx());
+        let session = InputDemoExtension.instantiate(ctx().await);
         let handlers = session.hook_handlers();
         let outcome = handlers[0]
             .on_input("hello", CancellationToken::new())

@@ -86,6 +86,7 @@ impl HookHandler for RecallHook {
         let hits = match self
             .memory
             .search_messages(&sanitized, self.config.max_hits)
+            .await
         {
             Ok(h) => h,
             Err(e) => {
@@ -153,7 +154,10 @@ fn sanitize_fts_query(raw: &str) -> String {
         })
         .filter(|tok| tok.chars().count() >= 3)
         .collect::<Vec<_>>()
-        .join(" ")
+        // Explicit AND: FTS5 treats it identically to its implicit-AND
+        // default, and Turso/Tantivy (GH #704) defaults bare spaces to
+        // OR — one query string that means the same thing on both.
+        .join(" AND ")
 }
 
 /// True when `messages` looks like the first turn of a fresh session —
@@ -244,7 +248,7 @@ mod tests {
 
     #[tokio::test]
     async fn recall_hook_no_op_when_disabled() {
-        let memory = Arc::new(SessionStore::in_memory());
+        let memory = Arc::new(SessionStore::in_memory().await);
         let hook = RecallHook::new(
             memory,
             RecallConfig {
@@ -261,7 +265,7 @@ mod tests {
 
     #[tokio::test]
     async fn recall_hook_no_op_when_session_already_has_history() {
-        let memory = Arc::new(SessionStore::in_memory());
+        let memory = Arc::new(SessionStore::in_memory().await);
         let hook = RecallHook::new(
             memory,
             RecallConfig {
@@ -282,7 +286,7 @@ mod tests {
 
     #[tokio::test]
     async fn recall_hook_continues_when_no_user_prompt_present() {
-        let memory = Arc::new(SessionStore::in_memory());
+        let memory = Arc::new(SessionStore::in_memory().await);
         let hook = RecallHook::new(
             memory,
             RecallConfig {
@@ -299,17 +303,19 @@ mod tests {
 
     #[tokio::test]
     async fn recall_hook_injects_when_fts_returns_hits() {
-        let memory = Arc::new(SessionStore::in_memory());
+        let memory = Arc::new(SessionStore::in_memory().await);
         memory
             .save_messages(
                 "past-session-id",
                 &[user("rocketship vulcandistinctivekeyword anchor")],
             )
+            .await
             .unwrap();
 
         // Sanity: FTS pipeline is populated.
         let raw_hits = memory
             .search_messages("vulcandistinctivekeyword", 5)
+            .await
             .unwrap();
         assert!(
             !raw_hits.is_empty(),

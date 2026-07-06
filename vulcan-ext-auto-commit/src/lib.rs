@@ -198,7 +198,7 @@ mod tests {
         let session = ext.instantiate(SessionExtensionCtx::new(
             repo.clone(),
             "test-session".to_string(),
-            Arc::new(vulcan::memory::SessionStore::in_memory()),
+            Arc::new(vulcan::memory::SessionStore::in_memory().await),
         ));
         let handlers = session.hook_handlers();
         assert_eq!(handlers.len(), 1);
@@ -218,7 +218,7 @@ mod tests {
         let session = ext.instantiate(SessionExtensionCtx::new(
             repo.clone(),
             "clean-session".to_string(),
-            Arc::new(vulcan::memory::SessionStore::in_memory()),
+            Arc::new(vulcan::memory::SessionStore::in_memory().await),
         ));
         session.hook_handlers()[0]
             .session_end("clean-session", 0)
@@ -238,7 +238,7 @@ mod tests {
         let session = ext.instantiate(SessionExtensionCtx::new(
             path,
             "no-git".to_string(),
-            Arc::new(vulcan::memory::SessionStore::in_memory()),
+            Arc::new(vulcan::memory::SessionStore::in_memory().await),
         ));
         session.hook_handlers()[0].session_end("no-git", 0).await;
         // No panic, no error — just silently no-op.

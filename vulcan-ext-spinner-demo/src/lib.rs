@@ -116,7 +116,7 @@ mod tests {
         let ctx = SessionExtensionCtx::new(
             std::path::PathBuf::from("/tmp/test"),
             "session".into(),
-            Arc::new(vulcan::memory::SessionStore::in_memory()),
+            Arc::new(vulcan::memory::SessionStore::in_memory().await),
         )
         .for_extension(ID);
         let ctx = SessionExtensionCtx {

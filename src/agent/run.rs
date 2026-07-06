@@ -439,7 +439,7 @@ impl Agent {
         // durability + recovery source, not the hot-path source of
         // truth.
         if !self.history_loaded {
-            if let Some(history) = self.memory.load_history(&self.session_id)? {
+            if let Some(history) = self.memory.load_history(&self.session_id).await? {
                 for msg in history {
                     messages.push(msg);
                 }
@@ -451,7 +451,7 @@ impl Agent {
                 tracing::warn!(
                     "agent: dropped {dropped} orphan Tool message(s) from loaded history"
                 );
-                self.replace_history(&messages)?;
+                self.replace_history(&messages).await?;
             } else {
                 self.history_cache = messages.iter().skip(1).cloned().collect();
                 self.history_loaded = true;
@@ -470,7 +470,7 @@ impl Agent {
         // tool-loop early exit, or process kill doesn't strand the prompt.
         // save_messages tracks last_saved_count and appends only the new tail,
         // so this is cheap.
-        self.save_messages(&messages)?;
+        self.save_messages(&messages).await?;
 
         Ok(StreamTurn {
             messages,
@@ -543,7 +543,7 @@ impl Agent {
                 Ok(()) => {
                     let pre_count = messages.len();
                     *messages = proposed;
-                    if let Err(e) = self.replace_history(messages) {
+                    if let Err(e) = self.replace_history(messages).await {
                         tracing::warn!(
                             "failed to replace persisted history after extension compaction: {e}"
                         );
@@ -712,7 +712,7 @@ impl Agent {
         // YYC-138: persist the rewritten snapshot atomically so the next
         // save_messages append doesn't orphan Tool rows from the dropped
         // pre-summary slice.
-        if let Err(e) = self.replace_history(messages) {
+        if let Err(e) = self.replace_history(messages).await {
             tracing::warn!("failed to replace persisted history after compaction: {e}");
         }
         true
@@ -1400,7 +1400,7 @@ impl TurnRunnerMut<'_> {
                         content: flatten_for_message(result),
                     });
                 }
-                self.agent.save_messages(&messages)?;
+                self.agent.save_messages(&messages).await?;
                 self.agent
                     .hooks
                     .on_turn_end(iteration as u32, cancel.clone())
@@ -1434,7 +1434,7 @@ impl TurnRunnerMut<'_> {
                     tool_calls: None,
                     reasoning_content: reasoning.clone(),
                 });
-                self.agent.save_messages(&messages)?;
+                self.agent.save_messages(&messages).await?;
                 self.agent.turns = self.agent.turns.saturating_add(1);
                 if iteration >= 5 {
                     let _ = self

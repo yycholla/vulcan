@@ -133,7 +133,11 @@ impl Agent {
         self.active_profile = profile.map(str::to_string);
 
         // YYC-95: persist the active profile so resume restores it.
-        if let Err(e) = self.memory.save_provider_profile(&self.session_id, profile) {
+        if let Err(e) = self
+            .memory
+            .save_provider_profile(&self.session_id, profile)
+            .await
+        {
             tracing::warn!("failed to persist provider profile: {e}");
         }
 
@@ -181,6 +185,7 @@ impl Agent {
         let profile = self
             .memory
             .load_provider_profile(&session_id)
+            .await
             .unwrap_or_else(|e| {
                 tracing::warn!("could not read saved provider profile: {e}");
                 None

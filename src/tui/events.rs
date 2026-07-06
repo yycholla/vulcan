@@ -88,7 +88,7 @@ pub(super) async fn refresh_sessions(agent: &Arc<Mutex<Agent>>, app: &mut AppSta
     let (summaries, active_session_id) = {
         let a = agent.lock().await;
         (
-            a.memory().list_sessions(12).unwrap_or_default(),
+            a.memory().list_sessions(12).await.unwrap_or_default(),
             a.session_id().to_string(),
         )
     };

@@ -46,14 +46,15 @@ fn empty_skills() -> Arc<SkillRegistry> {
     Arc::new(SkillRegistry::empty())
 }
 
-fn agent_with_mock() -> (Agent, Arc<MockProvider>) {
+async fn agent_with_mock() -> (Agent, Arc<MockProvider>) {
     let mock = Arc::new(MockProvider::new(128_000));
     let agent = Agent::for_test(
         Box::new(ProviderHandle(mock.clone())),
         ToolRegistry::new(),
         HookRegistry::new(),
         empty_skills(),
-    );
+    )
+    .await;
     (agent, mock)
 }
 
@@ -64,7 +65,7 @@ async fn run_record_lifecycle_events_land_for_completed_turn() {
     // status. This test pins the contract — a successful turn yields
     // Running → PromptReceived → ProviderRequest → ProviderResponse
     // → StatusChanged{Completed}.
-    let (mut agent, mock) = agent_with_mock();
+    let (mut agent, mock) = agent_with_mock().await;
     mock.enqueue_text("done.");
     let _ = agent.run_prompt("hello").await.unwrap();
 
@@ -118,7 +119,7 @@ async fn agent_create_artifact_persists_with_run_and_session_links() {
     // artifact, agent runs reference it, and the user can list
     // artifacts for a session/run. Also pins ArtifactCreated event
     // on the run timeline so YYC-179's `vulcan run show` lists it.
-    let (mut agent, mock) = agent_with_mock();
+    let (mut agent, mock) = agent_with_mock().await;
     mock.enqueue_text("plan ready.");
     let _ = agent.run_prompt("plan something").await.unwrap();
 
@@ -150,7 +151,7 @@ async fn run_record_gateway_origin_carries_lane_string() {
     // YYC-179 PR-6: gateway lane streaming entry point tags the
     // run record with `RunOrigin::Gateway { lane }` so timeline
     // queries can attribute traffic per platform/lane.
-    let (mut agent, mock) = agent_with_mock();
+    let (mut agent, mock) = agent_with_mock().await;
     mock.enqueue_text("gateway reply.");
     let (tx, _rx) = mpsc::channel(vulcan::provider::STREAM_CHANNEL_CAPACITY);
     let cancel = CancellationToken::new();
@@ -175,7 +176,7 @@ async fn run_record_captures_streaming_turn_with_tui_origin() {
     // produces a run record with `RunOrigin::Tui`, lifecycle events,
     // and a streaming=true ProviderRequest event so dashboards can
     // distinguish it from buffered turns.
-    let (mut agent, mock) = agent_with_mock();
+    let (mut agent, mock) = agent_with_mock().await;
     mock.enqueue_text("streamed reply.");
     let (tx, _rx) = mpsc::channel(vulcan::provider::STREAM_CHANNEL_CAPACITY);
     let cancel = CancellationToken::new();
@@ -209,7 +210,7 @@ async fn run_record_captures_tool_call_with_error_distinguishable_from_success()
     // → Completed timeline ordering.
     let dir = tempdir().unwrap();
     let missing = dir.path().join("does-not-exist.txt");
-    let (mut agent, mock) = agent_with_mock();
+    let (mut agent, mock) = agent_with_mock().await;
 
     mock.enqueue_tool_call(
         "read_file",
@@ -246,7 +247,7 @@ async fn agent_read_file_tool_result_flows_into_next_llm_turn() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("note.txt");
     std::fs::write(&path, "hello from integration\n").unwrap();
-    let (mut agent, mock) = agent_with_mock();
+    let (mut agent, mock) = agent_with_mock().await;
 
     mock.enqueue_tool_call("read_file", "read_note", serde_json::json!({"path": path}));
     mock.enqueue_text("I read the note.");
@@ -279,7 +280,7 @@ async fn agent_tool_loop_can_read_edit_and_cargo_check_real_project() {
 
     let prev = std::env::current_dir().unwrap();
     std::env::set_current_dir(dir.path()).unwrap();
-    let (mut agent, mock) = agent_with_mock();
+    let (mut agent, mock) = agent_with_mock().await;
 
     mock.enqueue_tool_call(
         "read_file",
@@ -318,7 +319,7 @@ async fn agent_tool_loop_can_read_edit_and_cargo_check_real_project() {
 
 #[tokio::test]
 async fn stream_cancel_mid_tool_emits_done_and_persists_partial_messages() {
-    let (mut agent, mock) = agent_with_mock();
+    let (mut agent, mock) = agent_with_mock().await;
     let session_id = agent.session_id().to_string();
     mock.enqueue_tool_call(
         "bash",
@@ -360,7 +361,12 @@ async fn stream_cancel_mid_tool_emits_done_and_persists_partial_messages() {
     let (response, agent) = run.await.unwrap().unwrap();
     assert_eq!(response, "Cancelled");
     assert!(saw_done);
-    let history = agent.memory().load_history(&session_id).unwrap().unwrap();
+    let history = agent
+        .memory()
+        .load_history(&session_id)
+        .await
+        .unwrap()
+        .unwrap();
     assert!(history.iter().any(|message| matches!(
         message,
         Message::Tool { tool_call_id, content } if tool_call_id == "sleep_call"
@@ -370,7 +376,7 @@ async fn stream_cancel_mid_tool_emits_done_and_persists_partial_messages() {
 
 #[tokio::test]
 async fn resume_session_reloads_saved_history_for_next_prompt() {
-    let (mut agent, mock) = agent_with_mock();
+    let (mut agent, mock) = agent_with_mock().await;
     mock.enqueue_text("first answer");
 
     assert_eq!(
@@ -378,13 +384,18 @@ async fn resume_session_reloads_saved_history_for_next_prompt() {
         "first answer"
     );
     let session_id = agent.session_id().to_string();
-    let saved = agent.memory().load_history(&session_id).unwrap().unwrap();
+    let saved = agent
+        .memory()
+        .load_history(&session_id)
+        .await
+        .unwrap()
+        .unwrap();
     assert!(saved.iter().any(|message| matches!(
         message,
         Message::Assistant { content: Some(content), .. } if content == "first answer"
     )));
 
-    agent.resume_session(&session_id).unwrap();
+    agent.resume_session(&session_id).await.unwrap();
     mock.enqueue_text("second answer");
     assert_eq!(
         agent.run_prompt("second question").await.unwrap(),

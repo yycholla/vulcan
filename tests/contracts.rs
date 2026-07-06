@@ -57,7 +57,7 @@ fn empty_skills() -> Arc<SkillRegistry> {
 /// Build a fresh agent + mock provider pair with the given tool
 /// profile applied. Pass `None` to leave the registry
 /// unrestricted (the historical default).
-fn agent_with_profile(profile: Option<ToolProfile>) -> (Agent, Arc<MockProvider>) {
+async fn agent_with_profile(profile: Option<ToolProfile>) -> (Agent, Arc<MockProvider>) {
     let mock = Arc::new(MockProvider::new(128_000));
     let mut tools = ToolRegistry::new();
     if let Some(p) = profile {
@@ -68,7 +68,8 @@ fn agent_with_profile(profile: Option<ToolProfile>) -> (Agent, Arc<MockProvider>
         tools,
         HookRegistry::new(),
         empty_skills(),
-    );
+    )
+    .await;
     (agent, mock)
 }
 
@@ -88,7 +89,7 @@ fn tool_names(agent: &Agent) -> Vec<String> {
 /// profile.
 #[tokio::test]
 async fn readonly_profile_does_not_expose_mutating_tools() {
-    let (agent, _mock) = agent_with_profile(builtin_profile("readonly"));
+    let (agent, _mock) = agent_with_profile(builtin_profile("readonly")).await;
     let names = tool_names(&agent);
     for forbidden in [
         "write_file",
@@ -110,7 +111,7 @@ async fn readonly_profile_does_not_expose_mutating_tools() {
 /// scribble on the workspace via a tool we forgot to consider.
 #[tokio::test]
 async fn gateway_safe_profile_blocks_all_workspace_mutation() {
-    let (agent, _mock) = agent_with_profile(builtin_profile("gateway-safe"));
+    let (agent, _mock) = agent_with_profile(builtin_profile("gateway-safe")).await;
     let names = tool_names(&agent);
     for forbidden in [
         "write_file",
@@ -135,7 +136,7 @@ async fn gateway_safe_profile_blocks_all_workspace_mutation() {
 /// registry.
 #[tokio::test]
 async fn default_registry_contains_foundational_tools() {
-    let (agent, _mock) = agent_with_profile(None);
+    let (agent, _mock) = agent_with_profile(None).await;
     let names = tool_names(&agent);
     for must in ["read_file", "list_files", "search_files", "git_status"] {
         assert!(
@@ -151,7 +152,7 @@ async fn default_registry_contains_foundational_tools() {
 /// drop. The run record must reflect the failure.
 #[tokio::test]
 async fn disallowed_tool_call_produces_structured_denial_in_run_record() {
-    let (mut agent, mock) = agent_with_profile(builtin_profile("readonly"));
+    let (mut agent, mock) = agent_with_profile(builtin_profile("readonly")).await;
     // Mock asks for write_file (disallowed under readonly), then
     // recovers with text on the next turn.
     mock.enqueue_tool_call(
@@ -188,7 +189,7 @@ async fn disallowed_tool_call_produces_structured_denial_in_run_record() {
 /// shape, different cause (real tool, real failure mode).
 #[tokio::test]
 async fn tool_errors_are_distinguishable_from_successes() {
-    let (mut agent, mock) = agent_with_profile(None);
+    let (mut agent, mock) = agent_with_profile(None).await;
     mock.enqueue_tool_call(
         "read_file",
         "read_missing",
@@ -238,7 +239,7 @@ async fn trust_resolver_unknown_workspace_defaults_to_untrusted() {
 /// emitting them on a happy turn.
 #[tokio::test]
 async fn happy_turn_produces_no_provider_error_events() {
-    let (mut agent, mock) = agent_with_profile(None);
+    let (mut agent, mock) = agent_with_profile(None).await;
     mock.enqueue_text("plain reply.");
     let _ = agent.run_prompt("hi").await.unwrap();
 

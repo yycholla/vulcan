@@ -123,22 +123,24 @@ pub async fn list(state: &DaemonState, id: String) -> Response {
 
 /// Open the saved-session store. Failure maps to a retryable
 /// protocol error — the daemon may not have a writable ~/.vulcan yet.
-fn open_store() -> Result<crate::memory::SessionStore, ProtocolError> {
-    crate::memory::SessionStore::try_new().map_err(|e| ProtocolError {
-        code: "SESSION_STORE_UNAVAILABLE".into(),
-        message: format!("could not open session store: {e}"),
-        retryable: true,
-    })
+async fn open_store() -> Result<crate::memory::SessionStore, ProtocolError> {
+    crate::memory::SessionStore::try_new()
+        .await
+        .map_err(|e| ProtocolError {
+            code: "SESSION_STORE_UNAVAILABLE".into(),
+            message: format!("could not open session store: {e}"),
+            retryable: true,
+        })
 }
 
 /// FTS5 search across every saved session's messages.
 pub async fn search(state: &DaemonState, id: String, query: &str, limit: usize) -> Response {
     let _ = state;
-    let store = match open_store() {
+    let store = match open_store().await {
         Ok(s) => s,
         Err(e) => return Response::error(id, e),
     };
-    match store.search_messages(query, limit) {
+    match store.search_messages(query, limit).await {
         Ok(hits) => Response::ok(
             id,
             json!({
@@ -177,11 +179,11 @@ pub async fn resume(state: &DaemonState, id: String, session_id: &str) -> Respon
         );
     }
 
-    let store = match open_store() {
+    let store = match open_store().await {
         Ok(s) => s,
         Err(e) => return Response::error(id, e),
     };
-    match store.load_history(session_id) {
+    match store.load_history(session_id).await {
         Ok(Some(_)) => {}
         Ok(None) => {
             return Response::error(
@@ -236,7 +238,7 @@ pub async fn resume(state: &DaemonState, id: String, session_id: &str) -> Respon
             );
         }
     };
-    if let Err(e) = agent_arc.lock().await.resume_session(session_id) {
+    if let Err(e) = agent_arc.lock().await.resume_session(session_id).await {
         state.sessions().destroy(session_id);
         return Response::error(
             id,
@@ -256,11 +258,11 @@ pub async fn resume(state: &DaemonState, id: String, session_id: &str) -> Respon
 /// Return a saved session's full message log.
 pub async fn history(state: &DaemonState, id: String, session_id: &str) -> Response {
     let _ = state;
-    let store = match open_store() {
+    let store = match open_store().await {
         Ok(s) => s,
         Err(e) => return Response::error(id, e),
     };
-    match store.load_history(session_id) {
+    match store.load_history(session_id).await {
         Ok(Some(messages)) => match serde_json::to_value(&messages) {
             Ok(v) => Response::ok(id, json!({ "session_id": session_id, "messages": v })),
             Err(e) => Response::error(

@@ -614,12 +614,12 @@ impl Default for DaemonState {
 mod tests {
     use super::*;
 
-    #[test]
-    fn pool_is_none_by_default_and_some_after_with_pool() {
+    #[tokio::test]
+    async fn pool_is_none_by_default_and_some_after_with_pool() {
         let state = DaemonState::for_tests_minimal();
         assert!(state.pool().is_none());
 
-        let pool = Arc::new(RuntimeResourcePool::for_tests());
+        let pool = Arc::new(RuntimeResourcePool::for_tests().await);
         let state = state.with_pool(Arc::clone(&pool));
         let installed = state.pool().expect("pool installed");
         assert!(Arc::ptr_eq(installed, &pool));

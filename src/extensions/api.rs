@@ -585,11 +585,11 @@ pub fn wire_inventory_into_registry(registry: &super::ExtensionRegistry) -> usiz
 }
 
 #[cfg(test)]
-pub(crate) fn test_session_extension_ctx() -> SessionExtensionCtx {
+pub(crate) async fn test_session_extension_ctx() -> SessionExtensionCtx {
     SessionExtensionCtx::new(
         PathBuf::from("/tmp/test-session"),
         "test-session-id".to_string(),
-        Arc::new(SessionStore::in_memory()),
+        Arc::new(SessionStore::in_memory().await),
     )
 }
 
@@ -617,8 +617,8 @@ mod tests {
     }
 
     /// Test-only ctx with deterministic placeholder values.
-    fn test_ctx() -> SessionExtensionCtx {
-        test_session_extension_ctx()
+    async fn test_ctx() -> SessionExtensionCtx {
+        test_session_extension_ctx().await
     }
 
     inventory::submit! {
@@ -670,8 +670,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn wire_daemon_extensions_instantiates_and_registers_hook_handlers_per_session() {
+    #[tokio::test]
+    async fn wire_daemon_extensions_instantiates_and_registers_hook_handlers_per_session() {
         use crate::extensions::ExtensionRegistry;
         use crate::hooks::{HookHandler, HookRegistry};
 
@@ -712,14 +712,14 @@ mod tests {
         registry.register_daemon_extension(Arc::new(WatcherExtension));
 
         let hooks = HookRegistry::new();
-        let registered = registry.wire_daemon_extensions(test_ctx(), &hooks);
+        let registered = registry.wire_daemon_extensions(test_ctx().await, &hooks);
 
         assert_eq!(registered, 1);
         assert_eq!(hooks.handler_count(), 1);
     }
 
-    #[test]
-    fn session_extension_ctx_carries_cwd_and_session_id_to_instantiate() {
+    #[tokio::test]
+    async fn session_extension_ctx_carries_cwd_and_session_id_to_instantiate() {
         use parking_lot::RwLock;
         use std::path::PathBuf;
 
@@ -743,7 +743,7 @@ mod tests {
         let ctx = SessionExtensionCtx::new(
             PathBuf::from("/tmp/example-session"),
             "sess-42".to_string(),
-            Arc::new(SessionStore::in_memory()),
+            Arc::new(SessionStore::in_memory().await),
         );
         let _ = ext.instantiate(ctx);
 
@@ -752,11 +752,11 @@ mod tests {
         assert_eq!(captured.1, "sess-42");
     }
 
-    #[test]
-    fn extension_state_requires_scoped_context_and_uses_extension_id() {
+    #[tokio::test]
+    async fn extension_state_requires_scoped_context_and_uses_extension_id() {
         let store: Arc<dyn ExtensionStateStore> =
             Arc::new(super::super::SqliteExtensionStateStore::try_open_in_memory().unwrap());
-        let ctx = test_ctx().with_extension_state_store(Some(store));
+        let ctx = test_ctx().await.with_extension_state_store(Some(store));
         assert!(ctx.state().is_err());
 
         let scoped = ctx.for_extension("stateful-ext").state().unwrap();
@@ -770,8 +770,8 @@ mod tests {
         assert_eq!(scoped.extension_id(), "stateful-ext");
     }
 
-    #[test]
-    fn instantiated_session_extension_exposes_its_hook_handlers() {
+    #[tokio::test]
+    async fn instantiated_session_extension_exposes_its_hook_handlers() {
         use crate::hooks::HookHandler;
 
         struct WatcherSession;
@@ -801,7 +801,7 @@ mod tests {
         }
 
         let daemon_ext: Arc<dyn DaemonCodeExtension> = Arc::new(WatcherExtension);
-        let session_ext = daemon_ext.instantiate(test_ctx());
+        let session_ext = daemon_ext.instantiate(test_ctx().await);
         let handlers = session_ext.hook_handlers();
         assert_eq!(handlers.len(), 1);
         assert_eq!(handlers[0].name(), "watcher");

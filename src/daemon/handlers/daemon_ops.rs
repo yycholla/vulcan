@@ -85,7 +85,8 @@ mod tests {
             crate::runtime_pool::RuntimeResourcePool::for_tests_degraded(
                 "session_store",
                 "sqlite unavailable; using in-memory session history",
-            ),
+            )
+            .await,
         );
         let state = Arc::new(DaemonState::for_tests_minimal().with_pool(pool));
 

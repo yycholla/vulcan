@@ -265,7 +265,7 @@ async fn resume_selected_session(app: &mut AppState, agent: &Arc<Mutex<Agent>>, 
 
     let (note, should_hydrate) = {
         let mut a = agent.lock().await;
-        match a.resume_session(&picked) {
+        match a.resume_session(&picked).await {
             Ok(()) => {
                 if let Err(e) = a.restore_persisted_provider(config).await {
                     tracing::warn!("provider restore failed during picker resume: {e}");
@@ -293,7 +293,7 @@ async fn resume_selected_session(app: &mut AppState, agent: &Arc<Mutex<Agent>>, 
     if should_hydrate {
         let history = {
             let a = agent.lock().await;
-            a.memory().load_history(&picked).ok().flatten()
+            a.memory().load_history(&picked).await.ok().flatten()
         };
         if let Some(msgs) = history {
             for msg in msgs {

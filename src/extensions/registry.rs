@@ -906,8 +906,8 @@ mod tests {
         assert_eq!(fields[0].1.path, "enabled");
     }
 
-    #[test]
-    fn daemon_extension_version_mismatch_marks_extension_broken() {
+    #[tokio::test]
+    async fn daemon_extension_version_mismatch_marks_extension_broken() {
         struct VersionedDaemonExtension {
             meta: ExtensionMetadata,
         }
@@ -935,13 +935,12 @@ mod tests {
         meta.status = ExtensionStatus::Active;
         reg.register_daemon_extension(Arc::new(VersionedDaemonExtension { meta }));
         let hooks = crate::hooks::HookRegistry::new();
-        let ctx =
-            crate::extensions::api::test_session_extension_ctx().with_frontend_extensions(vec![
-                vulcan_frontend_api::FrontendExtensionDescriptor {
-                    id: "versioned".into(),
-                    version: "2.0.0".into(),
-                },
-            ]);
+        let ctx = crate::extensions::api::test_session_extension_ctx()
+            .await
+            .with_frontend_extensions(vec![vulcan_frontend_api::FrontendExtensionDescriptor {
+                id: "versioned".into(),
+                version: "2.0.0".into(),
+            }]);
 
         let runtimes = reg.wire_daemon_extensions_runtime(ctx, &hooks);
 

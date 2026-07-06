@@ -452,8 +452,8 @@ async fn run_prompt_direct(
 }
 
 async fn run_search_direct(query: &str, limit: usize) -> anyhow::Result<()> {
-    let store = vulcan::memory::SessionStore::try_new()?;
-    let hits = store.search_messages(query, limit)?;
+    let store = vulcan::memory::SessionStore::try_new().await?;
+    let hits = store.search_messages(query, limit).await?;
     if hits.is_empty() {
         println!("No matches.");
     } else {

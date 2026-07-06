@@ -340,10 +340,10 @@ pub async fn seed_from_sessions(sessions: usize) -> Result<usize> {
 /// Daemon-friendly seed that operates on an existing `CortexStore` reference
 /// instead of opening its own. Used by the daemon's `cortex.seed` handler.
 pub async fn seed_from_sessions_to(sessions: usize, store: &CortexStore) -> Result<usize> {
-    let session_store = SessionStore::try_new()?;
+    let session_store = SessionStore::try_new().await?;
 
     let limit = sessions.max(1).min(20);
-    let list = session_store.list_sessions(limit)?;
+    let list = session_store.list_sessions(limit).await?;
 
     if list.is_empty() {
         return Ok(0);
@@ -351,7 +351,7 @@ pub async fn seed_from_sessions_to(sessions: usize, store: &CortexStore) -> Resu
 
     let mut stored = 0usize;
     for summary in &list {
-        let history = match session_store.load_history(&summary.id) {
+        let history = match session_store.load_history(&summary.id).await {
             Ok(Some(h)) => h,
             _ => continue,
         };

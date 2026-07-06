@@ -168,28 +168,29 @@ mod tests {
         }
     }
 
-    fn test_agent() -> crate::agent::Agent {
+    async fn test_agent() -> crate::agent::Agent {
         crate::agent::Agent::for_test(
             Box::new(crate::provider::mock::MockProvider::new(4096)),
             crate::tools::ToolRegistry::new(),
             crate::hooks::HookRegistry::new(),
             Arc::new(crate::skills::SkillRegistry::empty()),
         )
+        .await
     }
 
-    fn state_with_extension() -> DaemonState {
-        let pool = Arc::new(crate::runtime_pool::RuntimeResourcePool::for_tests());
+    async fn state_with_extension() -> DaemonState {
+        let pool = Arc::new(crate::runtime_pool::RuntimeResourcePool::for_tests().await);
         pool.extension_registry()
             .register_daemon_extension(Arc::new(LifecycleExt));
         let state = DaemonState::for_tests_minimal().with_pool(pool);
         let main = state.sessions().get("main").unwrap();
-        main.set_agent(test_agent());
+        main.set_agent(test_agent().await);
         state
     }
 
     #[tokio::test]
     async fn enable_attaches_extension_to_live_agent() {
-        let state = state_with_extension();
+        let state = state_with_extension().await;
         let resp = enable(&state, "req-1".into(), "lifecycle-ext").await;
         assert!(resp.error.is_none(), "{:?}", resp.error);
         let main = state.sessions().get("main").unwrap();
@@ -200,7 +201,7 @@ mod tests {
 
     #[tokio::test]
     async fn kill_removes_extension_from_live_agent() {
-        let state = state_with_extension();
+        let state = state_with_extension().await;
         let _ = enable(&state, "req-1".into(), "lifecycle-ext").await;
         let resp = kill(&state, "req-2".into(), "lifecycle-ext").await;
         assert!(resp.error.is_none(), "{:?}", resp.error);

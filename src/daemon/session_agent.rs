@@ -157,7 +157,7 @@ mod tests {
     #[tokio::test]
     async fn pooled_assembly_uses_runtime_pool_resources() {
         let config = Arc::new(local_config());
-        let pool = Arc::new(RuntimeResourcePool::for_tests());
+        let pool = Arc::new(RuntimeResourcePool::for_tests().await);
         let assembler = SessionAgentAssembler::new(Arc::clone(&config), Some(Arc::clone(&pool)));
 
         let agent = assembler
@@ -173,9 +173,14 @@ mod tests {
                     content: "pooled assembly".into(),
                 }],
             )
+            .await
             .unwrap();
 
-        let loaded = pool.session_store().load_history(&session_id).unwrap();
+        let loaded = pool
+            .session_store()
+            .load_history(&session_id)
+            .await
+            .unwrap();
         assert!(
             matches!(
                 loaded.as_deref().and_then(|messages| messages.first()),
