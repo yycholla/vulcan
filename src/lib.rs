@@ -29,6 +29,8 @@ pub mod context;
 pub mod context_pack;
 #[cfg(feature = "daemon")]
 pub mod daemon;
+#[cfg(feature = "turso-backend")]
+pub mod db;
 pub mod doctor;
 pub mod extensions;
 #[cfg(feature = "gateway")]

@@ -3,19 +3,19 @@
 # package stays as `vulcan-core` (current `src/`); new bins/extensions
 # live in sibling member crates.
 members = [
-    ".",
-    "vulcan",
-    "vulcan-tui",
-    "vulcan-frontend-api",
-    "vulcan-extension-macros",
-    "vulcan-core-ext-skills",
-    "vulcan-core-ext-safety",
-    "vulcan-ext-auto-commit",
-    "vulcan-ext-compact-summary",
-    "vulcan-ext-snake",
-    "vulcan-ext-input-demo",
-    "vulcan-ext-spinner-demo",
-    "vulcan-ext-todo",
+  ".",
+  "vulcan",
+  "vulcan-tui",
+  "vulcan-frontend-api",
+  "vulcan-extension-macros",
+  "vulcan-core-ext-skills",
+  "vulcan-core-ext-safety",
+  "vulcan-ext-auto-commit",
+  "vulcan-ext-compact-summary",
+  "vulcan-ext-snake",
+  "vulcan-ext-input-demo",
+  "vulcan-ext-spinner-demo",
+  "vulcan-ext-todo",
 ]
 resolver = "2"
 
@@ -55,13 +55,13 @@ bench-soak = ["dep:dhat", "dep:hdrhistogram"]
 # in-tree daemon Client, so it implies `daemon` (which gates `client`
 # and `daemon`).
 gateway = [
-    "daemon",
-    "dep:axum",
-    "dep:tower",
-    "dep:subtle",
-    "dep:hmac",
-    "dep:r2d2",
-    "dep:r2d2_sqlite",
+  "daemon",
+  "dep:axum",
+  "dep:tower",
+  "dep:subtle",
+  "dep:hmac",
+  "dep:r2d2",
+  "dep:r2d2_sqlite",
 ]
 # Discord connector (YYC-19). Gated separately from `gateway` so
 # operators who only need the HTTP gateway / scheduler / loopback
@@ -79,6 +79,10 @@ render-typst-image-preview = ["render-typst-preview", "render-images"]
 # GH issue #273: sandboxed extension runtime. Optional because Wasmtime
 # materially increases compile/link cost and only WASM extension hosts need it.
 extension-wasm = ["dep:wasmtime"]
+# GH issue #704: async Turso persistence backend (rusqlite -> turso).
+# Migration is phased store-by-store behind this flag; when every store
+# has ported, turso becomes unconditional and rusqlite/r2d2 drop out.
+turso-backend = ["dep:turso"]
 
 [dependencies]
 # Async runtime
@@ -143,10 +147,18 @@ clap_complete = "4.6"
 # password input + confirm modals. Optional dep — only the auth flow
 # uses it, but cheap enough to leave in default deps.
 dialoguer = { version = "0.12", features = ["fuzzy-select", "password"] }
-ratatui = { version = "0.30", default-features = false, features = ["termwiz", "underline-color", "all-widgets", "macros", "layout-cache"] }
+ratatui = { version = "0.30", default-features = false, features = [
+  "termwiz",
+  "underline-color",
+  "all-widgets",
+  "macros",
+  "layout-cache",
+] }
 termwiz = "0.23.3"
 figlet-rs = "1.0.0"
-tui-textarea = { version = "0.10.2", package = "tui-textarea-2", default-features = false, features = ["no-backend"] }
+tui-textarea = { version = "0.10.2", package = "tui-textarea-2", default-features = false, features = [
+  "no-backend",
+] }
 unicode-width = "0.2"
 pulldown-cmark = "0.13.0"
 # YYC-287: lightweight ANSI terminal colors for styled CLI output
@@ -158,10 +170,17 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 opentelemetry = "0.31"
 opentelemetry_sdk = "0.31"
-opentelemetry-otlp = { version = "0.31.1", default-features = false, features = ["http-proto", "reqwest-blocking-client", "trace", "metrics"] }
+opentelemetry-otlp = { version = "0.31.1", default-features = false, features = [
+  "http-proto",
+  "reqwest-blocking-client",
+  "trace",
+  "metrics",
+] }
 tracing-opentelemetry = "0.32.1"
 # Low-overhead process RSS/CPU/thread sampling for OpenTelemetry runtime metrics.
-sysinfo = { version = "0.38.4", default-features = false, features = ["system"] }
+sysinfo = { version = "0.38.4", default-features = false, features = [
+  "system",
+] }
 
 # Error handling
 anyhow = "1"
@@ -177,6 +196,10 @@ chrono = { version = "0.4", features = ["serde"] }
 uuid = { version = "1", features = ["v4", "serde"] }
 tokio-util = { version = "0.7.18", features = ["rt"] }
 rusqlite = { version = "0.39.0", features = ["bundled"] }
+# GH issue #704: async, pure-Rust SQLite (Turso). Optional during the
+# phased rusqlite->turso migration; native FTS + vector types. Verified
+# building in the flake env (turso 0.6.1, tantivy 0.26.1).
+turso = { version = "0.6.1", optional = true }
 strsim = "0.11.1"
 # Cortex — self-organizing temporal graph memory for AI agents. Embedded
 # library mode (no server, no external deps). Provides HNSW vector search,
@@ -233,13 +256,21 @@ hmac = { version = "0.13.0", optional = true }
 # YYC-179: sha2 is now a non-optional core dep so run-record payload
 # fingerprinting works in CLI/TUI builds (not just `gateway`).
 sha2 = "0.11.0"
-serenity = { version = "0.12", default-features = false, features = ["client", "gateway", "http", "model", "rustls_backend"], optional = true }
+serenity = { version = "0.12", default-features = false, features = [
+  "client",
+  "gateway",
+  "http",
+  "model",
+  "rustls_backend",
+], optional = true }
 # Telegram Bot API client + types. We use teloxide-core (HTTP + types
 # only) rather than full teloxide so the dispatcher framework's macro
 # DSL doesn't infect the build. Long-poll + webhook are driven by our
 # own gateway plumbing. Pinned to 0.13.0 (latest stable on crates.io
 # 2026-04-27); `rustls` feature reuses our existing rustls TLS stack.
-teloxide-core = { version = "0.13.0", default-features = false, features = ["rustls"], optional = true }
+teloxide-core = { version = "0.13.0", default-features = false, features = [
+  "rustls",
+], optional = true }
 # Connection pool for the gateway daemon's SQLite store (YYC-113). Replaces
 # the global Arc<Mutex<Connection>> that serialized every concurrent agent
 # lane through one lock. Versions verified at crates.io latest stable.
@@ -267,7 +298,11 @@ notify = { version = "8.2.0", optional = true }
 # Unix-only primitives the daemon needs: kill(pid, None) for stale-PID
 # detection, signal handling. fs feature pulls in flock() if we end up
 # needing it for advisory locking beyond what redb already does.
-nix = { version = "0.31.2", optional = true, features = ["fs", "process", "signal"] }
+nix = { version = "0.31.2", optional = true, features = [
+  "fs",
+  "process",
+  "signal",
+] }
 throbber-widgets-tui = "0.11.0"
 tachyonfx = "0.25.0"
 wasmtime = { version = "44.0.1", optional = true }
@@ -299,7 +334,7 @@ ptr_arg = "allow"
 large_enum_variant = "allow"
 
 [profile.release]
-opt-level = "z"    # optimize for size
+opt-level = "z"   # optimize for size
 lto = true
 codegen-units = 1
 strip = true
