@@ -255,11 +255,9 @@ impl CommandDispatcher {
         if session_id.is_empty() {
             return Ok("Usage: /resume <session-id>".into());
         }
-        // The daemon's `session.resume` handler is still stubbed
-        // (METHOD_NOT_IMPLEMENTED). Surface a clean message rather
-        // than failing the inbound row outright; the legacy in-process
-        // resume relied on the gateway-owned Agent which no longer
-        // exists.
+        // GH #703: the daemon rehydrates the saved session. The
+        // METHOD_NOT_IMPLEMENTED arm stays as a clean message when
+        // this gateway talks to an older daemon binary.
         let client = ctx.daemon_client.shared_client().await?;
         match client
             .call(

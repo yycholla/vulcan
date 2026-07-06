@@ -1,9 +1,8 @@
 //! Handlers for the `session.*` method namespace.
 //!
 //! Slice 3 Task 3.1: `create`, `destroy`, and `list` are wired through
-//! to the live `SessionMap`. `search` / `resume` / `history` remain
-//! stubbed pending later slices that load saved session bodies from
-//! disk.
+//! to the live `SessionMap`. GH #703: `search` / `resume` / `history`
+//! read saved session bodies from the SQLite `SessionStore`.
 
 use serde_json::json;
 use uuid::Uuid;
@@ -120,42 +119,176 @@ pub async fn list(state: &DaemonState, id: String) -> Response {
     )
 }
 
-// -- search / resume / history (deferred) --
+// -- search / resume / history (GH #703) --
 
-pub async fn search(state: &DaemonState, id: String, _query: &str, _limit: usize) -> Response {
+/// Open the saved-session store. Failure maps to a retryable
+/// protocol error — the daemon may not have a writable ~/.vulcan yet.
+fn open_store() -> Result<crate::memory::SessionStore, ProtocolError> {
+    crate::memory::SessionStore::try_new().map_err(|e| ProtocolError {
+        code: "SESSION_STORE_UNAVAILABLE".into(),
+        message: format!("could not open session store: {e}"),
+        retryable: true,
+    })
+}
+
+/// FTS5 search across every saved session's messages.
+pub async fn search(state: &DaemonState, id: String, query: &str, limit: usize) -> Response {
     let _ = state;
-    Response::error(
+    let store = match open_store() {
+        Ok(s) => s,
+        Err(e) => return Response::error(id, e),
+    };
+    match store.search_messages(query, limit) {
+        Ok(hits) => Response::ok(
+            id,
+            json!({
+                "hits": hits.iter().map(|h| json!({
+                    "session_id": h.session_id,
+                    "position": h.position,
+                    "role": h.role,
+                    "content": h.content,
+                    "created_at": h.created_at,
+                    "score": h.score,
+                })).collect::<Vec<_>>(),
+            }),
+        ),
+        Err(e) => Response::error(
+            id,
+            ProtocolError {
+                code: "SEARCH_FAILED".into(),
+                message: format!("session search failed: {e}"),
+                retryable: false,
+            },
+        ),
+    }
+}
+
+/// Rehydrate a saved session into a live one. Idempotent: resuming
+/// an already-live session touches it and reports `already_live`.
+/// The Agent lazy-loads the transcript from the store on its next
+/// `prepare_turn`, so pointing its session id at the saved one is
+/// the whole rehydration step.
+pub async fn resume(state: &DaemonState, id: String, session_id: &str) -> Response {
+    if let Some(sess) = state.sessions().get(session_id) {
+        sess.touch();
+        return Response::ok(
+            id,
+            json!({ "session_id": session_id, "already_live": true }),
+        );
+    }
+
+    let store = match open_store() {
+        Ok(s) => s,
+        Err(e) => return Response::error(id, e),
+    };
+    match store.load_history(session_id) {
+        Ok(Some(_)) => {}
+        Ok(None) => {
+            return Response::error(
+                id,
+                ProtocolError {
+                    code: "SESSION_NOT_FOUND".into(),
+                    message: format!("no saved session '{session_id}'"),
+                    retryable: false,
+                },
+            );
+        }
+        Err(e) => {
+            return Response::error(
+                id,
+                ProtocolError {
+                    code: "SESSION_STORE_UNAVAILABLE".into(),
+                    message: format!("could not read saved session: {e}"),
+                    retryable: true,
+                },
+            );
+        }
+    }
+
+    if let Err(e) = state
+        .sessions()
+        .create_named_with_lineage(session_id, None, None)
+    {
+        return Response::error(
+            id,
+            ProtocolError {
+                code: "SESSION_EXISTS".into(),
+                message: format!("{e}"),
+                retryable: false,
+            },
+        );
+    }
+    let sess = state
+        .sessions()
+        .get(session_id)
+        .expect("session registered above");
+    let agent_arc = match sess.ensure_agent(&state.session_agent_assembler()).await {
+        Ok(a) => a,
+        Err(e) => {
+            state.sessions().destroy(session_id);
+            return Response::error(
+                id,
+                ProtocolError {
+                    code: "AGENT_BUILD_FAILED".into(),
+                    message: format!("agent build for resumed session failed: {e}"),
+                    retryable: true,
+                },
+            );
+        }
+    };
+    if let Err(e) = agent_arc.lock().await.resume_session(session_id) {
+        state.sessions().destroy(session_id);
+        return Response::error(
+            id,
+            ProtocolError {
+                code: "RESUME_FAILED".into(),
+                message: format!("could not resume '{session_id}': {e}"),
+                retryable: false,
+            },
+        );
+    }
+    Response::ok(
         id,
-        ProtocolError {
-            code: "METHOD_NOT_IMPLEMENTED".into(),
-            message: "session.search is not yet implemented".into(),
-            retryable: false,
-        },
+        json!({ "session_id": session_id, "already_live": false }),
     )
 }
 
-pub async fn resume(state: &DaemonState, id: String, _session_id: &str) -> Response {
+/// Return a saved session's full message log.
+pub async fn history(state: &DaemonState, id: String, session_id: &str) -> Response {
     let _ = state;
-    Response::error(
-        id,
-        ProtocolError {
-            code: "METHOD_NOT_IMPLEMENTED".into(),
-            message: "session.resume is not yet implemented".into(),
-            retryable: false,
+    let store = match open_store() {
+        Ok(s) => s,
+        Err(e) => return Response::error(id, e),
+    };
+    match store.load_history(session_id) {
+        Ok(Some(messages)) => match serde_json::to_value(&messages) {
+            Ok(v) => Response::ok(id, json!({ "session_id": session_id, "messages": v })),
+            Err(e) => Response::error(
+                id,
+                ProtocolError {
+                    code: "HISTORY_ENCODE_FAILED".into(),
+                    message: format!("{e}"),
+                    retryable: false,
+                },
+            ),
         },
-    )
-}
-
-pub async fn history(state: &DaemonState, id: String, _session_id: &str) -> Response {
-    let _ = state;
-    Response::error(
-        id,
-        ProtocolError {
-            code: "METHOD_NOT_IMPLEMENTED".into(),
-            message: "session.history is not yet implemented".into(),
-            retryable: false,
-        },
-    )
+        Ok(None) => Response::error(
+            id,
+            ProtocolError {
+                code: "SESSION_NOT_FOUND".into(),
+                message: format!("no saved session '{session_id}'"),
+                retryable: false,
+            },
+        ),
+        Err(e) => Response::error(
+            id,
+            ProtocolError {
+                code: "SESSION_STORE_UNAVAILABLE".into(),
+                message: format!("could not read saved session: {e}"),
+                retryable: true,
+            },
+        ),
+    }
 }
 
 #[cfg(test)]
@@ -225,6 +358,49 @@ mod tests {
         let resp = destroy(&state, "r1".into(), "ghost".into()).await;
         let err = resp.error.expect("err");
         assert_eq!(err.code, "SESSION_NOT_FOUND");
+    }
+
+    // GH #703: resume of a live session is idempotent and never
+    // touches the on-disk store.
+    #[tokio::test]
+    async fn resume_live_session_reports_already_live() {
+        let state = Arc::new(DaemonState::for_tests_minimal());
+        create(&state, "r1".into(), Some("foo".into()), None, None, None).await;
+        let resp = resume(&state, "r2".into(), "foo").await;
+        let result = resp.result.expect("ok");
+        assert_eq!(result["already_live"], true);
+        assert_eq!(result["session_id"], "foo");
+    }
+
+    // GH #703: history of a session that was never saved is a typed
+    // SESSION_NOT_FOUND, not METHOD_NOT_IMPLEMENTED.
+    #[tokio::test]
+    async fn history_missing_session_not_found() {
+        let state = Arc::new(DaemonState::for_tests_minimal());
+        let ghost = uuid::Uuid::new_v4().to_string();
+        let resp = history(&state, "r1".into(), &ghost).await;
+        let err = resp.error.expect("err");
+        assert!(
+            err.code == "SESSION_NOT_FOUND" || err.code == "SESSION_STORE_UNAVAILABLE",
+            "unexpected code {}",
+            err.code
+        );
+        assert_ne!(err.code, "METHOD_NOT_IMPLEMENTED");
+    }
+
+    // GH #703: resume of an unknown saved session is typed too.
+    #[tokio::test]
+    async fn resume_missing_session_not_found() {
+        let state = Arc::new(DaemonState::for_tests_minimal());
+        let ghost = uuid::Uuid::new_v4().to_string();
+        let resp = resume(&state, "r1".into(), &ghost).await;
+        let err = resp.error.expect("err");
+        assert!(
+            err.code == "SESSION_NOT_FOUND" || err.code == "SESSION_STORE_UNAVAILABLE",
+            "unexpected code {}",
+            err.code
+        );
+        assert!(state.sessions().get(&ghost).is_none());
     }
 
     #[tokio::test]
