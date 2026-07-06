@@ -24,13 +24,25 @@ Done: seam (Phase 0), playbook, artifact, run_record, code/embed. Pattern proven
    the largely-sync WASM extension host, so check for a constructor cascade first.
 3. **extensions/install_state** — biggest cascade: forces the ~60-function sync
    extension registry loader async. Budget for it; do it in its own PR.
-4. **gateway trio + memory-FTS finale** — inbound/outbound queue + scheduler +
-   memory share one r2d2 `DbPool`; they move together. This is where FTS5
-   (`messages_fts` virtual table + 3 triggers) becomes Turso native FTS
-   (`CREATE INDEX ... USING fts`, `fts_match`/`fts_score`, no triggers) and
-   `db_blocking`/r2d2/`spawn_blocking` get deleted — **the real prize**. Highest
-   value of all remaining migration work; do this before the low-value code stores.
-5. **Cutover** — drop `rusqlite`/`r2d2`/`r2d2_sqlite`, remove the feature flag,
+4. **memory-FTS store — now independently portable.** ✅ The shared-file blocker
+   is **resolved**: the gateway queues were split out of `sessions.db` into
+   `gateway.db` (commit "Split gateway queues out of sessions.db"), so
+   `SessionStore` owns `sessions.db` alone. Next: port `SessionStore` to Turso —
+   the FTS thesis. ~14 methods; cfg-gate the `conn` field + `db_*` bodies like
+   code/embed. The FTS conversion: `messages_fts USING fts5(...)` + 3 triggers →
+   `CREATE INDEX messages_fts ON messages USING fts(content)` (Turso auto-maintains
+   it, delete the triggers); `WHERE messages_fts MATCH ?1` → `WHERE fts_match(content, ?1)`;
+   `bm25(messages_fts)` (lower=better) → `fts_score(content, ?1)` (higher=better,
+   flip the ORDER BY); and `sanitize_fts_query` must join tokens with explicit
+   `AND` (Turso/Tantivy defaults to OR). Constructor cascade: `try_new`/`in_memory`
+   become async → callers in agent, daemon session handlers, RecallHook, runtime_pool,
+   cli_cortex, extensions/api, tests. Verify RecallHook + `session.search` (GH #703)
+   return the same top hits on a fixture corpus.
+5. **gateway queues + scheduler** — now that they own `gateway.db`, port them to
+   Turso and delete `db_blocking`/r2d2/`spawn_blocking`. No FTS here (pure CRUD),
+   so this is the "delete the async scaffolding" win. They still share `gateway.db`,
+   so port inbound/outbound/scheduler together.
+6. **Cutover** — drop `rusqlite`/`r2d2`/`r2d2_sqlite`, remove the feature flag,
    make Turso the only backend. (Requires all stores ported, or a permanent
    rusqlite carve-out for code/graph + code/embed if those stay unported.)
 
