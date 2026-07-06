@@ -12,10 +12,12 @@
 //!
 //! ## Deliberately deferred
 //!
-//! - Purge (PR-2).
 //! - Exclusion config + retrieval provenance (PR-3).
 //! - `doctor` integration (YYC-183).
 //! - Workspace trust profile interplay (YYC-182).
+//!
+//! (Purge, deferred as PR-2 when this module landed, has since
+//! shipped — `vulcan knowledge purge`.)
 
 use anyhow::Result;
 use serde::Serialize;

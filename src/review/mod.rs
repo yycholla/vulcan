@@ -7,9 +7,9 @@
 //! - Parser for the canonical findings-first format the critic
 //!   prompt (PR-2) will ask the model to emit.
 //!
-//! ## Deliberately deferred
-//!
-//! - `vulcan review plan|diff|run` CLI surface (PR-3).
+//! (The `vulcan review plan|diff|run` CLI surface, deferred as PR-3
+//! when this module landed, has since shipped — see `cli_review.rs`
+//! and `review/runner.rs`.)
 
 use anyhow::Result;
 use serde::{Deserialize, Serialize};

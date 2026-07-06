@@ -17,12 +17,12 @@
 //!
 //! ## Deliberately deferred
 //!
-//! - Wiring the resolved profile into Agent / capability profile
-//!   selection (separate PR).
-//! - TUI status indicator.
-//! - Run-record annotation (waits on PR-2).
-//! - Git remote fingerprint matching.
-//! - `vulcan trust list/show/why` CLI surface.
+//! - Git remote fingerprint matching (resolver is path-only).
+//! - `vulcan trust list/show` (only `why` shipped).
+//!
+//! (Agent/capability-profile wiring, run-record annotation, the TUI
+//! status indicator, and `vulcan trust why` — all deferred when this
+//! module landed — have since shipped.)
 
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};

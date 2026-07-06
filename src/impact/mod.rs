@@ -11,10 +11,11 @@
 //!
 //! ## Deliberately deferred
 //!
-//! - Heuristic generator (code-graph + references + search) —
-//!   lands when a CLI driver / agent flow is wired.
-//! - `vulcan impact <file|symbol>` CLI surface.
 //! - Auto-suggest from edit hooks for high-risk edits.
+//!
+//! (The heuristic generator and the `vulcan impact <file|symbol>`
+//! CLI surface, deferred when this module landed, have since
+//! shipped — see `generator.rs` and `cli_impact.rs`.)
 
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
