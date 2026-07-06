@@ -296,6 +296,11 @@ pub async fn run_tui(
         app.model_label = a.active_model().to_string();
         app.token_max = a.max_context() as u32;
         app.provider_label = a.active_profile().map(str::to_string);
+        // YYC-182: surface the resolved workspace trust level when it
+        // deviates from the default; `trusted` stays quiet.
+        let trust = a.trust_profile();
+        app.trust_label = (trust.level != crate::trust::TrustLevel::Trusted)
+            .then(|| trust.level.as_str().to_string());
         // YYC-207: share the agent's orchestration store so subagent
         // tiles + tree nodes render real child runs as they happen.
         app.orchestration_store = Some(a.orchestration());

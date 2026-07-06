@@ -291,6 +291,10 @@ pub struct AppState {
     /// session is running on the legacy unnamed `[provider]` block —
     /// `model_status()` omits the prefix in that case.
     pub provider_label: Option<String>,
+    /// YYC-182: workspace trust level, shown in the status row when it
+    /// deviates from the default `trusted` (restricted / sensitive /
+    /// untrusted). `None` = trusted, nothing rendered.
+    pub trust_label: Option<String>,
     /// Cumulative input tokens across the whole session (every turn's
     /// `usage.prompt_tokens` summed). Used by the cost telemetry pane
     /// (YYC-67).
@@ -402,6 +406,7 @@ impl AppState {
             cursor: Cell::new((0, 0)),
             model_label,
             provider_label: None,
+            trust_label: None,
             current_turn_cancel: None,
             prompt_tokens_total: 0,
             completion_tokens_total: 0,
@@ -558,6 +563,10 @@ impl AppState {
                 format_thousands(self.prompt_tokens_last),
                 format_thousands(self.token_max),
             ),
+        };
+        let base = match &self.trust_label {
+            Some(trust) => format!("{base} · ⛨ {trust}"),
+            None => base,
         };
         let widget_status = self.status_widget_summary();
         if widget_status.is_empty() {

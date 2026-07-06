@@ -174,6 +174,19 @@ fn model_status_prefixes_active_provider_label() {
 }
 
 #[test]
+fn model_status_appends_non_default_trust_level() {
+    let mut app = AppState::new("deepseek/v4".into(), 128_000);
+    app.prompt_tokens_last = 18_402;
+    app.trust_label = Some("restricted".into());
+    assert_eq!(
+        app.model_status(),
+        "deepseek/v4 · 18,402 / 128,000 · ⛨ restricted"
+    );
+    app.trust_label = None;
+    assert!(!app.model_status().contains('⛨'));
+}
+
+#[test]
 fn app_state_applies_status_widget_updates() {
     let mut app = AppState::new("deepseek/v4".into(), 128_000);
 
