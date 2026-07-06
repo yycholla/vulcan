@@ -11,7 +11,8 @@
 //! `turso::Connection` and drop the `Mutex<Connection>` / r2d2 pool /
 //! `spawn_blocking` scaffolding the rusqlite stores needed.
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
+use std::future::Future;
 use std::path::Path;
 
 /// Open a Turso database at `path`, creating parent dirs as needed.
@@ -40,6 +41,38 @@ pub async fn open_in_memory() -> Result<turso::Connection> {
         .await
         .context("open in-memory turso db")?;
     connect_database(&db).await
+}
+
+/// Bridge for legacy sync stores that have not grown async traits yet.
+///
+/// ponytail: temporary sync bridge; delete it when the remaining store
+/// traits become async during the final Turso cutover.
+pub fn block_on<T, F>(future: F) -> Result<T>
+where
+    T: Send,
+    F: Future<Output = Result<T>> + Send,
+{
+    if tokio::runtime::Handle::try_current().is_ok() {
+        let joined = std::thread::scope(|scope| {
+            scope
+                .spawn(move || {
+                    tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                        .context("create turso sync bridge runtime")?
+                        .block_on(future)
+                })
+                .join()
+        });
+        match joined {
+            Ok(result) => result,
+            Err(_) => bail!("turso sync bridge thread panicked"),
+        }
+    } else {
+        tokio::runtime::Runtime::new()
+            .context("create turso sync bridge runtime")?
+            .block_on(future)
+    }
 }
 
 /// Execute a DDL statement, tolerating "already exists". Turso

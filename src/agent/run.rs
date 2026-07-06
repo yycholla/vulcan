@@ -217,14 +217,17 @@ impl Agent {
                 },
             )
             .await;
-        let _ = self.run_store.append_event(
-            id,
-            RunEvent::PromptReceived {
-                fingerprint: PayloadFingerprint::of(input.as_bytes()),
-                char_count: input.chars().count(),
-                raw: None,
-            },
-        );
+        let _ = self
+            .run_store
+            .append_event(
+                id,
+                RunEvent::PromptReceived {
+                    fingerprint: PayloadFingerprint::of(input.as_bytes()),
+                    char_count: input.chars().count(),
+                    raw: None,
+                },
+            )
+            .await;
     }
 
     /// YYC-179: write the terminal status for the current run and
