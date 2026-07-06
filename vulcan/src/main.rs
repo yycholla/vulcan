@@ -109,8 +109,29 @@ async fn main() -> anyhow::Result<()> {
             };
             run_tui(&config, resume, cli.profile.clone()).await?;
         }
-        Some(Command::Prompt { text }) => {
+        Some(Command::Prompt { text, context_pack }) => {
             init_cli_observability!("prompt");
+            // YYC-188: prepend the pack's citation list so the agent
+            // knows which files/docs to load. Works identically on the
+            // daemon and direct paths because it's plain prompt text.
+            let text = match context_pack.as_deref() {
+                None => text,
+                Some(name) => match vulcan::context_pack::lookup(name) {
+                    Some(pack) => format!(
+                        "{}\n---\n\n{}",
+                        vulcan::context_pack::render_pack_summary(&pack),
+                        text
+                    ),
+                    None => {
+                        let names = vulcan::context_pack::builtin_packs()
+                            .iter()
+                            .map(|p| p.name.clone())
+                            .collect::<Vec<_>>()
+                            .join(", ");
+                        anyhow::bail!("unknown context pack '{name}'. Available: {names}");
+                    }
+                },
+            };
             #[cfg(feature = "daemon")]
             if !cli.no_daemon {
                 match prompt_via_daemon(text.clone(), cli.profile.clone()).await {

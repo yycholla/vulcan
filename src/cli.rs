@@ -49,6 +49,10 @@ pub enum Command {
     Prompt {
         /// The prompt text to send to the agent
         text: String,
+        /// Prepend a named context pack's citation list to the prompt
+        /// (see `vulcan context-pack list`)
+        #[arg(long)]
+        context_pack: Option<String>,
     },
     /// Resume a previous session by ID (interactive TUI)
     Session {
