@@ -336,6 +336,28 @@ fn duration_millis(duration: Duration) -> f64 {
     duration.as_secs_f64() * 1000.0
 }
 
+/// Per-surface metric gates, snapshotted from `[observability.surfaces]`
+/// at init. Before init (unit tests, early startup) every surface is
+/// treated as enabled so nothing is silently dropped.
+static SURFACE_GATES: std::sync::OnceLock<crate::config::ObservabilitySurfaceConfig> =
+    std::sync::OnceLock::new();
+
+fn surface_enabled(surface: &str) -> bool {
+    let Some(gates) = SURFACE_GATES.get() else {
+        return true;
+    };
+    match surface {
+        "agent" => gates.agent,
+        "hooks" => gates.hooks,
+        "tools" => gates.tools,
+        "provider" => gates.provider,
+        "daemon" => gates.daemon,
+        "gateway" => gates.gateway,
+        "symphony" => gates.symphony,
+        _ => true,
+    }
+}
+
 fn outcome_metric_attrs(
     surface: &'static str,
     outcome: &str,
@@ -376,6 +398,9 @@ pub fn record_provider_request_metrics(
     outcome: &str,
     error_kind: Option<&str>,
 ) {
+    if !surface_enabled("provider") {
+        return;
+    }
     let mut attrs = provider_metric_attrs(provider, model, mode);
     push_outcome_attrs(&mut attrs, outcome, error_kind);
     RUNTIME_METRICS
@@ -394,6 +419,9 @@ pub fn record_provider_token_metrics(
     completion_tokens: usize,
     total_tokens: usize,
 ) {
+    if !surface_enabled("provider") {
+        return;
+    }
     let attrs = provider_metric_attrs(provider, model, mode);
     RUNTIME_METRICS
         .tokens_input
@@ -412,6 +440,9 @@ pub fn record_tool_call_metrics(
     outcome: &str,
     error_kind: Option<&str>,
 ) {
+    if !surface_enabled("tools") {
+        return;
+    }
     let mut attrs = vec![
         KeyValue::new(attr::SURFACE, "tools"),
         KeyValue::new(attr::TOOL_NAME, tool_name.to_string()),
@@ -432,6 +463,9 @@ pub fn record_hook_event_metrics(
     outcome: &str,
     error_kind: Option<&str>,
 ) {
+    if !surface_enabled("hooks") {
+        return;
+    }
     let mut attrs = vec![
         KeyValue::new(attr::SURFACE, "hooks"),
         KeyValue::new(attr::HOOK_EVENT, event),
@@ -460,6 +494,9 @@ pub fn record_daemon_request_metrics(
     outcome: &str,
     error_kind: Option<&str>,
 ) {
+    if !surface_enabled("daemon") {
+        return;
+    }
     let operation = daemon_request_operation(method);
     let mut attrs = vec![
         KeyValue::new(attr::SURFACE, "daemon"),
@@ -476,6 +513,9 @@ pub fn record_daemon_request_metrics(
 }
 
 pub fn record_error_metric(surface: &'static str, error_kind: &str) {
+    if !surface_enabled(surface) {
+        return;
+    }
     let attrs = outcome_metric_attrs(surface, "error", Some(error_kind));
     RUNTIME_METRICS.errors_total.add(1, &attrs);
 }
@@ -663,6 +703,9 @@ where
     W: for<'writer> fmt::MakeWriter<'writer> + Send + Sync + 'static,
 {
     let fmt_layer = fmt::layer().with_writer(writer).with_ansi(ansi);
+    // Snapshot per-surface gates for the record_* helpers. set() fails
+    // only when already initialized (re-init in tests) — keep the first.
+    let _ = SURFACE_GATES.set(config.surfaces.clone());
     if !config.enabled {
         tracing_subscriber::registry()
             .with(filter)
