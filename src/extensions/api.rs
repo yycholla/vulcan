@@ -1,6 +1,6 @@
 //! Cargo-crate extension API surface (Slice 1 / GH issue #549).
 //!
-//! Splits today's `CodeExtension` trait into two roles aligned with
+//! Forward daemon/frontend extension API aligned with
 //! `src/extensions/CONTEXT.md`:
 //!
 //! - **`DaemonCodeExtension`** — daemon-global registration that
@@ -9,14 +9,13 @@
 //! - **`SessionExtension`** — per-**Session** instantiation owning that
 //!   session's hooks, tools, commands, providers, and lifecycle handlers.
 //!
-//! The existing `CodeExtension` trait in `super::registry` stays
-//! alongside this module while migration is in flight; new extensions
-//! target this API.
+//! New daemon-side extensions target this API.
 
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+use super::ExtensionConfigField;
 use super::ExtensionMetadata;
 use super::FrontendCapability;
 use super::state::{ExtensionStateScope, ExtensionStateStore};
@@ -201,6 +200,13 @@ pub trait DaemonCodeExtension: Send + Sync {
     /// `Arc<dyn SessionExtension>` that owns hooks, tools, commands,
     /// providers, and lifecycle handlers for that session.
     fn instantiate(&self, ctx: SessionExtensionCtx) -> Arc<dyn SessionExtension>;
+
+    /// Configuration fields this daemon extension declares.
+    /// The `vulcan config` CLI surfaces active extension fields
+    /// under the extension's id.
+    fn config_fields(&self) -> Vec<ExtensionConfigField> {
+        Vec::new()
+    }
 }
 
 /// Extension-contributed command surface placeholder. Slice 1 only

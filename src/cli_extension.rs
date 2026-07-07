@@ -345,6 +345,11 @@ fn uninstall(
 }
 
 fn scaffold_new(name: &str, kind: &str) -> Result<()> {
+    let cwd = std::env::current_dir()?;
+    scaffold_new_at(&cwd, name, kind)
+}
+
+fn scaffold_new_at(base: &Path, name: &str, kind: &str) -> Result<()> {
     let id = name.to_ascii_lowercase().replace([' ', '_'], "-");
     if !id
         .chars()
@@ -355,7 +360,7 @@ fn scaffold_new(name: &str, kind: &str) -> Result<()> {
             "name `{name}` cannot become a valid extension id (lowercase letters, digits, `-`)"
         ));
     }
-    let dest = std::env::current_dir()?.join(&id);
+    let dest = base.join(&id);
     if dest.exists() {
         return Err(anyhow!(
             "destination {} already exists; refusing to overwrite",
@@ -414,7 +419,7 @@ edition = "2024"
         std::fs::create_dir_all(dest.join("src"))?;
         std::fs::write(
             dest.join("src/lib.rs"),
-            "//! TODO: implement `vulcan::extensions::CodeExtension` here.\n",
+            "//! TODO: implement `vulcan::extensions::api::DaemonCodeExtension` here.\n",
         )?;
     }
     println!("scaffolded {} at {}", id, dest.display());
@@ -508,4 +513,22 @@ fn confirm(prompt: &str, expect: &str) -> Result<bool> {
     let mut line = String::new();
     std::io::stdin().read_line(&mut line)?;
     Ok(line.trim() == expect)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rust_scaffold_references_daemon_extension_seam() {
+        let dir = tempfile::tempdir().unwrap();
+
+        scaffold_new_at(dir.path(), "Example Extension", "rust").unwrap();
+
+        let lib = std::fs::read_to_string(dir.path().join("example-extension/src/lib.rs"))
+            .expect("scaffolded lib.rs");
+        assert!(lib.contains("DaemonCodeExtension"));
+        let old_path = ["vulcan::extensions::", "Code", "Extension"].concat();
+        assert!(!lib.contains(&old_path));
+    }
 }

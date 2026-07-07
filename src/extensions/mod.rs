@@ -45,7 +45,7 @@ pub use install_state::{
 };
 pub use manifest::{EntryKind, ExtensionManifest, ManifestError};
 pub use policy::{ExtensionPermission, ExtensionPolicyEngine, PolicyDecision};
-pub use registry::{CodeExtension, ExtensionInventoryRow, ExtensionRegistry};
+pub use registry::{ExtensionInventoryRow, ExtensionRegistry};
 pub use repository::{
     InstalledExtension, PublisherMetadata, RepositoryCacheFailure, RepositoryCacheSnapshot,
     RepositoryCompatibility, RepositoryConfig, RepositoryError, RepositoryExtension,
