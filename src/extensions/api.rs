@@ -263,6 +263,8 @@ pub struct SessionExtensionRuntime {
     id: String,
     extension: Arc<dyn SessionExtension>,
     draining: Arc<AtomicBool>,
+    session_id: String,
+    frontend_events: FrontendEventSink,
 }
 
 impl SessionExtensionRuntime {
@@ -271,6 +273,22 @@ impl SessionExtensionRuntime {
             id: id.into(),
             extension,
             draining: Arc::new(AtomicBool::new(false)),
+            session_id: String::new(),
+            frontend_events: FrontendEventSink::default(),
+        }
+    }
+
+    pub fn new_with_context(
+        id: impl Into<String>,
+        extension: Arc<dyn SessionExtension>,
+        ctx: &SessionExtensionCtx,
+    ) -> Self {
+        Self {
+            id: id.into(),
+            extension,
+            draining: Arc::new(AtomicBool::new(false)),
+            session_id: ctx.session_id.clone(),
+            frontend_events: ctx.frontend_events.clone(),
         }
     }
 
@@ -292,6 +310,35 @@ impl SessionExtensionRuntime {
 
     pub async fn activate(&self) {
         self.extension.on_activate().await;
+    }
+
+    pub fn emit_lifecycle_success(&self, reason: &str, message: impl Into<String>) {
+        self.emit_lifecycle("success", reason, message);
+    }
+
+    pub fn emit_lifecycle_warning(&self, reason: &str, message: impl Into<String>) {
+        self.emit_lifecycle("warning", reason, message);
+    }
+
+    pub fn emit_lifecycle_failure(&self, reason: &str, message: impl Into<String>) {
+        self.emit_lifecycle("failure", reason, message);
+    }
+
+    pub fn emit_lifecycle_skipped(&self, reason: &str, message: impl Into<String>) {
+        self.emit_lifecycle("skipped", reason, message);
+    }
+
+    fn emit_lifecycle(&self, status: &str, reason: &str, message: impl Into<String>) {
+        let _ = self.frontend_events.emit(FrontendEvent {
+            session_id: self.session_id.clone(),
+            extension_id: self.id.clone(),
+            payload: serde_json::json!({
+                "kind": "lifecycle",
+                "status": status,
+                "reason": reason,
+                "message": message.into(),
+            }),
+        });
     }
 
     pub fn wrapped_hook_handlers(&self) -> Vec<Arc<dyn HookHandler>> {
@@ -556,6 +603,37 @@ mod tests {
         let captured = seen.read().clone().expect("instantiate ran");
         assert_eq!(captured.0, PathBuf::from("/tmp/example-session"));
         assert_eq!(captured.1, "sess-42");
+    }
+
+    #[tokio::test]
+    async fn session_extension_runtime_emits_lifecycle_events() {
+        struct NoopSession;
+        impl SessionExtension for NoopSession {}
+
+        let (tx, mut rx) = tokio::sync::broadcast::channel(8);
+        let ctx = SessionExtensionCtx {
+            frontend_events: FrontendEventSink::new(tx),
+            ..test_ctx().await
+        };
+        let runtime =
+            SessionExtensionRuntime::new_with_context("life-ext", Arc::new(NoopSession), &ctx);
+
+        runtime.emit_lifecycle_success("activated", "extension activated");
+        runtime.emit_lifecycle_failure("tool_registration_failed", "duplicate tool");
+
+        let success = rx.recv().await.unwrap();
+        assert_eq!(success.session_id, ctx.session_id);
+        assert_eq!(success.extension_id, "life-ext");
+        assert_eq!(success.payload["kind"], "lifecycle");
+        assert_eq!(success.payload["status"], "success");
+        assert_eq!(success.payload["reason"], "activated");
+
+        let failure = rx.recv().await.unwrap();
+        assert_eq!(failure.extension_id, "life-ext");
+        assert_eq!(failure.payload["kind"], "lifecycle");
+        assert_eq!(failure.payload["status"], "failure");
+        assert_eq!(failure.payload["reason"], "tool_registration_failed");
+        assert_eq!(failure.payload["message"], "duplicate tool");
     }
 
     #[tokio::test]

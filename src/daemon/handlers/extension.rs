@@ -145,9 +145,10 @@ mod tests {
     use std::sync::Arc;
 
     use crate::extensions::api::{DaemonCodeExtension, SessionExtension, SessionExtensionCtx};
-    use crate::extensions::{ExtensionMetadata, ExtensionSource};
+    use crate::extensions::{ExtensionMetadata, ExtensionSource, FrontendCapability};
 
     struct LifecycleExt;
+    struct FrontendRequiredExt;
 
     impl DaemonCodeExtension for LifecycleExt {
         fn metadata(&self) -> ExtensionMetadata {
@@ -158,6 +159,26 @@ mod tests {
                 ExtensionSource::Builtin,
             );
             meta.status = ExtensionStatus::Active;
+            meta
+        }
+
+        fn instantiate(&self, _ctx: SessionExtensionCtx) -> Arc<dyn SessionExtension> {
+            struct Session;
+            impl SessionExtension for Session {}
+            Arc::new(Session)
+        }
+    }
+
+    impl DaemonCodeExtension for FrontendRequiredExt {
+        fn metadata(&self) -> ExtensionMetadata {
+            let mut meta = ExtensionMetadata::new(
+                "frontend-required",
+                "Frontend Required",
+                "0.1.0",
+                ExtensionSource::Builtin,
+            );
+            meta.status = ExtensionStatus::Active;
+            meta.requires_frontend = vec![FrontendCapability::StatusWidgets];
             meta
         }
 
@@ -188,6 +209,16 @@ mod tests {
         state
     }
 
+    async fn state_with_frontend_required_extension() -> DaemonState {
+        let pool = Arc::new(crate::runtime_pool::RuntimeResourcePool::for_tests().await);
+        pool.extension_registry()
+            .register_daemon_extension(Arc::new(FrontendRequiredExt));
+        let state = DaemonState::for_tests_minimal().with_pool(pool);
+        let main = state.sessions().get("main").unwrap();
+        main.set_agent(test_agent().await);
+        state
+    }
+
     #[tokio::test]
     async fn enable_attaches_extension_to_live_agent() {
         let state = state_with_extension().await;
@@ -197,6 +228,17 @@ mod tests {
         let agent = main.agent_arc().unwrap();
         let agent = agent.lock().await;
         assert_eq!(agent.session_extension_ids(), vec!["lifecycle-ext"]);
+    }
+
+    #[tokio::test]
+    async fn enable_attaches_daemon_runtime_when_frontend_capability_is_missing() {
+        let state = state_with_frontend_required_extension().await;
+        let resp = enable(&state, "req-1".into(), "frontend-required").await;
+        assert!(resp.error.is_none(), "{:?}", resp.error);
+        let main = state.sessions().get("main").unwrap();
+        let agent = main.agent_arc().unwrap();
+        let agent = agent.lock().await;
+        assert_eq!(agent.session_extension_ids(), vec!["frontend-required"]);
     }
 
     #[tokio::test]

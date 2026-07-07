@@ -91,6 +91,7 @@ pub struct Agent {
     pub(in crate::agent) prompt_builder: PromptBuilder,
     pub(in crate::agent) hooks: Arc<HookRegistry>,
     pub(in crate::agent) session_extensions: Vec<crate::extensions::api::SessionExtensionRuntime>,
+    pub(in crate::agent) session_extension_ctx: crate::extensions::api::SessionExtensionCtx,
     pub(in crate::agent) _mcp_servers: Vec<Arc<crate::mcp::McpServerHandle>>,
     pub(in crate::agent) session_id: String,
     pub(in crate::agent) turns: u32,
@@ -586,19 +587,26 @@ impl Agent {
             frontend_events: frontend_events.clone(),
             ..ctx
         };
+        let session_extension_ctx = ctx.clone();
         let session_extensions = extension_registry.wire_daemon_extensions_runtime(ctx, &hooks);
         for ext in &session_extensions {
+            let mut tool_registration_failed = false;
             for tool in ext.wrapped_tools() {
                 if let Err(err) = tools.register_extension_tool(ext.id(), tool) {
                     extension_registry.mark_broken(ext.id(), err.to_string());
+                    ext.emit_lifecycle_failure("tool_registration_failed", err.to_string());
                     tracing::warn!(
                         extension_id = ext.id(),
                         %err,
                         "Agent: failed to register extension tool"
                     );
+                    tool_registration_failed = true;
                 }
             }
-            ext.activate().await;
+            if !tool_registration_failed {
+                ext.activate().await;
+                ext.emit_lifecycle_success("activated", "extension activated");
+            }
         }
         let orchestration_hooks = crate::orchestration::OrchestrationHookSet::new(
             session_extensions
@@ -770,6 +778,7 @@ impl Agent {
             prompt_builder: PromptBuilder,
             hooks: Arc::new(hooks),
             session_extensions,
+            session_extension_ctx,
             _mcp_servers: mcp_servers,
             session_id,
             turns: 0,
@@ -971,17 +980,26 @@ impl Agent {
         skills: Arc<SkillRegistry>,
     ) -> Self {
         let max_context = provider.max_context();
+        let memory = Arc::new(SessionStore::in_memory().await);
+        let session_id = Uuid::new_v4().to_string();
+        let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+        let session_extension_ctx = crate::extensions::api::SessionExtensionCtx::new(
+            cwd.clone(),
+            session_id.clone(),
+            Arc::clone(&memory),
+        );
         Self {
             provider,
             tools,
             skills,
             context: ContextManager::new(max_context),
-            memory: Arc::new(SessionStore::in_memory().await),
+            memory,
             prompt_builder: PromptBuilder,
             hooks: Arc::new(hooks),
             session_extensions: Vec::new(),
+            session_extension_ctx,
             _mcp_servers: Vec::new(),
-            session_id: Uuid::new_v4().to_string(),
+            session_id,
             turns: 0,
             turn_cancel: CancellationToken::new(),
             diff_sink: crate::tools::new_diff_sink(),
@@ -990,16 +1008,12 @@ impl Agent {
             provider_config: ProviderConfig::default(),
             provider_api_key: secrecy::SecretString::from("test-key".to_string()),
             active_profile: None,
-            lsp_manager: Arc::new(crate::code::lsp::LspManager::new(
-                std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")),
-            )),
+            lsp_manager: Arc::new(crate::code::lsp::LspManager::new(cwd.clone())),
             last_saved_count: 0,
             history_cache: Vec::new(),
             history_loaded: false,
             max_iterations: 0,
-            tool_context: crate::tools::ToolContext::probe(
-                std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")),
-            ),
+            tool_context: crate::tools::ToolContext::probe(cwd),
             auto_create_skills: false,
             orchestration: Arc::new(crate::orchestration::OrchestrationStore::new()),
             tokens_consumed: 0,
@@ -1036,6 +1050,14 @@ impl Agent {
             .iter()
             .map(|ext| ext.id().to_string())
             .collect()
+    }
+
+    fn session_extension_ctx(&self) -> crate::extensions::api::SessionExtensionCtx {
+        let mut ctx = self.session_extension_ctx.clone();
+        ctx.cwd = self.tool_context.cwd.clone();
+        ctx.session_id = self.session_id.clone();
+        ctx.memory = Arc::clone(&self.memory);
+        ctx
     }
 
     pub fn drain_session_extension(&self, id: &str) -> bool {
@@ -1075,19 +1097,20 @@ impl Agent {
         if self.session_extensions.iter().any(|ext| ext.id() == id) {
             return Ok(false);
         }
-        let ctx = crate::extensions::api::SessionExtensionCtx::new(
-            self.tool_context.cwd.clone(),
-            self.session_id.clone(),
-            Arc::clone(&self.memory),
-        );
+        let ctx = self.session_extension_ctx();
         let Some(runtime) = registry.instantiate_daemon_extension_runtime(id, ctx, &self.hooks)
         else {
             return Ok(false);
         };
         for tool in runtime.wrapped_tools() {
-            self.tools.register_extension_tool(runtime.id(), tool)?;
+            if let Err(err) = self.tools.register_extension_tool(runtime.id(), tool) {
+                registry.mark_broken(runtime.id(), err.to_string());
+                runtime.emit_lifecycle_failure("tool_registration_failed", err.to_string());
+                return Err(err);
+            }
         }
         runtime.activate().await;
+        runtime.emit_lifecycle_success("activated", "extension activated");
         self.session_extensions.push(runtime);
         Ok(true)
     }
