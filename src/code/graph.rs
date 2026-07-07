@@ -155,6 +155,13 @@ pub struct CodeGraphIndexReport {
     pub lsp_errors: Vec<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct FreshnessMetadata {
+    pub fresh: bool,
+    pub rebuilt: bool,
+    pub indexed_at: Option<u64>,
+}
+
 pub struct CodeGraph {
     conn: turso::Connection,
     workspace_root: PathBuf,
@@ -200,6 +207,15 @@ impl CodeGraph {
                 target_start_line      INTEGER NOT NULL,
                 target_start_character INTEGER NOT NULL,
                 provider               TEXT NOT NULL
+            )"#,
+        ))
+        .context("init code graph schema")?;
+        crate::db::block_on(crate::db::execute_ddl(
+            &conn,
+            r#"CREATE TABLE IF NOT EXISTS graph_metadata (
+                id                INTEGER PRIMARY KEY CHECK (id = 1),
+                indexed_at        INTEGER NOT NULL,
+                mtime_fingerprint INTEGER NOT NULL
             )"#,
         ))
         .context("init code graph schema")?;
@@ -305,7 +321,70 @@ impl CodeGraph {
             self.conn.execute("COMMIT", ()).await?;
             Ok(())
         })?;
+
+        let fingerprint = mtime_fingerprint(&self.workspace_root).unwrap_or(0);
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        block_turso(self.conn.execute(
+            "INSERT OR REPLACE INTO graph_metadata (id, indexed_at, mtime_fingerprint) VALUES (1, ?, ?)",
+            turso::params_from_iter([
+                turso::Value::from(now as i64),
+                turso::Value::from(fingerprint as i64),
+            ]),
+        ))?;
+
         Ok((files, symbols))
+    }
+
+    pub fn lazy_index_if_stale(&self) -> Result<FreshnessMetadata> {
+        let current_fingerprint = mtime_fingerprint(&self.workspace_root).unwrap_or(0);
+        let metadata_row: Option<(i64, i64)> = crate::db::block_on(async {
+            let mut rows = self
+                .conn
+                .query(
+                    "SELECT indexed_at, mtime_fingerprint FROM graph_metadata WHERE id = 1",
+                    (),
+                )
+                .await?;
+            if let Some(row) = rows.next().await? {
+                Ok(Some((row.get(0)?, row.get(1)?)))
+            } else {
+                Ok(None)
+            }
+        })?;
+
+        match metadata_row {
+            Some((indexed_at, stored_fingerprint))
+                if stored_fingerprint as u64 == current_fingerprint =>
+            {
+                Ok(FreshnessMetadata {
+                    fresh: true,
+                    rebuilt: false,
+                    indexed_at: Some(indexed_at as u64),
+                })
+            }
+            _ => {
+                self.reindex_with_edges(None)?;
+                let new_metadata_row: Option<i64> = crate::db::block_on(async {
+                    let mut rows = self
+                        .conn
+                        .query("SELECT indexed_at FROM graph_metadata WHERE id = 1", ())
+                        .await?;
+                    if let Some(row) = rows.next().await? {
+                        Ok(Some(row.get(0)?))
+                    } else {
+                        Ok(None)
+                    }
+                })?;
+                Ok(FreshnessMetadata {
+                    fresh: false,
+                    rebuilt: true,
+                    indexed_at: new_metadata_row.map(|v| v as u64),
+                })
+            }
+        }
     }
 
     /// Look up symbols by exact name. Used by `find_symbol` tool.
@@ -791,6 +870,42 @@ fn supports_lsp_edges(kind: &str) -> bool {
     )
 }
 
+fn mtime_fingerprint(workspace_root: &Path) -> Result<u64> {
+    let walker = ignore::WalkBuilder::new(workspace_root)
+        .standard_filters(true)
+        .build();
+    let mut file_count = 0u64;
+    let mut max_mtime = 0;
+    let mut mtime_sum = 0u64;
+    let mut size_sum = 0u64;
+    for entry in walker {
+        let entry = match entry {
+            Ok(e) => e,
+            Err(_) => continue,
+        };
+        if let Ok(metadata) = entry.metadata() {
+            if metadata.is_file() {
+                if let Ok(modified) = metadata.modified() {
+                    let ts = modified
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_secs();
+                    file_count = file_count.wrapping_add(1);
+                    max_mtime = max_mtime.max(ts);
+                    mtime_sum = mtime_sum.wrapping_add(ts);
+                    size_sum = size_sum.wrapping_add(metadata.len());
+                }
+            }
+        }
+    }
+    Ok(
+        max_mtime
+            ^ file_count.rotate_left(17)
+            ^ mtime_sum.rotate_left(31)
+            ^ size_sum.rotate_left(7),
+    )
+}
+
 fn edge_from_call_item(
     kind: EdgeKind,
     source: &SymbolRow,
@@ -953,6 +1068,24 @@ fn extract_symbols(parsers: &ParserCache, lang: Language, source: &str) -> Resul
 mod tests {
     use super::*;
     use tempfile::tempdir;
+
+    #[test]
+    fn mtime_fingerprint_changes_when_older_file_is_added() {
+        let dir = tempdir().unwrap();
+        let newest = dir.path().join("newest.rs");
+        let older = dir.path().join("older.rs");
+        std::fs::write(&newest, "fn newest() {}\n").unwrap();
+
+        let first = mtime_fingerprint(dir.path()).unwrap();
+        std::fs::write(&older, "fn older() {}\n").unwrap();
+        std::fs::File::open(&older)
+            .unwrap()
+            .set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(1))
+            .unwrap();
+
+        let second = mtime_fingerprint(dir.path()).unwrap();
+        assert_ne!(first, second);
+    }
 
     #[test]
     fn reindex_and_find_symbol_round_trip() {

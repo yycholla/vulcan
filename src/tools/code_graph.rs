@@ -155,6 +155,10 @@ impl Tool for FindSymbolTool {
         };
         let limit = p.limit as usize;
         let graph = self.graph.clone();
+        let metadata = {
+            let g = graph.clone();
+            tokio::task::spawn_blocking(move || g.lazy_index_if_stale()).await??
+        };
         let name_owned = p.name.clone();
         let rows =
             tokio::task::spawn_blocking(move || graph.find_by_name(&name_owned, limit)).await??;
@@ -168,6 +172,9 @@ impl Tool for FindSymbolTool {
         let payload = json!({
             "name": p.name,
             "matches": rows,
+            "fresh": metadata.fresh,
+            "rebuilt": metadata.rebuilt,
+            "indexed_at": metadata.indexed_at,
         });
         Ok(ToolResult::ok(serde_json::to_string_pretty(&payload)?).with_details(payload))
     }
@@ -209,11 +216,15 @@ impl Tool for FindCallersTool {
             Err(e) => return Ok(e),
         };
         let graph = self.graph.clone();
+        let metadata = {
+            let g = graph.clone();
+            tokio::task::spawn_blocking(move || g.lazy_index_if_stale()).await??
+        };
         let name = p.name.clone();
         let limit = p.limit as usize;
         let payload =
             tokio::task::spawn_blocking(move || graph.find_callers(&name, limit)).await??;
-        json_tool_result(payload)
+        json_tool_result(payload, metadata)
     }
 }
 
@@ -253,11 +264,15 @@ impl Tool for FindCalleesTool {
             Err(e) => return Ok(e),
         };
         let graph = self.graph.clone();
+        let metadata = {
+            let g = graph.clone();
+            tokio::task::spawn_blocking(move || g.lazy_index_if_stale()).await??
+        };
         let name = p.name.clone();
         let limit = p.limit as usize;
         let payload =
             tokio::task::spawn_blocking(move || graph.find_callees(&name, limit)).await??;
-        json_tool_result(payload)
+        json_tool_result(payload, metadata)
     }
 }
 
@@ -297,11 +312,15 @@ impl Tool for TypeHierarchyTool {
             Err(e) => return Ok(e),
         };
         let graph = self.graph.clone();
+        let metadata = {
+            let g = graph.clone();
+            tokio::task::spawn_blocking(move || g.lazy_index_if_stale()).await??
+        };
         let name = p.name.clone();
         let limit = p.limit as usize;
         let payload =
             tokio::task::spawn_blocking(move || graph.type_hierarchy(&name, limit)).await??;
-        json_tool_result(payload)
+        json_tool_result(payload, metadata)
     }
 }
 
@@ -349,13 +368,17 @@ impl Tool for GraphImpactAnalysisTool {
             Err(e) => return Ok(e),
         };
         let graph = self.graph.clone();
+        let metadata = {
+            let g = graph.clone();
+            tokio::task::spawn_blocking(move || g.lazy_index_if_stale()).await??
+        };
         let name = p.name.clone();
         let max_depth = p.max_depth as usize;
         let limit = p.limit as usize;
         let payload =
             tokio::task::spawn_blocking(move || graph.impact_analysis(&name, max_depth, limit))
                 .await??;
-        json_tool_result(payload)
+        json_tool_result(payload, metadata)
     }
 }
 
@@ -370,8 +393,19 @@ fn symbol_query_schema(name_description: &str) -> Value {
     })
 }
 
-fn json_tool_result<T: serde::Serialize>(payload: T) -> Result<ToolResult> {
-    let value = serde_json::to_value(payload)?;
+fn json_tool_result<T: serde::Serialize>(
+    payload: T,
+    metadata: crate::code::graph::FreshnessMetadata,
+) -> Result<ToolResult> {
+    let mut value = serde_json::to_value(payload)?;
+    if let Some(obj) = value.as_object_mut() {
+        obj.insert("fresh".into(), metadata.fresh.into());
+        obj.insert("rebuilt".into(), metadata.rebuilt.into());
+        obj.insert(
+            "indexed_at".into(),
+            serde_json::to_value(metadata.indexed_at)?,
+        );
+    }
     Ok(ToolResult::ok(serde_json::to_string_pretty(&value)?).with_details(value))
 }
 
@@ -382,6 +416,43 @@ mod tests {
     use crate::code::graph::{CodeGraphEdge, EdgeKind, EdgeProvider};
     use crate::tools::ReplaySafety;
     use tempfile::tempdir;
+
+    #[tokio::test]
+    async fn graph_query_tools_lazily_index_when_stale() {
+        let dir = tempdir().unwrap().keep();
+        std::fs::write(dir.join("a.rs"), "fn lazy_func() {}\n").unwrap();
+        let graph = Arc::new(CodeGraph::open(dir.clone(), Arc::new(ParserCache::new())).unwrap());
+
+        // Notice we do NOT call graph.reindex() here.
+        let find = FindSymbolTool::new(graph.clone());
+        let result = find
+            .call(
+                json!({"name": "lazy_func", "limit": 5}),
+                CancellationToken::new(),
+                None,
+            )
+            .await
+            .unwrap();
+
+        let payload: Value = serde_json::from_str(&result.output).unwrap();
+        assert_eq!(payload["matches"][0]["name"], "lazy_func");
+        assert_eq!(payload["fresh"], false);
+        assert_eq!(payload["rebuilt"], true);
+        assert!(payload.get("indexed_at").is_some());
+
+        // Second call should be fresh
+        let result2 = find
+            .call(
+                json!({"name": "lazy_func", "limit": 5}),
+                CancellationToken::new(),
+                None,
+            )
+            .await
+            .unwrap();
+        let payload2: Value = serde_json::from_str(&result2.output).unwrap();
+        assert_eq!(payload2["fresh"], true);
+        assert_eq!(payload2["rebuilt"], false);
+    }
 
     #[tokio::test]
     async fn graph_query_tools_return_structured_json_and_are_read_only() {
