@@ -368,7 +368,7 @@ impl HookFailureMetrics {
 /// Holds the registered handlers in priority order and exposes one emit method
 /// per event.
 pub struct HookRegistry {
-    handlers: RwLock<Vec<Arc<dyn HookHandler>>>,
+    handlers: RwLock<Vec<HookRegistration>>,
     handler_timeout: Duration,
     failure_metrics: HookFailureMetrics,
     /// GH issue #557: optional audit log. When set, `apply_on_input`
@@ -380,6 +380,13 @@ pub struct HookRegistry {
     input_rewrite_approval_required: HashSet<String>,
     /// Pause channel used to ask the active Frontend for approval.
     input_rewrite_pause_tx: Option<PauseSender>,
+}
+
+#[derive(Clone)]
+struct HookRegistration {
+    handler: Arc<dyn HookHandler>,
+    extension_id: Option<String>,
+    draining: bool,
 }
 
 impl HookRegistry {
@@ -429,9 +436,36 @@ impl HookRegistry {
     }
 
     pub fn register(&self, handler: Arc<dyn HookHandler>) {
+        self.register_handler(handler, None);
+    }
+
+    pub fn register_extension_handler(
+        &self,
+        extension_id: impl Into<String>,
+        handler: Arc<dyn HookHandler>,
+    ) {
+        self.register_handler(handler, Some(extension_id.into()));
+    }
+
+    fn register_handler(&self, handler: Arc<dyn HookHandler>, extension_id: Option<String>) {
         let mut handlers = self.handlers.write();
-        handlers.push(handler);
-        handlers.sort_by_key(|h| h.priority());
+        handlers.push(HookRegistration {
+            handler,
+            extension_id,
+            draining: false,
+        });
+        handlers.sort_by_key(|h| h.handler.priority());
+    }
+
+    pub fn set_extension_draining(&self, extension_id: &str, draining: bool) -> bool {
+        let mut changed = false;
+        for registration in self.handlers.write().iter_mut() {
+            if registration.extension_id.as_deref() == Some(extension_id) {
+                registration.draining = draining;
+                changed = true;
+            }
+        }
+        changed
     }
 
     pub fn handler_count(&self) -> usize {
@@ -439,7 +473,20 @@ impl HookRegistry {
     }
 
     fn handlers_snapshot(&self) -> Vec<Arc<dyn HookHandler>> {
-        self.handlers.read().clone()
+        self.handlers
+            .read()
+            .iter()
+            .map(|registration| Arc::clone(&registration.handler))
+            .collect()
+    }
+
+    fn active_handlers_snapshot(&self) -> Vec<Arc<dyn HookHandler>> {
+        self.handlers
+            .read()
+            .iter()
+            .filter(|registration| !registration.draining)
+            .map(|registration| Arc::clone(&registration.handler))
+            .collect()
     }
 
     /// Snapshot of per-failure-mode counters since registry construction
@@ -475,7 +522,7 @@ impl HookRegistry {
         let mut after_system: Vec<Message> = Vec::new();
         let mut appended: Vec<Message> = Vec::new();
 
-        for h in self.handlers_snapshot() {
+        for h in self.active_handlers_snapshot() {
             match self
                 .run("on_context", &h, h.on_context(&current, cancel.clone()))
                 .await
@@ -554,7 +601,7 @@ impl HookRegistry {
     }
 
     pub async fn on_turn_start(&self, turn: u32, cancel: CancellationToken) {
-        for h in self.handlers_snapshot() {
+        for h in self.active_handlers_snapshot() {
             match self
                 .run("on_turn_start", &h, h.on_turn_start(turn, cancel.clone()))
                 .await
@@ -727,7 +774,7 @@ impl HookRegistry {
         messages: &[Message],
         cancel: CancellationToken,
     ) -> CompactionDecision {
-        for h in self.handlers_snapshot() {
+        for h in self.active_handlers_snapshot() {
             match self
                 .run(
                     "on_session_before_compact",
@@ -816,7 +863,7 @@ impl HookRegistry {
     /// installed via `with_audit_log`), with the handler's `name()`
     /// as the audit `extension_id`.
     pub async fn apply_on_input(&self, raw: &str, cancel: CancellationToken) -> InputDecision {
-        for h in self.handlers_snapshot() {
+        for h in self.active_handlers_snapshot() {
             match self
                 .run("on_input", &h, h.on_input(raw, cancel.clone()))
                 .await
@@ -998,7 +1045,7 @@ impl HookRegistry {
         args: &Value,
         cancel: CancellationToken,
     ) -> ToolCallDecision {
-        for h in self.handlers_snapshot() {
+        for h in self.active_handlers_snapshot() {
             match self
                 .run(
                     "before_tool_call",
@@ -1068,7 +1115,7 @@ impl HookRegistry {
         response: &str,
         cancel: CancellationToken,
     ) -> Option<String> {
-        for h in self.handlers_snapshot() {
+        for h in self.active_handlers_snapshot() {
             match self
                 .run(
                     "before_agent_end",
@@ -1393,6 +1440,107 @@ mod tests {
             }
             Ok(self.before_tool_outcome.clone())
         }
+    }
+
+    #[derive(Default)]
+    struct DrainProbe {
+        before_tool_calls: AtomicUsize,
+        input_calls: AtomicUsize,
+        after_tool_calls: AtomicUsize,
+        turn_end_calls: AtomicUsize,
+        shutdown_calls: AtomicUsize,
+    }
+
+    #[async_trait::async_trait]
+    impl HookHandler for DrainProbe {
+        fn name(&self) -> &str {
+            "drain-probe"
+        }
+
+        async fn before_tool_call(
+            &self,
+            _tool: &str,
+            _args: &Value,
+            _cancel: CancellationToken,
+        ) -> Result<HookOutcome> {
+            self.before_tool_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(HookOutcome::Block {
+                reason: "blocked".into(),
+            })
+        }
+
+        async fn on_input(&self, _raw: &str, _cancel: CancellationToken) -> Result<HookOutcome> {
+            self.input_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(HookOutcome::BlockInput {
+                reason: "blocked input".into(),
+            })
+        }
+
+        async fn after_tool_call(
+            &self,
+            _tool: &str,
+            _result: &ToolResult,
+            _cancel: CancellationToken,
+        ) -> Result<HookOutcome> {
+            self.after_tool_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(HookOutcome::ReplaceResult(ToolResult::ok("rewritten")))
+        }
+
+        async fn on_turn_end(&self, _turn: u32, _cancel: CancellationToken) -> Result<HookOutcome> {
+            self.turn_end_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(HookOutcome::Continue)
+        }
+
+        async fn on_session_shutdown(&self, _cancel: CancellationToken) -> Result<HookOutcome> {
+            self.shutdown_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(HookOutcome::Continue)
+        }
+    }
+
+    #[tokio::test]
+    async fn draining_extension_handler_skips_new_blocking_events() {
+        let reg = HookRegistry::new();
+        let probe = Arc::new(DrainProbe::default());
+        reg.register_extension_handler("ext-1", probe.clone());
+
+        assert!(reg.set_extension_draining("ext-1", true));
+
+        let decision = reg
+            .before_tool_call("bash", &Value::Null, CancellationToken::new())
+            .await;
+        assert!(matches!(decision, ToolCallDecision::Continue));
+
+        let input = reg.apply_on_input("hi", CancellationToken::new()).await;
+        assert!(matches!(input, InputDecision::Continue));
+
+        assert_eq!(probe.before_tool_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(probe.input_calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn draining_extension_handler_still_receives_after_and_cleanup_events() {
+        let reg = HookRegistry::new();
+        let probe = Arc::new(DrainProbe::default());
+        reg.register_extension_handler("ext-1", probe.clone());
+
+        assert!(reg.set_extension_draining("ext-1", true));
+
+        let replacement = reg
+            .after_tool_call(
+                "bash",
+                &ToolResult::ok("original"),
+                CancellationToken::new(),
+            )
+            .await
+            .expect("after hook still runs");
+        assert_eq!(replacement.output, "rewritten");
+
+        reg.on_turn_end(1, CancellationToken::new()).await;
+        reg.on_session_shutdown(CancellationToken::new()).await;
+
+        assert_eq!(probe.after_tool_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(probe.turn_end_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(probe.shutdown_calls.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test]

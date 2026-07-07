@@ -334,7 +334,7 @@ impl ExtensionRegistry {
             let session_ext = ext.instantiate(ctx.for_extension(id.clone()));
             let runtime = SessionExtensionRuntime::new(id, session_ext);
             for handler in runtime.wrapped_hook_handlers() {
-                hooks.register(handler);
+                hooks.register_extension_handler(runtime.id(), handler);
             }
             runtimes.push(runtime);
         }
@@ -394,7 +394,7 @@ impl ExtensionRegistry {
             ext.instantiate(ctx.for_extension(id.to_string())),
         );
         for handler in runtime.wrapped_hook_handlers() {
-            hooks.register(handler);
+            hooks.register_extension_handler(runtime.id(), handler);
         }
         Some(runtime)
     }

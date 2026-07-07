@@ -21,13 +21,13 @@ use super::ExtensionMetadata;
 use super::FrontendCapability;
 use super::state::{ExtensionStateScope, ExtensionStateStore};
 use crate::config::DangerousCommandsConfig;
-use crate::hooks::{HookHandler, HookOutcome};
+use crate::hooks::HookHandler;
 use crate::memory::SessionStore;
 use crate::orchestration::OrchestrationHook;
 use crate::pause::PauseSender;
+use crate::provider::LLMProvider;
 use crate::provider::factory::ProviderFactory;
-use crate::provider::{ChatResponse, LLMProvider, Message, StreamEvent, ToolCall};
-use crate::tools::{Tool, ToolProgress, ToolResult};
+use crate::tools::{Tool, ToolResult};
 use anyhow::Result;
 use serde_json::Value;
 use tokio::sync::broadcast;
@@ -295,16 +295,7 @@ impl SessionExtensionRuntime {
     }
 
     pub fn wrapped_hook_handlers(&self) -> Vec<Arc<dyn HookHandler>> {
-        self.extension
-            .hook_handlers()
-            .into_iter()
-            .map(|inner| {
-                Arc::new(DrainingHookHandler {
-                    inner,
-                    draining: Arc::clone(&self.draining),
-                }) as Arc<dyn HookHandler>
-            })
-            .collect()
+        self.extension.hook_handlers()
     }
 
     pub fn wrapped_tools(&self) -> Vec<Arc<dyn Tool>> {
@@ -322,191 +313,6 @@ impl SessionExtensionRuntime {
 
     pub fn orchestration_hooks(&self) -> Vec<Arc<dyn OrchestrationHook>> {
         self.extension.orchestration_hooks()
-    }
-}
-
-struct DrainingHookHandler {
-    inner: Arc<dyn HookHandler>,
-    draining: Arc<AtomicBool>,
-}
-
-impl DrainingHookHandler {
-    fn should_skip_before_prompt(&self) -> bool {
-        self.draining.load(Ordering::SeqCst)
-    }
-}
-
-#[async_trait::async_trait]
-impl HookHandler for DrainingHookHandler {
-    fn name(&self) -> &str {
-        self.inner.name()
-    }
-
-    fn priority(&self) -> i32 {
-        self.inner.priority()
-    }
-
-    async fn before_prompt(
-        &self,
-        messages: &[Message],
-        cancel: CancellationToken,
-    ) -> Result<HookOutcome> {
-        if self.should_skip_before_prompt() {
-            return Ok(HookOutcome::Continue);
-        }
-        self.inner.before_prompt(messages, cancel).await
-    }
-
-    async fn on_turn_start(&self, turn: u32, cancel: CancellationToken) -> Result<HookOutcome> {
-        self.inner.on_turn_start(turn, cancel).await
-    }
-
-    async fn on_turn_end(&self, turn: u32, cancel: CancellationToken) -> Result<HookOutcome> {
-        self.inner.on_turn_end(turn, cancel).await
-    }
-
-    async fn on_input(&self, raw: &str, cancel: CancellationToken) -> Result<HookOutcome> {
-        self.inner.on_input(raw, cancel).await
-    }
-
-    async fn on_message_start(
-        &self,
-        delta: &StreamEvent,
-        cancel: CancellationToken,
-    ) -> Result<HookOutcome> {
-        self.inner.on_message_start(delta, cancel).await
-    }
-
-    async fn on_message_update(
-        &self,
-        delta: &StreamEvent,
-        cancel: CancellationToken,
-    ) -> Result<HookOutcome> {
-        self.inner.on_message_update(delta, cancel).await
-    }
-
-    async fn on_message_end(
-        &self,
-        delta: &StreamEvent,
-        cancel: CancellationToken,
-    ) -> Result<HookOutcome> {
-        self.inner.on_message_end(delta, cancel).await
-    }
-
-    async fn on_tool_execution_start(
-        &self,
-        call: &ToolCall,
-        cancel: CancellationToken,
-    ) -> Result<HookOutcome> {
-        self.inner.on_tool_execution_start(call, cancel).await
-    }
-
-    async fn on_tool_execution_update(
-        &self,
-        call: &ToolCall,
-        progress: &ToolProgress,
-        cancel: CancellationToken,
-    ) -> Result<HookOutcome> {
-        self.inner
-            .on_tool_execution_update(call, progress, cancel)
-            .await
-    }
-
-    async fn on_tool_execution_end(
-        &self,
-        call: &ToolCall,
-        cancel: CancellationToken,
-    ) -> Result<HookOutcome> {
-        self.inner.on_tool_execution_end(call, cancel).await
-    }
-
-    async fn on_context(
-        &self,
-        messages: &[Message],
-        cancel: CancellationToken,
-    ) -> Result<HookOutcome> {
-        if self.should_skip_before_prompt() {
-            return Ok(HookOutcome::Continue);
-        }
-        self.inner.on_context(messages, cancel).await
-    }
-
-    async fn on_before_provider_request(
-        &self,
-        messages: &[Message],
-        cancel: CancellationToken,
-    ) -> Result<HookOutcome> {
-        self.inner
-            .on_before_provider_request(messages, cancel)
-            .await
-    }
-
-    async fn on_after_provider_response(
-        &self,
-        response: &ChatResponse,
-        cancel: CancellationToken,
-    ) -> Result<HookOutcome> {
-        self.inner
-            .on_after_provider_response(response, cancel)
-            .await
-    }
-
-    async fn on_session_before_compact(
-        &self,
-        messages: &[Message],
-        cancel: CancellationToken,
-    ) -> Result<HookOutcome> {
-        self.inner.on_session_before_compact(messages, cancel).await
-    }
-
-    async fn on_session_compact(
-        &self,
-        summary: &str,
-        cancel: CancellationToken,
-    ) -> Result<HookOutcome> {
-        self.inner.on_session_compact(summary, cancel).await
-    }
-
-    async fn on_session_before_fork(&self, cancel: CancellationToken) -> Result<HookOutcome> {
-        self.inner.on_session_before_fork(cancel).await
-    }
-
-    async fn on_session_shutdown(&self, cancel: CancellationToken) -> Result<HookOutcome> {
-        self.inner.on_session_shutdown(cancel).await
-    }
-
-    async fn before_tool_call(
-        &self,
-        tool: &str,
-        args: &Value,
-        cancel: CancellationToken,
-    ) -> Result<HookOutcome> {
-        self.inner.before_tool_call(tool, args, cancel).await
-    }
-
-    async fn after_tool_call(
-        &self,
-        tool: &str,
-        result: &ToolResult,
-        cancel: CancellationToken,
-    ) -> Result<HookOutcome> {
-        self.inner.after_tool_call(tool, result, cancel).await
-    }
-
-    async fn before_agent_end(
-        &self,
-        final_response: &str,
-        cancel: CancellationToken,
-    ) -> Result<HookOutcome> {
-        self.inner.before_agent_end(final_response, cancel).await
-    }
-
-    async fn session_start(&self, session_id: &str) {
-        self.inner.session_start(session_id).await;
-    }
-
-    async fn session_end(&self, session_id: &str, total_turns: u32) {
-        self.inner.session_end(session_id, total_turns).await;
     }
 }
 
@@ -825,6 +631,7 @@ mod tests {
     #[tokio::test]
     async fn draining_runtime_skips_prompt_hooks_but_keeps_handler_registered() {
         use crate::hooks::{HookOutcome, HookRegistry, InjectPosition};
+        use crate::provider::Message;
         use std::sync::atomic::{AtomicUsize, Ordering};
 
         struct PromptSession {
@@ -873,7 +680,7 @@ mod tests {
         );
         let hooks = HookRegistry::new();
         for handler in runtime.wrapped_hook_handlers() {
-            hooks.register(handler);
+            hooks.register_extension_handler(runtime.id(), handler);
         }
         assert_eq!(hooks.handler_count(), 1);
 
@@ -886,7 +693,7 @@ mod tests {
         assert_eq!(out.len(), 2);
         assert_eq!(calls.load(Ordering::SeqCst), 1);
 
-        runtime.set_draining(true);
+        assert!(hooks.set_extension_draining(runtime.id(), true));
         let out = hooks
             .apply_before_prompt(&input, CancellationToken::new())
             .await;

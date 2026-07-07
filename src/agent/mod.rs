@@ -1043,6 +1043,7 @@ impl Agent {
         for ext in &self.session_extensions {
             if ext.id() == id {
                 ext.set_draining(true);
+                self.hooks.set_extension_draining(id, true);
                 changed = true;
             }
         }
@@ -1055,6 +1056,7 @@ impl Agent {
         for ext in self.session_extensions.drain(..) {
             if ext.id() == id {
                 ext.set_draining(true);
+                self.hooks.set_extension_draining(id, true);
                 ext.deactivate().await;
                 killed = true;
             } else {
