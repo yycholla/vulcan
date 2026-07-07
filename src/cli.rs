@@ -37,7 +37,7 @@ pub struct Cli {
     /// YYC-266 Slice 1: bypass the daemon and use in-process execution.
     /// Forces direct mode for all subcommands that would normally route
     /// through the daemon (cortex, search, etc.).
-    #[arg(long, global = true)]
+    #[arg(long, global = true, hide = true)]
     pub no_daemon: bool,
 }
 
@@ -494,6 +494,7 @@ pub enum AgentSubcommand {
 #[cfg(test)]
 mod parse_tests {
     use super::*;
+    use clap::CommandFactory;
 
     #[test]
     fn run_accepts_no_subcommand_for_interactive_picker() {
@@ -525,6 +526,21 @@ mod parse_tests {
             }) => assert_eq!(id, "abcd1234"),
             other => panic!("unexpected parse: {other:?}"),
         }
+    }
+
+    #[test]
+    fn no_daemon_parses_but_is_hidden_from_help() {
+        let cli = Cli::parse_from(["vulcan", "--no-daemon", "prompt", "hello"]);
+        assert!(cli.no_daemon);
+
+        let mut cmd = Cli::command();
+        let mut help = Vec::new();
+        cmd.write_long_help(&mut help).expect("render help");
+        let help = String::from_utf8(help).expect("help is utf-8");
+        assert!(
+            !help.contains("--no-daemon"),
+            "--no-daemon is a dev escape hatch and should stay hidden"
+        );
     }
 }
 

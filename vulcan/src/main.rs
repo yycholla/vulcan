@@ -160,13 +160,9 @@ async fn main() -> anyhow::Result<()> {
             };
             #[cfg(feature = "daemon")]
             if !cli.no_daemon {
-                match prompt_via_daemon(text.clone(), cli.profile.clone()).await {
-                    Ok(()) => {}
-                    Err(e) => {
-                        tracing::warn!("daemon prompt failed, falling back to direct: {e}");
-                        run_prompt_direct(&config, text, cli.profile.clone()).await?;
-                    }
-                }
+                prompt_via_daemon(text, cli.profile.clone())
+                    .await
+                    .map_err(|e| daemon_required_error("prompt", e))?;
             } else {
                 run_prompt_direct(&config, text, cli.profile.clone()).await?;
             }
@@ -181,13 +177,9 @@ async fn main() -> anyhow::Result<()> {
             init_cli_observability!("search");
             #[cfg(feature = "daemon")]
             if !cli.no_daemon {
-                match search_via_daemon(query.clone(), limit).await {
-                    Ok(()) => {}
-                    Err(e) => {
-                        tracing::warn!("daemon search failed, falling back to direct: {e}");
-                        run_search_direct(&query, limit).await?;
-                    }
-                }
+                search_via_daemon(query, limit)
+                    .await
+                    .map_err(|e| daemon_required_error("search", e))?;
             } else {
                 run_search_direct(&query, limit).await?;
             }
@@ -411,7 +403,15 @@ fn init_tui_logging(config: &Config) -> vulcan::observability::ObservabilityGuar
     }
 }
 
-// ── Slice 2: direct-mode helpers (fallback when daemon is unavailable) ──
+fn daemon_required_error(command: &str, err: anyhow::Error) -> anyhow::Error {
+    let log_path = vulcan::config::vulcan_home().join("vulcan.log");
+    anyhow::anyhow!(
+        "daemon {command} failed: {err}. Logs: {}. Use --no-daemon for explicit direct dev mode.",
+        log_path.display()
+    )
+}
+
+// ── Slice 2: direct-mode helpers (explicit --no-daemon) ──
 
 async fn run_prompt_direct(
     config: &Config,
@@ -564,5 +564,14 @@ mod tests {
             TuiLogTarget::File { path, .. } => assert_eq!(path, tmp),
             TuiLogTarget::Sink { reason } => panic!("expected File variant, got sink: {reason}"),
         }
+    }
+
+    #[test]
+    fn daemon_required_error_mentions_logs_and_explicit_direct_mode() {
+        let msg = daemon_required_error("prompt", anyhow::anyhow!("boom")).to_string();
+        assert!(msg.contains("daemon prompt failed"), "{msg}");
+        assert!(msg.contains("boom"), "{msg}");
+        assert!(msg.contains("--no-daemon"), "{msg}");
+        assert!(msg.contains("vulcan.log"), "{msg}");
     }
 }
