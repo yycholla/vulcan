@@ -1,4 +1,3 @@
-use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -6,12 +5,10 @@ use anyhow::{Context as _, Result, bail};
 
 use crate::cli::SymphonySubcommand;
 use crate::run_record::{RunOrigin, RunRecord, RunStatus, RunStore, SqliteRunStore};
-use crate::symphony::config::{ConfigView, EffectiveConfig, TaskSourceKind};
-use crate::symphony::orchestrator::{
-    Orchestrator, OrchestratorEvent, RunnerStart, RunnerStartResult, TaskRunner,
-};
-use crate::symphony::task_source::task_source_from_config;
-use crate::symphony::workflow::{NormalizedTask, Workflow};
+use crate::symphony::config::{EffectiveConfig, TaskSourceKind};
+use crate::symphony::orchestrator::OrchestratorEvent;
+use crate::symphony::runtime::{DryTickResult, SymphonyRuntime};
+use crate::symphony::workflow::NormalizedTask;
 
 pub async fn run(cmd: SymphonySubcommand) -> Result<()> {
     let output = match cmd {
@@ -162,16 +159,17 @@ pub fn list_in_dir_to_string(root: &Path) -> Result<String> {
 }
 
 pub fn validate_to_string(workflow: &Path) -> Result<String> {
-    let loaded = load_runtime(workflow)?;
-    Ok(render_config_summary(&loaded.config))
+    let runtime = SymphonyRuntime::load(workflow)?;
+    Ok(render_config_summary(&runtime.validate().config))
 }
 
 pub fn tasks_to_string(workflow: &Path) -> Result<String> {
-    let loaded = load_runtime(workflow)?;
-    let source = task_source_from_config(&loaded.config.task_source)?;
-    let mut tasks = source.fetch_candidates(&loaded.config.polling.active_states)?;
-    tasks.sort_by(|left, right| left.identifier.cmp(&right.identifier));
+    let runtime = SymphonyRuntime::load(workflow)?;
+    let result = runtime.list_tasks()?;
+    Ok(render_task_list(&result.tasks))
+}
 
+fn render_task_list(tasks: &[NormalizedTask]) -> String {
     let mut out = String::new();
     if tasks.is_empty() {
         out.push_str("No eligible Symphony tasks.\n");
@@ -180,21 +178,13 @@ pub fn tasks_to_string(workflow: &Path) -> Result<String> {
             out.push_str(&format_task(&task));
         }
     }
-    Ok(out)
+    out
 }
 
 pub fn tick_to_string(workflow: &Path) -> Result<String> {
-    let loaded = load_runtime(workflow)?;
-    let source = task_source_from_config(&loaded.config.task_source)?;
-    let identifiers = source
-        .fetch_candidates(&loaded.config.polling.active_states)?
-        .into_iter()
-        .map(|task| (task.id, task.identifier))
-        .collect::<BTreeMap<_, _>>();
-    let runner = DryRunRunner::default();
-    let mut orchestrator = Orchestrator::new(loaded.config.polling, source, runner);
-    let outcome = orchestrator.poll_tick(0);
-    Ok(render_tick_outcome(&outcome.events, &identifiers))
+    let runtime = SymphonyRuntime::load(workflow)?;
+    let outcome = runtime.dry_tick(0)?;
+    Ok(render_tick_outcome(&outcome))
 }
 
 pub async fn runs_to_string(limit: usize, all: bool) -> Result<String> {
@@ -224,24 +214,6 @@ fn is_symphony_run(record: &RunRecord) -> bool {
             .as_deref()
             .is_some_and(|workspace| workspace.contains(".symphony")),
     }
-}
-
-struct LoadedRuntime {
-    config: EffectiveConfig,
-}
-
-fn load_runtime(workflow: &Path) -> Result<LoadedRuntime> {
-    let workflow_doc = Workflow::load(workflow)
-        .with_context(|| format!("failed to load workflow `{}`", workflow.display()))?;
-    let repo_root = workflow
-        .parent()
-        .filter(|path| !path.as_os_str().is_empty())
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("."));
-    let config = ConfigView::new(&workflow_doc.config, repo_root)
-        .startup_validate()
-        .context("invalid Symphony workflow config")?;
-    Ok(LoadedRuntime { config })
 }
 
 fn workflows_dir(root: &Path) -> PathBuf {
@@ -458,18 +430,15 @@ fn format_task(task: &NormalizedTask) -> String {
     )
 }
 
-fn render_tick_outcome(
-    events: &[OrchestratorEvent],
-    identifiers: &BTreeMap<String, String>,
-) -> String {
+fn render_tick_outcome(outcome: &DryTickResult) -> String {
     let mut out = String::new();
-    for event in events {
+    for event in &outcome.events {
         match event {
             OrchestratorEvent::CandidatesFetched { count } => {
                 out.push_str(&format!("candidates={count}\n"));
             }
             OrchestratorEvent::Dispatched { id, run_id } => {
-                let display_id = identifiers.get(id).unwrap_or(id);
+                let display_id = outcome.identifiers.get(id).unwrap_or(id);
                 out.push_str(&format!("dispatched {display_id} run_id={run_id}\n"));
             }
             OrchestratorEvent::Requeued {
@@ -558,57 +527,11 @@ fn run_duration_summary(rec: &RunRecord) -> String {
     }
 }
 
-#[derive(Debug, Default)]
-struct DryRunRunner {
-    next: u64,
-}
-
-impl TaskRunner for DryRunRunner {
-    fn start(&mut self, _task: &NormalizedTask, _now_ms: u64) -> RunnerStartResult {
-        self.next += 1;
-        RunnerStartResult::Started(RunnerStart {
-            run_id: format!("symphony-dry-run-{}", self.next),
-        })
-    }
-}
-
-impl<T> crate::symphony::task_source::TaskSource for Box<T>
-where
-    T: crate::symphony::task_source::TaskSource + ?Sized,
-{
-    fn capabilities(&self) -> crate::symphony::task_source::TaskSourceCapabilities {
-        (**self).capabilities()
-    }
-
-    fn fetch_candidates(
-        &self,
-        active_states: &[String],
-    ) -> std::result::Result<Vec<NormalizedTask>, crate::symphony::task_source::TaskSourceError>
-    {
-        (**self).fetch_candidates(active_states)
-    }
-
-    fn fetch_by_state(
-        &self,
-        states: &[String],
-    ) -> std::result::Result<Vec<NormalizedTask>, crate::symphony::task_source::TaskSourceError>
-    {
-        (**self).fetch_by_state(states)
-    }
-
-    fn refresh_by_ids(
-        &self,
-        ids: &[String],
-    ) -> std::result::Result<Vec<NormalizedTask>, crate::symphony::task_source::TaskSourceError>
-    {
-        (**self).refresh_by_ids(ids)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    use std::collections::BTreeMap;
     use std::fs;
     use std::path::{Path, PathBuf};
 
@@ -788,8 +711,10 @@ Handle {{ issue.identifier }}: {{ issue.title }}
         let dir = fixture_dir("guided-render");
         create_guided_in_dir_to_string("Workflow Builder", &dir).expect("create workflow");
 
-        let workflow =
-            Workflow::load(dir.join(".symphony/workflows/workflow-builder.md")).expect("load");
+        let workflow = crate::symphony::workflow::Workflow::load(
+            dir.join(".symphony/workflows/workflow-builder.md"),
+        )
+        .expect("load");
         let task = NormalizedTask {
             id: "workflow-builder-spec".into(),
             identifier: "workflow-builder-spec".into(),

@@ -21,6 +21,30 @@ pub trait TaskSource: Send + Sync {
     fn refresh_by_ids(&self, ids: &[String]) -> Result<Vec<NormalizedTask>, TaskSourceError>;
 }
 
+impl<T> TaskSource for Box<T>
+where
+    T: TaskSource + ?Sized,
+{
+    fn capabilities(&self) -> TaskSourceCapabilities {
+        (**self).capabilities()
+    }
+
+    fn fetch_candidates(
+        &self,
+        active_states: &[String],
+    ) -> Result<Vec<NormalizedTask>, TaskSourceError> {
+        (**self).fetch_candidates(active_states)
+    }
+
+    fn fetch_by_state(&self, states: &[String]) -> Result<Vec<NormalizedTask>, TaskSourceError> {
+        (**self).fetch_by_state(states)
+    }
+
+    fn refresh_by_ids(&self, ids: &[String]) -> Result<Vec<NormalizedTask>, TaskSourceError> {
+        (**self).refresh_by_ids(ids)
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TaskSourceCapabilities {
     pub fetch_candidates: bool,
