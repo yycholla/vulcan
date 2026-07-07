@@ -118,9 +118,11 @@ pub async fn run(state: Arc<DaemonState>, id: String, session_id: String, input:
         Ok(s) => s,
         Err(e) => return Response::error(id, e),
     };
+    let turn = sess.begin_turn(id.clone()).await;
     let agent_arc = match sess.ensure_agent(&state.session_agent_assembler()).await {
         Ok(a) => a,
         Err(e) => {
+            drop(turn);
             return Response::error(
                 id,
                 ProtocolError {
@@ -148,8 +150,7 @@ pub async fn run(state: Arc<DaemonState>, id: String, session_id: String, input:
         crate::hooks::InputDecision::Replace(rewrite) => rewrite,
         crate::hooks::InputDecision::Block(reason) => {
             drop(agent);
-            *sess.in_flight.lock() = false;
-            sess.touch();
+            drop(turn);
             return Response::error(
                 id,
                 ProtocolError {
@@ -165,8 +166,7 @@ pub async fn run(state: Arc<DaemonState>, id: String, session_id: String, input:
         .run_prompt_with_cancel(&effective_input, cancel_token)
         .await;
     drop(agent);
-    *sess.in_flight.lock() = false;
-    sess.touch();
+    drop(turn);
     match result {
         Ok(output) => Response::ok(id, json!({ "text": output })),
         Err(e) => Response::error(
@@ -202,11 +202,6 @@ pub fn stream(
         }
     };
     sess.touch();
-    // Mark in_flight BEFORE spawning so daemon.status / any_in_flight()
-    // see the busy state immediately, even if the spawned task hasn't
-    // been scheduled yet. The spawned task clears it in every
-    // completion path.
-    *sess.in_flight.lock() = true;
 
     let rid = req_id.clone();
     let sess_for_task = sess.clone();
@@ -214,6 +209,7 @@ pub fn stream(
     let state_for_runner = Arc::clone(&state);
     tokio::spawn(
         async move {
+            let turn = sess_for_task.begin_turn(rid.clone()).await;
             let (frontend_tx, mut frontend_rx) = tokio::sync::broadcast::channel(32);
             let frontend_capabilities = options.frontend_capabilities();
             let frontend_extensions = options.frontend_extensions();
@@ -232,8 +228,7 @@ pub fn stream(
             {
                 Ok(a) => a,
                 Err(e) => {
-                    *sess_for_task.in_flight.lock() = false;
-                    sess_for_task.touch();
+                    drop(turn);
                     let _ = done_tx.send(Response::error(
                         rid.clone(),
                         ProtocolError {
@@ -263,8 +258,7 @@ pub fn stream(
                     crate::hooks::InputDecision::Replace(rewrite) => rewrite,
                     crate::hooks::InputDecision::Block(reason) => {
                         drop(agent);
-                        *sess_for_task.in_flight.lock() = false;
-                        sess_for_task.touch();
+                        drop(turn);
                         let _ = done_tx.send(Response::error(
                             rid.clone(),
                             ProtocolError {
@@ -308,26 +302,27 @@ pub fn stream(
             );
 
             // Forward events as StreamFrames.
+            let mut stream_open = true;
             loop {
                 tokio::select! {
                     ev = event_rx.recv() => {
                         let Some(ev) = ev else {
                             break;
                         };
-                        if let Some(frame) = stream_event_to_frame(&rid, ev) {
-                            if frame_tx.send(frame).await.is_err() {
-                                // TUI disconnected -- cancel the turn.
-                                cancel_token.cancel();
-                                break;
-                            }
+                        if stream_open
+                            && let Some(frame) = stream_event_to_frame(&rid, ev)
+                            && frame_tx.send(frame).await.is_err()
+                        {
+                            stream_open = false;
                         }
                     }
                     event = frontend_rx.recv() => {
                         match event {
                             Ok(event) => {
-                                if frame_tx.send(frontend_event_to_frame(event)).await.is_err() {
-                                    cancel_token.cancel();
-                                    break;
+                                if stream_open
+                                    && frame_tx.send(frontend_event_to_frame(event)).await.is_err()
+                                {
+                                    stream_open = false;
                                 }
                             }
                             Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
@@ -358,9 +353,7 @@ pub fn stream(
                 ),
             };
 
-            // Clear in_flight in all 3 completion paths before signalling done.
-            *sess_for_task.in_flight.lock() = false;
-            sess_for_task.touch();
+            drop(turn);
             let _ = done_tx.send(final_response);
         }
         .instrument(tracing::Span::current()),
@@ -404,6 +397,11 @@ pub async fn cancel(state: &DaemonState, id: String, session_id: String) -> Resp
             },
         );
     };
+    let was_in_flight = *sess.in_flight.lock();
+    if !was_in_flight {
+        sess.touch();
+        return Response::ok(id, json!({ "cancelled": false }));
+    }
     let Some(token) = sess.agent_cancel() else {
         return Response::error(
             id,
@@ -414,7 +412,6 @@ pub async fn cancel(state: &DaemonState, id: String, session_id: String) -> Resp
             },
         );
     };
-    let was_in_flight = *sess.in_flight.lock();
     token.cancel();
     sess.touch();
     Response::ok(id, json!({ "cancelled": was_in_flight }))
@@ -473,12 +470,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn cancel_returns_agent_not_available_when_no_agent() {
+    async fn cancel_reports_false_when_no_turn_is_active() {
         let state = Arc::new(DaemonState::for_tests_minimal());
         // "main" has no agent in for_tests_minimal
         let resp = cancel(&state, "r1".into(), "main".into()).await;
-        let err = resp.error.expect("err");
-        assert_eq!(err.code, "AGENT_NOT_AVAILABLE");
+        let result = resp.result.expect("ok");
+        assert_eq!(result["cancelled"], false);
     }
 
     #[tokio::test]
@@ -508,6 +505,9 @@ mod tests {
         let resp = cancel(&state, "r1".into(), "main".into()).await;
         let result = resp.result.expect("ok");
         assert_eq!(result["cancelled"], false);
-        assert!(token.is_cancelled(), "token still fires even when idle");
+        assert!(
+            !token.is_cancelled(),
+            "idle cancel must not fire stale token"
+        );
     }
 }

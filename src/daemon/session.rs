@@ -15,6 +15,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use parking_lot::{Mutex, RwLock};
+use tokio::sync::OwnedMutexGuard;
 use tokio_util::sync::CancellationToken;
 
 use crate::daemon::session_agent::{SessionAgentAssembler, SessionAgentOptions, SessionAgentSeed};
@@ -33,6 +34,9 @@ pub struct SessionState {
     pub created_at: Instant,
     pub last_activity: Mutex<Instant>,
     pub in_flight: Mutex<bool>,
+    turn_lock: Arc<tokio::sync::Mutex<()>>,
+    active_turn_id: Mutex<Option<String>>,
+    queued_turns: Mutex<usize>,
     pub cancel: CancellationToken,
     /// Phase 3: each session optionally owns its own warm Agent.
     /// `None` until the Agent is built (main at boot, others on
@@ -77,6 +81,9 @@ impl SessionState {
             created_at: now,
             last_activity: Mutex::new(now),
             in_flight: Mutex::new(false),
+            turn_lock: Arc::new(tokio::sync::Mutex::new(())),
+            active_turn_id: Mutex::new(None),
+            queued_turns: Mutex::new(0),
             cancel: CancellationToken::new(),
             agent: Mutex::new(None),
             agent_cancel: Mutex::new(None),
@@ -101,6 +108,47 @@ impl SessionState {
     /// stale token captured when the Agent was installed.
     pub fn set_agent_cancel(&self, token: CancellationToken) {
         *self.agent_cancel.lock() = Some(token);
+    }
+
+    fn clear_agent_cancel(&self) {
+        *self.agent_cancel.lock() = None;
+    }
+
+    pub async fn begin_turn(self: &Arc<Self>, turn_id: String) -> ActiveTurn {
+        let lock = Arc::clone(&self.turn_lock);
+        let has_waiters = *self.queued_turns.lock() > 0;
+        let guard = if has_waiters {
+            self.wait_for_turn(lock).await
+        } else {
+            match lock.clone().try_lock_owned() {
+                Ok(guard) => guard,
+                Err(_) => self.wait_for_turn(lock).await,
+            }
+        };
+
+        *self.in_flight.lock() = true;
+        *self.active_turn_id.lock() = Some(turn_id);
+        self.touch();
+
+        ActiveTurn {
+            session: Arc::clone(self),
+            _guard: guard,
+        }
+    }
+
+    async fn wait_for_turn(&self, lock: Arc<tokio::sync::Mutex<()>>) -> OwnedMutexGuard<()> {
+        *self.queued_turns.lock() += 1;
+        let guard = lock.lock_owned().await;
+        *self.queued_turns.lock() -= 1;
+        guard
+    }
+
+    pub fn active_turn_id(&self) -> Option<String> {
+        self.active_turn_id.lock().clone()
+    }
+
+    pub fn queued_turns(&self) -> usize {
+        *self.queued_turns.lock()
     }
 
     /// Update `last_activity` to `Instant::now()`. Call when this
@@ -213,6 +261,20 @@ impl SessionState {
     }
 }
 
+pub struct ActiveTurn {
+    session: Arc<SessionState>,
+    _guard: OwnedMutexGuard<()>,
+}
+
+impl Drop for ActiveTurn {
+    fn drop(&mut self) {
+        *self.session.in_flight.lock() = false;
+        *self.session.active_turn_id.lock() = None;
+        self.session.clear_agent_cancel();
+        self.session.touch();
+    }
+}
+
 /// Concurrent map of session id → state. Cheap reads under
 /// `parking_lot::RwLock`; writes are infrequent (create/destroy).
 pub struct SessionMap {
@@ -294,6 +356,8 @@ impl SessionMap {
                     "parent_session_id": s.parent_session_id,
                     "lineage_label": s.lineage_label,
                     "in_flight": *s.in_flight.lock(),
+                    "active_turn_id": s.active_turn_id(),
+                    "queued_turns": s.queued_turns(),
                     "last_activity_secs_ago": last.elapsed().as_secs(),
                     "has_agent": s.has_agent(),
                 })
@@ -423,6 +487,32 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn turn_guard_tracks_active_and_queued_status() {
+        let sess = Arc::new(SessionState::new("foo".into()));
+        let first = sess.begin_turn("turn-1".into()).await;
+
+        assert_eq!(sess.active_turn_id(), Some("turn-1".to_string()));
+        assert_eq!(sess.queued_turns(), 0);
+        assert!(*sess.in_flight.lock());
+
+        let waiting = {
+            let sess = Arc::clone(&sess);
+            tokio::spawn(async move {
+                let _second = sess.begin_turn("turn-2".into()).await;
+                assert_eq!(sess.active_turn_id(), Some("turn-2".to_string()));
+            })
+        };
+        tokio::task::yield_now().await;
+        assert_eq!(sess.queued_turns(), 1);
+
+        drop(first);
+        waiting.await.expect("queued turn finishes");
+        assert_eq!(sess.active_turn_id(), None);
+        assert_eq!(sess.queued_turns(), 0);
+        assert!(!*sess.in_flight.lock());
+    }
+
     #[test]
     fn map_with_main_has_main_session() {
         let map = SessionMap::with_main();
@@ -478,6 +568,8 @@ mod tests {
         let d = map.descriptors();
         assert_eq!(d.len(), 1);
         assert_eq!(d[0]["id"], "main");
+        assert_eq!(d[0]["active_turn_id"], serde_json::Value::Null);
+        assert_eq!(d[0]["queued_turns"], 0);
     }
 
     #[test]
