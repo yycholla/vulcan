@@ -7,6 +7,7 @@
 
 use std::sync::Arc;
 
+use crate::config::Config;
 use ratatui::{
     Frame,
     layout::Rect,
@@ -14,10 +15,6 @@ use ratatui::{
     text::{Line, Span},
     widgets::{Clear, Paragraph, Wrap},
 };
-use tokio::sync::Mutex;
-
-use crate::agent::Agent;
-use crate::config::Config;
 
 use super::keymap::SlashCommand;
 use super::miller_columns;
@@ -433,7 +430,7 @@ fn compact_text_surface_placement(
 pub(super) async fn open_unified_picker(
     app: &mut AppState,
     config: &Config,
-    agent: &Arc<Mutex<Agent>>,
+    agent: &Arc<crate::tui::backend::TuiBackend>,
     active_model_id: &str,
     active_provider_models: Vec<crate::provider::catalog::ModelInfo>,
 ) {
@@ -453,8 +450,8 @@ pub(super) async fn open_unified_picker(
 
     // Determine active provider key.
     let active_profile = {
-        let a = agent.lock().await;
-        a.active_profile().map(str::to_string)
+        let a = agent.as_ref();
+        a.active_profile().await
     };
     let active_key: String = active_profile.clone().unwrap_or_else(|| "default".into());
 

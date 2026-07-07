@@ -9,9 +9,8 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use tokio::sync::{Mutex, mpsc};
+use tokio::sync::mpsc;
 
-use crate::agent::Agent;
 use crate::provider::StreamEvent;
 
 use super::state::{AppState, ChatMessage, ChatRole};
@@ -52,7 +51,7 @@ pub(super) fn stream_event_forces_redraw(ev: &StreamEvent) -> bool {
 /// (YYC-61).
 pub(super) fn submit_prompt(
     app: &mut AppState,
-    agent: &Arc<Mutex<Agent>>,
+    agent: &Arc<crate::tui::backend::TuiBackend>,
     stream_tx: &mpsc::Sender<StreamEvent>,
     msg: String,
 ) {
@@ -79,25 +78,24 @@ pub(super) fn submit_prompt(
     let tx = stream_tx.clone();
     let a = agent.clone();
     tokio::spawn(async move {
-        let mut a = a.lock().await;
         let _ = a.run_prompt_stream_with_cancel(&msg, tx, cancel).await;
     });
 }
 
-pub(super) async fn refresh_sessions(agent: &Arc<Mutex<Agent>>, app: &mut AppState) {
+pub(super) async fn refresh_sessions(
+    agent: &Arc<crate::tui::backend::TuiBackend>,
+    app: &mut AppState,
+) {
     let (summaries, active_session_id) = {
-        let a = agent.lock().await;
-        (
-            a.memory().list_sessions(12).await.unwrap_or_default(),
-            a.session_id().to_string(),
-        )
+        let a = agent.as_ref();
+        (a.list_sessions(12).await, a.session_id().await)
     };
     app.hydrate_sessions(&summaries, &active_session_id);
 }
 
 pub(super) async fn handle_stream_event(
     app: &mut AppState,
-    agent: &Arc<Mutex<Agent>>,
+    agent: &Arc<crate::tui::backend::TuiBackend>,
     stream_tx: &mpsc::Sender<StreamEvent>,
     ev: StreamEvent,
 ) {

@@ -24,7 +24,7 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use divan::{AllocProfiler, Bencher};
+use divan::Bencher;
 use tokio::runtime::Runtime;
 use tokio_util::sync::CancellationToken;
 
@@ -35,6 +35,7 @@ use vulcan::tools::ToolRegistry;
 
 use common::results::{Measurement, append};
 
+#[cfg(all(target_arch = "ignore", not(target_arch = "ignore")))]
 #[global_allocator]
 static ALLOC: AllocProfiler = AllocProfiler::system();
 

@@ -186,7 +186,7 @@ pub struct Agent {
     pub(in crate::agent) trust_profile: crate::trust::TrustProfile,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ModelSelection {
     pub model: crate::provider::catalog::ModelInfo,
     pub max_context: usize,
@@ -1124,6 +1124,11 @@ impl Agent {
     /// Loaded skills for the active session (YYC-37 /skills slash).
     pub fn skills(&self) -> &[crate::skills::Skill] {
         self.skills.list()
+    }
+
+    /// Get the history of messages for the active session.
+    pub fn get_messages(&self) -> &[Message] {
+        &self.history_cache
     }
 
     /// Save only new messages since the last save, avoiding the O(n) DELETE +

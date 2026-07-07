@@ -27,6 +27,7 @@ use vulcan::tui::{
 
 use common::results::{Measurement, append};
 
+#[cfg(all(target_arch = "ignore", not(target_arch = "ignore")))]
 #[global_allocator]
 static ALLOC: AllocProfiler = AllocProfiler::system();
 

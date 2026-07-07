@@ -9,6 +9,7 @@
 
 use serde_json::json;
 
+use crate::agent::ModelSelection;
 use crate::daemon::protocol::{ProtocolError, Response};
 use crate::daemon::session::AgentHandle;
 use crate::daemon::state::DaemonState;
@@ -57,6 +58,18 @@ pub async fn status(state: &DaemonState, id: String, session_id: String) -> Resp
 
 // -- agent.switch_model --
 
+fn selection_payload(sel: ModelSelection) -> serde_json::Value {
+    json!({
+        "id": sel.model.id,
+        "display_name": sel.model.display_name,
+        "context_length": sel.model.context_length,
+        "pricing": sel.pricing,
+        "features": sel.model.features,
+        "top_provider": sel.model.top_provider,
+        "max_context": sel.max_context,
+    })
+}
+
 pub async fn switch_model(
     state: &DaemonState,
     id: String,
@@ -69,19 +82,62 @@ pub async fn switch_model(
     };
     let mut agent = agent_arc.lock().await;
     match agent.switch_model(model).await {
-        Ok(sel) => Response::ok(
-            id,
-            json!({
-                "id": sel.model.id,
-                "display_name": sel.model.display_name,
-                "context_length": sel.model.context_length,
-                "max_context": sel.max_context,
-            }),
-        ),
+        Ok(sel) => Response::ok(id, selection_payload(sel)),
         Err(e) => Response::error(
             id,
             ProtocolError {
                 code: "SWITCH_MODEL_FAILED".into(),
+                message: format!("{e}"),
+                retryable: false,
+            },
+        ),
+    }
+}
+
+pub async fn switch_provider(
+    state: &DaemonState,
+    id: String,
+    session_id: String,
+    profile: Option<&str>,
+) -> Response {
+    let agent_arc = match resolve(state, &session_id).await {
+        Ok(a) => a,
+        Err(e) => return Response::error(id, e),
+    };
+    let config = state.config();
+    let mut agent = agent_arc.lock().await;
+    match agent.switch_provider(profile, &config).await {
+        Ok(sel) => Response::ok(id, selection_payload(sel)),
+        Err(e) => Response::error(
+            id,
+            ProtocolError {
+                code: "SWITCH_PROVIDER_FAILED".into(),
+                message: format!("{e}"),
+                retryable: false,
+            },
+        ),
+    }
+}
+
+pub async fn switch_provider_model(
+    state: &DaemonState,
+    id: String,
+    session_id: String,
+    profile: Option<&str>,
+    model: &str,
+) -> Response {
+    let agent_arc = match resolve(state, &session_id).await {
+        Ok(a) => a,
+        Err(e) => return Response::error(id, e),
+    };
+    let config = state.config();
+    let mut agent = agent_arc.lock().await;
+    match agent.switch_provider_model(profile, &config, model).await {
+        Ok(sel) => Response::ok(id, selection_payload(sel)),
+        Err(e) => Response::error(
+            id,
+            ProtocolError {
+                code: "SWITCH_PROVIDER_MODEL_FAILED".into(),
                 message: format!("{e}"),
                 retryable: false,
             },

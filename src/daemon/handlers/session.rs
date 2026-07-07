@@ -150,6 +150,25 @@ fn pooled_session_store(
     Ok(pool.session_store())
 }
 
+/// Return saved session summaries from the daemon-owned session store.
+pub async fn list_saved(state: &DaemonState, id: String, limit: usize) -> Response {
+    let store = match pooled_session_store(state) {
+        Ok(s) => s,
+        Err(e) => return Response::error(id, e),
+    };
+    match store.list_sessions(limit).await {
+        Ok(sessions) => Response::ok(id, json!({ "sessions": sessions })),
+        Err(e) => Response::error(
+            id,
+            ProtocolError {
+                code: "LIST_SESSIONS_FAILED".into(),
+                message: format!("session list failed: {e}"),
+                retryable: false,
+            },
+        ),
+    }
+}
+
 /// FTS5 search across every saved session's messages.
 pub async fn search(state: &DaemonState, id: String, query: &str, limit: usize) -> Response {
     let store = match pooled_session_store(state) {
@@ -418,6 +437,30 @@ mod tests {
         let resp = history(&state, "r1".into(), &session_id).await;
         let messages = resp.result.expect("ok")["messages"].clone();
         assert_eq!(messages[0]["content"], "pooled daemon history");
+    }
+
+    #[tokio::test]
+    async fn list_saved_reads_from_daemon_pool_session_store() {
+        let pool = Arc::new(RuntimeResourcePool::for_tests().await);
+        let session_id = uuid::Uuid::new_v4().to_string();
+        pool.session_store()
+            .save_messages(
+                &session_id,
+                &[Message::User {
+                    content: "saved session preview".into(),
+                }],
+            )
+            .await
+            .unwrap();
+        let state = Arc::new(DaemonState::for_tests_minimal().with_pool(pool));
+
+        let resp = list_saved(&state, "r1".into(), 5).await;
+        let sessions = resp.result.expect("ok")["sessions"]
+            .as_array()
+            .unwrap()
+            .clone();
+        assert_eq!(sessions[0]["id"], session_id);
+        assert_eq!(sessions[0]["preview"], "saved session preview");
     }
 
     #[tokio::test]

@@ -43,7 +43,7 @@ pub struct SearchHit {
     pub score: f64,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct SessionSummary {
     pub id: String,
     pub created_at: i64,

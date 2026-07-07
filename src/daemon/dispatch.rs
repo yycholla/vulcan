@@ -88,6 +88,26 @@ impl Dispatcher {
                     agent::switch_model(&self.state, req.id, session, model).await,
                 )
             }
+            "agent.switch_provider" => {
+                let session = req.session.clone();
+                let profile = req.params.get("profile").and_then(|v| v.as_str());
+                DispatchResult::Response(
+                    agent::switch_provider(&self.state, req.id, session, profile).await,
+                )
+            }
+            "agent.switch_provider_model" => {
+                let session = req.session.clone();
+                let profile = req.params.get("profile").and_then(|v| v.as_str());
+                let model = req
+                    .params
+                    .get("model")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                DispatchResult::Response(
+                    agent::switch_provider_model(&self.state, req.id, session, profile, model)
+                        .await,
+                )
+            }
             "agent.list_models" => {
                 let session = req.session.clone();
                 DispatchResult::Response(agent::list_models(&self.state, req.id, session).await)
@@ -320,6 +340,14 @@ impl Dispatcher {
                     .to_string();
                 DispatchResult::Response(session::destroy(&self.state, req.id, sid).await)
             }
+            "session.list_saved" => {
+                let limit = req
+                    .params
+                    .get("limit")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(12) as usize;
+                DispatchResult::Response(session::list_saved(&self.state, req.id, limit).await)
+            }
             "session.search" => {
                 let query = req
                     .params
@@ -338,7 +366,7 @@ impl Dispatcher {
                     .params
                     .get("session_id")
                     .and_then(|v| v.as_str())
-                    .unwrap_or("");
+                    .unwrap_or(&req.session);
                 DispatchResult::Response(session::resume(&self.state, req.id, sid).await)
             }
             "session.history" => {
@@ -346,7 +374,7 @@ impl Dispatcher {
                     .params
                     .get("session_id")
                     .and_then(|v| v.as_str())
-                    .unwrap_or("");
+                    .unwrap_or(&req.session);
                 DispatchResult::Response(session::history(&self.state, req.id, sid).await)
             }
 
@@ -435,6 +463,8 @@ mod tests {
     use crate::config::{Config, CortexConfig};
     use crate::daemon::protocol::*;
     use crate::memory::cortex::CortexStore;
+    use crate::provider::Message;
+    use crate::runtime_pool::RuntimeResourcePool;
     use std::sync::Arc;
 
     fn req(method: &str) -> Request {
@@ -616,6 +646,37 @@ mod tests {
                 assert_eq!(child["lineage_label"], "spawn_subagent: inspect daemon");
             }
             DispatchResult::Stream { .. } => panic!("session.list should not stream"),
+        }
+    }
+
+    #[tokio::test]
+    async fn session_history_defaults_to_request_session() {
+        let pool = Arc::new(RuntimeResourcePool::for_tests().await);
+        let session_id = uuid::Uuid::new_v4().to_string();
+        pool.session_store()
+            .save_messages(
+                &session_id,
+                &[Message::User {
+                    content: "history from request session".into(),
+                }],
+            )
+            .await
+            .unwrap();
+        let state =
+            Arc::new(crate::daemon::state::DaemonState::for_tests_minimal().with_pool(pool));
+        let dispatcher = Dispatcher::new(state);
+        let mut request = req("session.history");
+        request.session = session_id;
+
+        match dispatcher.dispatch(request).await {
+            DispatchResult::Response(resp) => {
+                let messages = resp.result.expect("history ok")["messages"]
+                    .as_array()
+                    .unwrap()
+                    .clone();
+                assert_eq!(messages[0]["content"], "history from request session");
+            }
+            DispatchResult::Stream { .. } => panic!("session.history should not stream"),
         }
     }
 

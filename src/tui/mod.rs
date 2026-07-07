@@ -30,15 +30,16 @@ use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use ratatui::{layout::Rect, prelude::Position};
-use tokio::sync::{Mutex, mpsc};
+use tokio::sync::mpsc;
 
 use crate::agent::Agent;
 use crate::config::Config;
 use crate::hooks::HookRegistry;
 use crate::hooks::audit::AuditHook;
 use crate::pause::{self, PauseKind};
-use crate::provider::StreamEvent;
+use crate::provider::{Message, StreamEvent};
 
+pub mod backend;
 pub mod chat_message;
 pub mod chat_render;
 pub mod diff_scrubber;
@@ -168,6 +169,7 @@ pub async fn run_tui(
     config: &Config,
     resume: ResumeTarget,
     tool_profile: Option<String>,
+    no_daemon: bool,
 ) -> Result<()> {
     let terminal_session = init::init_terminal()?;
     tracing::debug!(
@@ -225,31 +227,51 @@ pub async fn run_tui(
 
     // ── Long-lived agent: one per TUI session, shared across prompts so
     // hook handlers' state (audit log, rate limits, etc.) survives turns.
-    let agent = Arc::new(Mutex::new(
-        Agent::builder(config)
-            .with_hooks(hook_reg)
-            .with_pause_channel(pause_tx_for_agent)
-            .with_tool_profile(tool_profile)
-            .with_frontend_context(
-                frontend.extension_frontend_capabilities(),
-                frontend.frontend_extensions(),
-                crate::extensions::api::FrontendEventSink::new(frontend_event_tx),
+    let agent = Arc::new(if no_daemon {
+        backend::TuiBackend::Direct(tokio::sync::Mutex::new(
+            Agent::builder(config)
+                .with_hooks(hook_reg)
+                .with_pause_channel(pause_tx_for_agent)
+                .with_tool_profile(tool_profile)
+                .with_frontend_context(
+                    frontend.extension_frontend_capabilities(),
+                    frontend.frontend_extensions(),
+                    crate::extensions::api::FrontendEventSink::new(frontend_event_tx),
+                )
+                .build()
+                .await?,
+        ))
+    } else {
+        #[cfg(feature = "daemon")]
+        {
+            let client = crate::client::Client::connect_or_autostart().await?;
+            backend::TuiBackend::Daemon {
+                client: Arc::new(client),
+                session_id: tokio::sync::Mutex::new(String::new()),
+                active_model: tokio::sync::Mutex::new(String::new()),
+                active_profile: tokio::sync::Mutex::new(None),
+                max_context: tokio::sync::Mutex::new(128000),
+            }
+        }
+        #[cfg(not(feature = "daemon"))]
+        {
+            anyhow::bail!(
+                "vulcan compiled without daemon feature. Use --no-daemon for explicit direct dev mode."
             )
-            .build()
-            .await?,
-    ));
+        }
+    });
 
     // ── Apply resume target if any. Errors here are non-fatal — we report
     // and start fresh.
     let resume_note = {
-        let mut a = agent.lock().await;
+        let a = agent.as_ref();
         let outcome = match &resume {
             ResumeTarget::None => None,
             ResumeTarget::Pick => None, // session picker shown in UI later
             ResumeTarget::Last => match a.continue_last_session().await {
                 Ok(()) => Some(Ok(format!(
                     "Resumed last session ({})",
-                    short_id(a.session_id())
+                    short_id(&a.session_id().await)
                 ))),
                 Err(e) => Some(Err(format!("Could not resume last session: {e}"))),
             },
@@ -271,7 +293,7 @@ pub async fn run_tui(
     };
 
     {
-        let a = agent.lock().await;
+        let a = agent.as_ref();
         a.start_session().await;
     }
 
@@ -290,20 +312,20 @@ pub async fn run_tui(
     // window changed under us — sync the app surface from the agent.
     // YYC-96: surface the active profile name in the prompt-row status.
     {
-        let a = agent.lock().await;
-        app.diff_sink = Some(a.diff_sink().clone());
-        app.pricing = a.pricing().cloned();
-        app.model_label = a.active_model().to_string();
-        app.token_max = a.max_context() as u32;
-        app.provider_label = a.active_profile().map(str::to_string);
+        let a = agent.as_ref();
+        app.diff_sink = a.diff_sink().await;
+        app.pricing = a.pricing().await;
+        app.model_label = a.active_model().await;
+        app.token_max = a.max_context().await as u32;
+        app.provider_label = a.active_profile().await;
         // YYC-182: surface the resolved workspace trust level when it
         // deviates from the default; `trusted` stays quiet.
-        let trust = a.trust_profile();
+        let trust = a.trust_profile().await;
         app.trust_label = (trust.level != crate::trust::TrustLevel::Trusted)
             .then(|| trust.level.as_str().to_string());
         // YYC-207: share the agent's orchestration store so subagent
         // tiles + tree nodes render real child runs as they happen.
-        app.orchestration_store = Some(a.orchestration());
+        app.orchestration_store = Some(a.orchestration().await);
     }
     events::refresh_sessions(&agent, &mut app).await;
 
@@ -325,12 +347,11 @@ pub async fn run_tui(
         // history, not a blank screen. Tool turns are skipped (audit log surfaces
         // tool activity separately).
         let history = {
-            let a = agent.lock().await;
-            a.memory().load_history(a.session_id()).await.ok().flatten()
+            let a = agent.as_ref();
+            a.load_history(&a.session_id().await).await.ok().flatten()
         };
         if let Some(msgs) = history {
             for msg in msgs {
-                use crate::provider::Message;
                 match msg {
                     Message::User { content } => {
                         app.messages.push(ChatMessage::new(ChatRole::User, content));
@@ -905,8 +926,8 @@ pub async fn run_tui(
                                                     }
                                                     "skills" => {
                                                         let body = {
-                                                            let a = agent.lock().await;
-                                                            let skills = a.skills();
+                                                            let a = agent.as_ref();
+                                                            let skills = a.skills().await;
                                                             if skills.is_empty() {
                                                                 "No skills loaded.".to_string()
                                                             } else {
@@ -969,12 +990,11 @@ pub async fn run_tui(
                                                     }
                                                     "status" => {
                                                         let (session_id, profile, ctx_used) = {
-                                                            let a = agent.lock().await;
+                                                            let a = agent.as_ref();
                                                             (
-                                                                a.session_id().to_string(),
-                                                                a.active_profile()
-                                                                    .map(str::to_string),
-                                                                a.max_context() as u32,
+                                                                a.session_id().await,
+                                                                a.active_profile().await,
+                                                                a.max_context().await as u32,
                                                             )
                                                         };
                                                         let profile_label = profile
@@ -1024,8 +1044,8 @@ pub async fn run_tui(
                                                             continue;
                                                         }
                                                         let hits = {
-                                                            let a = agent.lock().await;
-                                                            a.memory().search_messages(query, 10).await
+                                                            let a = agent.as_ref();
+                                                            a.search_messages(query, 10).await
                                                         };
                                                         let report = match hits {
                                                             Ok(hs) if hs.is_empty() => format!("No matches for '{query}'"),
@@ -1058,8 +1078,8 @@ pub async fn run_tui(
                                                         if arg.is_empty() {
                                                             // YYC-97: arrow-key picker overlay.
                                                             let active = {
-                                                                let a = agent.lock().await;
-                                                                a.active_profile().map(str::to_string)
+                                                                let a = agent.as_ref();
+                                                                a.active_profile().await
                                                             };
                                                             let items =
                                                                 keymap::build_provider_picker_entries(config);
@@ -1077,7 +1097,7 @@ pub async fn run_tui(
                                                             Some(arg)
                                                         };
                                                         let result = {
-                                                            let mut a = agent.lock().await;
+                                                            let a = agent.as_ref();
                                                             a.switch_provider(target, config).await
                                                         };
                                                         match result {
@@ -1112,10 +1132,10 @@ pub async fn run_tui(
                                                         if arg.is_empty() {
                                                             // YYC-97: arrow-key picker overlay.
                                                             let (models_result, active) = {
-                                                                let a = agent.lock().await;
+                                                                let a = agent.as_ref();
                                                                 (
                                                                     a.available_models().await,
-                                                                    a.active_model().to_string(),
+                                                                    a.active_model().await,
                                                                 )
                                                             };
                                                             match models_result {
@@ -1148,7 +1168,7 @@ pub async fn run_tui(
                                                         }
 
                                                         let result = {
-                                                            let mut a = agent.lock().await;
+                                                            let a = agent.as_ref();
                                                             a.switch_model(arg).await
                                                         };
                                                         match result {
@@ -1342,7 +1362,7 @@ pub async fn run_tui(
     // ── End the session before tearing down the terminal so SessionEnd hooks
     // see the final state.
     {
-        let a = agent.lock().await;
+        let a = agent.as_ref();
         a.end_session().await;
     }
 

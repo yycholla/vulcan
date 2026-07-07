@@ -133,7 +133,13 @@ async fn main() -> anyhow::Result<()> {
             } else {
                 ResumeTarget::None
             };
-            run_tui(&config, resume, cli.profile.clone()).await?;
+            if !cli.no_daemon {
+                run_tui(&config, resume, cli.profile.clone(), cli.no_daemon)
+                    .await
+                    .map_err(|e| daemon_required_error("TUI", e))?;
+            } else {
+                run_tui(&config, resume, cli.profile.clone(), cli.no_daemon).await?;
+            }
         }
         Some(Command::Prompt { text, context_pack }) => {
             init_cli_observability!("prompt");
@@ -167,11 +173,34 @@ async fn main() -> anyhow::Result<()> {
                 run_prompt_direct(&config, text, cli.profile.clone()).await?;
             }
             #[cfg(not(feature = "daemon"))]
-            run_prompt_direct(&config, text, cli.profile.clone()).await?;
+            if !cli.no_daemon {
+                return Err(anyhow::anyhow!(
+                    "daemon prompt failed: vulcan compiled without daemon feature. Logs: unavailable. Use --no-daemon for explicit direct dev mode."
+                ));
+            } else {
+                run_prompt_direct(&config, text, cli.profile.clone()).await?;
+            }
         }
         Some(Command::Session { id }) => {
             init_tui_observability!("session");
-            run_tui(&config, ResumeTarget::Specific(id), cli.profile.clone()).await?;
+            if !cli.no_daemon {
+                run_tui(
+                    &config,
+                    ResumeTarget::Specific(id),
+                    cli.profile.clone(),
+                    cli.no_daemon,
+                )
+                .await
+                .map_err(|e| daemon_required_error("TUI", e))?;
+            } else {
+                run_tui(
+                    &config,
+                    ResumeTarget::Specific(id),
+                    cli.profile.clone(),
+                    cli.no_daemon,
+                )
+                .await?;
+            }
         }
         Some(Command::Search { query, limit }) => {
             init_cli_observability!("search");
@@ -184,7 +213,13 @@ async fn main() -> anyhow::Result<()> {
                 run_search_direct(&query, limit).await?;
             }
             #[cfg(not(feature = "daemon"))]
-            run_search_direct(&query, limit).await?;
+            if !cli.no_daemon {
+                return Err(anyhow::anyhow!(
+                    "daemon search failed: vulcan compiled without daemon feature. Logs: unavailable. Use --no-daemon for explicit direct dev mode."
+                ));
+            } else {
+                run_search_direct(&query, limit).await?;
+            }
         }
         #[cfg(feature = "gateway")]
         Some(Command::Gateway { cmd, bind }) => {
@@ -301,12 +336,20 @@ async fn main() -> anyhow::Result<()> {
                 if cli.no_daemon {
                     vulcan::cli_cortex::run(cmd).await?;
                 } else {
-                    vulcan::cli_cortex::run_with_client(cmd).await?;
+                    vulcan::cli_cortex::run_with_client(cmd)
+                        .await
+                        .map_err(|e| daemon_required_error("cortex", e))?;
                 }
             }
             #[cfg(not(feature = "daemon"))]
             {
-                vulcan::cli_cortex::run(cmd).await?;
+                if !cli.no_daemon {
+                    return Err(anyhow::anyhow!(
+                        "daemon cortex failed: vulcan compiled without daemon feature. Logs: unavailable. Use --no-daemon for explicit direct dev mode."
+                    ));
+                } else {
+                    vulcan::cli_cortex::run(cmd).await?;
+                }
             }
         }
         #[cfg(feature = "daemon")]
@@ -494,7 +537,7 @@ async fn search_via_daemon(query: String, limit: usize) -> anyhow::Result<()> {
             serde_json::json!({ "query": query, "limit": limit }),
         )
         .await?;
-    let hits = result["results"].as_array().cloned().unwrap_or_default();
+    let hits = daemon_search_hits(&result);
     if hits.is_empty() {
         println!("No matches.");
     } else {
@@ -516,6 +559,15 @@ async fn search_via_daemon(query: String, limit: usize) -> anyhow::Result<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(feature = "daemon")]
+fn daemon_search_hits(result: &serde_json::Value) -> Vec<serde_json::Value> {
+    result
+        .get("hits")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default()
 }
 
 #[cfg(test)]
@@ -573,5 +625,17 @@ mod tests {
         assert!(msg.contains("boom"), "{msg}");
         assert!(msg.contains("--no-daemon"), "{msg}");
         assert!(msg.contains("vulcan.log"), "{msg}");
+    }
+
+    #[cfg(feature = "daemon")]
+    #[test]
+    fn daemon_search_hits_reads_daemon_hits_key() {
+        let hits = daemon_search_hits(&serde_json::json!({
+            "hits": [{ "session_id": "s1" }],
+            "results": [{ "session_id": "wrong" }]
+        }));
+
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0]["session_id"], "s1");
     }
 }

@@ -1,10 +1,10 @@
 use std::sync::Arc;
 
-use tokio::sync::{Mutex, mpsc};
+use tokio::sync::mpsc;
 
-use crate::agent::Agent;
 use crate::config::Config;
 use crate::pause::{self, AgentResume};
+use crate::provider::Message;
 
 use super::KeyEv;
 use super::diff_scrubber::DiffScrubberAction;
@@ -73,7 +73,7 @@ pub(super) async fn drive_diff_scrubber(
 
 pub(super) async fn drive_model_picker(
     app: &mut AppState,
-    agent: &Arc<Mutex<Agent>>,
+    agent: &Arc<crate::tui::backend::TuiBackend>,
     config: &Config,
     key_rx: &mut mpsc::UnboundedReceiver<KeyEv>,
 ) {
@@ -84,8 +84,8 @@ pub(super) async fn drive_model_picker(
                 model_id: id,
             } => {
                 let result = {
-                    let mut a = agent.lock().await;
-                    let active = a.active_profile().map(str::to_string);
+                    let a = agent.as_ref();
+                    let active = a.active_profile().await;
                     if active != profile {
                         a.switch_provider_model(profile.as_deref(), config, &id)
                             .await
@@ -134,7 +134,7 @@ pub(super) async fn drive_model_picker(
 
 pub(super) async fn drive_provider_picker(
     app: &mut AppState,
-    agent: &Arc<Mutex<Agent>>,
+    agent: &Arc<crate::tui::backend::TuiBackend>,
     config: &Config,
     key_rx: &mut mpsc::UnboundedReceiver<KeyEv>,
 ) {
@@ -143,7 +143,7 @@ pub(super) async fn drive_provider_picker(
             ProviderPickerOutcome::Commit(picked) => {
                 let target: Option<&str> = picked.name.as_deref();
                 let result = {
-                    let mut a = agent.lock().await;
+                    let a = agent.as_ref();
                     a.switch_provider(target, config).await
                 };
                 match result {
@@ -187,7 +187,7 @@ pub(super) async fn drive_provider_picker(
 
 pub(super) async fn drive_session_picker(
     app: &mut AppState,
-    agent: &Arc<Mutex<Agent>>,
+    agent: &Arc<crate::tui::backend::TuiBackend>,
     config: &Config,
     key_rx: &mut mpsc::UnboundedReceiver<KeyEv>,
     pause_rx: &mut pause::PauseReceiver,
@@ -222,7 +222,7 @@ pub(super) async fn drive_session_picker(
 
 async fn handle_session_picker_key(
     app: &mut AppState,
-    agent: &Arc<Mutex<Agent>>,
+    agent: &Arc<crate::tui::backend::TuiBackend>,
     config: &Config,
     key: super::input::TuiKeyEvent,
 ) {
@@ -248,7 +248,11 @@ async fn handle_session_picker_key(
     }
 }
 
-async fn resume_selected_session(app: &mut AppState, agent: &Arc<Mutex<Agent>>, config: &Config) {
+async fn resume_selected_session(
+    app: &mut AppState,
+    agent: &Arc<crate::tui::backend::TuiBackend>,
+    config: &Config,
+) {
     let idx = app
         .session_picker_selection()
         .min(app.sessions.len().saturating_sub(1));
@@ -264,7 +268,7 @@ async fn resume_selected_session(app: &mut AppState, agent: &Arc<Mutex<Agent>>, 
     }
 
     let (note, should_hydrate) = {
-        let mut a = agent.lock().await;
+        let a = agent.as_ref();
         match a.resume_session(&picked).await {
             Ok(()) => {
                 if let Err(e) = a.restore_persisted_provider(config).await {
@@ -277,11 +281,11 @@ async fn resume_selected_session(app: &mut AppState, agent: &Arc<Mutex<Agent>>, 
     };
     app.close_session_picker();
     if should_hydrate {
-        let a = agent.lock().await;
-        app.model_label = a.active_model().to_string();
-        app.token_max = a.max_context() as u32;
-        app.pricing = a.pricing().cloned();
-        app.provider_label = a.active_profile().map(str::to_string);
+        let a = agent.as_ref();
+        app.model_label = a.active_model().await;
+        app.token_max = a.max_context().await as u32;
+        app.pricing = a.pricing().await;
+        app.provider_label = a.active_profile().await;
     }
     if let Some(n) = note {
         app.messages.push(ChatMessage {
@@ -292,12 +296,11 @@ async fn resume_selected_session(app: &mut AppState, agent: &Arc<Mutex<Agent>>, 
     }
     if should_hydrate {
         let history = {
-            let a = agent.lock().await;
-            a.memory().load_history(&picked).await.ok().flatten()
+            let a = agent.as_ref();
+            a.load_history(&picked).await.ok().flatten()
         };
         if let Some(msgs) = history {
             for msg in msgs {
-                use crate::provider::Message;
                 match msg {
                     Message::User { content } => {
                         app.messages.push(ChatMessage::new(ChatRole::User, content));
