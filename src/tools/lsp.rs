@@ -8,15 +8,16 @@
 
 use crate::code::Language;
 use crate::code::lsp::{
-    LspManager, call_hierarchy_incoming, call_hierarchy_outgoing, code_action, diagnostics_for,
-    find_references, goto_definition, hover, implementation, prepare_call_hierarchy,
-    type_definition, workspace_symbol,
+    LspManager, LspServer, call_hierarchy_incoming, call_hierarchy_outgoing, code_action,
+    diagnostics_for, find_references, goto_definition, hover, implementation,
+    prepare_call_hierarchy, type_definition, workspace_symbol,
 };
 use crate::tools::{Tool, ToolResult, parse_tool_params};
 use anyhow::Result;
 use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::{Value, json};
+use std::future::Future;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
@@ -69,6 +70,135 @@ fn lang_for(path: &str) -> Result<Language> {
         .ok_or_else(|| anyhow::anyhow!("Unsupported file type for LSP tools: {path}"))
 }
 
+#[derive(Debug, Clone)]
+struct LspPositionQuery {
+    path: PathBuf,
+    language: Language,
+    line0: u32,
+    character: u32,
+}
+
+impl LspPositionQuery {
+    fn from_params(params: LspPositionParams) -> std::result::Result<Self, LspToolError> {
+        Self::from_parts(params.path, params.line, params.character)
+    }
+
+    fn from_parts(
+        path: String,
+        line: u64,
+        character: u64,
+    ) -> std::result::Result<Self, LspToolError> {
+        let pb = PathBuf::from(&path);
+        let language =
+            Language::from_path(&pb).ok_or_else(|| LspToolError::UnsupportedFileType { path })?;
+        Ok(Self {
+            path: pb,
+            language,
+            line0: (line as u32).saturating_sub(1),
+            character: character as u32,
+        })
+    }
+}
+
+#[derive(Debug)]
+enum LspToolError {
+    UnsupportedFileType {
+        path: String,
+    },
+    ServerUnavailable {
+        language: Language,
+        source: String,
+        fallback_hint: Option<&'static str>,
+    },
+}
+
+impl LspToolError {
+    fn server_unavailable(
+        language: Language,
+        source: anyhow::Error,
+        fallback_hint: Option<&'static str>,
+    ) -> Self {
+        Self::ServerUnavailable {
+            language,
+            source: source.to_string(),
+            fallback_hint,
+        }
+    }
+
+    fn into_tool_result(self) -> ToolResult {
+        ToolResult::err(self.to_string())
+    }
+}
+
+impl std::fmt::Display for LspToolError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::UnsupportedFileType { path } => {
+                write!(f, "Unsupported file type for LSP tools: {path}")
+            }
+            Self::ServerUnavailable {
+                language,
+                source,
+                fallback_hint,
+            } => {
+                write!(f, "LSP unavailable for {}: {source}", language.name())?;
+                if let Some(hint) = fallback_hint {
+                    write!(f, "{hint}")?;
+                }
+                Ok(())
+            }
+        }
+    }
+}
+
+impl std::error::Error for LspToolError {}
+
+async fn run_position_tool<F, Fut>(
+    manager: &Arc<LspManager>,
+    params: Value,
+    unavailable_hint: Option<&'static str>,
+    f: F,
+) -> Result<ToolResult>
+where
+    F: FnOnce(Arc<LspServer>, LspPositionQuery) -> Fut + Send,
+    Fut: Future<Output = Result<Value>> + Send,
+{
+    let p: LspPositionParams = match parse_tool_params(params) {
+        Ok(p) => p,
+        Err(e) => return Ok(e),
+    };
+    let query = match LspPositionQuery::from_params(p) {
+        Ok(query) => query,
+        Err(e) => return Ok(e.into_tool_result()),
+    };
+    run_prepared_position_tool(manager, query, unavailable_hint, f).await
+}
+
+async fn run_prepared_position_tool<F, Fut>(
+    manager: &Arc<LspManager>,
+    query: LspPositionQuery,
+    unavailable_hint: Option<&'static str>,
+    f: F,
+) -> Result<ToolResult>
+where
+    F: FnOnce(Arc<LspServer>, LspPositionQuery) -> Fut + Send,
+    Fut: Future<Output = Result<Value>> + Send,
+{
+    let server = match manager.server(query.language).await {
+        Ok(server) => server,
+        Err(e) => {
+            return Ok(
+                LspToolError::server_unavailable(query.language, e, unavailable_hint)
+                    .into_tool_result(),
+            );
+        }
+    };
+    match f(server, query).await {
+        Ok(payload) => Ok(ToolResult::ok(serde_json::to_string_pretty(&payload)?)),
+        Err(e) => Ok(ToolResult::err(format!("{e}"))),
+    }
+}
+
 #[derive(Clone)]
 pub struct GotoDefinitionTool {
     manager: Arc<LspManager>,
@@ -105,36 +235,17 @@ impl Tool for GotoDefinitionTool {
         _cancel: CancellationToken,
         _progress: Option<crate::tools::ProgressSink>,
     ) -> Result<ToolResult> {
-        let p: LspPositionParams = match parse_tool_params(params) {
-            Ok(p) => p,
-            Err(e) => return Ok(e),
-        };
-        let path = p.path.as_str();
-        let line = p.line;
-        let character = p.character;
-        let lang = match lang_for(path) {
-            Ok(l) => l,
-            Err(e) => return Ok(ToolResult::err(e.to_string())),
-        };
-        let server = match self.manager.server(lang).await {
-            Ok(s) => s,
-            Err(e) => {
-                return Ok(ToolResult::err(format!(
-                    "LSP unavailable for {}: {e}. Try the tree-sitter tools as a fallback.",
-                    lang.name()
-                )));
-            }
-        };
-        let pb = PathBuf::from(path);
-        // LSP positions are 0-indexed; translate the more agent-friendly
-        // 1-indexed line input.
-        let line0 = (line as u32).saturating_sub(1);
-        let resp = match goto_definition(&server, &pb, line0, character as u32).await {
-            Ok(r) => r,
-            Err(e) => return Ok(ToolResult::err(format!("{e}"))),
-        };
-        let payload = json!({ "locations": resp.unwrap_or_default() });
-        Ok(ToolResult::ok(serde_json::to_string_pretty(&payload)?))
+        run_position_tool(
+            &self.manager,
+            params,
+            Some(". Try the tree-sitter tools as a fallback."),
+            |server, query| async move {
+                let resp =
+                    goto_definition(&server, &query.path, query.line0, query.character).await?;
+                Ok(json!({ "locations": resp.unwrap_or_default() }))
+            },
+        )
+        .await
     }
 }
 
@@ -174,34 +285,13 @@ impl Tool for FindReferencesTool {
         _cancel: CancellationToken,
         _progress: Option<crate::tools::ProgressSink>,
     ) -> Result<ToolResult> {
-        let p: LspPositionParams = match parse_tool_params(params) {
-            Ok(p) => p,
-            Err(e) => return Ok(e),
-        };
-        let path = p.path.as_str();
-        let line = p.line;
-        let character = p.character;
-        let lang = match lang_for(path) {
-            Ok(l) => l,
-            Err(e) => return Ok(ToolResult::err(e.to_string())),
-        };
-        let server = match self.manager.server(lang).await {
-            Ok(s) => s,
-            Err(e) => {
-                return Ok(ToolResult::err(format!(
-                    "LSP unavailable for {}: {e}",
-                    lang.name()
-                )));
-            }
-        };
-        let pb = PathBuf::from(path);
-        let line0 = (line as u32).saturating_sub(1);
-        let locs = match find_references(&server, &pb, line0, character as u32).await {
-            Ok(r) => r.unwrap_or_default(),
-            Err(e) => return Ok(ToolResult::err(format!("{e}"))),
-        };
-        let payload = json!({ "references": locs });
-        Ok(ToolResult::ok(serde_json::to_string_pretty(&payload)?))
+        run_position_tool(&self.manager, params, None, |server, query| async move {
+            let locs = find_references(&server, &query.path, query.line0, query.character)
+                .await?
+                .unwrap_or_default();
+            Ok(json!({ "references": locs }))
+        })
+        .await
     }
 }
 
@@ -241,34 +331,11 @@ impl Tool for HoverTool {
         _cancel: CancellationToken,
         _progress: Option<crate::tools::ProgressSink>,
     ) -> Result<ToolResult> {
-        let p: LspPositionParams = match parse_tool_params(params) {
-            Ok(p) => p,
-            Err(e) => return Ok(e),
-        };
-        let path = p.path.as_str();
-        let line = p.line;
-        let character = p.character;
-        let lang = match lang_for(path) {
-            Ok(l) => l,
-            Err(e) => return Ok(ToolResult::err(e.to_string())),
-        };
-        let server = match self.manager.server(lang).await {
-            Ok(s) => s,
-            Err(e) => {
-                return Ok(ToolResult::err(format!(
-                    "LSP unavailable for {}: {e}",
-                    lang.name()
-                )));
-            }
-        };
-        let pb = PathBuf::from(path);
-        let line0 = (line as u32).saturating_sub(1);
-        let resp = match hover(&server, &pb, line0, character as u32).await {
-            Ok(r) => r,
-            Err(e) => return Ok(ToolResult::err(format!("{e}"))),
-        };
-        let payload = json!({ "hover": resp });
-        Ok(ToolResult::ok(serde_json::to_string_pretty(&payload)?))
+        run_position_tool(&self.manager, params, None, |server, query| async move {
+            let resp = hover(&server, &query.path, query.line0, query.character).await?;
+            Ok(json!({ "hover": resp }))
+        })
+        .await
     }
 }
 
@@ -308,34 +375,11 @@ impl Tool for TypeDefinitionTool {
         _cancel: CancellationToken,
         _progress: Option<crate::tools::ProgressSink>,
     ) -> Result<ToolResult> {
-        let p: LspPositionParams = match parse_tool_params(params) {
-            Ok(p) => p,
-            Err(e) => return Ok(e),
-        };
-        let path = p.path.as_str();
-        let line = p.line;
-        let character = p.character;
-        let lang = match lang_for(path) {
-            Ok(l) => l,
-            Err(e) => return Ok(ToolResult::err(e.to_string())),
-        };
-        let server = match self.manager.server(lang).await {
-            Ok(s) => s,
-            Err(e) => {
-                return Ok(ToolResult::err(format!(
-                    "LSP unavailable for {}: {e}",
-                    lang.name()
-                )));
-            }
-        };
-        let pb = PathBuf::from(path);
-        let line0 = (line as u32).saturating_sub(1);
-        let resp = match type_definition(&server, &pb, line0, character as u32).await {
-            Ok(r) => r,
-            Err(e) => return Ok(ToolResult::err(format!("{e}"))),
-        };
-        let payload = json!({ "locations": resp.unwrap_or_default() });
-        Ok(ToolResult::ok(serde_json::to_string_pretty(&payload)?))
+        run_position_tool(&self.manager, params, None, |server, query| async move {
+            let resp = type_definition(&server, &query.path, query.line0, query.character).await?;
+            Ok(json!({ "locations": resp.unwrap_or_default() }))
+        })
+        .await
     }
 }
 
@@ -375,34 +419,13 @@ impl Tool for ImplementationTool {
         _cancel: CancellationToken,
         _progress: Option<crate::tools::ProgressSink>,
     ) -> Result<ToolResult> {
-        let p: LspPositionParams = match parse_tool_params(params) {
-            Ok(p) => p,
-            Err(e) => return Ok(e),
-        };
-        let path = p.path.as_str();
-        let line = p.line;
-        let character = p.character;
-        let lang = match lang_for(path) {
-            Ok(l) => l,
-            Err(e) => return Ok(ToolResult::err(e.to_string())),
-        };
-        let server = match self.manager.server(lang).await {
-            Ok(s) => s,
-            Err(e) => {
-                return Ok(ToolResult::err(format!(
-                    "LSP unavailable for {}: {e}",
-                    lang.name()
-                )));
-            }
-        };
-        let pb = PathBuf::from(path);
-        let line0 = (line as u32).saturating_sub(1);
-        let locs = match implementation(&server, &pb, line0, character as u32).await {
-            Ok(r) => r.unwrap_or_default(),
-            Err(e) => return Ok(ToolResult::err(format!("{e}"))),
-        };
-        let payload = json!({ "implementations": locs });
-        Ok(ToolResult::ok(serde_json::to_string_pretty(&payload)?))
+        run_position_tool(&self.manager, params, None, |server, query| async move {
+            let locs = implementation(&server, &query.path, query.line0, query.character)
+                .await?
+                .unwrap_or_default();
+            Ok(json!({ "implementations": locs }))
+        })
+        .await
     }
 }
 
@@ -571,87 +594,69 @@ impl Tool for CallHierarchyTool {
             Ok(p) => p,
             Err(e) => return Ok(e),
         };
-        let path = p.path.as_str();
-        let line = p.line;
-        let character = p.character;
-        let direction = p.direction.as_str();
+        let direction = p.direction;
         if direction != "incoming" && direction != "outgoing" {
             return Ok(ToolResult::err(format!(
                 "direction must be \"incoming\" or \"outgoing\"; got `{direction}`",
             )));
         }
-        let lang = match lang_for(path) {
-            Ok(l) => l,
-            Err(e) => return Ok(ToolResult::err(e.to_string())),
+
+        let query = match LspPositionQuery::from_parts(p.path, p.line, p.character) {
+            Ok(query) => query,
+            Err(e) => return Ok(e.into_tool_result()),
         };
-        let server = match self.manager.server(lang).await {
-            Ok(s) => s,
-            Err(e) => {
-                return Ok(ToolResult::err(format!(
-                    "LSP unavailable for {}: {e}",
-                    lang.name()
-                )));
+
+        run_prepared_position_tool(&self.manager, query, None, |server, query| async move {
+            let items =
+                prepare_call_hierarchy(&server, &query.path, query.line0, query.character).await?;
+            if items.is_empty() {
+                return Ok(json!({
+                    "direction": direction,
+                    "calls": [],
+                    "note": "No callable symbol at this position.",
+                }));
             }
-        };
-        let pb = PathBuf::from(path);
-        let line0 = (line as u32).saturating_sub(1);
-        let items = match prepare_call_hierarchy(&server, &pb, line0, character as u32).await {
-            Ok(items) => items,
-            Err(e) => return Ok(ToolResult::err(format!("{e}"))),
-        };
-        if items.is_empty() {
-            let payload = json!({
+
+            // The spec returns a `Vec` because some servers resolve a
+            // position to multiple callable items (overloads). Expand
+            // each into its own incoming/outgoing query and concatenate.
+            let mut hits: Vec<Value> = Vec::new();
+            for item in items {
+                if direction == "incoming" {
+                    let calls = call_hierarchy_incoming(&server, item).await?;
+                    for call in calls {
+                        let from = call.from;
+                        hits.push(json!({
+                            "name": from.name,
+                            "kind": format!("{:?}", from.kind),
+                            "container": from.detail,
+                            "file": from.uri.path().as_str(),
+                            "line": from.range.start.line + 1,
+                            "call_sites": call.from_ranges.len(),
+                        }));
+                    }
+                } else {
+                    let calls = call_hierarchy_outgoing(&server, item).await?;
+                    for call in calls {
+                        let to = call.to;
+                        hits.push(json!({
+                            "name": to.name,
+                            "kind": format!("{:?}", to.kind),
+                            "container": to.detail,
+                            "file": to.uri.path().as_str(),
+                            "line": to.range.start.line + 1,
+                            "call_sites": call.from_ranges.len(),
+                        }));
+                    }
+                }
+            }
+            Ok(json!({
                 "direction": direction,
-                "calls": [],
-                "note": "No callable symbol at this position.",
-            });
-            return Ok(ToolResult::ok(serde_json::to_string_pretty(&payload)?));
-        }
-        // The spec returns a `Vec` because some servers resolve a
-        // position to multiple callable items (overloads). Expand
-        // each into its own incoming/outgoing query and concatenate.
-        let mut hits: Vec<Value> = Vec::new();
-        for item in items {
-            if direction == "incoming" {
-                let calls = match call_hierarchy_incoming(&server, item).await {
-                    Ok(c) => c,
-                    Err(e) => return Ok(ToolResult::err(format!("{e}"))),
-                };
-                for call in calls {
-                    let from = call.from;
-                    hits.push(json!({
-                        "name": from.name,
-                        "kind": format!("{:?}", from.kind),
-                        "container": from.detail,
-                        "file": from.uri.path().as_str(),
-                        "line": from.range.start.line + 1,
-                        "call_sites": call.from_ranges.len(),
-                    }));
-                }
-            } else {
-                let calls = match call_hierarchy_outgoing(&server, item).await {
-                    Ok(c) => c,
-                    Err(e) => return Ok(ToolResult::err(format!("{e}"))),
-                };
-                for call in calls {
-                    let to = call.to;
-                    hits.push(json!({
-                        "name": to.name,
-                        "kind": format!("{:?}", to.kind),
-                        "container": to.detail,
-                        "file": to.uri.path().as_str(),
-                        "line": to.range.start.line + 1,
-                        "call_sites": call.from_ranges.len(),
-                    }));
-                }
-            }
-        }
-        let payload = json!({
-            "direction": direction,
-            "count": hits.len(),
-            "calls": hits,
-        });
-        Ok(ToolResult::ok(serde_json::to_string_pretty(&payload)?))
+                "count": hits.len(),
+                "calls": hits,
+            }))
+        })
+        .await
     }
 }
 
@@ -800,6 +805,69 @@ mod workspace_symbol_tests {
         assert!(result.is_error);
         assert!(result.output.contains("Unknown language"));
         assert!(result.output.contains("rust"));
+    }
+}
+
+#[cfg(test)]
+mod position_query_tests {
+    use super::*;
+
+    #[test]
+    fn position_query_detects_language_and_converts_line() {
+        let query = LspPositionQuery::from_params(LspPositionParams {
+            path: "src/lib.rs".into(),
+            line: 1,
+            character: 12,
+        })
+        .expect("query");
+
+        assert_eq!(query.path, PathBuf::from("src/lib.rs"));
+        assert_eq!(query.language, Language::Rust);
+        assert_eq!(query.line0, 0);
+        assert_eq!(query.character, 12);
+    }
+
+    #[test]
+    fn position_query_saturates_line_zero_to_zero() {
+        let query = LspPositionQuery::from_params(LspPositionParams {
+            path: "src/lib.rs".into(),
+            line: 0,
+            character: 3,
+        })
+        .expect("query");
+
+        assert_eq!(query.line0, 0);
+        assert_eq!(query.character, 3);
+    }
+
+    #[test]
+    fn unsupported_file_type_is_structured_error() {
+        let err = LspPositionQuery::from_params(LspPositionParams {
+            path: "README.md".into(),
+            line: 1,
+            character: 0,
+        })
+        .expect_err("unsupported");
+
+        assert!(matches!(err, LspToolError::UnsupportedFileType { .. }));
+        assert_eq!(
+            err.to_string(),
+            "Unsupported file type for LSP tools: README.md"
+        );
+    }
+
+    #[test]
+    fn server_unavailable_error_preserves_optional_fallback_hint() {
+        let err = LspToolError::server_unavailable(
+            Language::Rust,
+            anyhow::anyhow!("missing rust-analyzer"),
+            Some(". Try the tree-sitter tools as a fallback."),
+        );
+
+        assert_eq!(
+            err.to_string(),
+            "LSP unavailable for rust: missing rust-analyzer. Try the tree-sitter tools as a fallback."
+        );
     }
 }
 
