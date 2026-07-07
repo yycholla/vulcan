@@ -5,6 +5,7 @@
 //! read saved session bodies from the SQLite `SessionStore`.
 
 use serde_json::json;
+use std::sync::Arc;
 use uuid::Uuid;
 
 use crate::daemon::protocol::{ProtocolError, Response};
@@ -121,22 +122,37 @@ pub async fn list(state: &DaemonState, id: String) -> Response {
 
 // -- search / resume / history (GH #703) --
 
-/// Open the saved-session store. Failure maps to a retryable
-/// protocol error — the daemon may not have a writable ~/.vulcan yet.
-async fn open_store() -> Result<crate::memory::SessionStore, ProtocolError> {
-    crate::memory::SessionStore::try_new()
-        .await
-        .map_err(|e| ProtocolError {
+/// Borrow the daemon-owned saved-session store.
+fn pooled_session_store(
+    state: &DaemonState,
+) -> Result<Arc<crate::memory::SessionStore>, ProtocolError> {
+    let Some(pool) = state.pool() else {
+        return Err(ProtocolError {
             code: "SESSION_STORE_UNAVAILABLE".into(),
-            message: format!("could not open session store: {e}"),
+            message: "daemon RuntimeResourcePool is not installed; session store unavailable"
+                .into(),
             retryable: true,
-        })
+        });
+    };
+
+    if let Some(degraded) = pool
+        .degraded_resources()
+        .iter()
+        .find(|resource| resource.component == "session_store")
+    {
+        return Err(ProtocolError {
+            code: "SESSION_STORE_UNAVAILABLE".into(),
+            message: format!("daemon session store is degraded: {}", degraded.message),
+            retryable: true,
+        });
+    }
+
+    Ok(pool.session_store())
 }
 
 /// FTS5 search across every saved session's messages.
 pub async fn search(state: &DaemonState, id: String, query: &str, limit: usize) -> Response {
-    let _ = state;
-    let store = match open_store().await {
+    let store = match pooled_session_store(state) {
         Ok(s) => s,
         Err(e) => return Response::error(id, e),
     };
@@ -179,7 +195,7 @@ pub async fn resume(state: &DaemonState, id: String, session_id: &str) -> Respon
         );
     }
 
-    let store = match open_store().await {
+    let store = match pooled_session_store(state) {
         Ok(s) => s,
         Err(e) => return Response::error(id, e),
     };
@@ -257,8 +273,7 @@ pub async fn resume(state: &DaemonState, id: String, session_id: &str) -> Respon
 
 /// Return a saved session's full message log.
 pub async fn history(state: &DaemonState, id: String, session_id: &str) -> Response {
-    let _ = state;
-    let store = match open_store().await {
+    let store = match pooled_session_store(state) {
         Ok(s) => s,
         Err(e) => return Response::error(id, e),
     };
@@ -297,6 +312,8 @@ pub async fn history(state: &DaemonState, id: String, session_id: &str) -> Respo
 mod tests {
     use super::*;
     use crate::daemon::state::DaemonState;
+    use crate::provider::Message;
+    use crate::runtime_pool::RuntimeResourcePool;
     use std::sync::Arc;
 
     #[tokio::test]
@@ -374,34 +391,92 @@ mod tests {
         assert_eq!(result["session_id"], "foo");
     }
 
+    #[tokio::test]
+    async fn history_requires_daemon_pool_session_store() {
+        let state = Arc::new(DaemonState::for_tests_minimal());
+        let resp = history(&state, "r1".into(), "missing").await;
+        let err = resp.error.expect("err");
+        assert_eq!(err.code, "SESSION_STORE_UNAVAILABLE");
+        assert!(err.message.contains("RuntimeResourcePool"));
+    }
+
+    #[tokio::test]
+    async fn history_reads_from_daemon_pool_session_store() {
+        let pool = Arc::new(RuntimeResourcePool::for_tests().await);
+        let session_id = uuid::Uuid::new_v4().to_string();
+        pool.session_store()
+            .save_messages(
+                &session_id,
+                &[Message::User {
+                    content: "pooled daemon history".into(),
+                }],
+            )
+            .await
+            .unwrap();
+        let state = Arc::new(DaemonState::for_tests_minimal().with_pool(pool));
+
+        let resp = history(&state, "r1".into(), &session_id).await;
+        let messages = resp.result.expect("ok")["messages"].clone();
+        assert_eq!(messages[0]["content"], "pooled daemon history");
+    }
+
+    #[tokio::test]
+    async fn search_reads_from_daemon_pool_session_store() {
+        let pool = Arc::new(RuntimeResourcePool::for_tests().await);
+        let session_id = uuid::Uuid::new_v4().to_string();
+        pool.session_store()
+            .save_messages(
+                &session_id,
+                &[Message::User {
+                    content: "uniquepooledqueryneedle".into(),
+                }],
+            )
+            .await
+            .unwrap();
+        let state = Arc::new(DaemonState::for_tests_minimal().with_pool(pool));
+
+        let resp = search(&state, "r1".into(), "uniquepooledqueryneedle", 10).await;
+        let result = resp.result.expect("ok");
+        let hits = result["hits"].as_array().expect("hits");
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0]["session_id"], session_id);
+    }
+
+    #[tokio::test]
+    async fn degraded_pool_session_store_fails_clearly() {
+        let pool = Arc::new(
+            RuntimeResourcePool::for_tests_degraded("session_store", "sqlite unavailable").await,
+        );
+        let state = Arc::new(DaemonState::for_tests_minimal().with_pool(pool));
+
+        let resp = search(&state, "r1".into(), "anything", 10).await;
+        let err = resp.error.expect("err");
+        assert_eq!(err.code, "SESSION_STORE_UNAVAILABLE");
+        assert!(err.message.contains("sqlite unavailable"));
+    }
+
     // GH #703: history of a session that was never saved is a typed
     // SESSION_NOT_FOUND, not METHOD_NOT_IMPLEMENTED.
     #[tokio::test]
     async fn history_missing_session_not_found() {
-        let state = Arc::new(DaemonState::for_tests_minimal());
+        let pool = Arc::new(RuntimeResourcePool::for_tests().await);
+        let state = Arc::new(DaemonState::for_tests_minimal().with_pool(pool));
         let ghost = uuid::Uuid::new_v4().to_string();
         let resp = history(&state, "r1".into(), &ghost).await;
         let err = resp.error.expect("err");
-        assert!(
-            err.code == "SESSION_NOT_FOUND" || err.code == "SESSION_STORE_UNAVAILABLE",
-            "unexpected code {}",
-            err.code
-        );
+        assert_eq!(err.code, "SESSION_NOT_FOUND");
         assert_ne!(err.code, "METHOD_NOT_IMPLEMENTED");
     }
 
     // GH #703: resume of an unknown saved session is typed too.
     #[tokio::test]
     async fn resume_missing_session_not_found() {
-        let state = Arc::new(DaemonState::for_tests_minimal());
+        let pool = Arc::new(RuntimeResourcePool::for_tests().await);
+        let state = Arc::new(DaemonState::for_tests_minimal().with_pool(pool));
         let ghost = uuid::Uuid::new_v4().to_string();
         let resp = resume(&state, "r1".into(), &ghost).await;
         let err = resp.error.expect("err");
-        assert!(
-            err.code == "SESSION_NOT_FOUND" || err.code == "SESSION_STORE_UNAVAILABLE",
-            "unexpected code {}",
-            err.code
-        );
+        assert_eq!(err.code, "SESSION_NOT_FOUND");
         assert!(state.sessions().get(&ghost).is_none());
     }
 
