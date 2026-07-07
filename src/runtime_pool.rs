@@ -31,7 +31,9 @@ use crate::extensions::{
 use crate::memory::SessionStore;
 use crate::memory::cortex::CortexStore;
 use crate::orchestration::OrchestrationStore;
+use crate::pause::PauseSender;
 use crate::run_record::{InMemoryRunStore, RunStore, SqliteRunStore};
+use crate::tools::{EditDiffSink, ToolRegistry};
 
 /// Operator-visible record for a runtime resource that fell back to a
 /// degraded in-memory/non-durable mode instead of aborting daemon startup.
@@ -49,6 +51,33 @@ impl RuntimeResourceDegradation {
             fallback: "in_memory".into(),
             message: message.into(),
         }
+    }
+}
+
+#[derive(Clone)]
+pub struct ToolRegistryBuildOptions {
+    cwd: PathBuf,
+    diff_sink: Option<EditDiffSink>,
+    pause_tx: Option<PauseSender>,
+}
+
+impl ToolRegistryBuildOptions {
+    pub fn new(cwd: PathBuf) -> Self {
+        Self {
+            cwd,
+            diff_sink: None,
+            pause_tx: None,
+        }
+    }
+
+    pub fn with_diff_sink(mut self, diff_sink: Option<EditDiffSink>) -> Self {
+        self.diff_sink = diff_sink;
+        self
+    }
+
+    pub fn with_pause_channel(mut self, pause_tx: Option<PauseSender>) -> Self {
+        self.pause_tx = pause_tx;
+        self
     }
 }
 
@@ -268,6 +297,23 @@ impl RuntimeResourcePool {
         Arc::clone(&self.lsp_manager)
     }
 
+    /// Build the per-session executable tool registry from daemon-owned
+    /// resources. The registry still owns execution/lookup; the pool owns
+    /// assembly of shared handles and interactive frontend wiring.
+    pub fn build_tool_registry(&self, options: ToolRegistryBuildOptions) -> ToolRegistry {
+        let mut registry = ToolRegistry::new_with_diff_and_lsp(
+            options.diff_sink.clone(),
+            Some(self.lsp_manager()),
+            options.cwd,
+        );
+        crate::tools::register_interactive_tools(
+            &mut registry,
+            options.diff_sink,
+            options.pause_tx,
+        );
+        registry
+    }
+
     /// Cloneable handle to the shared cortex graph memory, when the
     /// daemon installed one at boot. `None` for tests / disabled
     /// configurations.
@@ -343,6 +389,39 @@ mod tests {
         // the pool hands out the same Arc.
         let pool = RuntimeResourcePool::for_tests().await;
         assert!(Arc::ptr_eq(&pool.lsp_manager(), &pool.lsp_manager()));
+    }
+
+    #[tokio::test]
+    async fn pool_builds_ordered_tool_registry_with_interactive_tools() {
+        let pool = RuntimeResourcePool::for_tests().await;
+        let diff_sink = crate::tools::new_diff_sink();
+        let (pause_tx, _pause_rx) = crate::pause::channel(1);
+
+        let registry = pool.build_tool_registry(
+            ToolRegistryBuildOptions::new(std::env::current_dir().unwrap())
+                .with_diff_sink(Some(diff_sink))
+                .with_pause_channel(Some(pause_tx)),
+        );
+        let names = registry.catalog(None).names();
+
+        assert_eq!(
+            &names[0..5],
+            &[
+                "read_file".to_string(),
+                "write_file".to_string(),
+                "search_files".to_string(),
+                "edit_file".to_string(),
+                "list_files".to_string(),
+            ]
+        );
+        assert!(
+            names.contains(&"ask_user".to_string()),
+            "pool construction should own interactive tool registration"
+        );
+        assert!(
+            names.contains(&"goto_definition".to_string()),
+            "pool construction should reuse the shared LSP manager for semantic tools"
+        );
     }
 
     #[tokio::test]

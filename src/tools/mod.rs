@@ -430,6 +430,17 @@ pub fn new_diff_sink() -> EditDiffSink {
     Arc::new(DiffSink::new(DIFF_SINK_CAP))
 }
 
+pub fn register_interactive_tools(
+    registry: &mut ToolRegistry,
+    diff_sink: Option<EditDiffSink>,
+    pause_tx: Option<crate::pause::PauseSender>,
+) {
+    if pause_tx.is_some() {
+        registry.register(Arc::new(ask_user::AskUserTool::new(pause_tx.clone())));
+        registry.register(Arc::new(file::PatchFile::with_pause(diff_sink, pause_tx)));
+    }
+}
+
 /// Trim a string to a max number of lines + chars so the TUI doesn't
 /// stash megabyte-sized files in memory just to render a 6-line preview.
 pub(crate) fn snippet(text: &str, max_lines: usize, max_chars: usize) -> String {
@@ -441,9 +452,38 @@ pub(crate) fn snippet(text: &str, max_lines: usize, max_chars: usize) -> String 
         .join("\n")
 }
 
+/// Lightweight provider-facing catalog of tool definitions. Carries
+/// names, descriptions, and JSON schemas without executable tool handles.
+#[derive(Debug, Clone, Default)]
+pub struct ToolCatalog {
+    definitions: Vec<ToolDefinition>,
+}
+
+impl ToolCatalog {
+    pub fn new(definitions: Vec<ToolDefinition>) -> Self {
+        Self { definitions }
+    }
+
+    pub fn definitions(&self) -> &[ToolDefinition] {
+        &self.definitions
+    }
+
+    pub fn names(&self) -> Vec<String> {
+        self.definitions
+            .iter()
+            .map(|definition| definition.function.name.clone())
+            .collect()
+    }
+
+    pub fn into_definitions(self) -> Vec<ToolDefinition> {
+        self.definitions
+    }
+}
+
 /// Registry of available tools — tools are discovered at startup via the `inventory` pattern
 pub struct ToolRegistry {
     tools: HashMap<String, Arc<dyn Tool>>,
+    order: Vec<String>,
     /// YYC-181: name of the active capability profile, when one was
     /// applied via [`Self::apply_profile`]. `None` means the registry
     /// is unrestricted (the historical default).
@@ -453,6 +493,98 @@ pub struct ToolRegistry {
     /// construction wires some tools late) cannot reintroduce capabilities
     /// the profile already removed.
     active_profile_allowed: Option<HashSet<String>>,
+}
+
+fn builtin_tools(
+    sink: Option<EditDiffSink>,
+    lsp: Option<Arc<crate::code::lsp::LspManager>>,
+    cwd: std::path::PathBuf,
+) -> Vec<Arc<dyn Tool>> {
+    let mut tools: Vec<Arc<dyn Tool>> = Vec::new();
+    tools.push(Arc::new(file::ReadFile));
+    tools.push(Arc::new(file::WriteFile::new(sink.clone())));
+    tools.push(Arc::new(file::SearchFiles));
+    tools.push(Arc::new(file::PatchFile::new(sink)));
+    // YYC-79: native tree listing.
+    tools.push(Arc::new(file::ListFiles));
+    // YYC-80: structured Rust compile diagnostics.
+    tools.push(Arc::new(cargo::CargoCheckTool));
+    tools.push(Arc::new(web::WebSearch));
+    tools.push(Arc::new(web::WebFetch));
+    // YYC-45: tree-sitter structural code tools. One parser cache
+    // shared across all three so we only initialize each grammar
+    // once per session.
+    let parser_cache = Arc::new(crate::code::ParserCache::new());
+    tools.push(Arc::new(code::CodeOutlineTool::new(parser_cache.clone())));
+    tools.push(Arc::new(code::CodeExtractTool::new(parser_cache.clone())));
+    tools.push(Arc::new(code::CodeQueryTool::new(parser_cache.clone())));
+    // YYC-46: LSP-backed semantic tools. One manager pool — servers
+    // are spawned lazily on first use per language.
+    let lsp_mgr = lsp.unwrap_or_else(|| Arc::new(crate::code::lsp::LspManager::new(cwd.clone())));
+    tools.push(Arc::new(lsp::GotoDefinitionTool::new(lsp_mgr.clone())));
+    tools.push(Arc::new(lsp::FindReferencesTool::new(lsp_mgr.clone())));
+    tools.push(Arc::new(lsp::HoverTool::new(lsp_mgr.clone())));
+    tools.push(Arc::new(lsp::DiagnosticsTool::new(lsp_mgr.clone())));
+    // YYC-201: workspace-wide symbol search via LSP.
+    tools.push(Arc::new(lsp::WorkspaceSymbolTool::new(lsp_mgr.clone())));
+    // YYC-202: type-of-expression + trait/interface implementation lookup.
+    tools.push(Arc::new(lsp::TypeDefinitionTool::new(lsp_mgr.clone())));
+    tools.push(Arc::new(lsp::ImplementationTool::new(lsp_mgr.clone())));
+    // YYC-203: incoming/outgoing call hierarchy.
+    tools.push(Arc::new(lsp::CallHierarchyTool::new(lsp_mgr.clone())));
+    // YYC-204: code actions (fix-its + refactors).
+    tools.push(Arc::new(lsp::CodeActionTool::new(lsp_mgr.clone())));
+    // YYC-49: AST-aware structural edits.
+    tools.push(Arc::new(code_edit::ReplaceFunctionBodyTool));
+    tools.push(Arc::new(code_edit::AddMethodTool));
+    tools.push(Arc::new(code_edit::AddImportTool));
+    tools.push(Arc::new(code_edit::RenameSymbolTool::new(lsp_mgr.clone())));
+    // YYC-50: workspace symbol index. Lazy — the agent has to run
+    // `index_code_graph` once before `find_symbol` returns hits.
+    if let Ok(graph) = crate::code::graph::CodeGraph::open(cwd, parser_cache.clone()) {
+        let graph_arc = Arc::new(graph);
+        tools.push(Arc::new(code_graph::IndexCodeGraphTool::new(
+            graph_arc.clone(),
+            Some(lsp_mgr),
+        )));
+        tools.push(Arc::new(code_graph::FindSymbolTool::new(graph_arc.clone())));
+        tools.push(Arc::new(code_graph::FindCallersTool::new(
+            graph_arc.clone(),
+        )));
+        tools.push(Arc::new(code_graph::FindCalleesTool::new(
+            graph_arc.clone(),
+        )));
+        tools.push(Arc::new(code_graph::TypeHierarchyTool::new(
+            graph_arc.clone(),
+        )));
+        tools.push(Arc::new(code_graph::GraphImpactAnalysisTool::new(
+            graph_arc,
+        )));
+    }
+    // YYC-36: native git tools — agent stops composing brittle
+    // `git ...` shell strings through bash.
+    tools.push(Arc::new(git::GitStatusTool));
+    tools.push(Arc::new(git::GitDiffTool));
+    tools.push(Arc::new(git::GitCommitTool));
+    tools.push(Arc::new(git::GitPushTool));
+    tools.push(Arc::new(git::GitBranchTool));
+    tools.push(Arc::new(git::GitLogTool));
+    tools.extend(shell::make_tools());
+    tools
+}
+
+fn tool_definition(tool: &dyn Tool, ctx: Option<&ToolContext>) -> ToolDefinition {
+    let description = ctx
+        .and_then(|c| tool.dynamic_description(c))
+        .unwrap_or_else(|| tool.description().to_string());
+    ToolDefinition {
+        tool_type: "function".into(),
+        function: crate::provider::ToolFunction {
+            name: tool.name().to_string(),
+            description,
+            parameters: tool.schema(),
+        },
+    }
 }
 
 impl Default for ToolRegistry {
@@ -492,79 +624,11 @@ impl ToolRegistry {
     ) -> Self {
         let mut registry = Self {
             tools: HashMap::new(),
+            order: Vec::new(),
             active_profile: None,
             active_profile_allowed: None,
         };
-        registry.register(Arc::new(file::ReadFile));
-        registry.register(Arc::new(file::WriteFile::new(sink.clone())));
-        registry.register(Arc::new(file::SearchFiles));
-        registry.register(Arc::new(file::PatchFile::new(sink)));
-        // YYC-79: native tree listing.
-        registry.register(Arc::new(file::ListFiles));
-        // YYC-80: structured Rust compile diagnostics.
-        registry.register(Arc::new(cargo::CargoCheckTool));
-        registry.register(Arc::new(web::WebSearch));
-        registry.register(Arc::new(web::WebFetch));
-        // YYC-45: tree-sitter structural code tools. One parser cache
-        // shared across all three so we only initialize each grammar
-        // once per session.
-        let parser_cache = Arc::new(crate::code::ParserCache::new());
-        registry.register(Arc::new(code::CodeOutlineTool::new(parser_cache.clone())));
-        registry.register(Arc::new(code::CodeExtractTool::new(parser_cache.clone())));
-        registry.register(Arc::new(code::CodeQueryTool::new(parser_cache.clone())));
-        // YYC-46: LSP-backed semantic tools. One manager pool — servers
-        // are spawned lazily on first use per language.
-        let lsp_mgr =
-            lsp.unwrap_or_else(|| Arc::new(crate::code::lsp::LspManager::new(cwd.clone())));
-        registry.register(Arc::new(lsp::GotoDefinitionTool::new(lsp_mgr.clone())));
-        registry.register(Arc::new(lsp::FindReferencesTool::new(lsp_mgr.clone())));
-        registry.register(Arc::new(lsp::HoverTool::new(lsp_mgr.clone())));
-        registry.register(Arc::new(lsp::DiagnosticsTool::new(lsp_mgr.clone())));
-        // YYC-201: workspace-wide symbol search via LSP.
-        registry.register(Arc::new(lsp::WorkspaceSymbolTool::new(lsp_mgr.clone())));
-        // YYC-202: type-of-expression + trait/interface implementation lookup.
-        registry.register(Arc::new(lsp::TypeDefinitionTool::new(lsp_mgr.clone())));
-        registry.register(Arc::new(lsp::ImplementationTool::new(lsp_mgr.clone())));
-        // YYC-203: incoming/outgoing call hierarchy.
-        registry.register(Arc::new(lsp::CallHierarchyTool::new(lsp_mgr.clone())));
-        // YYC-204: code actions (fix-its + refactors).
-        registry.register(Arc::new(lsp::CodeActionTool::new(lsp_mgr.clone())));
-        // YYC-49: AST-aware structural edits.
-        registry.register(Arc::new(code_edit::ReplaceFunctionBodyTool));
-        registry.register(Arc::new(code_edit::AddMethodTool));
-        registry.register(Arc::new(code_edit::AddImportTool));
-        registry.register(Arc::new(code_edit::RenameSymbolTool::new(lsp_mgr.clone())));
-        // YYC-50: workspace symbol index. Lazy — the agent has to run
-        // `index_code_graph` once before `find_symbol` returns hits.
-        if let Ok(graph) = crate::code::graph::CodeGraph::open(cwd, parser_cache.clone()) {
-            let graph_arc = Arc::new(graph);
-            registry.register(Arc::new(code_graph::IndexCodeGraphTool::new(
-                graph_arc.clone(),
-                Some(lsp_mgr),
-            )));
-            registry.register(Arc::new(code_graph::FindSymbolTool::new(graph_arc.clone())));
-            registry.register(Arc::new(code_graph::FindCallersTool::new(
-                graph_arc.clone(),
-            )));
-            registry.register(Arc::new(code_graph::FindCalleesTool::new(
-                graph_arc.clone(),
-            )));
-            registry.register(Arc::new(code_graph::TypeHierarchyTool::new(
-                graph_arc.clone(),
-            )));
-            registry.register(Arc::new(code_graph::GraphImpactAnalysisTool::new(
-                graph_arc,
-            )));
-        }
-        // YYC-36: native git tools — agent stops composing brittle
-        // `git ...` shell strings through bash.
-        registry.register(Arc::new(git::GitStatusTool));
-        registry.register(Arc::new(git::GitDiffTool));
-        registry.register(Arc::new(git::GitCommitTool));
-        registry.register(Arc::new(git::GitPushTool));
-        registry.register(Arc::new(git::GitBranchTool));
-        registry.register(Arc::new(git::GitLogTool));
-        for tool in shell::make_tools() {
+        for tool in builtin_tools(sink, lsp, cwd) {
             registry.register(tool);
         }
         registry
@@ -574,6 +638,9 @@ impl ToolRegistry {
         let name = tool.name().to_string();
         if !self.profile_allows(&name) {
             return;
+        }
+        if !self.tools.contains_key(&name) {
+            self.order.push(name.clone());
         }
         self.tools.insert(name, tool);
     }
@@ -596,6 +663,7 @@ impl ToolRegistry {
         if self.tools.contains_key(&name) {
             anyhow::bail!("extension tool `{name}` conflicts with an existing tool");
         }
+        self.order.push(name.clone());
         self.tools.insert(name, wrapped);
         Ok(())
     }
@@ -630,15 +698,9 @@ impl ToolRegistry {
     /// silently ignored — the caller can reconcile by checking
     /// `definitions()` afterwards if it cares.
     pub fn retain_only(&mut self, allowed: &[String]) {
-        let drop_keys: Vec<String> = self
-            .tools
-            .keys()
-            .filter(|k| !allowed.iter().any(|a| a == *k))
-            .cloned()
-            .collect();
-        for k in drop_keys {
-            self.tools.remove(&k);
-        }
+        let allowed: HashSet<&str> = allowed.iter().map(String::as_str).collect();
+        self.tools.retain(|name, _| allowed.contains(name.as_str()));
+        self.order.retain(|name| self.tools.contains_key(name));
     }
 
     /// YYC-107: drop tools whose `is_relevant(ctx)` returns false.
@@ -659,6 +721,7 @@ impl ToolRegistry {
         for k in drop_keys {
             self.tools.remove(&k);
         }
+        self.order.retain(|name| self.tools.contains_key(name));
     }
 
     /// Get all tool definitions for the LLM. Tools that override
@@ -669,22 +732,24 @@ impl ToolRegistry {
     }
 
     pub fn definitions_with_context(&self, ctx: Option<&ToolContext>) -> Vec<ToolDefinition> {
-        self.tools
-            .values()
-            .map(|t| {
-                let description = ctx
-                    .and_then(|c| t.dynamic_description(c))
-                    .unwrap_or_else(|| t.description().to_string());
-                ToolDefinition {
-                    tool_type: "function".into(),
-                    function: crate::provider::ToolFunction {
-                        name: t.name().to_string(),
-                        description,
-                        parameters: t.schema(),
-                    },
-                }
-            })
+        self.order
+            .iter()
+            .filter_map(|name| self.tools.get(name))
+            .map(|tool| tool_definition(tool.as_ref(), ctx))
             .collect()
+    }
+
+    pub fn catalog(&self, ctx: Option<&ToolContext>) -> ToolCatalog {
+        ToolCatalog::new(self.definitions_with_context(ctx))
+    }
+
+    pub fn default_catalog() -> ToolCatalog {
+        let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+        let definitions = builtin_tools(None, None, cwd)
+            .into_iter()
+            .map(|tool| tool_definition(tool.as_ref(), None))
+            .collect();
+        ToolCatalog::new(definitions)
     }
 
     /// Execute a tool by name with JSON arguments.
@@ -1306,6 +1371,36 @@ path = "src/primary.rs"
         assert!(
             !registry.contains("spawn_subagent"),
             "readonly profile must reject late-registered spawn_subagent"
+        );
+    }
+
+    #[test]
+    fn catalog_preserves_builtin_definition_order_without_execution_handles() {
+        let registry = ToolRegistry::new();
+        let catalog = registry.catalog(None);
+
+        let registry_names: Vec<String> = registry
+            .definitions()
+            .into_iter()
+            .map(|d| d.function.name)
+            .collect();
+        assert_eq!(catalog.names(), registry_names);
+        assert_eq!(
+            &catalog.names()[0..5],
+            &[
+                "read_file".to_string(),
+                "write_file".to_string(),
+                "search_files".to_string(),
+                "edit_file".to_string(),
+                "list_files".to_string(),
+            ]
+        );
+        assert!(
+            catalog
+                .definitions()
+                .iter()
+                .all(|def| def.function.parameters.is_object()),
+            "catalog should expose provider schemas, not executable tools"
         );
     }
 

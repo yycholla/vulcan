@@ -339,15 +339,10 @@ fn relevant_tool_names(workspace_root: &Path, tool_context: &ToolContext) -> BTr
 }
 
 /// Default tool universe — the names the live registry registers
-/// at startup. Pulled from `ToolRegistry::new` so the simulator
-/// stays in lockstep without hand-maintained lists.
+/// at startup. Pulled from the canonical catalog so the simulator
+/// stays in lockstep without policy assembling executable tools.
 pub fn default_tool_universe() -> Vec<String> {
-    let registry = ToolRegistry::new();
-    registry
-        .definitions()
-        .into_iter()
-        .map(|d| d.function.name)
-        .collect()
+    ToolRegistry::default_catalog().names()
 }
 
 fn collect_warnings(entries: &[PolicyEntry]) -> Vec<PolicyWarning> {
@@ -704,6 +699,14 @@ mod tests {
             .expect("cargo_check entry");
         assert_eq!(cargo_check.decision, PolicyDecision::Denied);
         assert!(cargo_check.source.contains("workspace context"));
+    }
+
+    #[test]
+    fn default_universe_matches_tool_catalog() {
+        assert_eq!(
+            default_tool_universe(),
+            crate::tools::ToolRegistry::default_catalog().names()
+        );
     }
 
     #[test]

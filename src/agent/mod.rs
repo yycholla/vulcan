@@ -11,7 +11,7 @@ use crate::pause::PauseSender;
 use crate::prompt_builder::PromptBuilder;
 use crate::provider::factory::{DefaultProviderFactory, ProviderFactory};
 use crate::provider::{LLMProvider, Message, ToolDefinition};
-use crate::runtime_pool::RuntimeResourcePool;
+use crate::runtime_pool::{RuntimeResourcePool, ToolRegistryBuildOptions};
 use crate::skills::SkillRegistry;
 use crate::tools::{ToolRegistry, ToolResult};
 use anyhow::Result;
@@ -364,27 +364,26 @@ impl Agent {
         // drop irrelevant tools (cargo_check off-Rust, etc.) and the
         // remaining tools can render runtime-aware descriptions.
         let tool_context = crate::tools::ToolContext::probe(cwd.clone());
-        let mut tools = ToolRegistry::new_with_diff_and_lsp(
-            Some(diff_sink.clone()),
-            Some(lsp_manager.clone()),
-            cwd.clone(),
-        );
-
-        // YYC-81: ask_user is only useful in interactive (TUI) mode.
-        // Register it whenever a pause channel is wired; it self-
-        // reports when called without one.
-        if pause_tx.is_some() {
-            tools.register(Arc::new(crate::tools::ask_user::AskUserTool::new(
-                pause_tx.clone(),
-            )));
-            // YYC-75: re-register edit_file with the pause channel so
-            // multi-site replaces route through the diff scrubber. Still
-            // shares the diff sink wired up in the registry constructor.
-            tools.register(Arc::new(crate::tools::file::PatchFile::with_pause(
-                Some(diff_sink.clone()),
-                pause_tx.clone(),
-            )));
-        }
+        let mut tools = match &pool {
+            Some(pool) => pool.build_tool_registry(
+                ToolRegistryBuildOptions::new(cwd.clone())
+                    .with_diff_sink(Some(diff_sink.clone()))
+                    .with_pause_channel(pause_tx.clone()),
+            ),
+            None => {
+                let mut registry = ToolRegistry::new_with_diff_and_lsp(
+                    Some(diff_sink.clone()),
+                    Some(lsp_manager.clone()),
+                    cwd.clone(),
+                );
+                crate::tools::register_interactive_tools(
+                    &mut registry,
+                    Some(diff_sink.clone()),
+                    pause_tx.clone(),
+                );
+                registry
+            }
+        };
 
         // YYC-82: spawn_subagent tool. Holds a clone of the parent
         // config so child agents can be built with the same provider
