@@ -29,10 +29,6 @@ use vulcan::tools::ToolRegistry;
 
 use common::results::{Measurement, append};
 
-#[cfg(feature = "bench-soak")]
-#[global_allocator]
-static ALLOCATOR: dhat::Alloc = dhat::Alloc;
-
 #[derive(Parser)]
 #[command(about = "Vulcan soak benchmark — drives Agent::run_prompt for N turns.")]
 struct Args {
@@ -73,9 +69,6 @@ fn empty_skills() -> Arc<SkillRegistry> {
 async fn main() -> Result<()> {
     let args = Args::parse();
 
-    #[cfg(feature = "bench-soak")]
-    let _profiler = dhat::Profiler::new_heap();
-
     let provider: Box<dyn LLMProvider> =
         Box::new(GeneratedProvider::new(128_000, |turn| ChatResponse {
             content: Some(format!("response for turn {turn}")),
@@ -90,7 +83,8 @@ async fn main() -> Result<()> {
         ToolRegistry::new(),
         HookRegistry::new(),
         empty_skills(),
-    );
+    )
+    .await;
 
     let mut samples: Vec<Measurement> = Vec::new();
     let mut hist: Histogram<u64> =

@@ -35,7 +35,7 @@ pub struct AppState {
     pub scheduler_store: Option<crate::gateway::scheduler_store::SchedulerStore>,
 }
 
-/// Build the axum router. Public so tests can drive it via `tower::ServiceExt::oneshot`.
+/// Build the axum router. Public so tests can drive it directly.
 ///
 /// Topology: `/health` is unauthenticated; everything under `/v1/*` is wrapped
 /// in a bearer-auth middleware. The middleware lives on the nested `/v1`

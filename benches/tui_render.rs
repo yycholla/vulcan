@@ -17,7 +17,9 @@ mod common;
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
-use divan::{AllocProfiler, Bencher};
+#[cfg(any())]
+use divan::AllocProfiler;
+use divan::Bencher;
 
 use vulcan::tui::{
     chat_render::{ChatRenderOptions, ChatRenderStore},
@@ -27,7 +29,7 @@ use vulcan::tui::{
 
 use common::results::{Measurement, append};
 
-#[cfg(all(target_arch = "ignore", not(target_arch = "ignore")))]
+#[cfg(any())]
 #[global_allocator]
 static ALLOC: AllocProfiler = AllocProfiler::system();
 
