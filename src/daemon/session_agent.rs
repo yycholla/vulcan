@@ -198,9 +198,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn non_pooled_assembly_applies_session_specific_allowlist() {
+    async fn assembly_applies_session_specific_allowlist() {
         let config = Arc::new(local_config());
-        let assembler = SessionAgentAssembler::new(config, None);
+        let pool = Arc::new(RuntimeResourcePool::for_tests().await);
+        let assembler = SessionAgentAssembler::new(config, Some(pool));
         let agent = assembler
             .assemble(SessionAgentOptions::subagent(
                 2,

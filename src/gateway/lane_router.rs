@@ -165,6 +165,10 @@ impl DaemonLaneRouter {
         );
     }
 
+    pub fn bind_session(&self, lane: &LaneKey, session_id: String) {
+        self.remember_session(lane.clone(), session_id);
+    }
+
     /// Number of cached lanes (surface for /v1/lanes route).
     pub fn cached_lane_count(&self) -> usize {
         self.sessions.lock().entries.len()

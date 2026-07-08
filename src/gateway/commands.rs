@@ -266,7 +266,11 @@ impl CommandDispatcher {
             )
             .await
         {
-            Ok(_) => Ok(format!("Resumed session {session_id}.")),
+            Ok(_) => {
+                ctx.lane_router
+                    .bind_session(ctx.lane, session_id.to_string());
+                Ok(format!("Resumed session {session_id}."))
+            }
             Err(ClientError::Daemon(err)) if err.code == "METHOD_NOT_IMPLEMENTED" => Ok(
                 "/resume is not yet supported with the daemon backend (YYC-266 follow-up).".into(),
             ),
@@ -475,5 +479,62 @@ mod tests {
             body: "",
         };
         assert!(d.dispatch("hello world", ctx).await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn resume_command_binds_lane_to_resumed_session() {
+        let dir = tempfile::tempdir().unwrap();
+        let sock = dir.path().join("vulcan.sock");
+        let pool = std::sync::Arc::new(crate::runtime_pool::RuntimeResourcePool::for_tests().await);
+        let saved_id = uuid::Uuid::new_v4().to_string();
+        pool.session_store()
+            .save_messages(
+                &saved_id,
+                &[crate::provider::Message::User {
+                    content: "gateway resume me".into(),
+                }],
+            )
+            .await
+            .unwrap();
+        let mut config = crate::config::Config::default();
+        config.provider.base_url = "http://127.0.0.1:11434/v1".into();
+        config.provider.disable_catalog = true;
+        let state = std::sync::Arc::new(
+            crate::daemon::state::DaemonState::new(std::sync::Arc::new(config)).with_pool(pool),
+        );
+        let server = crate::daemon::server::Server::bind(&sock, state.clone())
+            .await
+            .unwrap();
+        let server_handle = tokio::spawn(server.run());
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        let sock_path = sock.clone();
+        let daemon_client = GatewayDaemonClient::with_client_factory(move || {
+            let path = sock_path.clone();
+            Box::pin(async move { crate::client::Client::connect_at(&path).await })
+        });
+        let d = CommandDispatcher::new(&empty_overrides());
+        let lane = LaneKey {
+            platform: "loopback".into(),
+            chat_id: "c".into(),
+        };
+        let lane_router = DaemonLaneRouter::new();
+        let command = format!("/resume {saved_id}");
+        let ctx = DispatchCtx {
+            lane: &lane,
+            user_id: "u",
+            lane_router: &lane_router,
+            daemon_client: &daemon_client,
+            body: &saved_id,
+        };
+
+        let reply = d.dispatch(&command, ctx).await.unwrap().unwrap();
+        assert_eq!(reply, format!("Resumed session {saved_id}."));
+        let snapshot = lane_router.snapshot_cache();
+        assert_eq!(snapshot.len(), 1);
+        assert_eq!(snapshot[0].session_id, saved_id);
+
+        state.signal_shutdown();
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(2), server_handle).await;
     }
 }
