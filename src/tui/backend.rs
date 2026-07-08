@@ -94,6 +94,9 @@ impl TuiBackend {
                 if let Ok(resp) = client.call("session.create", serde_json::json!({})).await {
                     if let Some(id) = resp.get("session_id").and_then(|v| v.as_str()) {
                         *session_id.lock().await = id.to_string();
+                        if let Err(e) = self.sync_status().await {
+                            tracing::debug!("daemon status sync after session create failed: {e}");
+                        }
                     }
                 }
             }
@@ -716,6 +719,11 @@ fn parse_model_selection(resp: &Value) -> Result<Selection> {
 #[cfg(all(test, feature = "daemon"))]
 mod tests {
     use super::*;
+    use std::sync::Arc;
+    use tempfile::TempDir;
+    use tokio::net::UnixListener;
+
+    use crate::daemon::protocol::{Request, Response, read_frame_bytes, write_response};
 
     #[test]
     fn prompt_stream_params_use_daemon_text_key() {
@@ -753,5 +761,48 @@ mod tests {
         .unwrap();
         assert_eq!(selection.model.id, "model-a");
         assert_eq!(selection.max_context, 16000);
+    }
+
+    #[tokio::test]
+    async fn daemon_start_session_syncs_model_status() {
+        let tmp = TempDir::new().expect("tempdir");
+        let sock = tmp.path().join("daemon.sock");
+        let listener = UnixListener::bind(&sock).expect("bind fake daemon");
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.expect("accept");
+            let (mut read, mut write) = stream.into_split();
+            for _ in 0..2 {
+                let body = read_frame_bytes(&mut read).await.expect("read request");
+                let req: Request = serde_json::from_slice(&body).expect("decode request");
+                let result = match req.method.as_str() {
+                    "session.create" => serde_json::json!({ "session_id": "session-1" }),
+                    "agent.status" => serde_json::json!({
+                        "model": "configured-model",
+                        "provider": "local",
+                        "max_context": 4096,
+                    }),
+                    other => panic!("unexpected method {other}"),
+                };
+                write_response(&mut write, &Response::ok(req.id, result))
+                    .await
+                    .expect("write response");
+            }
+        });
+
+        let client = Arc::new(Client::connect_at(&sock).await.expect("connect"));
+        let backend = TuiBackend::Daemon {
+            client,
+            session_id: Mutex::new(String::new()),
+            active_model: Mutex::new(String::new()),
+            active_profile: Mutex::new(None),
+            max_context: Mutex::new(0),
+        };
+
+        backend.start_session().await;
+
+        assert_eq!(backend.session_id().await, "session-1");
+        assert_eq!(backend.active_model().await, "configured-model");
+        assert_eq!(backend.max_context().await, 4096);
+        assert_eq!(backend.active_profile().await.as_deref(), Some("local"));
     }
 }
