@@ -315,7 +315,7 @@ fn push_markdown_body(
         return;
     }
     let inner_width = width.max(1) as usize;
-    for line in render_markdown(trimmed, theme) {
+    for line in render_markdown(trimmed, theme, width) {
         for row in wrap_spans(line.spans, inner_width) {
             lines.push(Line::from(row));
         }
@@ -364,11 +364,17 @@ struct ContinuationPrefix {
 fn continuation_prefix(spans: &[Span<'static>], width: usize) -> Option<ContinuationPrefix> {
     let first = spans.first()?;
     let content = first.content.as_ref();
-    let prefix = if content == "▎ " || content == " │" {
+    let prefix = if content == "▎ " || content == " │" || content == "│ " {
         Some(Span::styled(content.to_string(), first.style))
+    } else if content == "│" {
+        Some(Span::styled("│ ", first.style))
     } else if content.starts_with(" │") {
         Some(Span::styled(" │", first.style))
+    } else if content.starts_with("│") {
+        Some(Span::styled("│ ", first.style))
     } else if matches!(content, "• " | "☑ " | "☐ ") {
+        Some(Span::styled("  ", first.style))
+    } else if matches!(content, "•" | "☑" | "☐") {
         Some(Span::styled("  ", first.style))
     } else if is_ordered_list_marker(content) {
         Some(Span::styled(
@@ -627,7 +633,7 @@ mod tests {
     #[test]
     fn wrapped_blockquote_keeps_accent_rail_on_first_row() {
         let theme = Theme::system();
-        let rows = render_markdown("> alpha beta gamma", &theme)
+        let rows = render_markdown("> alpha beta gamma", &theme, 80)
             .into_iter()
             .flat_map(|line| wrap_spans(line.spans, 10))
             .collect::<Vec<_>>();
@@ -644,7 +650,7 @@ mod tests {
     #[test]
     fn wrapped_lists_preserve_continuation_indent() {
         let theme = Theme::system();
-        let rows = render_markdown("- alpha beta gamma", &theme)
+        let rows = render_markdown("- alpha beta gamma", &theme, 80)
             .into_iter()
             .flat_map(|line| wrap_spans(line.spans, 10))
             .collect::<Vec<_>>();
@@ -659,7 +665,7 @@ mod tests {
     #[test]
     fn wrapped_ordered_lists_preserve_continuation_indent() {
         let theme = Theme::system();
-        let rows = render_markdown("12. alpha beta gamma", &theme)
+        let rows = render_markdown("12. alpha beta gamma", &theme, 80)
             .into_iter()
             .flat_map(|line| wrap_spans(line.spans, 11))
             .collect::<Vec<_>>();
@@ -674,7 +680,7 @@ mod tests {
     #[test]
     fn wrapped_code_blocks_preserve_code_rail() {
         let theme = Theme::system();
-        let rows = render_markdown("```\nabcdef gh\n```", &theme)
+        let rows = render_markdown("```\nabcdef gh\n```", &theme, 80)
             .into_iter()
             .flat_map(|line| wrap_spans(line.spans, 8))
             .collect::<Vec<_>>();
@@ -689,7 +695,7 @@ mod tests {
     #[test]
     fn wrapped_typst_blocks_preserve_source_rail() {
         let theme = Theme::system();
-        let rows = render_markdown("```typst\nabcdef gh\n```", &theme)
+        let rows = render_markdown("```typst\nabcdef gh\n```", &theme, 80)
             .into_iter()
             .flat_map(|line| wrap_spans(line.spans, 10))
             .collect::<Vec<_>>();
