@@ -542,6 +542,36 @@ mod parse_tests {
             "--no-daemon is a dev escape hatch and should stay hidden"
         );
     }
+
+    #[test]
+    fn knowledge_why_parses_filters() {
+        let cli = Cli::parse_from([
+            "vulcan",
+            "knowledge",
+            "why",
+            "gateway queue retry",
+            "--pack",
+            "gateway",
+            "--source-id",
+            "file:src/gateway/queue.rs",
+        ]);
+
+        match cli.command {
+            Some(Command::Knowledge {
+                cmd:
+                    KnowledgeSubcommand::Why {
+                        task,
+                        pack,
+                        source_id,
+                    },
+            }) => {
+                assert_eq!(task, "gateway queue retry");
+                assert_eq!(pack.as_deref(), Some("gateway"));
+                assert_eq!(source_id.as_deref(), Some("file:src/gateway/queue.rs"));
+            }
+            other => panic!("unexpected parse: {other:?}"),
+        }
+    }
 }
 
 #[cfg(all(test, feature = "gateway"))]
@@ -797,6 +827,18 @@ pub enum KnowledgeSubcommand {
     /// List all discovered local knowledge stores with size +
     /// last-modified time.
     List,
+    /// Explain why local knowledge/context sources are relevant to a task.
+    Why {
+        /// Task text to explain source inclusion for.
+        task: String,
+        /// Limit explanation to one context pack.
+        #[arg(long)]
+        pack: Option<String>,
+        /// Limit explanation to one source id, such as
+        /// `file:src/gateway/queue.rs`.
+        #[arg(long = "source-id")]
+        source_id: Option<String>,
+    },
     /// Permanently delete one or more local knowledge stores.
     /// Asks for confirmation unless `--yes` is set.
     Purge {
