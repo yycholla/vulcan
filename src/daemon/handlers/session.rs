@@ -14,8 +14,8 @@ use crate::daemon::state::DaemonState;
 // -- session.create --
 
 /// Create a new session. If `id` is `None`, a UUID v4 is generated.
-/// `resume_from` is accepted but currently ignored (lazy-load of
-/// historical session bodies is deferred to Slice 4).
+/// When `resume_from` is set, the saved transcript is copied into the
+/// new session id and lazy-loaded when the Agent is first built.
 pub async fn create(
     state: &DaemonState,
     id: String,
@@ -24,11 +24,6 @@ pub async fn create(
     parent_session_id: Option<String>,
     lineage_label: Option<String>,
 ) -> Response {
-    // resume_from is reserved for a later slice that re-hydrates a
-    // historical session into the new one. For now we just accept
-    // and ignore the field so callers can start passing it.
-    let _ = resume_from;
-
     let new_id = requested_id.unwrap_or_else(|| Uuid::new_v4().to_string());
 
     if new_id == "main" {
@@ -42,12 +37,77 @@ pub async fn create(
         );
     }
 
+    let resume_seed = if let Some(source_id) = resume_from.as_deref() {
+        let store = match pooled_session_store(state) {
+            Ok(s) => s,
+            Err(e) => return Response::error(id, e),
+        };
+        match store.load_history(source_id).await {
+            Ok(Some(history)) => Some((store, history)),
+            Ok(None) => {
+                return Response::error(
+                    id,
+                    ProtocolError {
+                        code: "SESSION_NOT_FOUND".into(),
+                        message: format!("no saved session '{source_id}'"),
+                        retryable: false,
+                    },
+                );
+            }
+            Err(e) => {
+                return Response::error(
+                    id,
+                    ProtocolError {
+                        code: "SESSION_STORE_UNAVAILABLE".into(),
+                        message: format!("could not read saved session: {e}"),
+                        retryable: true,
+                    },
+                );
+            }
+        }
+    } else {
+        None
+    };
+
     match state.sessions().create_named_with_lineage(
         &new_id,
         parent_session_id.clone(),
         lineage_label.clone(),
     ) {
-        Ok(_) => Response::ok(id, json!({ "session_id": new_id })),
+        Ok(_) => {
+            if let Some((store, history)) = resume_seed {
+                if let Err(e) = store.save_messages(&new_id, &history).await {
+                    state.sessions().destroy(&new_id);
+                    return Response::error(
+                        id,
+                        ProtocolError {
+                            code: "RESUME_FAILED".into(),
+                            message: format!("could not seed resumed session: {e}"),
+                            retryable: false,
+                        },
+                    );
+                }
+                if let Err(e) = store
+                    .save_session_metadata(
+                        &new_id,
+                        parent_session_id.as_deref(),
+                        lineage_label.as_deref(),
+                    )
+                    .await
+                {
+                    state.sessions().destroy(&new_id);
+                    return Response::error(
+                        id,
+                        ProtocolError {
+                            code: "RESUME_FAILED".into(),
+                            message: format!("could not seed resumed session metadata: {e}"),
+                            retryable: false,
+                        },
+                    );
+                }
+            }
+            Response::ok(id, json!({ "session_id": new_id }))
+        }
         Err(_) => Response::error(
             id,
             ProtocolError {
@@ -363,6 +423,45 @@ mod tests {
         let resp = create(&state, "r2".into(), Some("foo".into()), None, None, None).await;
         let err = resp.error.expect("err");
         assert_eq!(err.code, "SESSION_EXISTS");
+    }
+
+    #[tokio::test]
+    async fn create_with_resume_from_seeds_new_session_history() {
+        let pool = Arc::new(RuntimeResourcePool::for_tests().await);
+        let source_id = uuid::Uuid::new_v4().to_string();
+        pool.session_store()
+            .save_messages(
+                &source_id,
+                &[Message::User {
+                    content: "resume-from-history".into(),
+                }],
+            )
+            .await
+            .unwrap();
+        let state = Arc::new(DaemonState::for_tests_minimal().with_pool(pool.clone()));
+
+        let resp = create(
+            &state,
+            "r1".into(),
+            Some("target".into()),
+            Some(source_id),
+            None,
+            None,
+        )
+        .await;
+
+        assert!(resp.error.is_none(), "got {:?}", resp.error);
+        let history = pool
+            .session_store()
+            .load_history("target")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(history.len(), 1);
+        assert!(matches!(
+            &history[0],
+            Message::User { content } if content == "resume-from-history"
+        ));
     }
 
     #[tokio::test]

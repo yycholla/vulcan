@@ -218,7 +218,16 @@ impl SessionState {
             return Ok(handle);
         }
 
-        let agent = assembler.assemble(options.clone()).await?;
+        let mut agent = assembler.assemble(options.clone()).await?;
+        agent
+            .memory()
+            .save_session_metadata(
+                &self.id,
+                self.parent_session_id.as_deref(),
+                self.lineage_label.as_deref(),
+            )
+            .await?;
+        agent.resume_session(&self.id).await?;
         *self.agent_seed.lock() = options.seed();
         self.set_agent(agent);
         Ok(self.agent_arc().expect("just installed"))
@@ -463,6 +472,20 @@ mod tests {
             Arc::ptr_eq(&h, &h2),
             "ensure_agent returns the existing handle"
         );
+    }
+
+    #[tokio::test]
+    async fn ensure_agent_binds_lazy_agent_to_session_id() {
+        let mut config = crate::config::Config::default();
+        config.provider.base_url = "http://127.0.0.1:11434/v1".into();
+        config.provider.disable_catalog = true;
+        let pool = Arc::new(crate::runtime_pool::RuntimeResourcePool::for_tests().await);
+        let assembler = SessionAgentAssembler::new(Arc::new(config), Some(pool));
+        let sess = Arc::new(SessionState::new("foo".into()));
+
+        let agent = sess.ensure_agent(&assembler).await.unwrap();
+
+        assert_eq!(agent.lock().await.session_id(), "foo");
     }
 
     #[test]
