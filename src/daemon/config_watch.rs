@@ -121,10 +121,10 @@ mod tests {
         baseline.provider.base_url = "http://127.0.0.1:11434/v1".into();
         baseline.provider.model = "qwen2.5:7b".into();
         baseline.provider.disable_catalog = true;
-        let state = Arc::new(DaemonState::for_tests_with_home(
-            Arc::new(baseline),
-            dir.path(),
-        ));
+        let pool = Arc::new(crate::runtime_pool::RuntimeResourcePool::for_tests().await);
+        let state = Arc::new(
+            DaemonState::for_tests_with_home(Arc::new(baseline), dir.path()).with_pool(pool),
+        );
         let _watcher = ConfigWatcher::start(dir.path(), state.clone()).unwrap();
 
         let baseline = state.reloads_applied();
@@ -153,10 +153,10 @@ mod tests {
         baseline_cfg.provider.base_url = "http://127.0.0.1:11434/v1".into();
         baseline_cfg.provider.model = "qwen2.5:7b".into();
         baseline_cfg.provider.disable_catalog = true;
-        let state = Arc::new(DaemonState::for_tests_with_home(
-            Arc::new(baseline_cfg),
-            dir.path(),
-        ));
+        let pool = Arc::new(crate::runtime_pool::RuntimeResourcePool::for_tests().await);
+        let state = Arc::new(
+            DaemonState::for_tests_with_home(Arc::new(baseline_cfg), dir.path()).with_pool(pool),
+        );
         let main = state.sessions().get("main").unwrap();
         *main.in_flight.lock() = true;
 
@@ -190,10 +190,10 @@ mod tests {
         baseline.provider.base_url = "http://127.0.0.1:11434/v1".into();
         baseline.provider.model = "qwen2.5:7b".into();
         baseline.provider.disable_catalog = true;
-        let state = Arc::new(DaemonState::for_tests_with_home(
-            Arc::new(baseline),
-            dir.path(),
-        ));
+        let pool = Arc::new(crate::runtime_pool::RuntimeResourcePool::for_tests().await);
+        let state = Arc::new(
+            DaemonState::for_tests_with_home(Arc::new(baseline), dir.path()).with_pool(pool),
+        );
 
         let report = state.reload_from_dir(dir.path()).await;
         assert!(

@@ -23,7 +23,46 @@ impl SessionAgentAssembler {
     }
 
     pub async fn assemble(&self, options: SessionAgentOptions) -> Result<Agent> {
-        let mut builder = Agent::builder(&self.config);
+        self.assemble_with_config(self.config.as_ref(), options)
+            .await
+    }
+
+    pub async fn assemble_for_provider_switch(
+        &self,
+        options: SessionAgentOptions,
+        profile: Option<&str>,
+        model_override: Option<&str>,
+    ) -> Result<Agent> {
+        let mut config = (*self.config).clone();
+        if let Some(name) = profile
+            && !config.providers.contains_key(name)
+        {
+            anyhow::bail!("Provider profile '{name}' not found in config");
+        }
+
+        config.active_profile = profile.map(str::to_string);
+        if let Some(model) = model_override {
+            match profile {
+                Some(name) => {
+                    if let Some(provider) = config.providers.get_mut(name) {
+                        provider.model = model.to_string();
+                    }
+                }
+                None => {
+                    config.provider.model = model.to_string();
+                }
+            }
+        }
+
+        self.assemble_with_config(&config, options).await
+    }
+
+    async fn assemble_with_config(
+        &self,
+        config: &Config,
+        options: SessionAgentOptions,
+    ) -> Result<Agent> {
+        let mut builder = Agent::builder(config);
         if let Some(pool) = &self.pool {
             builder = builder.with_pool(Arc::clone(pool));
         }

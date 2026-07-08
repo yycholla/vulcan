@@ -655,7 +655,9 @@ disable_catalog = true
         baseline.provider.base_url = "http://127.0.0.1:11434/v1".into();
         baseline.provider.model = "qwen2.5:7b".into();
         baseline.provider.disable_catalog = true;
-        let state = DaemonState::for_tests_with_home(Arc::new(baseline), dir.path());
+        let pool = Arc::new(RuntimeResourcePool::for_tests().await);
+        let state =
+            DaemonState::for_tests_with_home(Arc::new(baseline), dir.path()).with_pool(pool);
 
         std::fs::write(
             dir.path().join("config.toml"),
@@ -693,7 +695,9 @@ disable_catalog = true
         baseline.provider.base_url = "http://127.0.0.1:11434/v1".into();
         baseline.provider.model = "qwen2.5:7b".into();
         baseline.provider.disable_catalog = true;
-        let state = DaemonState::for_tests_with_home(Arc::new(baseline), dir.path());
+        let pool = Arc::new(RuntimeResourcePool::for_tests().await);
+        let state =
+            DaemonState::for_tests_with_home(Arc::new(baseline), dir.path()).with_pool(pool);
 
         let report = state.reload_from_dir(dir.path()).await;
         assert_eq!(report.status, "skipped");

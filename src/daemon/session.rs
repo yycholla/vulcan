@@ -218,7 +218,38 @@ impl SessionState {
             return Ok(handle);
         }
 
-        let mut agent = assembler.assemble(options.clone()).await?;
+        let agent = assembler.assemble(options.clone()).await?;
+        self.install_agent(agent, options.seed()).await
+    }
+
+    pub async fn ensure_agent_for_provider_switch(
+        self: &Arc<Self>,
+        assembler: &SessionAgentAssembler,
+        profile: Option<&str>,
+        model_override: Option<&str>,
+    ) -> anyhow::Result<AgentHandle> {
+        if let Some(handle) = self.agent_arc() {
+            return Ok(handle);
+        }
+
+        let _build_guard = self.build_lock.lock().await;
+
+        if let Some(handle) = self.agent_arc() {
+            return Ok(handle);
+        }
+
+        let options = SessionAgentOptions::default();
+        let agent = assembler
+            .assemble_for_provider_switch(options.clone(), profile, model_override)
+            .await?;
+        self.install_agent(agent, options.seed()).await
+    }
+
+    async fn install_agent(
+        self: &Arc<Self>,
+        mut agent: crate::agent::Agent,
+        seed: SessionAgentSeed,
+    ) -> anyhow::Result<AgentHandle> {
         agent
             .memory()
             .save_session_metadata(
@@ -228,7 +259,7 @@ impl SessionState {
             )
             .await?;
         agent.resume_session(&self.id).await?;
-        *self.agent_seed.lock() = options.seed();
+        *self.agent_seed.lock() = seed;
         self.set_agent(agent);
         Ok(self.agent_arc().expect("just installed"))
     }

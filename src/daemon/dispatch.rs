@@ -582,8 +582,10 @@ mod tests {
         baseline.provider.base_url = "http://127.0.0.1:11434/v1".into();
         baseline.provider.model = "qwen2.5:3b".into();
         baseline.provider.disable_catalog = true;
+        let pool = Arc::new(RuntimeResourcePool::for_tests().await);
         let state =
-            crate::daemon::state::DaemonState::for_tests_with_home(Arc::new(baseline), dir.path());
+            crate::daemon::state::DaemonState::for_tests_with_home(Arc::new(baseline), dir.path())
+                .with_pool(pool);
 
         std::fs::write(
             dir.path().join("config.toml"),
@@ -761,6 +763,74 @@ mod tests {
                 assert_eq!(err.code, "AGENT_BUILD_FAILED");
             }
             DispatchResult::Stream { .. } => panic!("agent.status should not stream"),
+        }
+    }
+
+    #[tokio::test]
+    async fn switch_provider_model_cold_session_builds_target_provider() {
+        let mut config = Config::default();
+        let mut local = config.provider.clone();
+        local.base_url = "http://127.0.0.1:11434/v1".into();
+        local.model = "local/stale-default".into();
+        local.max_context = 42_000;
+        local.disable_catalog = true;
+        config.providers.insert("local".into(), local);
+        let dir = tempfile::tempdir().unwrap();
+        let pool = Arc::new(RuntimeResourcePool::for_tests().await);
+        let dispatcher = Dispatcher::new(Arc::new(
+            crate::daemon::state::DaemonState::for_tests_with_home(Arc::new(config), dir.path())
+                .with_pool(pool),
+        ));
+
+        let request = req_with_params(
+            "agent.switch_provider_model",
+            serde_json::json!({
+                "profile": "local",
+                "model": "local/selected",
+            }),
+        );
+        match dispatcher.dispatch(request).await {
+            DispatchResult::Response(resp) => {
+                assert!(resp.error.is_none(), "got {:?}", resp.error);
+                let result = resp.result.expect("switch result");
+                assert_eq!(result["id"], "local/selected");
+                assert_eq!(result["max_context"], 42_000);
+            }
+            DispatchResult::Stream { .. } => {
+                panic!("agent.switch_provider_model should not stream")
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn switch_provider_cold_session_missing_key_returns_switch_error() {
+        let dispatcher = Dispatcher::new(Arc::new(
+            crate::daemon::state::DaemonState::for_tests_minimal(),
+        ));
+
+        match dispatcher.dispatch(req("agent.switch_provider")).await {
+            DispatchResult::Response(resp) => {
+                assert!(resp.result.is_none());
+                let err = resp.error.expect("error returned");
+                assert_eq!(err.code, "SWITCH_PROVIDER_FAILED");
+            }
+            DispatchResult::Stream { .. } => panic!("agent.switch_provider should not stream"),
+        }
+    }
+
+    #[tokio::test]
+    async fn list_models_cold_session_does_not_build_agent_for_missing_key() {
+        let dispatcher = Dispatcher::new(Arc::new(
+            crate::daemon::state::DaemonState::for_tests_minimal(),
+        ));
+
+        match dispatcher.dispatch(req("agent.list_models")).await {
+            DispatchResult::Response(resp) => {
+                assert!(resp.result.is_none());
+                let err = resp.error.expect("error returned");
+                assert_eq!(err.code, "CATALOG_FETCH_FAILED");
+            }
+            DispatchResult::Stream { .. } => panic!("agent.list_models should not stream"),
         }
     }
 

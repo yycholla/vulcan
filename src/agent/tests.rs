@@ -217,11 +217,13 @@ async fn builder_accepts_hooks_pause_channel_and_max_iterations() {
     config.provider.disable_catalog = true;
     config.provider.max_iterations = 12;
     let (pause_tx, _pause_rx) = crate::pause::channel(1);
+    let pool = Arc::new(crate::runtime_pool::RuntimeResourcePool::for_tests().await);
 
     let agent = Agent::builder(&config)
         .with_hooks(HookRegistry::new())
         .with_pause_channel(pause_tx)
         .with_max_iterations(3)
+        .with_pool(pool)
         .build()
         .await
         .unwrap();
@@ -259,7 +261,12 @@ async fn builder_wires_enabled_external_hooks_from_config() {
             ..Default::default()
         });
 
-    let agent = Agent::builder(&config).build().await.unwrap();
+    let pool = Arc::new(crate::runtime_pool::RuntimeResourcePool::for_tests().await);
+    let agent = Agent::builder(&config)
+        .with_pool(pool)
+        .build()
+        .await
+        .unwrap();
     let decision = agent
         .hooks
         .before_tool_call("bash", &serde_json::json!({}), CancellationToken::new())
@@ -1299,7 +1306,12 @@ async fn switch_model_rebuilds_provider_metadata_without_restarting_session() {
         ..Default::default()
     };
 
-    let mut agent = Agent::builder(&config).build().await.unwrap();
+    let pool = Arc::new(crate::runtime_pool::RuntimeResourcePool::for_tests().await);
+    let mut agent = Agent::builder(&config)
+        .with_pool(pool)
+        .build()
+        .await
+        .unwrap();
     let session_id = agent.session_id().to_string();
 
     assert_eq!(agent.active_model(), "model-a");
@@ -1341,7 +1353,12 @@ async fn switch_provider_model_uses_selected_model_before_catalog_validation() {
         ..Default::default()
     };
 
-    let mut agent = Agent::builder(&config).build().await.unwrap();
+    let pool = Arc::new(crate::runtime_pool::RuntimeResourcePool::for_tests().await);
+    let mut agent = Agent::builder(&config)
+        .with_pool(pool)
+        .build()
+        .await
+        .unwrap();
     let stale_profile = agent.switch_provider(Some("qwen"), &config).await;
     assert!(
         stale_profile.is_err(),
