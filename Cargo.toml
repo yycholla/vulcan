@@ -47,14 +47,13 @@ default = ["daemon"]
 # daemon entry point wired in; gated as a feature so embedders / minimal
 # builds can opt out.
 daemon = ["dep:notify", "dep:nix"]
-# Enabled only when running the soak binary. Pulls in dhat-rs (heap
-# profiler that swaps the global allocator) and hdrhistogram (latency
-# percentiles) — both optional so production builds skip them entirely.
-bench-soak = ["dep:dhat", "dep:hdrhistogram"]
+# Enabled only when running the soak binary. Pulls in hdrhistogram
+# for latency percentiles; production builds skip it entirely.
+bench-soak = ["dep:hdrhistogram"]
 # YYC-266 Slice 3 Task 3.4: gateway now routes prompts through the
 # in-tree daemon Client, so it implies `daemon` (which gates `client`
 # and `daemon`).
-gateway = ["daemon", "dep:axum", "dep:tower", "dep:subtle", "dep:hmac"]
+gateway = ["daemon", "dep:axum", "dep:subtle", "dep:hmac"]
 # Discord connector (YYC-19). Gated separately from `gateway` so
 # operators who only need the HTTP gateway / scheduler / loopback
 # pieces do not compile Serenity unless Discord support is enabled.
@@ -233,7 +232,6 @@ html2text = "0.17"
 
 # Gateway daemon HTTP stack. Optional — only linked under `gateway`.
 axum = { version = "0.8.9", optional = true }
-tower = { version = "0.5.3", features = ["util"], optional = true }
 subtle = { version = "2.6.1", optional = true }
 # Webhook HMAC verification (Task 16). hmac 0.13 + sha2 0.11 share `digest 0.11`,
 # picking matching majors avoids pulling a second copy of `digest`.
@@ -260,9 +258,6 @@ teloxide-core = { version = "0.13.0", default-features = false, features = [
 # `verify_webhook`. Promoted to a direct, NON-feature-gated dep so the trait
 # signature compiles in builds without the `gateway` feature too.
 http = "1.4.0"
-
-# Heap profiler for the soak binary. Optional — only linked under `bench-soak`.
-dhat = { version = "0.3", optional = true }
 
 # HDR histogram for soak-binary latency percentiles. Optional — only linked
 # into the runtime crate under `bench-soak`. (Also listed in

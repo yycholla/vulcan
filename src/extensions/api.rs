@@ -645,7 +645,7 @@ mod tests {
     #[tokio::test]
     async fn extension_state_requires_scoped_context_and_uses_extension_id() {
         let store: Arc<dyn ExtensionStateStore> =
-            Arc::new(super::super::SqliteExtensionStateStore::try_open_in_memory().unwrap());
+            Arc::new(super::super::TursoExtensionStateStore::try_open_in_memory().unwrap());
         let ctx = test_ctx().await.with_extension_state_store(Some(store));
         assert!(ctx.state().is_err());
 

@@ -1,8 +1,8 @@
 //! Extension-scoped persistent state and checkpoints.
 //!
-//! This is the SQLite-first foundation for GH issue #270. Extensions receive
-//! scoped handles, so normal key/value and checkpoint operations do not accept
-//! an arbitrary extension id after construction.
+//! Turso-backed extension state. Extensions receive scoped handles, so normal
+//! key/value and checkpoint operations do not accept an arbitrary extension id
+//! after construction.
 
 use std::path::Path;
 use std::sync::Arc;
@@ -31,11 +31,11 @@ pub trait ExtensionStateStore: Send + Sync {
     fn scope(&self, extension_id: &str) -> Result<ExtensionStateScope>;
 }
 
-pub struct SqliteExtensionStateStore {
+pub struct TursoExtensionStateStore {
     conn: Arc<turso::Connection>,
 }
 
-impl SqliteExtensionStateStore {
+impl TursoExtensionStateStore {
     pub fn try_new() -> Result<Self> {
         let dir = crate::config::vulcan_home();
         std::fs::create_dir_all(&dir)
@@ -92,7 +92,7 @@ impl SqliteExtensionStateStore {
     }
 }
 
-impl ExtensionStateStore for SqliteExtensionStateStore {
+impl ExtensionStateStore for TursoExtensionStateStore {
     fn scope(&self, extension_id: &str) -> Result<ExtensionStateScope> {
         validate_identifier("extension id", extension_id)?;
         Ok(ExtensionStateScope {
@@ -321,7 +321,7 @@ mod tests {
 
     #[test]
     fn state_is_scoped_by_extension_id() {
-        let store = SqliteExtensionStateStore::try_open_in_memory().unwrap();
+        let store = TursoExtensionStateStore::try_open_in_memory().unwrap();
         let alpha = store.scope("alpha").unwrap();
         let beta = store.scope("beta").unwrap();
 
@@ -348,12 +348,12 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("extension_state.db");
         {
-            let store = SqliteExtensionStateStore::try_open_at(&path).unwrap();
+            let store = TursoExtensionStateStore::try_open_at(&path).unwrap();
             let scoped = store.scope("persist-demo").unwrap();
             scoped.put_json("counter", &json!({"value": 3})).unwrap();
         }
 
-        let reopened = SqliteExtensionStateStore::try_open_at(&path).unwrap();
+        let reopened = TursoExtensionStateStore::try_open_at(&path).unwrap();
         let scoped = reopened.scope("persist-demo").unwrap();
         assert_eq!(
             scoped.get_json("counter").unwrap(),
@@ -364,14 +364,14 @@ mod tests {
     #[test]
     fn turso_backend_uses_isolated_file_name() {
         assert_eq!(
-            SqliteExtensionStateStore::db_file_name(),
+            TursoExtensionStateStore::db_file_name(),
             "extension_state.turso.db"
         );
     }
 
     #[test]
     fn checkpoint_crud_is_scoped_and_round_trips_json() {
-        let store = SqliteExtensionStateStore::try_open_in_memory().unwrap();
+        let store = TursoExtensionStateStore::try_open_in_memory().unwrap();
         let alpha = store.scope("alpha").unwrap();
         let beta = store.scope("beta").unwrap();
 
@@ -396,7 +396,7 @@ mod tests {
 
     #[test]
     fn invalid_scope_ids_are_rejected() {
-        let store = SqliteExtensionStateStore::try_open_in_memory().unwrap();
+        let store = TursoExtensionStateStore::try_open_in_memory().unwrap();
         assert!(store.scope("../bad").is_err());
     }
 }

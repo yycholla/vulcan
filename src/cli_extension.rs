@@ -14,12 +14,12 @@ use crate::config::vulcan_home;
 use crate::daemon::protocol::{Request, Response, read_frame_bytes, write_request};
 use crate::extensions::ExtensionRegistry;
 use crate::extensions::install_state::{
-    ExtensionTrustStore, InstallState, InstallStateStore, SqliteInstallStateStore,
+    ExtensionTrustStore, InstallState, InstallStateStore, TursoInstallStateStore,
 };
 
 pub async fn run(cmd: ExtensionSubcommand) -> Result<()> {
     let home = vulcan_home();
-    let install = SqliteInstallStateStore::try_new()?;
+    let install = TursoInstallStateStore::try_new()?;
     match cmd {
         ExtensionSubcommand::List => list(&home, &install),
         ExtensionSubcommand::Show { id } => show(&home, &install, &id),
@@ -35,7 +35,7 @@ pub async fn run(cmd: ExtensionSubcommand) -> Result<()> {
     }
 }
 
-fn list(home: &Path, install: &SqliteInstallStateStore) -> Result<()> {
+fn list(home: &Path, install: &TursoInstallStateStore) -> Result<()> {
     let registry = ExtensionRegistry::new();
     // GH issue #549: surface cargo-crate extensions registered via
     // `inventory::submit!` alongside manifest-discovered ones.
@@ -80,7 +80,7 @@ fn list(home: &Path, install: &SqliteInstallStateStore) -> Result<()> {
     Ok(())
 }
 
-fn show(home: &Path, install: &SqliteInstallStateStore, id: &str) -> Result<()> {
+fn show(home: &Path, install: &TursoInstallStateStore, id: &str) -> Result<()> {
     let registry = ExtensionRegistry::new();
     crate::extensions::api::wire_inventory_into_registry(&registry);
     let cwd = std::env::current_dir()?;
@@ -131,7 +131,7 @@ fn show(home: &Path, install: &SqliteInstallStateStore, id: &str) -> Result<()> 
 
 async fn set_enabled(
     home: &Path,
-    install: &SqliteInstallStateStore,
+    install: &TursoInstallStateStore,
     id: &str,
     enabled: bool,
 ) -> Result<()> {
@@ -189,7 +189,7 @@ async fn set_enabled(
     Ok(())
 }
 
-async fn kill(home: &Path, install: &SqliteInstallStateStore, id: &str) -> Result<()> {
+async fn kill(home: &Path, install: &TursoInstallStateStore, id: &str) -> Result<()> {
     let registry = ExtensionRegistry::new();
     crate::extensions::api::wire_inventory_into_registry(&registry);
     let cwd = std::env::current_dir()?;
@@ -223,7 +223,7 @@ async fn notify_daemon_lifecycle(id: &str, enabled: bool) -> Result<()> {
     Ok(())
 }
 
-fn trust_workspace(install: &SqliteInstallStateStore, id: &str) -> Result<()> {
+fn trust_workspace(install: &TursoInstallStateStore, id: &str) -> Result<()> {
     let cwd = std::env::current_dir()?;
     let manifest_path = cwd.join(format!(".vulcan/extensions/{id}/extension.toml"));
     let raw = std::fs::read_to_string(&manifest_path)
@@ -252,7 +252,7 @@ fn trust_workspace(install: &SqliteInstallStateStore, id: &str) -> Result<()> {
     Ok(())
 }
 
-fn untrust_workspace(install: &SqliteInstallStateStore, id: &str) -> Result<()> {
+fn untrust_workspace(install: &TursoInstallStateStore, id: &str) -> Result<()> {
     let cwd = std::env::current_dir()?;
     let removed = install.untrust(&workspace_hash(&cwd), id)?;
     if removed {
@@ -313,7 +313,7 @@ async fn call_daemon(
 
 fn uninstall(
     home: &Path,
-    install: &SqliteInstallStateStore,
+    install: &TursoInstallStateStore,
     id: &str,
     skip_prompt: bool,
 ) -> Result<()> {
@@ -452,7 +452,7 @@ fn validate_at(path: &Path) -> Result<()> {
     Ok(())
 }
 
-fn install_from_path(home: &Path, install: &SqliteInstallStateStore, path: &Path) -> Result<()> {
+fn install_from_path(home: &Path, install: &TursoInstallStateStore, path: &Path) -> Result<()> {
     let manifest_path = if path.is_dir() {
         path.join("extension.toml")
     } else {

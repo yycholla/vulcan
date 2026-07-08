@@ -78,6 +78,9 @@ allow = [
     # NCSA is a permissive OSI-approved license. Reaches us via
     # libfuzzer-sys -> rav1e -> ravif -> image -> fastembed.
     "NCSA",
+    # WTFPL is a permissive public-domain-style license. Reaches us via
+    # terminfo -> termwiz -> ratatui, used for terminal capability data.
+    "WTFPL",
 ]
 confidence-threshold = 0.93
 

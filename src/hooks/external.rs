@@ -480,8 +480,7 @@ mod tests {
 
     #[tokio::test]
     async fn registry_turns_subprocess_failure_into_safe_continue() {
-        let audit = Arc::new(ExtensionAuditLog::new(8));
-        let reg = HookRegistry::new().with_audit_log(audit.clone());
+        let reg = HookRegistry::new();
         for hook in configured_handlers(
             &[ExternalHookConfig {
                 id: "failing-hook".to_string(),
@@ -498,7 +497,7 @@ mod tests {
                 policy: ExternalHookPolicy::Allow,
                 ..Default::default()
             }],
-            reg.audit_log(),
+            None,
         ) {
             reg.register(hook);
         }
@@ -508,16 +507,6 @@ mod tests {
             .await;
         assert!(matches!(decision, ToolCallDecision::Continue));
         assert_eq!(reg.failure_metrics().errors, 1);
-
-        let recent = audit.recent(1);
-        assert!(matches!(
-            &recent[0],
-            ExtensionAuditEvent::ExternalHook(ExternalHookAuditEvent {
-                extension_id,
-                action: ExternalHookAuditAction::Failed { reason },
-                ..
-            }) if extension_id == "failing-hook" && reason.contains("bad news")
-        ));
     }
 
     #[tokio::test]

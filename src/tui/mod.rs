@@ -952,7 +952,7 @@ pub async fn run_tui(
                                                         continue;
                                                     }
                                                     "extensions" => {
-                                                        let body = match crate::extensions::install_state::SqliteInstallStateStore::try_new() {
+                                                        let body = match crate::extensions::install_state::TursoInstallStateStore::try_new() {
                                                             Ok(install) => {
                                                                 let registry = crate::extensions::ExtensionRegistry::new();
                                                                 crate::extensions::api::wire_inventory_into_registry(&registry);

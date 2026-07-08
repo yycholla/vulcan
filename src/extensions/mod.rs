@@ -41,7 +41,7 @@ pub use audit::{
 pub use config_field::{ExtensionConfigField, ExtensionFieldKind};
 pub use draft::parse_skill_extension;
 pub use install_state::{
-    InstallState, InstallStateStore, RuntimeAuditRecord, SqliteInstallStateStore,
+    InstallState, InstallStateStore, RuntimeAuditRecord, TursoInstallStateStore,
 };
 pub use manifest::{EntryKind, ExtensionManifest, ManifestError};
 pub use policy::{ExtensionPermission, ExtensionPolicyEngine, PolicyDecision};
@@ -58,7 +58,7 @@ pub use runtime::{
 };
 pub use state::{
     CheckpointInfo, CheckpointRecord, ExtensionStateScope, ExtensionStateStore,
-    SqliteExtensionStateStore,
+    TursoExtensionStateStore,
 };
 pub use store::{DiscoveredExtension, discover};
 pub use verify::{VerificationError, verify_checksum_optional, verify_compatible};
