@@ -186,6 +186,10 @@ where
         &self.state
     }
 
+    pub fn update_polling_config(&mut self, config: PollingConfig) {
+        self.config = config;
+    }
+
     pub fn snapshot(
         &self,
         now_ms: u64,
@@ -635,6 +639,39 @@ mod tests {
         assert!(!orchestrator.state().claimed.contains("blocked"));
         assert!(!orchestrator.state().claimed.contains("missing-title"));
         assert!(!orchestrator.state().claimed.contains("same-state-over-cap"));
+    }
+
+    #[test]
+    fn poll_time_config_reload_affects_future_dispatch_without_restarting_running_work() {
+        let source = FakeSource::new(vec![
+            task("first", "TASK-FIRST", "ready-for-agent"),
+            task("second", "TASK-SECOND", "ready-for-agent"),
+        ]);
+        let mut orchestrator = Orchestrator::new(config(1), source, FakeRunner::default());
+
+        let first = orchestrator.poll_tick(1_000);
+        assert!(first.events.contains(&OrchestratorEvent::Dispatched {
+            id: "first".into(),
+            run_id: "run-1".into(),
+        }));
+        assert_eq!(orchestrator.state().running.len(), 1);
+
+        orchestrator.update_polling_config(config(2));
+        let second = orchestrator.poll_tick(2_000);
+
+        assert!(second.events.contains(&OrchestratorEvent::Dispatched {
+            id: "second".into(),
+            run_id: "run-2".into(),
+        }));
+        assert_eq!(
+            orchestrator
+                .state()
+                .running
+                .keys()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            ["first", "second"]
+        );
     }
 
     #[test]

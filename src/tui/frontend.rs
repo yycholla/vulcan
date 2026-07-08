@@ -105,6 +105,24 @@ impl TuiFrontend {
     pub fn dispatch_slash(&self, input: &str) -> Option<FrontendCommandDispatch> {
         let body = input.strip_prefix('/')?.trim();
         let name = body.split_whitespace().next().unwrap_or("");
+        if name == "symphony" {
+            let args = body.strip_prefix(name).unwrap_or("").trim();
+            let output = crate::cli_symphony::slash_symphony_to_string(args)
+                .unwrap_or_else(|err| format!("Symphony error: {err}\n"));
+            return Some(FrontendCommandDispatch {
+                action: FrontendCommandAction::OpenView {
+                    id: "symphony".into(),
+                    title: "Symphony".into(),
+                    body: output.lines().map(str::to_string).collect(),
+                },
+                canvas_requests: Vec::new(),
+                tick_requests: Vec::new(),
+                surface_requests: Vec::new(),
+                surface_updates: Vec::new(),
+                surface_closes: Vec::new(),
+                widget_updates: Vec::new(),
+            });
+        }
         let command = self.commands.get(name)?;
         let mut ctx = FrontendCtx::default();
         let action = command.run(&mut ctx);
@@ -329,6 +347,25 @@ mod tests {
             dispatch.action,
             FrontendCommandAction::OpenSurface(FrontendSurface { ref id, .. }) if id == "todo"
         ));
+    }
+
+    #[test]
+    fn symphony_slash_command_opens_shared_manual_surface() {
+        let frontend = TuiFrontend::default();
+
+        let dispatch = frontend.dispatch_slash("/symphony").expect("symphony");
+
+        match dispatch.action {
+            FrontendCommandAction::OpenView { id, title, body } => {
+                assert_eq!(id, "symphony");
+                assert_eq!(title, "Symphony");
+                assert!(
+                    body.iter()
+                        .any(|line| line.contains("vulcan symphony run-once"))
+                );
+            }
+            other => panic!("unexpected action: {other:?}"),
+        }
     }
 
     #[test]

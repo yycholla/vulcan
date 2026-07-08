@@ -89,6 +89,11 @@ pub(super) const SLASH_COMMANDS: &[SlashCommand] = &[
         mid_turn_safe: true,
     },
     SlashCommand {
+        name: "symphony",
+        description: "Open Symphony workflow/status/manual-run tools",
+        mid_turn_safe: true,
+    },
+    SlashCommand {
         name: "diagnostics",
         description: "Toggle frame/runtime diagnostics overlay",
         mid_turn_safe: true,

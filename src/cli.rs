@@ -640,10 +640,24 @@ pub enum SymphonySubcommand {
     List,
     /// Validate a workflow spec's front-matter and template
     Validate { workflow: std::path::PathBuf },
+    /// Print the effective Symphony config for a workflow
+    Config { workflow: std::path::PathBuf },
     /// Show the normalized task list a workflow would enqueue
     Tasks { workflow: std::path::PathBuf },
+    /// Show Symphony runtime status from the observability snapshot
+    Status {
+        /// Workflow to load for local manual status. Without this, reports service unavailable.
+        workflow: Option<std::path::PathBuf>,
+    },
     /// Run one dry-run orchestrator poll tick for a workflow
     Tick { workflow: std::path::PathBuf },
+    /// Run one fake-backed Symphony dispatch through the runner
+    RunOnce {
+        workflow: std::path::PathBuf,
+        /// Use the built-in fake app-server worker. Required until real service mode lands.
+        #[arg(long)]
+        fake: bool,
+    },
     /// List recent symphony runs from the run-record store
     Runs {
         /// Maximum number of runs to show

@@ -5,15 +5,20 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context as _, Result};
 
+use crate::symphony::app_server::{AppServerOutcome, AppServerRequest, AppServerTelemetry};
 use crate::symphony::config::{ConfigView, EffectiveConfig};
 use crate::symphony::orchestrator::{
-    Orchestrator, OrchestratorEvent, RunnerStart, RunnerStartResult, TaskRunner,
+    Orchestrator, OrchestratorEvent, RunnerStart, RunnerStartResult, SymphonyRuntimeSnapshot,
+    TaskRunner,
 };
+use crate::symphony::runner::{AgentRunReport, AgentRunRequest, AgentRunner, AgentWorker};
 use crate::symphony::task_source::task_source_from_config;
 use crate::symphony::workflow::{NormalizedTask, Workflow};
+use crate::symphony::workspace::WorkspaceManager;
 
 #[derive(Debug, Clone)]
 pub struct SymphonyRuntime {
+    workflow: Workflow,
     config: EffectiveConfig,
 }
 
@@ -33,6 +38,13 @@ pub struct DryTickResult {
     pub identifiers: BTreeMap<String, String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RunOnceResult {
+    pub tick: DryTickResult,
+    pub report: Option<AgentRunReport>,
+    pub snapshot: SymphonyRuntimeSnapshot,
+}
+
 impl SymphonyRuntime {
     pub fn load(workflow: impl AsRef<Path>) -> Result<Self> {
         let workflow = workflow.as_ref();
@@ -46,7 +58,10 @@ impl SymphonyRuntime {
         let config = ConfigView::new(&workflow_doc.config, repo_root)
             .startup_validate()
             .context("invalid Symphony workflow config")?;
-        Ok(Self { config })
+        Ok(Self {
+            workflow: workflow_doc,
+            config,
+        })
     }
 
     pub fn validate(&self) -> ValidationResult {
@@ -77,6 +92,66 @@ impl SymphonyRuntime {
             identifiers,
         })
     }
+
+    pub fn snapshot(&self, now_ms: u64) -> Result<SymphonyRuntimeSnapshot> {
+        let source = task_source_from_config(&self.config.task_source)?;
+        let runner = DryRunRunner::default();
+        let orchestrator = Orchestrator::new(self.config.polling.clone(), source, runner);
+        Ok(orchestrator.snapshot(now_ms, None))
+    }
+
+    pub fn fake_run_once(&self, now_ms: u64) -> Result<RunOnceResult> {
+        let source = task_source_from_config(&self.config.task_source)?;
+        let mut tasks = source.fetch_candidates(&self.config.polling.active_states)?;
+        tasks.sort_by(|left, right| left.identifier.cmp(&right.identifier));
+        let identifiers = tasks
+            .iter()
+            .map(|task| (task.id.clone(), task.identifier.clone()))
+            .collect::<BTreeMap<_, _>>();
+        let mut orchestrator =
+            Orchestrator::new(self.config.polling.clone(), source, DryRunRunner::default());
+        let outcome = orchestrator.poll_tick(now_ms);
+        let dispatched = outcome.events.iter().find_map(|event| match event {
+            OrchestratorEvent::Dispatched { id, .. } => Some(id.clone()),
+            _ => None,
+        });
+        let tick = DryTickResult {
+            events: outcome.events,
+            identifiers,
+        };
+
+        let Some(id) = dispatched else {
+            return Ok(RunOnceResult {
+                tick,
+                report: None,
+                snapshot: orchestrator.snapshot(now_ms, None),
+            });
+        };
+        let Some(task) = tasks.into_iter().find(|task| task.id == id) else {
+            return Ok(RunOnceResult {
+                tick,
+                report: None,
+                snapshot: orchestrator.snapshot(now_ms, None),
+            });
+        };
+
+        let workspace =
+            WorkspaceManager::from_config(self.config.workspace.clone(), self.config.hooks.clone());
+        let worker = FakeAppServerWorker;
+        let mut runner = AgentRunner::new(
+            self.workflow.clone(),
+            workspace,
+            self.config.agent.clone(),
+            worker,
+        );
+        let report = runner.run_attempt(AgentRunRequest { task, attempt: 1 });
+        orchestrator.record_run_result(&id, report.result.clone(), now_ms + 1_000);
+        Ok(RunOnceResult {
+            tick,
+            report: Some(report),
+            snapshot: orchestrator.snapshot(now_ms + 1_000, None),
+        })
+    }
 }
 
 #[derive(Debug, Default)]
@@ -91,6 +166,28 @@ impl TaskRunner for DryRunRunner {
             run_id: format!("symphony-dry-run-{}", self.next),
         })
     }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct FakeAppServerWorker;
+
+impl AgentWorker for FakeAppServerWorker {
+    type Error = std::convert::Infallible;
+
+    fn run_turn(
+        &mut self,
+        request: AppServerRequest,
+    ) -> std::result::Result<AppServerOutcome, Self::Error> {
+        Ok(AppServerOutcome::Completed(AppServerTelemetry {
+            session_id: format!("{}:fake", request.task.identifier),
+            input_tokens: 1,
+            output_tokens: 1,
+            messages: Vec::new(),
+            rate_limits: Vec::new(),
+        }))
+    }
+
+    fn cleanup(&mut self) {}
 }
 
 #[cfg(test)]
@@ -209,5 +306,39 @@ Handle {{ issue.identifier }}: {{ issue.title }}
             run_id: "symphony-dry-run-1".into(),
         }));
         assert_eq!(result.identifiers.get("task-a"), Some(&"ISSUE-A".into()));
+    }
+
+    #[test]
+    fn fake_run_once_dispatches_runner_and_updates_snapshot_accounting() {
+        let dir = fixture_dir("run-once");
+        let workflow = write_workflow(&dir);
+
+        let runtime = SymphonyRuntime::load(&workflow).expect("load runtime");
+        let result = runtime.fake_run_once(1_000).expect("run once");
+
+        assert!(result.tick.events.contains(&OrchestratorEvent::Dispatched {
+            id: "task-a".into(),
+            run_id: "symphony-dry-run-1".into(),
+        }));
+        let report = result.report.expect("agent runner report");
+        assert!(matches!(
+            report.result,
+            crate::symphony::orchestrator::RunResult::Succeeded {
+                input_tokens: 1,
+                output_tokens: 1,
+                turn_count: 1,
+                ..
+            }
+        ));
+        assert_eq!(result.snapshot.turn_count, 1);
+        assert_eq!(result.snapshot.token_totals.input, 1);
+        assert_eq!(result.snapshot.token_totals.output, 1);
+        assert_eq!(result.snapshot.live_runtime_secs, 1);
+        assert!(
+            dir.join(".symphony")
+                .join("workspaces")
+                .join("ISSUE-A")
+                .exists()
+        );
     }
 }
