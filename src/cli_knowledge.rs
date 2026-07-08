@@ -1,15 +1,20 @@
-//! YYC-194: `vulcan knowledge list` — display local knowledge
-//! stores with size + last-modified.
+//! YYC-194: `vulcan knowledge` governance commands.
 
 use anyhow::{Result, anyhow};
 use std::io::{self, BufRead as _, Write};
 
 use crate::cli::KnowledgeSubcommand;
+use crate::context_pack::{self, ContextPack, ContextSource};
 use crate::knowledge::{self, KnowledgeStoreInfo};
 
 pub async fn run(cmd: KnowledgeSubcommand) -> Result<()> {
     match cmd {
         KnowledgeSubcommand::List => list(),
+        KnowledgeSubcommand::Why {
+            task,
+            pack,
+            source_id,
+        } => why(&task, pack.as_deref(), source_id.as_deref()),
         KnowledgeSubcommand::Purge {
             kind,
             workspace,
@@ -45,6 +50,136 @@ fn list() -> Result<()> {
     println!();
     println!("{} stores · total {}", stores.len(), format_bytes(total));
     Ok(())
+}
+
+fn why(task: &str, pack: Option<&str>, source_id: Option<&str>) -> Result<()> {
+    print!("{}", render_why(task, pack, source_id)?);
+    Ok(())
+}
+
+fn render_why(task: &str, pack_filter: Option<&str>, source_id: Option<&str>) -> Result<String> {
+    let task = task.trim();
+    if task.is_empty() {
+        return Err(anyhow!("task must not be empty"));
+    }
+
+    let packs = selected_packs(pack_filter)?;
+    let task_terms = task_terms(task);
+    let mut out = String::new();
+    out.push_str(&format!("Task: {task}\n"));
+    out.push_str("Explanation source: context-pack metadata\n\n");
+
+    let mut rendered = 0usize;
+    for pack in &packs {
+        let mut lines = Vec::new();
+        let include_all_pack_sources = pack_filter.is_some() || source_id.is_some();
+        for source in &pack.sources {
+            let id = source.short_label();
+            if let Some(wanted) = source_id {
+                if id != wanted {
+                    continue;
+                }
+            }
+
+            let matched_terms = matching_terms(&task_terms, pack, source, &id);
+            if !include_all_pack_sources && matched_terms.is_empty() {
+                continue;
+            }
+
+            let matches = if matched_terms.is_empty() {
+                "none".to_string()
+            } else {
+                matched_terms.join(", ")
+            };
+            lines.push(format!(
+                "- source-id: {id}\n  reason: {}\n  matched task terms: {matches}",
+                source_reason(source)
+            ));
+        }
+
+        if lines.is_empty() {
+            continue;
+        }
+
+        out.push_str(&format!("## context-pack:{}\n", pack.name));
+        out.push_str(&format!("description: {}\n", pack.description));
+        out.push_str(&lines.join("\n"));
+        out.push_str("\n\n");
+        rendered += lines.len();
+    }
+
+    if rendered == 0 {
+        if let Some(source_id) = source_id {
+            let scope = pack_filter
+                .map(|name| format!(" in context pack `{name}`"))
+                .unwrap_or_default();
+            return Err(anyhow!("source-id `{source_id}` not found{scope}"));
+        }
+
+        let available = packs
+            .iter()
+            .map(|pack| pack.name.as_str())
+            .collect::<Vec<_>>()
+            .join(", ");
+        out.push_str(&format!(
+            "No context-pack sources matched this task. Available packs: {available}\n"
+        ));
+    }
+
+    Ok(out)
+}
+
+fn selected_packs(pack: Option<&str>) -> Result<Vec<ContextPack>> {
+    match pack {
+        Some(name) => context_pack::lookup(name)
+            .map(|pack| vec![pack])
+            .ok_or_else(|| anyhow!("context pack `{name}` not found")),
+        None => Ok(context_pack::builtin_packs()),
+    }
+}
+
+fn task_terms(task: &str) -> Vec<String> {
+    task.split(|c: char| !c.is_alphanumeric())
+        .filter_map(|term| {
+            let term = term.trim().to_lowercase();
+            (term.len() >= 3).then_some(term)
+        })
+        .collect()
+}
+
+fn matching_terms(
+    task_terms: &[String],
+    pack: &ContextPack,
+    source: &ContextSource,
+    source_id: &str,
+) -> Vec<String> {
+    let haystack = format!(
+        "{} {} {} {}",
+        pack.name,
+        pack.description,
+        source_id,
+        source_reason(source)
+    )
+    .to_lowercase();
+
+    let mut matched = task_terms
+        .iter()
+        .filter(|term| haystack.contains(term.as_str()))
+        .cloned()
+        .collect::<Vec<_>>();
+    matched.sort();
+    matched.dedup();
+    matched
+}
+
+fn source_reason(source: &ContextSource) -> &str {
+    match source {
+        ContextSource::File { why, .. }
+        | ContextSource::Doc { why, .. }
+        | ContextSource::Run { why, .. }
+        | ContextSource::Artifact { why, .. } => why,
+        ContextSource::Note { text } => text,
+    }
 }
 
 fn purge(kind: Option<&str>, workspace: Option<&str>, all: bool, skip_prompt: bool) -> Result<()> {
@@ -153,5 +288,44 @@ mod tests {
         assert_eq!(format_bytes(2048), "2.0 KiB");
         assert_eq!(format_bytes(5 * 1024 * 1024), "5.0 MiB");
         assert!(format_bytes(3 * 1024 * 1024 * 1024).starts_with("3.0 GiB"));
+    }
+
+    #[test]
+    fn render_why_explains_filtered_source() {
+        let report = render_why(
+            "gateway queue lifecycle",
+            Some("gateway"),
+            Some("file:src/gateway/queue.rs"),
+        )
+        .unwrap();
+
+        assert!(report.contains("Task: gateway queue lifecycle"));
+        assert!(report.contains("## context-pack:gateway"));
+        assert!(report.contains("source-id: file:src/gateway/queue.rs"));
+        assert!(report.contains("reason: durable inbound/outbound queues"));
+        assert!(report.contains("matched task terms: gateway, queue"));
+    }
+
+    #[test]
+    fn render_why_fails_clear_for_unknown_source() {
+        let err = render_why(
+            "gateway queue lifecycle",
+            Some("gateway"),
+            Some("file:src/missing.rs"),
+        )
+        .unwrap_err();
+
+        assert!(
+            err.to_string()
+                .contains("source-id `file:src/missing.rs` not found")
+        );
+    }
+
+    #[test]
+    fn render_why_lists_available_packs_when_no_source_matches() {
+        let report = render_why("zzzzzzzz", None, None).unwrap();
+
+        assert!(report.contains("No context-pack sources matched this task."));
+        assert!(report.contains("Available packs:"));
     }
 }
