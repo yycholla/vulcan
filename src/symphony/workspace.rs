@@ -123,6 +123,10 @@ impl WorkspaceManager {
         })
     }
 
+    pub fn preserve_success(&self) -> bool {
+        self.config.preserve_success
+    }
+
     fn run_fatal_hook(
         &self,
         name: &'static str,

@@ -6,8 +6,10 @@ use anyhow::{Context as _, Result, bail};
 use crate::cli::SymphonySubcommand;
 use crate::run_record::{RunOrigin, RunRecord, RunStatus, RunStore, SqliteRunStore};
 use crate::symphony::config::{EffectiveConfig, TaskSourceKind};
-use crate::symphony::orchestrator::OrchestratorEvent;
-use crate::symphony::runtime::{DryTickResult, SymphonyRuntime};
+use crate::symphony::orchestrator::{
+    OrchestratorEvent, RunResult, SymphonyRuntimeSnapshot, SymphonySnapshotStatus,
+};
+use crate::symphony::runtime::{DryTickResult, RunOnceResult, SymphonyRuntime};
 use crate::symphony::workflow::NormalizedTask;
 
 pub async fn run(cmd: SymphonySubcommand) -> Result<()> {
@@ -30,8 +32,11 @@ pub async fn run(cmd: SymphonySubcommand) -> Result<()> {
         }
         SymphonySubcommand::List => list_to_string()?,
         SymphonySubcommand::Validate { workflow } => validate_to_string(&workflow)?,
+        SymphonySubcommand::Config { workflow } => config_to_string(&workflow)?,
         SymphonySubcommand::Tasks { workflow } => tasks_to_string(&workflow)?,
+        SymphonySubcommand::Status { workflow } => status_to_string(workflow.as_deref())?,
         SymphonySubcommand::Tick { workflow } => tick_to_string(&workflow)?,
+        SymphonySubcommand::RunOnce { workflow, fake } => run_once_to_string(&workflow, fake)?,
         SymphonySubcommand::Runs { limit, all } => runs_to_string(limit, all).await?,
     };
     print!("{output}");
@@ -163,6 +168,10 @@ pub fn validate_to_string(workflow: &Path) -> Result<String> {
     Ok(render_config_summary(&runtime.validate().config))
 }
 
+pub fn config_to_string(workflow: &Path) -> Result<String> {
+    validate_to_string(workflow)
+}
+
 pub fn tasks_to_string(workflow: &Path) -> Result<String> {
     let runtime = SymphonyRuntime::load(workflow)?;
     let result = runtime.list_tasks()?;
@@ -185,6 +194,63 @@ pub fn tick_to_string(workflow: &Path) -> Result<String> {
     let runtime = SymphonyRuntime::load(workflow)?;
     let outcome = runtime.dry_tick(0)?;
     Ok(render_tick_outcome(&outcome))
+}
+
+pub fn status_to_string(workflow: Option<&Path>) -> Result<String> {
+    let snapshot = if let Some(workflow) = workflow {
+        SymphonyRuntime::load(workflow)?.snapshot(0)?
+    } else {
+        SymphonyRuntimeSnapshot::unavailable()
+    };
+    Ok(render_symphony_snapshot(&snapshot))
+}
+
+pub fn run_once_to_string(workflow: &Path, fake: bool) -> Result<String> {
+    if !fake {
+        bail!("`vulcan symphony run-once` currently requires --fake");
+    }
+    let runtime = SymphonyRuntime::load(workflow)?;
+    let result = runtime.fake_run_once(0)?;
+    Ok(render_run_once(&result))
+}
+
+pub fn slash_symphony_to_string(args: &str) -> Result<String> {
+    let mut words = args.split_whitespace();
+    match words.next() {
+        None => Ok(symphony_manual_help()),
+        Some("workflow" | "workflows" | "list") => list_to_string(),
+        Some("validate") => {
+            let workflow = required_slash_path(words.next(), "validate")?;
+            validate_to_string(workflow.as_path())
+        }
+        Some("config") => {
+            let workflow = required_slash_path(words.next(), "config")?;
+            config_to_string(workflow.as_path())
+        }
+        Some("tasks") => {
+            let workflow = required_slash_path(words.next(), "tasks")?;
+            tasks_to_string(workflow.as_path())
+        }
+        Some("status") => {
+            let workflow = words.next().map(PathBuf::from);
+            status_to_string(workflow.as_deref())
+        }
+        Some("run-once") => {
+            let mut workflow = None;
+            let mut fake = false;
+            for word in words {
+                if word == "--fake" {
+                    fake = true;
+                } else if workflow.is_none() {
+                    workflow = Some(PathBuf::from(word));
+                }
+            }
+            let workflow = workflow
+                .ok_or_else(|| anyhow::anyhow!("missing workflow path for /symphony run-once"))?;
+            run_once_to_string(workflow.as_path(), fake)
+        }
+        Some(_) => Ok(symphony_manual_help()),
+    }
 }
 
 pub async fn runs_to_string(limit: usize, all: bool) -> Result<String> {
@@ -463,6 +529,131 @@ fn render_tick_outcome(outcome: &DryTickResult) -> String {
     out
 }
 
+fn render_run_once(result: &RunOnceResult) -> String {
+    let mut out = render_tick_outcome(&result.tick);
+    match &result.report {
+        Some(report) => {
+            out.push_str(&format!(
+                "run_result={} reason={:?}\n",
+                run_result_label(&report.result),
+                report.terminal_reason
+            ));
+            if let RunResult::Succeeded {
+                input_tokens,
+                output_tokens,
+                turn_count,
+                ..
+            } = &report.result
+            {
+                out.push_str(&format!(
+                    "turn_count={turn_count} input_tokens={input_tokens} output_tokens={output_tokens}\n"
+                ));
+            }
+        }
+        None => out.push_str("run_result=not_dispatched\n"),
+    }
+    out.push_str(&render_symphony_snapshot(&result.snapshot));
+    out
+}
+
+fn render_symphony_snapshot(snapshot: &SymphonyRuntimeSnapshot) -> String {
+    let mut out = String::new();
+    out.push_str(&format!(
+        "Symphony status: {}\n",
+        snapshot_status_label(snapshot.status)
+    ));
+    out.push_str(&format!("running: {}\n", snapshot.running.len()));
+    for row in &snapshot.running {
+        out.push_str(&format!(
+            "  {} {} run_id={} state={} runtime_secs={} last_seen_ms={}\n",
+            row.task_identifier,
+            row.task_id,
+            row.run_id,
+            row.state,
+            row.runtime_secs,
+            row.last_seen_ms
+        ));
+    }
+    out.push_str(&format!("retrying: {}\n", snapshot.retrying.len()));
+    for row in &snapshot.retrying {
+        out.push_str(&format!(
+            "  {} next_at_ms={} attempt={}\n",
+            row.task_id, row.next_at_ms, row.attempt
+        ));
+    }
+    out.push_str(&format!("turn_count: {}\n", snapshot.turn_count));
+    out.push_str(&format!(
+        "tokens: input={} output={}\n",
+        snapshot.token_totals.input, snapshot.token_totals.output
+    ));
+    out.push_str(&format!(
+        "live_runtime_secs: {}\n",
+        snapshot.live_runtime_secs
+    ));
+    if snapshot.latest_rate_limits.is_empty() {
+        out.push_str("rate_limits: none\n");
+    } else {
+        out.push_str("rate_limits:\n");
+        for (name, limit) in &snapshot.latest_rate_limits {
+            out.push_str(&format!(
+                "  {name}: {}/{} reset_at_ms={}\n",
+                limit.remaining,
+                limit.limit,
+                limit
+                    .reset_at_ms
+                    .map_or_else(|| "-".to_string(), |value| value.to_string())
+            ));
+        }
+    }
+    if let Some(health) = &snapshot.hook_health {
+        out.push_str(&format!(
+            "hooks: handlers={} errors={} timeouts={}\n",
+            health.handler_count, health.errors, health.timeouts
+        ));
+    } else {
+        out.push_str("hooks: unavailable\n");
+    }
+    out
+}
+
+fn run_result_label(result: &RunResult) -> &'static str {
+    match result {
+        RunResult::Succeeded { .. } => "succeeded",
+        RunResult::NeedsContinuation => "needs_continuation",
+        RunResult::Failed => "failed",
+    }
+}
+
+fn snapshot_status_label(status: SymphonySnapshotStatus) -> &'static str {
+    match status {
+        SymphonySnapshotStatus::Ok => "ok",
+        SymphonySnapshotStatus::Unavailable => "unavailable",
+        SymphonySnapshotStatus::Timeout => "timeout",
+    }
+}
+
+fn required_slash_path(value: Option<&str>, command: &str) -> Result<PathBuf> {
+    value
+        .map(PathBuf::from)
+        .ok_or_else(|| anyhow::anyhow!("missing workflow path for /symphony {command}"))
+}
+
+fn symphony_manual_help() -> String {
+    [
+        "Symphony manual E2E:",
+        "  vulcan symphony validate <workflow>",
+        "  vulcan symphony config <workflow>",
+        "  vulcan symphony status [workflow]",
+        "  vulcan symphony run-once <workflow> --fake",
+        "  /symphony workflow",
+        "  /symphony config <workflow>",
+        "  /symphony status [workflow]",
+        "  /symphony run-once <workflow> --fake",
+        "",
+    ]
+    .join("\n")
+}
+
 fn render_symphony_runs(records: &[RunRecord], all: bool) -> String {
     if records.is_empty() {
         return if all {
@@ -622,6 +813,44 @@ Handle {{ issue.identifier }}: {{ issue.title }}
         assert!(output.contains("dispatched ISSUE-1"));
         assert!(output.contains("run_id=symphony-dry-run-1"));
         assert!(output.contains("status=published"));
+    }
+
+    #[test]
+    fn manual_e2e_status_and_fake_run_once_use_snapshot_renderer() {
+        let dir = fixture_dir("manual-e2e");
+        let workflow = write_workflow(&dir);
+
+        let status = status_to_string(Some(&workflow)).expect("status");
+        assert!(status.contains("Symphony status: ok"));
+        assert!(status.contains("turn_count: 0"));
+        assert!(status.contains("hooks: unavailable"));
+
+        let unavailable = status_to_string(None).expect("unavailable status");
+        assert!(unavailable.contains("Symphony status: unavailable"));
+
+        let output = run_once_to_string(&workflow, true).expect("fake run once");
+        assert!(output.contains("dispatched ISSUE-1"));
+        assert!(output.contains("run_result=succeeded"));
+        assert!(output.contains("turn_count=1 input_tokens=1 output_tokens=1"));
+        assert!(output.contains("Symphony status: ok"));
+        assert!(output.contains("tokens: input=1 output=1"));
+    }
+
+    #[test]
+    fn slash_symphony_commands_share_manual_e2e_renderers() {
+        let dir = fixture_dir("slash-manual-e2e");
+        let workflow = write_workflow(&dir);
+
+        let help = slash_symphony_to_string("").expect("help");
+        assert!(help.contains("vulcan symphony run-once <workflow> --fake"));
+
+        let config =
+            slash_symphony_to_string(&format!("config {}", workflow.display())).expect("config");
+        assert!(config.contains("Symphony workflow OK"));
+
+        let run = slash_symphony_to_string(&format!("run-once {} --fake", workflow.display()))
+            .expect("run once");
+        assert!(run.contains("run_result=succeeded"));
     }
 
     #[tokio::test]

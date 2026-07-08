@@ -24,6 +24,17 @@ use vulcan::config::Config;
 use vulcan::provider::StreamEvent;
 use vulcan::tui::{ResumeTarget, run_tui};
 
+fn needs_first_run_provider_setup(config: &Config, api_key_missing: bool) -> bool {
+    if !config.providers.is_empty() {
+        return false;
+    }
+
+    let active = config.active_provider_config();
+    api_key_missing
+        && !active.disable_catalog
+        && !vulcan::agent::is_local_base_url(&active.base_url)
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
@@ -107,10 +118,7 @@ async fn main() -> anyhow::Result<()> {
             // into the interactive `vulcan auth` provider setup instead
             // of erroring out, then continues into the TUI with the
             // fresh config. Local/self-hosted endpoints don't need auth.
-            let active = config.active_provider_config();
-            if config.api_key().is_none()
-                && !active.disable_catalog
-                && !vulcan::agent::is_local_base_url(&active.base_url)
+            if needs_first_run_provider_setup(&config, config.api_key().is_none())
                 && std::io::IsTerminal::is_terminal(&std::io::stdin())
             {
                 println!("No model provider configured yet — let's set one up.\n");
@@ -593,6 +601,16 @@ mod tests {
             script.contains("vulcan"),
             "bash completion script missing vulcan binary name"
         );
+    }
+
+    #[test]
+    fn first_run_setup_skips_existing_named_providers() {
+        let mut config = Config::default();
+        config
+            .providers
+            .insert("openrouter".to_string(), config.provider.clone());
+
+        assert!(!needs_first_run_provider_setup(&config, true));
     }
 
     #[test]

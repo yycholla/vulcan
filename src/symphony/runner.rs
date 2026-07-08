@@ -1,5 +1,6 @@
 //! Symphony agent-runner integration over workspace, workflow, and app-server boundaries.
 
+use crate::observability;
 use crate::symphony::app_server::{
     AppServerClient, AppServerError, AppServerOutcome, AppServerRequest,
 };
@@ -170,11 +171,30 @@ where
 
             match outcome {
                 Ok(AppServerOutcome::Completed(telemetry)) => {
+                    let session_id = telemetry.session_id.clone();
+                    let span = tracing::info_span!(
+                        observability::span::AGENT_SESSION,
+                        surface = "symphony",
+                        action = "turn_completed",
+                        session_id = %session_id,
+                        outcome = "ok"
+                    );
+                    let _guard = span.enter();
+                    tracing::info!(
+                        session_id = %session_id,
+                        action = "turn_completed",
+                        outcome = "ok",
+                        turn,
+                        input_tokens = telemetry.input_tokens,
+                        output_tokens = telemetry.output_tokens,
+                        "symphony agent session turn completed"
+                    );
                     events.push(AgentRunnerEvent::TurnCompleted { turn });
                     return terminal_with_cleanup(
                         RunResult::Succeeded {
                             input_tokens: telemetry.input_tokens,
                             output_tokens: telemetry.output_tokens,
+                            turn_count: u64::from(turn),
                             rate_limits: telemetry
                                 .rate_limits
                                 .into_iter()
@@ -316,9 +336,18 @@ fn terminal_with_cleanup<W>(
 where
     W: AgentWorker,
 {
+    let remove_success_workspace =
+        terminal_reason == AgentTerminalReason::Succeeded && !workspace.preserve_success();
     worker.cleanup();
     events.push(AgentRunnerEvent::WorkerCleanedUp);
     workspace.after_run(prepared);
+    if remove_success_workspace && let Err(err) = workspace.remove(prepared) {
+        tracing::warn!(
+            workspace = %prepared.path.display(),
+            error = %err,
+            "failed to remove successful Symphony workspace"
+        );
+    }
     AgentRunReport {
         result,
         terminal_reason,
@@ -379,6 +408,7 @@ mod tests {
             RunResult::Succeeded {
                 input_tokens: 40,
                 output_tokens: 8,
+                turn_count: 1,
                 rate_limits: vec![(
                     "requests".into(),
                     RateLimitSnapshot {
@@ -590,6 +620,39 @@ mod tests {
         assert!(report.events.is_empty());
         assert!(runner.worker().prompts.is_empty());
         assert_eq!(runner.worker().cleanup_calls, 0);
+    }
+
+    #[test]
+    fn successful_workspace_cleanup_follows_preserve_success_policy() {
+        let temp = TempDir::new().unwrap();
+        let workspace_root = temp.path().join("workspaces");
+        let mut runner = AgentRunner::new(
+            Workflow::parse("Prompt").expect("workflow"),
+            WorkspaceManager::new(WorkspaceConfig {
+                root: workspace_root,
+                preserve_success: false,
+            }),
+            AgentConfig {
+                max_attempts: 3,
+                max_turns: 1,
+                stall_timeout_secs: Some(900),
+            },
+            FakeWorker::new(vec![Ok(AppServerOutcome::Completed(AppServerTelemetry {
+                session_id: "GH-601:session".into(),
+                input_tokens: 1,
+                output_tokens: 1,
+                messages: Vec::new(),
+                rate_limits: Vec::new(),
+            }))]),
+        );
+
+        let report = runner.run_attempt(AgentRunRequest {
+            task: task("601", "GH-601"),
+            attempt: 1,
+        });
+
+        assert_eq!(report.terminal_reason, AgentTerminalReason::Succeeded);
+        assert!(!std::path::Path::new(&runner.worker().workspaces[0]).exists());
     }
 
     impl AgentWorker for FakeWorker {
