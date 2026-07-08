@@ -25,6 +25,7 @@ use crate::config::ObservabilityConfig;
 use crate::hooks::{HookFailureCounts, HookRegistry};
 
 pub mod attr {
+    pub const ACTION: &str = "action";
     pub const OPERATION: &str = "operation";
     pub const REQUEST_ID: &str = "request_id";
     pub const SESSION_ID: &str = "session_id";
@@ -107,6 +108,7 @@ pub mod metric {
     pub const PROCESS_CPU_PERCENT: &str = "vulcan.process.cpu.percent";
     pub const PROCESS_THREADS: &str = "vulcan.process.threads";
     pub const RUNTIME_SECONDS: &str = "vulcan.runtime.seconds";
+    pub const SYMPHONY_TASK_RUNTIME_MS: &str = "vulcan.symphony.task.runtime_ms";
 
     pub const RUNTIME_PERFORMANCE: &[&str] = &[
         DAEMON_REQUEST_DURATION_MS,
@@ -125,6 +127,7 @@ pub mod metric {
         PROCESS_MEMORY_RSS_BYTES,
         PROCESS_CPU_PERCENT,
         PROCESS_THREADS,
+        SYMPHONY_TASK_RUNTIME_MS,
     ];
 }
 
@@ -147,6 +150,7 @@ struct RuntimeMetricInstruments {
     process_memory_rss_bytes: Gauge<u64>,
     process_cpu_percent: Gauge<f64>,
     process_threads: Gauge<u64>,
+    symphony_task_runtime_ms: Histogram<f64>,
 }
 
 static RUNTIME_METRICS: LazyLock<RuntimeMetricInstruments> = LazyLock::new(|| {
@@ -234,6 +238,11 @@ static RUNTIME_METRICS: LazyLock<RuntimeMetricInstruments> = LazyLock::new(|| {
         process_threads: meter
             .u64_gauge(metric::PROCESS_THREADS)
             .with_description("Current process thread count when available.")
+            .build(),
+        symphony_task_runtime_ms: meter
+            .f64_histogram(metric::SYMPHONY_TASK_RUNTIME_MS)
+            .with_unit("ms")
+            .with_description("Symphony task runtime from dispatch to terminal outcome.")
             .build(),
     }
 });
@@ -330,6 +339,22 @@ pub fn provider_request_span(
         ProviderSpanMode::Compaction => span!(span::PROVIDER_COMPACTION),
         ProviderSpanMode::Streaming => span!(span::PROVIDER_STREAMING),
     }
+}
+
+pub fn symphony_task_span(
+    operation: &'static str,
+    task_id: &str,
+    task_identifier: &str,
+) -> tracing::Span {
+    tracing::info_span!(
+        span::TASK_ORCHESTRATION,
+        surface = "symphony",
+        operation,
+        task_id,
+        task_identifier,
+        outcome = tracing::field::Empty,
+        error_kind = tracing::field::Empty
+    )
 }
 
 fn duration_millis(duration: Duration) -> f64 {
@@ -539,6 +564,30 @@ pub fn record_tui_frame_metrics(
     RUNTIME_METRICS
         .tui_surface_count
         .record(surface_count as u64, &attrs);
+}
+
+pub fn record_symphony_task_runtime_metrics(
+    task_id: &str,
+    task_identifier: &str,
+    duration: Duration,
+    outcome: &str,
+    error_kind: Option<&str>,
+) {
+    if !surface_enabled("symphony") {
+        return;
+    }
+    let mut attrs = vec![
+        KeyValue::new(attr::SURFACE, "symphony"),
+        KeyValue::new(attr::TASK_ID, task_id.to_string()),
+        KeyValue::new(attr::TASK_IDENTIFIER, task_identifier.to_string()),
+    ];
+    push_outcome_attrs(&mut attrs, outcome, error_kind);
+    RUNTIME_METRICS
+        .symphony_task_runtime_ms
+        .record(duration_millis(duration), &attrs);
+    if let Some(kind) = error_kind {
+        record_error_metric("symphony", kind);
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -834,6 +883,7 @@ mod tests {
     #[test]
     fn stable_attribute_and_span_names_cover_runtime_surfaces() {
         let attrs = [
+            attr::ACTION,
             attr::OPERATION,
             attr::REQUEST_ID,
             attr::SESSION_ID,
@@ -894,6 +944,10 @@ mod tests {
         assert_eq!(
             metric::PROCESS_MEMORY_RSS_BYTES,
             "vulcan.process.memory.rss_bytes"
+        );
+        assert_eq!(
+            metric::SYMPHONY_TASK_RUNTIME_MS,
+            "vulcan.symphony.task.runtime_ms"
         );
     }
 

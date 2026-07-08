@@ -1,5 +1,6 @@
 //! Symphony agent-runner integration over workspace, workflow, and app-server boundaries.
 
+use crate::observability;
 use crate::symphony::app_server::{
     AppServerClient, AppServerError, AppServerOutcome, AppServerRequest,
 };
@@ -170,11 +171,30 @@ where
 
             match outcome {
                 Ok(AppServerOutcome::Completed(telemetry)) => {
+                    let session_id = telemetry.session_id.clone();
+                    let span = tracing::info_span!(
+                        observability::span::AGENT_SESSION,
+                        surface = "symphony",
+                        action = "turn_completed",
+                        session_id = %session_id,
+                        outcome = "ok"
+                    );
+                    let _guard = span.enter();
+                    tracing::info!(
+                        session_id = %session_id,
+                        action = "turn_completed",
+                        outcome = "ok",
+                        turn,
+                        input_tokens = telemetry.input_tokens,
+                        output_tokens = telemetry.output_tokens,
+                        "symphony agent session turn completed"
+                    );
                     events.push(AgentRunnerEvent::TurnCompleted { turn });
                     return terminal_with_cleanup(
                         RunResult::Succeeded {
                             input_tokens: telemetry.input_tokens,
                             output_tokens: telemetry.output_tokens,
+                            turn_count: u64::from(turn),
                             rate_limits: telemetry
                                 .rate_limits
                                 .into_iter()
@@ -379,6 +399,7 @@ mod tests {
             RunResult::Succeeded {
                 input_tokens: 40,
                 output_tokens: 8,
+                turn_count: 1,
                 rate_limits: vec![(
                     "requests".into(),
                     RateLimitSnapshot {

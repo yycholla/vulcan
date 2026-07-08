@@ -1,7 +1,11 @@
 //! Core Symphony poll-loop orchestration with fake runner boundaries.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::time::Duration;
 
+use serde::Serialize;
+
+use crate::observability::{self, HookHealthSnapshot};
 use crate::symphony::config::PollingConfig;
 use crate::symphony::task_source::TaskSource;
 use crate::symphony::workflow::NormalizedTask;
@@ -24,6 +28,8 @@ pub struct OrchestratorState {
     pub completed: BTreeSet<String>,
     pub token_totals: TokenTotals,
     pub rate_limits: BTreeMap<String, RateLimitSnapshot>,
+    pub turn_count: u64,
+    pub ended_runtime_ms: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -40,17 +46,54 @@ pub struct RetryPlan {
     pub attempt: u32,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 pub struct TokenTotals {
     pub input: u64,
     pub output: u64,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct RateLimitSnapshot {
     pub limit: u64,
     pub remaining: u64,
     pub reset_at_ms: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct SymphonyRuntimeSnapshot {
+    pub status: SymphonySnapshotStatus,
+    pub running: Vec<SymphonyRunningRow>,
+    pub retrying: Vec<SymphonyRetryRow>,
+    pub turn_count: u64,
+    pub token_totals: TokenTotals,
+    pub live_runtime_secs: u64,
+    pub latest_rate_limits: BTreeMap<String, RateLimitSnapshot>,
+    pub hook_health: Option<HookHealthSnapshot>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SymphonySnapshotStatus {
+    Ok,
+    Unavailable,
+    Timeout,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct SymphonyRunningRow {
+    pub task_id: String,
+    pub task_identifier: String,
+    pub run_id: String,
+    pub state: String,
+    pub runtime_secs: u64,
+    pub last_seen_ms: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct SymphonyRetryRow {
+    pub task_id: String,
+    pub next_at_ms: u64,
+    pub attempt: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -103,6 +146,7 @@ pub enum RunResult {
     Succeeded {
         input_tokens: u64,
         output_tokens: u64,
+        turn_count: u64,
         rate_limits: Vec<(String, RateLimitSnapshot)>,
     },
     NeedsContinuation,
@@ -142,6 +186,14 @@ where
         &self.state
     }
 
+    pub fn snapshot(
+        &self,
+        now_ms: u64,
+        hook_health: Option<HookHealthSnapshot>,
+    ) -> SymphonyRuntimeSnapshot {
+        self.state.snapshot(now_ms, hook_health)
+    }
+
     pub fn poll_tick(&mut self, now_ms: u64) -> PollOutcome {
         let mut events = self.reconcile(now_ms);
         events.push(OrchestratorEvent::Reconciled);
@@ -165,6 +217,18 @@ where
             let start = self.runner.start(&task, now_ms);
             let id = task.id.clone();
             let RunnerStartResult::Started(start) = start else {
+                let span =
+                    observability::symphony_task_span("task.requeued", &task.id, &task.identifier);
+                span.record(observability::attr::OUTCOME, "retry");
+                span.record(observability::attr::ERROR_KIND, "slot_unavailable");
+                let _guard = span.enter();
+                tracing::warn!(
+                    task_id = %task.id,
+                    task_identifier = %task.identifier,
+                    outcome = "retry",
+                    error_kind = "slot_unavailable",
+                    "symphony task requeued"
+                );
                 let plan = self.schedule_retry(&id, now_ms, RetryReason::SlotUnavailable);
                 events.push(OrchestratorEvent::Requeued {
                     id,
@@ -173,6 +237,17 @@ where
                 });
                 continue;
             };
+            let span =
+                observability::symphony_task_span("task.dispatch", &task.id, &task.identifier);
+            span.record(observability::attr::OUTCOME, "started");
+            let _guard = span.enter();
+            tracing::info!(
+                task_id = %task.id,
+                task_identifier = %task.identifier,
+                run_id = %start.run_id,
+                outcome = "started",
+                "symphony task dispatched"
+            );
             self.state.claimed.insert(task.id.clone());
             self.state.running.insert(
                 task.id.clone(),
@@ -256,25 +331,99 @@ where
             RunResult::Succeeded {
                 input_tokens,
                 output_tokens,
+                turn_count,
                 rate_limits,
             } => {
-                self.state.running.remove(id);
+                let running = self.state.running.remove(id);
                 self.state.claimed.remove(id);
                 self.state.retrying.remove(id);
                 self.state.completed.insert(id.to_string());
                 self.state.token_totals.input += input_tokens;
                 self.state.token_totals.output += output_tokens;
+                self.state.turn_count += turn_count;
+                if let Some(running) = running {
+                    let duration_ms = now_ms.saturating_sub(running.started_at_ms);
+                    self.state.ended_runtime_ms += duration_ms;
+                    let span = observability::symphony_task_span(
+                        "task.completed",
+                        id,
+                        &running.task.identifier,
+                    );
+                    span.record(observability::attr::OUTCOME, "ok");
+                    let _guard = span.enter();
+                    observability::record_symphony_task_runtime_metrics(
+                        id,
+                        &running.task.identifier,
+                        Duration::from_millis(duration_ms),
+                        "ok",
+                        None,
+                    );
+                    tracing::info!(
+                        task_id = %id,
+                        task_identifier = %running.task.identifier,
+                        run_id = %running.run_id,
+                        turn_count,
+                        input_tokens,
+                        output_tokens,
+                        outcome = "ok",
+                        "symphony task completed"
+                    );
+                }
                 for (name, snapshot) in rate_limits {
                     self.state.rate_limits.insert(name, snapshot);
                 }
             }
             RunResult::NeedsContinuation => {
+                self.finish_running_attempt(id, now_ms, "needs_continuation", None);
                 self.schedule_retry(id, now_ms, RetryReason::Continuation);
             }
             RunResult::Failed => {
+                self.finish_running_attempt(id, now_ms, "error", Some("task_failed"));
                 self.schedule_retry(id, now_ms, RetryReason::Failure);
             }
         }
+    }
+
+    fn finish_running_attempt(
+        &mut self,
+        id: &str,
+        now_ms: u64,
+        outcome: &'static str,
+        error_kind: Option<&'static str>,
+    ) {
+        let running = self.state.running.remove(id);
+        self.state.claimed.remove(id);
+        let Some(running) = running else {
+            return;
+        };
+
+        let duration_ms = now_ms.saturating_sub(running.started_at_ms);
+        self.state.ended_runtime_ms += duration_ms;
+        let span = observability::symphony_task_span(
+            "task.attempt_finished",
+            id,
+            &running.task.identifier,
+        );
+        span.record(observability::attr::OUTCOME, outcome);
+        if let Some(kind) = error_kind {
+            span.record(observability::attr::ERROR_KIND, kind);
+        }
+        let _guard = span.enter();
+        observability::record_symphony_task_runtime_metrics(
+            id,
+            &running.task.identifier,
+            Duration::from_millis(duration_ms),
+            outcome,
+            error_kind,
+        );
+        tracing::info!(
+            task_id = %id,
+            task_identifier = %running.task.identifier,
+            run_id = %running.run_id,
+            outcome,
+            error_kind = error_kind.unwrap_or(""),
+            "symphony task attempt finished"
+        );
     }
 
     fn is_eligible(&self, task: &NormalizedTask, now_ms: u64) -> bool {
@@ -330,6 +479,75 @@ where
         };
         self.state.retrying.insert(id.to_string(), plan.clone());
         plan
+    }
+}
+
+impl OrchestratorState {
+    pub fn snapshot(
+        &self,
+        now_ms: u64,
+        hook_health: Option<HookHealthSnapshot>,
+    ) -> SymphonyRuntimeSnapshot {
+        let running = self
+            .running
+            .values()
+            .map(|running| SymphonyRunningRow {
+                task_id: running.task.id.clone(),
+                task_identifier: running.task.identifier.clone(),
+                run_id: running.run_id.clone(),
+                state: running.task.state.clone(),
+                runtime_secs: now_ms.saturating_sub(running.started_at_ms) / 1_000,
+                last_seen_ms: running.last_seen_ms,
+            })
+            .collect::<Vec<_>>();
+        let retrying = self
+            .retrying
+            .iter()
+            .map(|(task_id, plan)| SymphonyRetryRow {
+                task_id: task_id.clone(),
+                next_at_ms: plan.next_at_ms,
+                attempt: plan.attempt,
+            })
+            .collect::<Vec<_>>();
+        let active_runtime_ms = self
+            .running
+            .values()
+            .map(|running| now_ms.saturating_sub(running.started_at_ms))
+            .sum::<u64>();
+
+        SymphonyRuntimeSnapshot {
+            status: SymphonySnapshotStatus::Ok,
+            running,
+            retrying,
+            turn_count: self.turn_count,
+            token_totals: self.token_totals.clone(),
+            live_runtime_secs: (self.ended_runtime_ms + active_runtime_ms) / 1_000,
+            latest_rate_limits: self.rate_limits.clone(),
+            hook_health,
+        }
+    }
+}
+
+impl SymphonyRuntimeSnapshot {
+    pub fn unavailable() -> Self {
+        Self::empty(SymphonySnapshotStatus::Unavailable)
+    }
+
+    pub fn timeout() -> Self {
+        Self::empty(SymphonySnapshotStatus::Timeout)
+    }
+
+    fn empty(status: SymphonySnapshotStatus) -> Self {
+        Self {
+            status,
+            running: Vec::new(),
+            retrying: Vec::new(),
+            turn_count: 0,
+            token_totals: TokenTotals::default(),
+            live_runtime_secs: 0,
+            latest_rate_limits: BTreeMap::new(),
+            hook_health: None,
+        }
     }
 }
 
@@ -440,6 +658,16 @@ mod tests {
             })
         );
 
+        orchestrator.state.running.insert(
+            "1".into(),
+            RunningTask {
+                task: task("1", "TASK-1", "ready-for-agent"),
+                run_id: "run-continuation".into(),
+                started_at_ms: 1_500,
+                last_seen_ms: 1_500,
+            },
+        );
+        orchestrator.state.claimed.insert("1".into());
         orchestrator.record_run_result("1", RunResult::NeedsContinuation, 2_000);
         assert_eq!(
             orchestrator.state().retrying.get("1"),
@@ -448,7 +676,20 @@ mod tests {
                 attempt: 1,
             })
         );
+        assert!(!orchestrator.state().running.contains_key("1"));
+        assert!(!orchestrator.state().claimed.contains("1"));
+        assert_eq!(orchestrator.state().ended_runtime_ms, 500);
 
+        orchestrator.state.running.insert(
+            "1".into(),
+            RunningTask {
+                task: task("1", "TASK-1", "ready-for-agent"),
+                run_id: "run-failed".into(),
+                started_at_ms: 2_500,
+                last_seen_ms: 2_500,
+            },
+        );
+        orchestrator.state.claimed.insert("1".into());
         orchestrator.record_run_result("1", RunResult::Failed, 3_000);
         assert_eq!(
             orchestrator.state().retrying.get("1"),
@@ -457,6 +698,9 @@ mod tests {
                 attempt: 2,
             })
         );
+        assert!(!orchestrator.state().running.contains_key("1"));
+        assert!(!orchestrator.state().claimed.contains("1"));
+        assert_eq!(orchestrator.state().ended_runtime_ms, 1_000);
     }
 
     #[test]
@@ -540,6 +784,7 @@ mod tests {
             RunResult::Succeeded {
                 input_tokens: 42,
                 output_tokens: 7,
+                turn_count: 2,
                 rate_limits: vec![(
                     "requests".into(),
                     RateLimitSnapshot {
@@ -561,6 +806,8 @@ mod tests {
                 output: 7,
             }
         );
+        assert_eq!(orchestrator.state().turn_count, 2);
+        assert_eq!(orchestrator.state().ended_runtime_ms, 1_000);
         assert_eq!(
             orchestrator.state().rate_limits["requests"],
             RateLimitSnapshot {
@@ -568,6 +815,69 @@ mod tests {
                 remaining: 93,
                 reset_at_ms: Some(60_000),
             }
+        );
+    }
+
+    #[test]
+    fn snapshot_reports_runtime_rows_accounting_hook_health_and_error_modes() {
+        let source = FakeSource::new(Vec::new());
+        let mut orchestrator = Orchestrator::new(config(10), source, FakeRunner::default());
+        orchestrator.state.running.insert(
+            "active".into(),
+            RunningTask {
+                task: task("active", "TASK-ACTIVE", "ready-for-agent"),
+                run_id: "run-active".into(),
+                started_at_ms: 5_000,
+                last_seen_ms: 8_000,
+            },
+        );
+        orchestrator.state.retrying.insert(
+            "retry".into(),
+            RetryPlan {
+                next_at_ms: 12_000,
+                attempt: 3,
+            },
+        );
+        orchestrator.state.turn_count = 2;
+        orchestrator.state.ended_runtime_ms = 4_000;
+        orchestrator.state.token_totals = TokenTotals {
+            input: 40,
+            output: 8,
+        };
+        orchestrator.state.rate_limits.insert(
+            "requests".into(),
+            RateLimitSnapshot {
+                limit: 100,
+                remaining: 90,
+                reset_at_ms: Some(60_000),
+            },
+        );
+
+        let snapshot = orchestrator.snapshot(
+            9_000,
+            Some(HookHealthSnapshot {
+                handler_count: 4,
+                errors: 1,
+                timeouts: 2,
+            }),
+        );
+
+        assert_eq!(snapshot.status, SymphonySnapshotStatus::Ok);
+        assert_eq!(snapshot.running[0].task_identifier, "TASK-ACTIVE");
+        assert_eq!(snapshot.running[0].runtime_secs, 4);
+        assert_eq!(snapshot.retrying[0].attempt, 3);
+        assert_eq!(snapshot.turn_count, 2);
+        assert_eq!(snapshot.token_totals.input, 40);
+        assert_eq!(snapshot.live_runtime_secs, 8);
+        assert_eq!(snapshot.latest_rate_limits["requests"].remaining, 90);
+        assert_eq!(snapshot.hook_health.as_ref().unwrap().timeouts, 2);
+        assert_eq!(
+            SymphonyRuntimeSnapshot::unavailable().status,
+            SymphonySnapshotStatus::Unavailable
+        );
+        assert_eq!(
+            SymphonyRuntimeSnapshot::timeout().status,
+            SymphonySnapshotStatus::Timeout
         );
     }
 
