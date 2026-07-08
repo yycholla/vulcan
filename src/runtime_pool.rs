@@ -26,7 +26,7 @@ use crate::artifact::{ArtifactStore, InMemoryArtifactStore, SqliteArtifactStore}
 use crate::code::lsp::LspManager;
 use crate::extensions::api::wire_inventory_into_registry;
 use crate::extensions::{
-    ExtensionAuditLog, ExtensionRegistry, ExtensionStateStore, SqliteExtensionStateStore,
+    ExtensionAuditLog, ExtensionRegistry, ExtensionStateStore, TursoExtensionStateStore,
 };
 use crate::memory::SessionStore;
 use crate::memory::cortex::CortexStore;
@@ -185,7 +185,7 @@ impl RuntimeResourcePool {
 
         let extension_audit_log = Arc::new(ExtensionAuditLog::default());
         let extension_state_store: Arc<dyn ExtensionStateStore> =
-            match SqliteExtensionStateStore::try_new() {
+            match TursoExtensionStateStore::try_new() {
                 Ok(store) => Arc::new(store),
                 Err(e) => {
                     let message = format!(
@@ -196,7 +196,7 @@ impl RuntimeResourcePool {
                         "extension_state_store",
                         message,
                     ));
-                    Arc::new(SqliteExtensionStateStore::try_open_in_memory()?)
+                    Arc::new(TursoExtensionStateStore::try_open_in_memory()?)
                 }
             };
 
@@ -240,7 +240,7 @@ impl RuntimeResourcePool {
             extension_registry,
             extension_audit_log: Arc::new(ExtensionAuditLog::default()),
             extension_state_store: Arc::new(
-                SqliteExtensionStateStore::try_open_in_memory()
+                TursoExtensionStateStore::try_open_in_memory()
                     .expect("in-memory extension state store"),
             ),
         }

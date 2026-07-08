@@ -590,8 +590,7 @@ mod tests {
         broken.broken_reason = Some("manifest parse failed".into());
         reg.upsert(broken);
         let install =
-            crate::extensions::install_state::SqliteInstallStateStore::try_open_in_memory()
-                .unwrap();
+            crate::extensions::install_state::TursoInstallStateStore::try_open_in_memory().unwrap();
         crate::extensions::install_state::InstallStateStore::upsert(
             &install,
             &crate::extensions::install_state::InstallState {
@@ -896,8 +895,7 @@ kind = "builtin"
 "#,
         );
         let install =
-            crate::extensions::install_state::SqliteInstallStateStore::try_open_in_memory()
-                .unwrap();
+            crate::extensions::install_state::TursoInstallStateStore::try_open_in_memory().unwrap();
         let reg = ExtensionRegistry::new();
         let (ok, broken) = reg.load_from_store(dir.path(), &install);
         assert_eq!(ok, 1);
@@ -925,8 +923,7 @@ kind = "builtin"
 "#,
         );
         let install =
-            crate::extensions::install_state::SqliteInstallStateStore::try_open_in_memory()
-                .unwrap();
+            crate::extensions::install_state::TursoInstallStateStore::try_open_in_memory().unwrap();
         crate::extensions::install_state::InstallStateStore::upsert(
             &install,
             &crate::extensions::install_state::InstallState {
@@ -962,8 +959,7 @@ kind = "builtin"
 "#,
         );
         let install =
-            crate::extensions::install_state::SqliteInstallStateStore::try_open_in_memory()
-                .unwrap();
+            crate::extensions::install_state::TursoInstallStateStore::try_open_in_memory().unwrap();
         let reg = ExtensionRegistry::new();
         let (ok, broken) = reg.load_from_store_with_version(dir.path(), &install, "0.1.0");
         assert_eq!(ok, 0);
@@ -992,8 +988,7 @@ kind = "builtin"
             raw,
         );
         let install =
-            crate::extensions::install_state::SqliteInstallStateStore::try_open_in_memory()
-                .unwrap();
+            crate::extensions::install_state::TursoInstallStateStore::try_open_in_memory().unwrap();
         crate::extensions::install_state::InstallStateStore::upsert(
             &install,
             &crate::extensions::install_state::InstallState {
@@ -1046,8 +1041,7 @@ kind = "builtin"
             "completely[broken",
         );
         let install =
-            crate::extensions::install_state::SqliteInstallStateStore::try_open_in_memory()
-                .unwrap();
+            crate::extensions::install_state::TursoInstallStateStore::try_open_in_memory().unwrap();
         // Pre-create a state row so record_load_error has somewhere
         // to land.
         crate::extensions::install_state::InstallStateStore::upsert(
@@ -1077,8 +1071,7 @@ kind = "builtin"
     #[test]
     fn runtime_failure_marks_extension_broken_and_records_error() {
         let install =
-            crate::extensions::install_state::SqliteInstallStateStore::try_open_in_memory()
-                .unwrap();
+            crate::extensions::install_state::TursoInstallStateStore::try_open_in_memory().unwrap();
         crate::extensions::install_state::InstallStateStore::upsert(
             &install,
             &crate::extensions::install_state::InstallState {

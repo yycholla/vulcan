@@ -548,13 +548,13 @@ impl Agent {
         let extension_state_store: Option<Arc<dyn crate::extensions::ExtensionStateStore>> =
             match pool.as_ref() {
                 Some(p) => Some(p.extension_state_store()),
-                None => match crate::extensions::SqliteExtensionStateStore::try_new() {
+                None => match crate::extensions::TursoExtensionStateStore::try_new() {
                     Ok(store) => Some(Arc::new(store)),
                     Err(e) => {
                         tracing::warn!(
                             "Agent: extension state store unavailable ({e}); using in-memory"
                         );
-                        match crate::extensions::SqliteExtensionStateStore::try_open_in_memory() {
+                        match crate::extensions::TursoExtensionStateStore::try_open_in_memory() {
                             Ok(store) => Some(Arc::new(store)),
                             Err(e) => {
                                 tracing::warn!("Agent: extension state fallback unavailable ({e})");

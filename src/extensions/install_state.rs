@@ -69,11 +69,11 @@ pub trait ExtensionTrustStore: Send + Sync {
     fn list_trusted(&self, workspace_hash: &str) -> Result<Vec<TrustMarker>>;
 }
 
-pub struct SqliteInstallStateStore {
+pub struct TursoInstallStateStore {
     conn: Arc<turso::Connection>,
 }
 
-impl SqliteInstallStateStore {
+impl TursoInstallStateStore {
     pub fn try_new() -> Result<Self> {
         let dir = crate::config::vulcan_home();
         std::fs::create_dir_all(&dir)
@@ -155,7 +155,7 @@ impl SqliteInstallStateStore {
     }
 }
 
-impl ExtensionTrustStore for SqliteInstallStateStore {
+impl ExtensionTrustStore for TursoInstallStateStore {
     fn trust(
         &self,
         workspace_hash: &str,
@@ -253,7 +253,7 @@ impl ExtensionTrustStore for SqliteInstallStateStore {
     }
 }
 
-impl InstallStateStore for SqliteInstallStateStore {
+impl InstallStateStore for TursoInstallStateStore {
     fn upsert(&self, state: &InstallState) -> Result<()> {
         let id = state.id.clone();
         let version = state.version.clone();
@@ -470,7 +470,7 @@ mod tests {
 
     #[test]
     fn upsert_and_get_round_trip() {
-        let store = SqliteInstallStateStore::try_open_in_memory().unwrap();
+        let store = TursoInstallStateStore::try_open_in_memory().unwrap();
         let s = fixture();
         store.upsert(&s).unwrap();
         let got = store.get(&s.id).unwrap().unwrap();
@@ -481,7 +481,7 @@ mod tests {
 
     #[test]
     fn list_returns_ids_in_alphabetical_order() {
-        let store = SqliteInstallStateStore::try_open_in_memory().unwrap();
+        let store = TursoInstallStateStore::try_open_in_memory().unwrap();
         let mut a = fixture();
         a.id = "alpha".into();
         let mut z = fixture();
@@ -497,13 +497,13 @@ mod tests {
 
     #[test]
     fn set_enabled_returns_false_for_missing_id() {
-        let store = SqliteInstallStateStore::try_open_in_memory().unwrap();
+        let store = TursoInstallStateStore::try_open_in_memory().unwrap();
         assert!(!store.set_enabled("ghost", false).unwrap());
     }
 
     #[test]
     fn set_enabled_persists_change() {
-        let store = SqliteInstallStateStore::try_open_in_memory().unwrap();
+        let store = TursoInstallStateStore::try_open_in_memory().unwrap();
         let s = fixture();
         store.upsert(&s).unwrap();
         assert!(store.set_enabled(&s.id, false).unwrap());
@@ -512,7 +512,7 @@ mod tests {
 
     #[test]
     fn record_and_clear_load_error_round_trip() {
-        let store = SqliteInstallStateStore::try_open_in_memory().unwrap();
+        let store = TursoInstallStateStore::try_open_in_memory().unwrap();
         let s = fixture();
         store.upsert(&s).unwrap();
         assert!(store.record_load_error(&s.id, "missing entry").unwrap());
@@ -531,7 +531,7 @@ mod tests {
 
     #[test]
     fn runtime_audit_records_policy_decisions() {
-        let store = SqliteInstallStateStore::try_open_in_memory().unwrap();
+        let store = TursoInstallStateStore::try_open_in_memory().unwrap();
         let record = RuntimeAuditRecord {
             extension_id: "tooler".into(),
             requested_permission: Some(ExtensionPermission::ToolRegistration),
@@ -555,7 +555,7 @@ mod tests {
 
     #[test]
     fn remove_returns_false_when_id_missing() {
-        let store = SqliteInstallStateStore::try_open_in_memory().unwrap();
+        let store = TursoInstallStateStore::try_open_in_memory().unwrap();
         assert!(!store.remove("ghost").unwrap());
     }
 
@@ -564,10 +564,10 @@ mod tests {
         let dir = tempdir().unwrap();
         let path = dir.path().join("state.db");
         {
-            let store = SqliteInstallStateStore::try_open_at(&path).unwrap();
+            let store = TursoInstallStateStore::try_open_at(&path).unwrap();
             store.upsert(&fixture()).unwrap();
         }
-        let reopened = SqliteInstallStateStore::try_open_at(&path).unwrap();
+        let reopened = TursoInstallStateStore::try_open_at(&path).unwrap();
         let listed = reopened.list().unwrap();
         assert_eq!(listed.len(), 1);
         assert_eq!(listed[0].id, "lint-helper");
@@ -576,14 +576,14 @@ mod tests {
     #[test]
     fn turso_backend_uses_isolated_file_name() {
         assert_eq!(
-            SqliteInstallStateStore::db_file_name(),
+            TursoInstallStateStore::db_file_name(),
             "extension_install.turso.db"
         );
     }
 
     #[test]
     fn trust_marker_requires_current_checksum() {
-        let store = SqliteInstallStateStore::try_open_in_memory().unwrap();
+        let store = TursoInstallStateStore::try_open_in_memory().unwrap();
         store.trust("workspace-a", "todo", "sha256:old").unwrap();
         assert!(
             store
