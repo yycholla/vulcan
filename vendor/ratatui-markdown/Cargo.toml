@@ -492,3 +492,6 @@ optional = true
 
 [dependencies.unicode-width]
 version = "^0.2"
+
+[dev-dependencies.anyhow]
+version = "1"

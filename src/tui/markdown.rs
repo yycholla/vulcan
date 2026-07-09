@@ -7,97 +7,12 @@ use ratatui_markdown::{
     theme::{CodeColors, Generation, RichTextTheme},
 };
 
-use super::{
-    render_ir::{PulldownMarkdownParser, render_tui},
-    theme::Theme,
-};
+use super::theme::Theme;
 
 pub fn render_markdown(text: &str, theme: &Theme, width: u16) -> Vec<Line<'static>> {
-    if !has_mermaid_fence(text) {
-        return render_vulcan_markdown(text, theme);
-    }
-
-    let mut lines = Vec::new();
-    let mut prose = String::new();
-    let mut source_lines = text.lines();
-
-    while let Some(line) = source_lines.next() {
-        let Some(fence) = mermaid_fence(line) else {
-            push_source_line(&mut prose, line);
-            continue;
-        };
-
-        flush_prose(&mut lines, &mut prose, theme);
-
-        let mut block = String::new();
-        push_source_line(&mut block, line);
-        let mut closed = false;
-        for block_line in source_lines.by_ref() {
-            push_source_line(&mut block, block_line);
-            if closes_fence(block_line, fence) {
-                closed = true;
-                break;
-            }
-        }
-
-        if closed {
-            lines.extend(render_ratatui_markdown(&block, theme, width));
-        } else {
-            prose.push_str(&block);
-        }
-    }
-
-    flush_prose(&mut lines, &mut prose, theme);
-    lines
-}
-
-fn render_vulcan_markdown(text: &str, theme: &Theme) -> Vec<Line<'static>> {
-    let document = PulldownMarkdownParser.parse(text);
-    render_tui(&document, theme)
-}
-
-fn render_ratatui_markdown(text: &str, theme: &Theme, width: u16) -> Vec<Line<'static>> {
     let renderer = MarkdownRenderer::new(width.max(1) as usize);
     let blocks = renderer.parse(text);
     renderer.render(&blocks, &MarkdownTheme(theme))
-}
-
-fn flush_prose(lines: &mut Vec<Line<'static>>, prose: &mut String, theme: &Theme) {
-    if prose.is_empty() {
-        return;
-    }
-    lines.extend(render_vulcan_markdown(prose, theme));
-    prose.clear();
-}
-
-fn push_source_line(source: &mut String, line: &str) {
-    source.push_str(line);
-    source.push('\n');
-}
-
-fn has_mermaid_fence(text: &str) -> bool {
-    text.lines().any(|line| mermaid_fence(line).is_some())
-}
-
-fn mermaid_fence(line: &str) -> Option<&'static str> {
-    let line = line.trim();
-    for fence in ["```", "~~~"] {
-        let Some(info) = line.strip_prefix(fence) else {
-            continue;
-        };
-        if info
-            .split_whitespace()
-            .next()
-            .is_some_and(|lang| lang.eq_ignore_ascii_case("mermaid"))
-        {
-            return Some(fence);
-        }
-    }
-    None
-}
-
-fn closes_fence(line: &str, fence: &str) -> bool {
-    line.trim_start().starts_with(fence)
 }
 
 struct MarkdownTheme<'a>(&'a Theme);
@@ -221,6 +136,20 @@ mod tests {
         assert!(
             rendered.iter().any(|line| line.contains("Hello")),
             "missing rendered mermaid node: {rendered:?}"
+        );
+    }
+
+    #[test]
+    fn renders_regular_code_blocks_through_markdown_renderer() {
+        let rendered = texts(render_markdown(
+            "```rust\nfn main() {}\n```",
+            &Theme::system(),
+            80,
+        ));
+
+        assert!(
+            rendered.iter().any(|line| line.starts_with("╭─ rust")),
+            "missing rendered rust code frame: {rendered:?}"
         );
     }
 

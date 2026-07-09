@@ -154,7 +154,14 @@ pub fn parse_inline_formatting(text: &str, theme: &impl RichTextTheme) -> Vec<Sp
                 Style::default().fg(theme.get_accent_yellow()),
             ));
             i = end + 1;
-            if i < len && chars[i] != ' ' && chars[i] != '\n' {
+            if i < len
+                && chars[i] != ' '
+                && chars[i] != '\n'
+                && !matches!(
+                    chars[i],
+                    '.' | ',' | ';' | ':' | '!' | '?' | ')' | ']' | '}'
+                )
+            {
                 current.push(' ');
             }
             continue;

@@ -292,6 +292,18 @@ fn inline_code_renders() -> anyhow::Result<()> {
 }
 
 #[test]
+fn inline_code_keeps_trailing_punctuation_tight() -> anyhow::Result<()> {
+    let spans = crate::markdown::parse_inline_formatting("some `code`.", &test_theme());
+    let text = spans
+        .iter()
+        .map(|span| span.content.as_ref())
+        .collect::<String>();
+
+    assert_eq!(text, "some code.");
+    Ok(())
+}
+
+#[test]
 fn mixed_inline_formatting() -> anyhow::Result<()> {
     let spans =
         crate::markdown::parse_inline_formatting("normal **bold** *italic* `code`", &test_theme());

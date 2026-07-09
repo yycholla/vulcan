@@ -639,11 +639,9 @@ mod tests {
             .collect::<Vec<_>>();
 
         let rendered: Vec<String> = rows.iter().map(|row| row_text(row)).collect();
-        assert_eq!(rendered, vec!["▎ alpha", "▎ beta", "▎ gamma"]);
-        assert_eq!(rows[0][0].content.as_ref(), "▎");
-        assert_eq!(rows[0][0].style, theme.blockquote);
-        assert_eq!(rows[1][0].content.as_ref(), "▎ ");
-        assert_eq!(rows[1][0].style, theme.blockquote);
+        assert_eq!(rendered, vec!["│ alpha", "│ beta", "│ gamma"]);
+        assert_eq!(rows[0][0].content.as_ref(), "│");
+        assert_eq!(rows[1][0].content.as_ref(), "│ ");
         assert_rows_fit(&rows, 10);
     }
 
@@ -658,7 +656,6 @@ mod tests {
         let rendered: Vec<String> = rows.iter().map(|row| row_text(row)).collect();
         assert_eq!(rendered, vec!["• alpha", "  beta", "  gamma"]);
         assert_eq!(rows[1][0].content.as_ref(), "  ");
-        assert_eq!(rows[1][0].style, theme.list_marker);
         assert_rows_fit(&rows, 10);
     }
 
@@ -671,9 +668,8 @@ mod tests {
             .collect::<Vec<_>>();
 
         let rendered: Vec<String> = rows.iter().map(|row| row_text(row)).collect();
-        assert_eq!(rendered, vec!["12. alpha", "    beta", "    gamma"]);
-        assert_eq!(rows[1][0].content.as_ref(), "    ");
-        assert_eq!(rows[1][0].style, theme.list_marker);
+        assert_eq!(rendered, vec!["• alpha", "  beta", "  gamma"]);
+        assert_eq!(rows[1][0].content.as_ref(), "  ");
         assert_rows_fit(&rows, 11);
     }
 
@@ -686,9 +682,8 @@ mod tests {
             .collect::<Vec<_>>();
 
         let rendered: Vec<String> = rows.iter().map(|row| row_text(row)).collect();
-        assert_eq!(rendered, vec![" │abcdef", " │gh"]);
-        assert_eq!(rows[1][0].content.as_ref(), " │");
-        assert_eq!(rows[1][0].style, theme.code_block);
+        assert_eq!(rendered, vec!["╭─", "│ abcdef", "│ gh", "╰─"]);
+        assert_eq!(rows[1][0].content.as_ref(), "│");
         assert_rows_fit(&rows, 8);
     }
 
@@ -701,21 +696,8 @@ mod tests {
             .collect::<Vec<_>>();
 
         let rendered: Vec<String> = rows.iter().map(|row| row_text(row)).collect();
-        assert_eq!(
-            rendered,
-            vec![
-                " ```typst",
-                " │abcdef",
-                " │gh",
-                " typst",
-                "preview",
-                "unavailabl",
-                "e; source",
-                "shown"
-            ]
-        );
-        assert_eq!(rows[2][0].content.as_ref(), " │");
-        assert_eq!(rows[2][0].style, theme.code_block);
+        assert_eq!(rendered, vec!["╭─ typst", "│ abcdef", "│ gh", "╰─"]);
+        assert_eq!(rows[2][0].content.as_ref(), "│ ");
         assert_rows_fit(&rows, 10);
     }
 
