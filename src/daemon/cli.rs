@@ -223,7 +223,29 @@ async fn spawn_detached(sock_path: &Path) -> anyhow::Result<()> {
 }
 
 async fn stop(force: bool) -> anyhow::Result<()> {
-    call("daemon.shutdown", serde_json::json!({ "force": force })).await?;
+    let (_, sock_path) = home_paths();
+    let mut stream = tokio::net::UnixStream::connect(&sock_path)
+        .await
+        .with_context(|| format!("connecting to {}", sock_path.display()))?;
+    let req = Request {
+        version: 1,
+        id: "cli-daemon.shutdown".into(),
+        session: "main".into(),
+        method: "daemon.shutdown".into(),
+        params: serde_json::json!({ "force": force }),
+    };
+    write_request(&mut stream, &req)
+        .await
+        .context("writing request frame")?;
+    let body = match read_frame_bytes(&mut stream).await {
+        Ok(body) => body,
+        Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => return Ok(()),
+        Err(e) => return Err(e).context("reading response frame"),
+    };
+    let resp: Response = serde_json::from_slice(&body).context("decoding response")?;
+    if let Some(err) = resp.error {
+        anyhow::bail!("{}: {}", err.code, err.message);
+    }
     Ok(())
 }
 
