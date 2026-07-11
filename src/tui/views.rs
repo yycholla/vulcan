@@ -727,7 +727,7 @@ fn tree_of_thought(f: &mut TuiFrame, area: Rect, app: &AppState) {
     }
     if let Some(content) = app.latest_agent_content() {
         lines.push(Line::from(""));
-        for line in render_markdown(content, &app.theme) {
+        for line in render_markdown(content, &app.theme, focus_inner.width) {
             lines.push(Line::from(line.spans));
         }
     } else {

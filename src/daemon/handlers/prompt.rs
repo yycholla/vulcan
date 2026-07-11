@@ -306,8 +306,13 @@ pub fn stream(
 
             // Forward events as StreamFrames.
             let mut stream_open = true;
+            let mut frontend_open = true;
             loop {
                 tokio::select! {
+                    _ = frame_tx.closed(), if stream_open => {
+                        stream_open = false;
+                        cancel_token.cancel();
+                    }
                     ev = event_rx.recv() => {
                         let Some(ev) = ev else {
                             break;
@@ -317,18 +322,22 @@ pub fn stream(
                             && frame_tx.send(frame).await.is_err()
                         {
                             stream_open = false;
+                            cancel_token.cancel();
                         }
                     }
-                    event = frontend_rx.recv() => {
+                    event = frontend_rx.recv(), if frontend_open => {
                         match event {
                             Ok(event) => {
                                 if stream_open
                                     && frame_tx.send(frontend_event_to_frame(event)).await.is_err()
                                 {
                                     stream_open = false;
+                                    cancel_token.cancel();
                                 }
                             }
-                            Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                            Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                                frontend_open = false;
+                            }
                             Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
                         }
                     }
@@ -426,6 +435,62 @@ mod tests {
     use crate::daemon::state::DaemonState;
     use crate::extensions::api::FrontendEvent;
     use std::sync::Arc;
+    use tokio_util::sync::CancellationToken;
+
+    struct WaitsForCancelProvider;
+
+    #[async_trait::async_trait]
+    impl crate::provider::LLMProvider for WaitsForCancelProvider {
+        async fn chat(
+            &self,
+            _messages: &[crate::provider::Message],
+            _tools: &[crate::provider::ToolDefinition],
+            cancel: CancellationToken,
+        ) -> anyhow::Result<crate::provider::ChatResponse> {
+            cancel.cancelled().await;
+            Ok(cancelled_response())
+        }
+
+        async fn chat_stream(
+            &self,
+            _messages: &[crate::provider::Message],
+            _tools: &[crate::provider::ToolDefinition],
+            tx: mpsc::Sender<StreamEvent>,
+            cancel: CancellationToken,
+        ) -> anyhow::Result<()> {
+            let _ = tx.send(StreamEvent::Text("started".into())).await;
+            cancel.cancelled().await;
+            let _ = tx.send(StreamEvent::Done(cancelled_response())).await;
+            Ok(())
+        }
+
+        fn max_context(&self) -> usize {
+            128_000
+        }
+    }
+
+    fn cancelled_response() -> crate::provider::ChatResponse {
+        crate::provider::ChatResponse {
+            content: Some("cancelled".into()),
+            tool_calls: None,
+            usage: None,
+            finish_reason: Some("cancelled".into()),
+            reasoning_content: None,
+        }
+    }
+
+    async fn install_waiting_agent(state: &DaemonState) -> Arc<SessionState> {
+        let session = state.sessions().get("main").expect("main session exists");
+        let agent = crate::agent::Agent::for_test(
+            Box::new(WaitsForCancelProvider),
+            crate::tools::ToolRegistry::new(),
+            crate::hooks::HookRegistry::new(),
+            Arc::new(crate::skills::SkillRegistry::empty()),
+        )
+        .await;
+        session.set_agent(agent);
+        session
+    }
 
     #[test]
     fn frontend_event_frame_is_out_of_band_push_envelope() {
@@ -462,6 +527,36 @@ mod tests {
         let resp = run(state, "r1".into(), "main".into(), "hi").await;
         let err = resp.error.expect("err");
         assert_eq!(err.code, "AGENT_BUILD_FAILED");
+    }
+
+    #[tokio::test]
+    async fn stream_cancels_turn_when_frame_receiver_drops() {
+        let state = Arc::new(DaemonState::for_tests_minimal());
+        let session = install_waiting_agent(&state).await;
+        let (mut frames, done) = stream(
+            state,
+            "r1".into(),
+            "main".into(),
+            "hi".into(),
+            SessionAgentOptions::default(),
+        );
+
+        let frame = tokio::time::timeout(std::time::Duration::from_secs(1), frames.recv())
+            .await
+            .expect("stream should emit first frame")
+            .expect("frame channel should stay open");
+        assert_eq!(frame.stream, "text");
+        drop(frames);
+
+        let response = tokio::time::timeout(std::time::Duration::from_secs(1), done)
+            .await
+            .expect("disconnect should cancel prompt and finish turn")
+            .expect("done response should be sent");
+
+        assert_eq!(response.result.expect("ok")["text"], "cancelled");
+        assert!(!*session.in_flight.lock());
+        assert_eq!(session.active_turn_id(), None);
+        assert!(session.agent_cancel().is_none());
     }
 
     #[tokio::test]
