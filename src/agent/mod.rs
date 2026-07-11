@@ -682,6 +682,7 @@ impl Agent {
         // `tools.profile` is set, so a sensitive workspace falls
         // back to `readonly` instead of unrestricted.
         let trust_profile = config.workspace_trust.resolve_for(&tool_context.cwd);
+        tools.configure_fs_sandbox(&tool_context.cwd, trust_profile.level);
 
         // YYC-181: apply the requested tool capability profile.
         // Precedence: CLI flag > `tools.profile` in config > trust

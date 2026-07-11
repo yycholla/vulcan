@@ -12,12 +12,11 @@
 //! before the prefix check so a symlink at `cwd/escape -> /etc/passwd`
 //! cannot defeat it.
 //!
-//! Workspace-root sandboxing (only allow paths under `cwd` unless the
-//! trust profile permits otherwise) is deliberately deferred to a
-//! follow-up — too disruptive for ops/dev workflows that legitimately
-//! read outside the project. The deny prefix list catches the worst
-//! exfiltration vectors without requiring a trust-profile rewrite.
+//! A session-local [`FsSandbox`] also roots relative paths in the active
+//! workspace and contains restricted, sensitive, and untrusted workspaces.
+//! Trusted workspaces retain access to non-sensitive paths outside the root.
 
+use crate::trust::TrustLevel;
 use std::path::{Path, PathBuf};
 use thiserror::Error;
 
@@ -31,85 +30,109 @@ pub enum FsSandboxError {
         #[source]
         source: std::io::Error,
     },
+    #[error("blocked path `{path}`: outside workspace `{workspace_root}` for {trust_level} trust")]
+    OutsideWorkspace {
+        path: String,
+        workspace_root: String,
+        trust_level: &'static str,
+    },
 }
 
-/// Validate a path the tool wants to *read*. Returns the canonicalized
-/// path on success.
-pub fn validate_read(raw: &str) -> Result<PathBuf, FsSandboxError> {
-    let resolved = resolve_for_read(raw)?;
-    check_denylist(&resolved, raw)?;
-    Ok(resolved)
+#[derive(Debug, Clone)]
+pub struct FsSandbox {
+    workspace_root: PathBuf,
+    trust_level: TrustLevel,
 }
 
-/// Validate a path the tool wants to *write* (create or overwrite).
-/// Returns the canonicalized path on success.
-pub fn validate_write(raw: &str) -> Result<PathBuf, FsSandboxError> {
-    let resolved = resolve_for_write(raw)?;
-    check_denylist(&resolved, raw)?;
-    Ok(resolved)
-}
-
-fn resolve_for_read(raw: &str) -> Result<PathBuf, FsSandboxError> {
-    let absolute = absolutize(raw);
-    match std::fs::canonicalize(&absolute) {
-        Ok(p) => Ok(p),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            // Reads of non-existent paths are not the sandbox's
-            // problem — let the file tool surface its own NotFound.
-            // Still return the absolute path so the prefix check fires
-            // first (so a missing file under a blocked prefix doesn't
-            // leak the prefix as a NotFound error).
-            Ok(absolute)
+impl FsSandbox {
+    pub fn new(workspace_root: impl AsRef<Path>, trust_level: TrustLevel) -> Self {
+        let workspace_root = workspace_root.as_ref();
+        let workspace_root =
+            std::fs::canonicalize(workspace_root).unwrap_or_else(|_| workspace_root.to_path_buf());
+        Self {
+            workspace_root,
+            trust_level,
         }
-        Err(source) => Err(FsSandboxError::Resolve {
-            path: raw.to_string(),
-            source,
-        }),
     }
-}
 
-fn resolve_for_write(raw: &str) -> Result<PathBuf, FsSandboxError> {
-    let absolute = absolutize(raw);
-    if let Ok(p) = std::fs::canonicalize(&absolute) {
-        return Ok(p);
+    pub fn validate_read(&self, raw: impl AsRef<Path>) -> Result<PathBuf, FsSandboxError> {
+        self.validate(raw)
     }
-    // Target doesn't exist yet. Canonicalize the parent, then re-attach
-    // the filename. This is the standard symlink-defeating idiom for
-    // "where will my new file actually land?"
-    let parent = absolute.parent().ok_or_else(|| FsSandboxError::Resolve {
-        path: raw.to_string(),
-        source: std::io::Error::other("no parent directory"),
-    })?;
-    let canon_parent = match std::fs::canonicalize(parent) {
-        Ok(p) => p,
-        // Parent doesn't exist either (e.g. /etc/sudoers.d on systems
-        // without it). Fall back to the absolutized parent — same as
-        // the read path — so the denylist prefix check still fires and
-        // reports "blocked" rather than a NotFound resolve error.
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => parent.to_path_buf(),
-        Err(source) => {
-            return Err(FsSandboxError::Resolve {
-                path: raw.to_string(),
-                source,
+
+    pub fn validate_write(&self, raw: impl AsRef<Path>) -> Result<PathBuf, FsSandboxError> {
+        self.validate(raw)
+    }
+
+    fn validate(&self, raw: impl AsRef<Path>) -> Result<PathBuf, FsSandboxError> {
+        let raw = raw.as_ref();
+        let resolved = resolve_path(raw, &self.workspace_root)?;
+        let display = raw.to_string_lossy();
+        check_denylist(&resolved, &display)?;
+        if self.trust_level != TrustLevel::Trusted && !resolved.starts_with(&self.workspace_root) {
+            return Err(FsSandboxError::OutsideWorkspace {
+                path: display.into_owned(),
+                workspace_root: self.workspace_root.display().to_string(),
+                trust_level: self.trust_level.as_str(),
             });
         }
-    };
-    let filename = absolute
-        .file_name()
-        .ok_or_else(|| FsSandboxError::Resolve {
-            path: raw.to_string(),
-            source: std::io::Error::other("path has no filename component"),
-        })?;
-    Ok(canon_parent.join(filename))
+        Ok(resolved)
+    }
 }
 
-fn absolutize(raw: &str) -> PathBuf {
-    let p = PathBuf::from(raw);
-    if p.is_absolute() {
-        return p;
+/// Backward-compatible denylist validation for callers without a session
+/// policy. Agent-built file tools apply their explicit policy first.
+pub fn validate_read(raw: &str) -> Result<PathBuf, FsSandboxError> {
+    FsSandbox::new(current_dir(), TrustLevel::Trusted).validate_read(raw)
+}
+
+pub fn validate_write(raw: &str) -> Result<PathBuf, FsSandboxError> {
+    FsSandbox::new(current_dir(), TrustLevel::Trusted).validate_write(raw)
+}
+
+fn resolve_path(raw: &Path, workspace_root: &Path) -> Result<PathBuf, FsSandboxError> {
+    let absolute = if raw.is_absolute() {
+        raw.to_path_buf()
+    } else {
+        workspace_root.join(raw)
+    };
+    let mut cursor = absolute.as_path();
+    let mut missing = Vec::new();
+    loop {
+        match std::fs::canonicalize(cursor) {
+            Ok(mut resolved) => {
+                for component in missing.iter().rev() {
+                    resolved.push(component);
+                }
+                return Ok(resolved);
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                let Some(name) = cursor.file_name() else {
+                    return Err(FsSandboxError::Resolve {
+                        path: raw.display().to_string(),
+                        source: error,
+                    });
+                };
+                missing.push(name.to_os_string());
+                let Some(parent) = cursor.parent() else {
+                    return Err(FsSandboxError::Resolve {
+                        path: raw.display().to_string(),
+                        source: error,
+                    });
+                };
+                cursor = parent;
+            }
+            Err(source) => {
+                return Err(FsSandboxError::Resolve {
+                    path: raw.display().to_string(),
+                    source,
+                });
+            }
+        }
     }
-    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    cwd.join(p)
+}
+
+fn current_dir() -> PathBuf {
+    std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
 }
 
 fn check_denylist(canonical: &Path, raw: &str) -> Result<(), FsSandboxError> {
@@ -202,6 +225,74 @@ fn starts_with_any(s: &str, prefixes: &[&str]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::trust::TrustLevel;
+    use tempfile::tempdir;
+
+    #[test]
+    fn contained_trust_levels_reject_outside_paths_and_symlinks() {
+        let workspace = tempdir().unwrap();
+        let outside = tempdir().unwrap();
+        let outside_file = outside.path().join("outside.txt");
+        std::fs::write(&outside_file, "secret").unwrap();
+        let escape = workspace.path().join("escape");
+        std::os::unix::fs::symlink(outside.path(), &escape).unwrap();
+        let traversal = PathBuf::from("..")
+            .join(outside.path().file_name().unwrap())
+            .join("outside.txt");
+
+        for level in [
+            TrustLevel::Restricted,
+            TrustLevel::Sensitive,
+            TrustLevel::Untrusted,
+        ] {
+            let sandbox = FsSandbox::new(workspace.path(), level);
+            for result in [
+                sandbox.validate_read(&outside_file),
+                sandbox.validate_write(outside.path().join("new.txt")),
+                sandbox.validate_read("escape/outside.txt"),
+                sandbox.validate_write("escape/new.txt"),
+                sandbox.validate_read(&traversal),
+            ] {
+                let error = result.unwrap_err();
+                assert!(matches!(error, FsSandboxError::OutsideWorkspace { .. }));
+                assert!(error.to_string().contains("outside workspace"));
+            }
+        }
+    }
+
+    #[test]
+    fn trusted_workspace_allows_non_sensitive_outside_paths() {
+        let workspace = tempdir().unwrap();
+        let outside = tempdir().unwrap();
+        let outside_file = outside.path().join("outside.txt");
+        std::fs::write(&outside_file, "allowed").unwrap();
+        let sandbox = FsSandbox::new(workspace.path(), TrustLevel::Trusted);
+
+        assert_eq!(sandbox.validate_read(&outside_file).unwrap(), outside_file);
+        assert!(
+            sandbox
+                .validate_write(outside.path().join("new.txt"))
+                .is_ok()
+        );
+        assert!(matches!(
+            sandbox.validate_read("/etc/shadow").unwrap_err(),
+            FsSandboxError::BlockedPrefix { .. }
+        ));
+    }
+
+    #[test]
+    fn relative_paths_resolve_against_the_explicit_workspace_root() {
+        let workspace = tempdir().unwrap();
+        let inside = workspace.path().join("inside.txt");
+        std::fs::write(&inside, "inside").unwrap();
+        let sandbox = FsSandbox::new(workspace.path(), TrustLevel::Untrusted);
+
+        assert_eq!(sandbox.validate_read("inside.txt").unwrap(), inside);
+        assert_eq!(
+            sandbox.validate_write("nested/new.txt").unwrap(),
+            workspace.path().join("nested/new.txt")
+        );
+    }
 
     #[test]
     fn blocks_read_of_etc_shadow() {
