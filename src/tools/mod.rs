@@ -484,6 +484,7 @@ impl ToolCatalog {
 pub struct ToolRegistry {
     tools: HashMap<String, Arc<dyn Tool>>,
     order: Vec<String>,
+    fs_sandbox: Arc<parking_lot::RwLock<fs_sandbox::FsSandbox>>,
     /// YYC-181: name of the active capability profile, when one was
     /// applied via [`Self::apply_profile`]. `None` means the registry
     /// is unrestricted (the historical default).
@@ -499,14 +500,35 @@ fn builtin_tools(
     sink: Option<EditDiffSink>,
     lsp: Option<Arc<crate::code::lsp::LspManager>>,
     cwd: std::path::PathBuf,
+    fs_sandbox: Arc<parking_lot::RwLock<fs_sandbox::FsSandbox>>,
 ) -> Vec<Arc<dyn Tool>> {
     let mut tools: Vec<Arc<dyn Tool>> = Vec::new();
-    tools.push(Arc::new(file::ReadFile));
-    tools.push(Arc::new(file::WriteFile::new(sink.clone())));
-    tools.push(Arc::new(file::SearchFiles));
-    tools.push(Arc::new(file::PatchFile::new(sink)));
+    tools.push(SandboxedFileTool::new(
+        Arc::new(file::ReadFile),
+        Arc::clone(&fs_sandbox),
+        FileAccess::ReadRequired,
+    ));
+    tools.push(SandboxedFileTool::new(
+        Arc::new(file::WriteFile::new(sink.clone())),
+        Arc::clone(&fs_sandbox),
+        FileAccess::WriteRequired,
+    ));
+    tools.push(SandboxedFileTool::new(
+        Arc::new(file::SearchFiles),
+        Arc::clone(&fs_sandbox),
+        FileAccess::ReadDefaultRoot,
+    ));
+    tools.push(SandboxedFileTool::new(
+        Arc::new(file::PatchFile::new(sink)),
+        Arc::clone(&fs_sandbox),
+        FileAccess::WriteRequired,
+    ));
     // YYC-79: native tree listing.
-    tools.push(Arc::new(file::ListFiles));
+    tools.push(SandboxedFileTool::new(
+        Arc::new(file::ListFiles),
+        fs_sandbox,
+        FileAccess::ReadDefaultRoot,
+    ));
     // YYC-80: structured Rust compile diagnostics.
     tools.push(Arc::new(cargo::CargoCheckTool));
     tools.push(Arc::new(web::WebSearch));
@@ -622,16 +644,29 @@ impl ToolRegistry {
         lsp: Option<Arc<crate::code::lsp::LspManager>>,
         cwd: std::path::PathBuf,
     ) -> Self {
+        let fs_sandbox = Arc::new(parking_lot::RwLock::new(fs_sandbox::FsSandbox::new(
+            &cwd,
+            crate::trust::TrustLevel::Trusted,
+        )));
         let mut registry = Self {
             tools: HashMap::new(),
             order: Vec::new(),
+            fs_sandbox: Arc::clone(&fs_sandbox),
             active_profile: None,
             active_profile_allowed: None,
         };
-        for tool in builtin_tools(sink, lsp, cwd) {
+        for tool in builtin_tools(sink, lsp, cwd, fs_sandbox) {
             registry.register(tool);
         }
         registry
+    }
+
+    pub fn configure_fs_sandbox(
+        &mut self,
+        workspace_root: impl AsRef<std::path::Path>,
+        trust_level: crate::trust::TrustLevel,
+    ) {
+        *self.fs_sandbox.write() = fs_sandbox::FsSandbox::new(workspace_root, trust_level);
     }
 
     pub fn register(&mut self, tool: Arc<dyn Tool>) {
@@ -745,7 +780,11 @@ impl ToolRegistry {
 
     pub fn default_catalog() -> ToolCatalog {
         let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
-        let definitions = builtin_tools(None, None, cwd)
+        let fs_sandbox = Arc::new(parking_lot::RwLock::new(fs_sandbox::FsSandbox::new(
+            &cwd,
+            crate::trust::TrustLevel::Trusted,
+        )));
+        let definitions = builtin_tools(None, None, cwd, fs_sandbox)
             .into_iter()
             .map(|tool| tool_definition(tool.as_ref(), None))
             .collect();
@@ -789,6 +828,88 @@ impl ToolRegistry {
         validate_tool_params(name, &schema, &params, arguments)?;
 
         tool.call(params, cancel, progress).await
+    }
+}
+
+#[derive(Clone, Copy)]
+enum FileAccess {
+    ReadRequired,
+    ReadDefaultRoot,
+    WriteRequired,
+}
+
+struct SandboxedFileTool {
+    inner: Arc<dyn Tool>,
+    sandbox: Arc<parking_lot::RwLock<fs_sandbox::FsSandbox>>,
+    access: FileAccess,
+}
+
+impl SandboxedFileTool {
+    fn new(
+        inner: Arc<dyn Tool>,
+        sandbox: Arc<parking_lot::RwLock<fs_sandbox::FsSandbox>>,
+        access: FileAccess,
+    ) -> Arc<dyn Tool> {
+        Arc::new(Self {
+            inner,
+            sandbox,
+            access,
+        })
+    }
+}
+
+#[async_trait::async_trait]
+impl Tool for SandboxedFileTool {
+    fn name(&self) -> &str {
+        self.inner.name()
+    }
+
+    fn description(&self) -> &str {
+        self.inner.description()
+    }
+
+    fn schema(&self) -> Value {
+        self.inner.schema()
+    }
+
+    async fn call(
+        &self,
+        mut params: Value,
+        cancel: CancellationToken,
+        progress: Option<ProgressSink>,
+    ) -> Result<ToolResult> {
+        let raw = match params.get("path") {
+            Some(Value::String(path)) => path.clone(),
+            None if matches!(self.access, FileAccess::ReadDefaultRoot) => ".".to_string(),
+            _ => return self.inner.call(params, cancel, progress).await,
+        };
+        let resolved = {
+            let sandbox = self.sandbox.read();
+            match self.access {
+                FileAccess::ReadRequired | FileAccess::ReadDefaultRoot => {
+                    sandbox.validate_read(&raw)
+                }
+                FileAccess::WriteRequired => sandbox.validate_write(&raw),
+            }
+        };
+        let resolved = match resolved {
+            Ok(path) => path,
+            Err(error) => return Ok(ToolResult::err(error.to_string())),
+        };
+        params["path"] = Value::String(resolved.to_string_lossy().into_owned());
+        self.inner.call(params, cancel, progress).await
+    }
+
+    fn is_relevant(&self, ctx: &ToolContext) -> bool {
+        self.inner.is_relevant(ctx)
+    }
+
+    fn dynamic_description(&self, ctx: &ToolContext) -> Option<String> {
+        self.inner.dynamic_description(ctx)
+    }
+
+    fn replay_safety(&self) -> ReplaySafety {
+        self.inner.replay_safety()
     }
 }
 
@@ -1183,6 +1304,88 @@ path = "src/primary.rs"
         let msg = err.to_string();
         assert!(msg.contains("Failed to parse arguments"), "got {msg:?}");
         assert!(msg.contains("Raw args"), "got {msg:?}");
+    }
+
+    #[tokio::test]
+    async fn workspace_sandbox_applies_to_all_file_tools_independent_of_capability_profile() {
+        let workspace = tempdir().unwrap();
+        let outside = tempdir().unwrap();
+        std::fs::write(workspace.path().join("inside.txt"), "inside").unwrap();
+        let outside_file = outside.path().join("outside.txt");
+        std::fs::write(&outside_file, "outside").unwrap();
+
+        let mut registry =
+            ToolRegistry::new_with_diff_and_lsp(None, None, workspace.path().to_path_buf());
+        registry.configure_fs_sandbox(workspace.path(), crate::trust::TrustLevel::Untrusted);
+        registry.apply_profile(&ToolProfile {
+            name: "test-coding".into(),
+            description: "file tools".into(),
+            allowed: [
+                "read_file",
+                "list_files",
+                "search_files",
+                "write_file",
+                "edit_file",
+            ]
+            .into_iter()
+            .map(Into::into)
+            .collect(),
+        });
+
+        let inside = registry
+            .execute(
+                "read_file",
+                &json!({ "path": "inside.txt" }).to_string(),
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+        assert!(!inside.is_error, "{}", inside.output);
+
+        for (tool, args) in [
+            ("read_file", json!({ "path": outside_file })),
+            ("list_files", json!({ "path": outside.path() })),
+            (
+                "search_files",
+                json!({ "pattern": "outside", "path": outside.path() }),
+            ),
+            (
+                "write_file",
+                json!({ "path": outside.path().join("new.txt"), "content": "new" }),
+            ),
+            (
+                "edit_file",
+                json!({
+                    "path": outside_file,
+                    "old_string": "outside",
+                    "new_string": "changed",
+                }),
+            ),
+        ] {
+            let result = registry
+                .execute(tool, &args.to_string(), CancellationToken::new())
+                .await
+                .unwrap();
+            assert!(result.is_error, "{tool} unexpectedly succeeded");
+            assert!(
+                result.output.contains("outside workspace"),
+                "{tool}: {}",
+                result.output
+            );
+        }
+        assert_eq!(std::fs::read_to_string(&outside_file).unwrap(), "outside");
+        assert!(!outside.path().join("new.txt").exists());
+
+        registry.configure_fs_sandbox(workspace.path(), crate::trust::TrustLevel::Trusted);
+        let trusted = registry
+            .execute(
+                "read_file",
+                &json!({ "path": outside_file }).to_string(),
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+        assert!(!trusted.is_error, "{}", trusted.output);
     }
 
     #[test]
